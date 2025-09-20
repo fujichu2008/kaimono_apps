@@ -50,11 +50,19 @@ ul{list-style:none;margin:0;padding:0}
 
 /* album cards */
 .album-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
-.photo-card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.photo-card{position:relative;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
 .photo-card img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block;background:#eef3ff}
 .photo-meta{padding:8px 10px;border-top:1px solid var(--line);display:grid;gap:4px}
 .small{font-size:12px;color:var(--muted)}
 .tag{display:inline-block;background:var(--pill);color:var(--accent-2);border-radius:999px;padding:2px 8px;font-size:12px}
+
+/* per-card delete button (overlay) */
+.photo-del{
+  position:absolute; top:8px; right:8px;
+  background:#fff; color:var(--warn); border:1px solid var(--warn);
+  border-radius:999px; padding:4px 8px; font-size:12px;
+  cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.08);
+}
 
 /* modal */
 .modal{position:fixed;inset:0;background:rgba(11,16,40,.5);display:none;align-items:center;justify-content:center;padding:16px}
@@ -78,9 +86,9 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
   <div class="brand">
     <h1>買い物リスト</h1>
     <div class="supsel">
-      <label class="small">スーパー：</label>
+      <!-- 「スーパー：」ラベル削除／ボタン文言変更 -->
       <select id="superSelect"></select>
-      <button class="line" id="btnSort">売場順ソート</button>
+      <button class="line" id="btnSort">売場順</button>
       <button class="line" id="btnUnsort">解除</button>
     </div>
   </div>
@@ -163,13 +171,9 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
         </div>
       </div>
 
-      <!-- 一括削除 & カテゴリ削除 -->
+      <!-- 一括削除のみ残す（カテゴリ削除UIを撤去） -->
       <div class="row" style="margin-top:8px;justify-content:flex-end;gap:8px">
         <button class="warn" id="btnAlbumDeleteAll">アルバム一括削除</button>
-        <select id="albumDelCat">
-          <option value="">分類を選択して削除</option>
-        </select>
-        <button class="line" id="btnAlbumDeleteByCat">この分類を削除</button>
       </div>
 
       <div class="album-grid" id="albumGrid" style="margin-top:12px"></div>
@@ -335,7 +339,10 @@ tabButtons.forEach(b=>b.onclick=()=>{ tabButtons.forEach(x=>x.classList.remove('
 const selSuper=document.getElementById('superSelect');
 function refreshSuperSelect(){
   const cur=selSuper.value; selSuper.innerHTML='';
-  const opt0=new Option('（未選択）',''); selSuper.add(opt0);
+  // 初期表示文言を「スーパー選択」に
+  const opt0=new Option('スーパー選択','');
+  opt0.disabled=false; // 有効なプレースホルダとして使う
+  selSuper.add(opt0);
   supers.forEach(s=> selSuper.add(new Option(s.name,s.id)) );
   selSuper.value = supers.some(s=>s.id===cur)?cur:'';
 }
@@ -426,8 +433,6 @@ async function shrinkAndOrient(img, maxSide){
 /* ========= アルバム表示・詳細 ========= */
 const albumCat=document.getElementById('albumCat'); const albumText=document.getElementById('albumText'); const albumSuperOnly=document.getElementById('albumSuperOnly');
 CATEGORY_NAMES.forEach(c=> albumCat.add(new Option(c,c)) );
-const albumDelCat=document.getElementById('albumDelCat'); CATEGORY_NAMES.forEach(c=> albumDelCat.add(new Option(c,c)) );
-
 albumCat.onchange=renderAlbum; albumText.oninput=renderAlbum; albumSuperOnly.onchange=renderAlbum;
 
 const albumGrid=document.getElementById('albumGrid'); let albumCache=[];
@@ -444,13 +449,23 @@ async function renderAlbum(){
   .forEach(p=>{
     const card=document.createElement('div'); card.className='photo-card'; card.tabIndex=0;
     card.innerHTML=`
+      <button class="photo-del" title="削除">削除</button>
       <img src="${p.dataUrl}" alt="">
       <div class="photo-meta">
         <div><span class="tag">${escapeHtml(p.category)}</span> <span class="small">${escapeHtml(p.name)}</span></div>
         <div class="small">スーパー：${escapeHtml(superNameOf(p.supermarketId)||'—')}</div>
         <div class="small">${fmtDate(p.takenAt)}</div>
       </div>`;
-    card.onclick=()=>openPhoto(p);
+    // 大きく見る
+    card.querySelector('img').onclick=()=>openPhoto(p);
+    // 各カードの削除（確認あり）
+    card.querySelector('.photo-del').onclick=async (ev)=>{
+      ev.stopPropagation();
+      if(!confirm('この写真を削除しますか？')) return;
+      await dbDelete(p.id);
+      showToast('削除しました');
+      renderAlbum();
+    };
     albumGrid.appendChild(card);
   });
 }
@@ -465,26 +480,51 @@ function closePhoto(){ modalPhoto.classList.remove('open'); currentPhoto=null; }
 async function savePhotoNote(){ if(!currentPhoto) return; currentPhoto.note=document.getElementById('photoNote').value; await dbPut(currentPhoto); showToast('メモを更新しました'); closePhoto(); renderAlbum(); }
 async function deletePhoto(){ if(!currentPhoto) return; if(!confirm('この写真を削除しますか？')) return; await dbDelete(currentPhoto.id); closePhoto(); renderAlbum(); showToast('削除しました'); }
 
-/* 一括削除／カテゴリ削除 */
+/* 一括削除（カテゴリ削除UIは撤去） */
 document.getElementById('btnAlbumDeleteAll').onclick=async ()=>{
   if(!confirm('アルバム内のすべての写真を削除しますか？')) return;
   const n = await dbDeleteBulk(()=>true);
   showToast(`削除：${n}件`); renderAlbum();
 };
-document.getElementById('btnAlbumDeleteByCat').onclick=async ()=>{
-  const c = albumDelCat.value;
-  if(!c){ alert('削除する分類を選択してください'); return; }
-  if(!confirm(`分類「${c}」の写真をすべて削除しますか？`)) return;
-  const n = await dbDeleteBulk(p=>p.category===c);
-  showToast(`削除：${n}件（${c}）`); renderAlbum();
-};
 
-/* ========= QR共有 ========= */
+/* ========= スーパー登録画面 ========= */
+const superName=document.getElementById('superName'); const btnAddSuper=document.getElementById('btnAddSuper');
+const superList=document.getElementById('superList'); const catPick=document.getElementById('catPick'); const shelfOrderUL=document.getElementById('shelfOrder');
+const btnShelfAdd=document.getElementById('btnShelfAdd'); const btnSaveShelf=document.getElementById('btnSaveShelf'); const btnDeleteSuper=document.getElementById('btnDeleteSuper');
+CATEGORY_NAMES.forEach(c=>catPick.add(new Option(c,c)));
+btnAddSuper.onclick=()=>{ const name=superName.value.trim(); if(!name) return; supers.push({id:crypto.randomUUID(),name,shelfOrder:[],updatedAt:Date.now()}); superName.value=''; saveSupers(); refreshSuperList(); refreshSuperSelect(); showToast('追加しました'); };
+btnDeleteSuper.onclick=()=>{ const id=superList.value; if(!id) return; if(!confirm('選択スーパーを削除しますか？')) return;
+  supers=supers.filter(s=>s.id!==id); saveSupers(); refreshSuperList(); refreshSuperSelect(); };
+function refreshSuperList(){
+  superList.innerHTML=''; supers.forEach(s=> superList.add(new Option(s.name,s.id)) );
+  renderShelfOrder(superList.value);
+}
+superList.onchange=()=>renderShelfOrder(superList.value);
+function renderShelfOrder(id){
+  shelfOrderUL.innerHTML='';
+  const so = shelfOrderOf(id);
+  so.forEach((c,idx)=>{
+    const li=document.createElement('li'); li.className='item'; li.innerHTML=`
+      <div class="name">${escapeHtml(c)}</div>
+      <div class="row">
+        <button class="line up">↑</button>
+        <button class="line dn">↓</button>
+        <button class="line rm">削除</button>
+      </div>`;
+    li.querySelector('.up').onclick=()=>{ if(idx>0){ [so[idx-1],so[idx]]=[so[idx],so[idx-1]]; renderShelfOrder(id);} };
+    li.querySelector('.dn').onclick=()=>{ if(idx<so.length-1){ [so[idx+1],so[idx]]=[so[idx],so[idx+1]]; renderShelfOrder(id);} };
+    li.querySelector('.rm').onclick=()=>{ so.splice(idx,1); renderShelfOrder(id); };
+    shelfOrderUL.appendChild(li);
+  });
+}
+btnShelfAdd.onclick=()=>{ const id=superList.value; if(!id) return; const c=catPick.value; const s=supers.find(x=>x.id===id); s.shelfOrder.push(c); renderShelfOrder(id); };
+btnSaveShelf.onclick=()=>{ const id=superList.value; if(!id) return; const s=supers.find(x=>x.id===id); s.updatedAt=Date.now(); saveSupers(); refreshSuperSelect(); showToast('売場順を保存しました'); };
+
+/* ========= QR共有（UTF-8対応） ========= */
 const modalExport=document.getElementById('modalExport'); const modalImport=document.getElementById('modalImport');
 document.getElementById('btnExport').onclick=()=>openExport(); document.getElementById('btnImport').onclick=()=>openImport();
 const compact=document.getElementById('compact'); let qrInst=null;
 
-/* ★ 重要：UTF-8 変換（qrcodejs対策） */
 function toUTF8(str){ try{ return unescape(encodeURIComponent(str)); }catch(e){ return str; } }
 function fromUTF8(str){ try{ return decodeURIComponent(escape(str)); }catch(e){ return str; } }
 
@@ -505,9 +545,7 @@ function openExport(){
   const box=document.getElementById('qrcode'); box.innerHTML='';
   const payload = makePayload(compact.checked);
   validatePayloadSize(payload);
-  // ★ 日本語を含む場合でも確実に生成
-  const qrText = toUTF8(payload);
-  qrInst = new QRCode(box,{ text: qrText, width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
+  new QRCode(box,{ text: toUTF8(payload), width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
 }
 function closeExport(){ modalExport.classList.remove('open'); }
 function downloadQR(){
@@ -531,7 +569,6 @@ document.getElementById('qrPick').onchange=async (e)=>{
   const code = jsQR(data, w, h);
   if(!code){ alert('QRコードが見つかりません'); return; }
   try{
-    // ★ 読み取り時にUTF-8へ復元
     const jsonText = fromUTF8(code.data);
     const obj=JSON.parse(jsonText);
     if(obj.type!=='shopping-list') throw 0;
@@ -542,7 +579,6 @@ document.getElementById('qrPick').onchange=async (e)=>{
 function truncate(s,n){ return s.length>n ? s.slice(0,n)+'…':s; }
 
 async function imageToRGBA(img){
-  // 縮小 & 軽いコントラスト補正で読み取り精度UP
   const maxSide = 1024;
   const scale = Math.min(1, maxSide/Math.max(img.width,img.height));
   const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
@@ -577,7 +613,7 @@ function applyImport(mode){
 function normalizeIncoming(it){ return { id:crypto.randomUUID(), name:it.name||'', qty:Number(it.qty||1),
   category: it.category || guessCategory(it.name||''), checked:false, skip:false, createdAt:Date.now() }; }
 
-/* 圧縮チェックが変わったら即再生成（UTF-8対応版） */
+/* 圧縮チェックが変わったら即再生成（UTF-8対応） */
 document.getElementById('compact').addEventListener('change', () => {
   const box=document.getElementById('qrcode'); if(!box) return;
   box.innerHTML='';
@@ -614,7 +650,7 @@ document.getElementById('btnLiveScan').addEventListener('click', async ()=>{
       if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
       liveVideo.srcObject=null; wrap.remove();
       try{
-        const jsonText = fromUTF8(code.data);           // ★ UTF-8復元
+        const jsonText = fromUTF8(code.data);
         const obj=JSON.parse(jsonText);
         if(obj.type!=='shopping-list') throw 0;
         importData=obj; document.getElementById('qrPreview').textContent=`プレビュー：${obj.items?.length||0}件\n`+truncate(jsonText,300);
