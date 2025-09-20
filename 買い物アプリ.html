@@ -291,15 +291,23 @@ ul{list-style:none;margin:0;padding:0}
     </div>
     <div class="body">
       <div class="row small"><span class="pill">現在のリストを共有</span> 相手はカメラで読み取るか「QR取り込み」で画像から読めます。</div>
-      <div class="card" style="margin-top:8px;display:flex;justify-content:center"><div id="qrcode"></div></div>
-      <div id="qrError" class="small" style="color:#b91c1c;margin-top:6px;display:none"></div>
+<div class="card" style="margin-top:8px;display:flex;justify-content:center">
+  <div id="qrcode"></div>
+</div>
+
+<!-- ★ここに追加する -->
+<div id="qrCaption" class="small" style="text-align:center;margin-top:6px;color:var(--muted)"></div>
+
+<div id="qrError" class="small" style="color:#b91c1c;margin-top:6px;display:none"></div>
+
       <div class="row" style="margin-top:8px">
         <label><input type="checkbox" id="compact"> 圧縮共有（品名・数量・分類のみ）</label>
         <span class="small" style="margin-left:auto;color:var(--muted)">長大リストは圧縮推奨</span>
       </div>
     </div>
     <div class="foot">
-      <button class="line" onclick="captureScreenToPhotos()">画像保存</button>
+      <button class="line" onclick="saveQRToPhotos()">画像保存</button>
+
       <button class="ok" onclick="closeExport()">OK</button>
     </div>
   </div>
@@ -748,21 +756,113 @@ function validatePayloadSize(str){
   if (bytes > 2950) { showToast(`サイズ大（${bytes}B）。分割QRや圧縮を推奨`); }
 }
 function renderQRCodeInto(box, text){
-  if (window.qrcode && qrcode.stringToBytesFuncs) qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
-  const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
-  const size = 256, cell = Math.floor(size / qr.getModuleCount()), margin = Math.floor((size - cell * qr.getModuleCount()) / 2);
-  const cvs = document.createElement('canvas'); cvs.width = cvs.height = size; const ctx = cvs.getContext('2d');
-  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,size,size); ctx.fillStyle = '#000';
-  for(let r=0;r<qr.getModuleCount();r++){ for(let c=0;c<qr.getModuleCount();c++){ if(qr.isDark(r,c)){ ctx.fillRect(margin + c*cell, margin + r*cell, cell, cell); } } }
-  box.innerHTML = ''; box.appendChild(cvs);
+  // UTF-8 対応
+  if (window.qrcode && qrcode.stringToBytesFuncs) {
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+  }
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+
+  // キャンバス寸法：QR本体 + 下にラベル領域（約48px）
+  const qrSize = 256;
+  const labelH = 48;
+  const size = qrSize + labelH;
+  const cell = Math.floor(qrSize / qr.getModuleCount());
+  const margin = Math.floor((qrSize - cell * qr.getModuleCount()) / 2);
+
+  const cvs = document.createElement('canvas');
+  cvs.width = cvs.height = size;
+  const ctx = cvs.getContext('2d');
+
+  // 背景
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, size, size);
+
+  // QR本体
+  ctx.fillStyle = '#000';
+  for(let r=0; r<qr.getModuleCount(); r++){
+    for(let c=0; c<qr.getModuleCount(); c++){
+      if(qr.isDark(r,c)){
+        ctx.fillRect(margin + c*cell, margin + r*cell, cell, cell);
+      }
+    }
+  }
+
+  // 生成日時（QR下にセンタリングして描画）
+  const now = new Date();
+  const label = `生成: ${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  ctx.fillStyle = '#111';
+  ctx.font = '14px system-ui, -apple-system, "Segoe UI", Roboto, Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, size/2, qrSize + (labelH/2));
+
+  // 置換
+  box.innerHTML = '';
+  box.appendChild(cvs);
+
+  // 画面上のキャプションにも表示（UI用）
+  const cap = document.getElementById('qrCaption');
+  if (cap) cap.textContent = label;
 }
+
 function openExport(){
   modalExport.classList.add('open');
-  const box=document.getElementById('qrcode'); const err=document.getElementById('qrError');
-  err.style.display='none'; box.innerHTML='';
-  try{ const payload = makePayload(compact.checked); validatePayloadSize(payload); renderQRCodeInto(box, payload); }
-  catch(e){ console.error(e); err.textContent = 'QR生成に失敗しました：' + (e?.message||e); err.style.display='block'; }
+  const box = document.getElementById('qrcode');
+  const err = document.getElementById('qrError');
+  err.style.display='none';
+  box.innerHTML='';
+
+  try{
+    const payload = makePayload(compact.checked);
+    validatePayloadSize(payload);
+    // ← 日時付きでQRを再描画（関数内でUIキャプションと画像ラベルの両方を更新）
+    renderQRCodeInto(box, payload);
+  }catch(e){
+    console.error(e);
+    err.textContent = 'QR生成に失敗しました：' + (e?.message||e);
+    err.style.display='block';
+  }
 }
+
+// ★QRキャンバスのみを画像化して保存（共有シート→写真保存／非対応はDL）
+async function saveQRToPhotos(){
+  const cvs = document.querySelector('#qrcode canvas');
+  if(!cvs){ alert('QRが見つかりません'); return; }
+
+  // Blob化
+  const blob = await new Promise(res => cvs.toBlob(res, 'image/png', 1.0));
+  if(!blob){ alert('画像の作成に失敗しました'); return; }
+  const file = new File([blob], 'shopping_qr.png', { type: 'image/png' });
+
+  // Web Share API Level 2（モバイルの共有シート → 写真に保存）
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try{
+      await navigator.share({
+        files: [file],
+        title: '買い物リスト QR',
+        text: 'QRコード（生成日時付き）'
+      });
+      showToast('共有シートを開きました（写真に保存できます）');
+      return;
+    }catch(e){
+      // ユーザーキャンセル等は握りつぶしてフォールバックへ
+      console.warn(e);
+    }
+  }
+
+  // フォールバック：ダウンロード（PC/非対応ブラウザ）
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'shopping_qr.png';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('画像をダウンロードしました');
+}
+
+
+
 function closeExport(){ modalExport.classList.remove('open'); }
 function downloadQR(){
   const box=document.getElementById('qrcode'); const cvs=box.querySelector('canvas');
