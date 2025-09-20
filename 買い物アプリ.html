@@ -168,6 +168,17 @@ ul{list-style:none;margin:0;padding:0}
   .grid.cols-2{grid-template-columns:1fr}
   .grid.cols-3{grid-template-columns:1fr 1fr}
 }
+
+
+#modalRecipe select{ min-height: 260px; }
+#recipeIngredients li{ display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); }
+#recipeIngredients li:last-child{ border-bottom:none; }
+#recipeIngredients .ing-name{ flex:1; }
+#recipeIngredients .ing-qty{ color:var(--muted); font-size:12px; }
+
+
+
+
 /* サムネ画像のはみ出し保険 */
 #modalPhoto img, .photo-card img{ max-width:100%; height:auto; }
 </style>
@@ -197,6 +208,10 @@ ul{list-style:none;margin:0;padding:0}
     <select id="superSelect"></select>
     <button class="line" id="btnSort">売場順</button>
     <button class="line" id="btnUnsort">解除</button>
+
+<!-- ★追加：レシピボタン -->
+<button class="line" id="btnRecipe">レシピ</button>
+
     <span class="spacer"></span>
     <!-- ※ QRボタンは brand-actions に移動済み -->
   </div>
@@ -370,6 +385,45 @@ ul{list-style:none;margin:0;padding:0}
     </div>
   </div>
 </div>
+
+<!-- Recipe Modal -->
+<div id="modalRecipe" class="modal" aria-hidden="true">
+  <div class="sheet" style="max-width:720px">
+    <div class="head">
+      <strong>レシピから材料を選ぶ</strong>
+      <button class="flat" onclick="closeRecipe()">閉じる</button>
+    </div>
+    <div class="body">
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="small" style="margin-bottom:6px">料理分類</div>
+          <select id="recipeCat" size="10" style="width:100%"></select>
+        </div>
+        <div class="card">
+          <div class="small" style="margin-bottom:6px">料理</div>
+          <select id="recipeDish" size="10" style="width:100%"></select>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="row" style="justify-content:space-between;align-items:baseline">
+          <strong>材料</strong>
+          <button class="flat" id="btnRecipeToggleAll">全選択/解除</button>
+        </div>
+        <ul id="recipeIngredients" style="margin-top:6px"></ul>
+        <div class="small" style="color:var(--muted);margin-top:6px">
+          ※ 家庭に常備されがちな <span class="pill">醤油・砂糖・みりん・味噌・料理酒・サラダ油</span> は除外済み
+        </div>
+      </div>
+    </div>
+    <div class="foot" style="justify-content:flex-end">
+      <button class="ok" id="btnAddSelectedIngredients">買い物リストに追加</button>
+    </div>
+  </div>
+</div>
+
+
+
 
 <!-- libs -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator/qrcode.js"></script>
@@ -1077,6 +1131,325 @@ closeImport = function(){
   [...body.querySelectorAll('video')].forEach(v=> v.parentElement?.remove());
   _origCloseImport();
 };
+
+
+/* ========= レシピ機能 ========= */
+
+// 常備調味料（除外対象）
+const PANTRY_SET = new Set(['醤油','しょうゆ','砂糖','みりん','味噌','料理酒','サラダ油']);
+
+// レシピデータ：{ カテゴリ: { 料理名: [ {name, qty?}, ... ] } }
+// ※ 分量は目安。必要に応じて後で調整可能。
+// ※ 常備調味料は最初から含めない設計にしています。
+const RECIPES = {
+  'ご飯もの・麺': {
+    'カレーライス':        [{name:'玉ねぎ'},{name:'にんじん'},{name:'じゃがいも'},{name:'カレールー'},{name:'豚こま切れ'},{name:'ご飯'}],
+    'オムライス':          [{name:'卵'},{name:'鶏もも肉'},{name:'玉ねぎ'},{name:'ご飯'},{name:'ケチャップ'}],
+    '牛丼':                [{name:'牛こま肉'},{name:'玉ねぎ'},{name:'めんつゆ'},{name:'ご飯'}],
+    '親子丼':              [{name:'鶏もも肉'},{name:'玉ねぎ'},{name:'卵'},{name:'めんつゆ'},{name:'ご飯'}],
+    'カツ丼':              [{name:'豚ロース（とんかつ用）'},{name:'卵'},{name:'玉ねぎ'},{name:'パン粉'},{name:'小麦粉'},{name:'めんつゆ'},{name:'ご飯'}],
+    '天丼':                [{name:'海老'},{name:'いか'},{name:'さつまいも'},{name:'なす'},{name:'天ぷら粉'},{name:'めんつゆ'},{name:'ご飯'}],
+    '中華丼':              [{name:'豚こま肉'},{name:'白菜'},{name:'にんじん'},{name:'しいたけ'},{name:'うずら卵(茹で)'},{name:'中華スープの素'},{name:'片栗粉'},{name:'ご飯'}],
+    'ちらし寿司':          [{name:'寿司酢'},{name:'錦糸卵用の卵'},{name:'きゅうり'},{name:'刺身盛り合わせ'},{name:'海苔'},{name:'ご飯'}],
+    '手巻き寿司':          [{name:'刺身盛り合わせ'},{name:'きゅうり'},{name:'大葉'},{name:'寿司酢'},{name:'焼のり'},{name:'ご飯'}],
+    'お茶漬け':            [{name:'お茶漬けの素'},{name:'梅干し'},{name:'焼のり'},{name:'ご飯'}],
+    'いなり寿司':          [{name:'味付けいなり揚げ'},{name:'寿司酢'},{name:'白ごま'},{name:'ご飯'}],
+    '焼きそば':            [{name:'焼きそば麺'},{name:'豚こま肉'},{name:'キャベツ'},{name:'もやし'},{name:'焼きそばソース'}],
+    '肉うどん':            [{name:'うどん'},{name:'牛こま肉'},{name:'長ねぎ'},{name:'めんつゆ'}],
+  },
+
+  '魚料理': {
+    '焼き鮭':              [{name:'生鮭切り身'}],
+    'サバの味噌煮':        [{name:'サバ切り身'},{name:'しょうが'}], // 味噌は常備扱いで除外
+    'サンマの塩焼き':      [{name:'生さんま'},{name:'大根'}],
+    '煮魚（カレイなど）':  [{name:'カレイ切り身'},{name:'しょうが'}],
+    'ブリの照り焼き':      [{name:'ブリ切り身'}],
+    'アジの南蛮漬け':      [{name:'アジ'},{name:'玉ねぎ'},{name:'にんじん'},{name:'ピーマン'},{name:'南蛮漬けの素'}],
+    'イワシの梅煮':        [{name:'いわし'},{name:'梅干し'},{name:'しょうが'}],
+    '鮭のムニエル':        [{name:'生鮭切り身'},{name:'小麦粉'},{name:'バター'}],
+    'ホッケの開き':        [{name:'ホッケ開き'}],
+    '鯖の塩焼き':          [{name:'サバ切り身'}],
+  },
+
+  '肉料理': {
+    '豚の生姜焼き':        [{name:'豚ロース薄切り'},{name:'しょうが'},{name:'玉ねぎ'}],
+    '鶏の唐揚げ':          [{name:'鶏もも肉'},{name:'にんにく'},{name:'しょうが'},{name:'片栗粉'}],
+    '鶏の照り焼き':        [{name:'鶏もも肉'}],
+    '鶏肉と野菜の炒め物':  [{name:'鶏もも肉'},{name:'ピーマン'},{name:'にんじん'},{name:'玉ねぎ'}],
+    'ハンバーグ':          [{name:'合い挽き肉'},{name:'玉ねぎ'},{name:'卵'},{name:'パン粉'},{name:'牛乳'}],
+    '肉じゃが':            [{name:'牛こま肉'},{name:'じゃがいも'},{name:'玉ねぎ'},{name:'にんじん'}],
+    '豚カツ':              [{name:'豚ロース（とんかつ用）'},{name:'パン粉'},{name:'小麦粉'},{name:'卵'}],
+    'チキンカツ':          [{name:'鶏むね肉'},{name:'パン粉'},{name:'小麦粉'},{name:'卵'}],
+    'メンチカツ':          [{name:'合い挽き肉'},{name:'玉ねぎ'},{name:'パン粉'},{name:'小麦粉'},{name:'卵'}],
+    'ロールキャベツ':      [{name:'合い挽き肉'},{name:'キャベツ'},{name:'玉ねぎ'},{name:'パン粉'},{name:'卵'},{name:'コンソメ'}],
+    '焼き鳥（家庭用グリル）':[ {name:'鶏もも肉'},{name:'長ねぎ'},{name:'竹串'} ],
+    '豚肉の角煮':          [{name:'豚バラブロック'},{name:'しょうが'},{name:'長ねぎ（青い部分）'},{name:'ゆで卵'}],
+    '牛肉のしぐれ煮':      [{name:'牛こま肉'},{name:'しょうが'}],
+    '肉野菜炒め':          [{name:'豚こま肉'},{name:'キャベツ'},{name:'にんじん'},{name:'もやし'}],
+    '鶏そぼろ':            [{name:'鶏ひき肉'},{name:'しょうが'},{name:'卵'}],
+  },
+
+  '卵料理': {
+    '卵焼き':              [{name:'卵'}],
+    'だし巻き卵':          [{name:'卵'},{name:'白だし'}],
+    '目玉焼き':            [{name:'卵'}],
+    'スクランブルエッグ':  [{name:'卵'},{name:'牛乳'},{name:'バター'}],
+    '茶碗蒸し':            [{name:'卵'},{name:'白だし'},{name:'鶏もも肉'},{name:'しいたけ'}],
+    'オムレツ（洋風）':    [{name:'卵'},{name:'ハム'},{name:'玉ねぎ'},{name:'チーズ'}],
+    '親子煮':              [{name:'鶏もも肉'},{name:'卵'},{name:'玉ねぎ'},{name:'めんつゆ'}],
+    '半熟煮卵':            [{name:'卵'}],
+  },
+
+  '野菜・豆腐料理': {
+    '野菜炒め':            [{name:'キャベツ'},{name:'にんじん'},{name:'もやし'},{name:'ピーマン'}],
+    'きんぴらごぼう':      [{name:'ごぼう'},{name:'にんじん'},{name:'白ごま'}],
+    'ひじきの煮物':        [{name:'乾燥ひじき'},{name:'にんじん'},{name:'油揚げ'}],
+    '切り干し大根の煮物':  [{name:'切り干し大根'},{name:'にんじん'},{name:'油揚げ'}],
+    '筑前煮':              [{name:'鶏もも肉'},{name:'ごぼう'},{name:'れんこん'},{name:'にんじん'},{name:'しいたけ'},{name:'こんにゃく'}],
+    '煮しめ':              [{name:'れんこん'},{name:'ごぼう'},{name:'にんじん'},{name:'里いも'},{name:'こんにゃく'},{name:'しいたけ'}],
+    'ポテトサラダ':        [{name:'じゃがいも'},{name:'きゅうり'},{name:'玉ねぎ'},{name:'ハム'},{name:'マヨネーズ'}],
+    'マカロニサラダ':      [{name:'マカロニ'},{name:'きゅうり'},{name:'にんじん'},{name:'ハム'},{name:'マヨネーズ'}],
+    '冷ややっこ':          [{name:'絹ごし豆腐'},{name:'ねぎ'}],
+    '湯豆腐':              [{name:'絹ごし豆腐'},{name:'昆布'}],
+    '揚げ出し豆腐':        [{name:'木綿豆腐'},{name:'片栗粉'},{name:'大根'}],
+    '麻婆豆腐（クックドゥー）':[ {name:'麻婆豆腐の素'},{name:'木綿豆腐'} ],
+    '野菜の天ぷら':        [{name:'天ぷら粉'},{name:'なす'},{name:'さつまいも'},{name:'ピーマン'},{name:'しそ'}],
+    'ゴーヤチャンプルー':  [{name:'ゴーヤ'},{name:'木綿豆腐'},{name:'卵'},{name:'豚こま肉'}],
+    'ナスの味噌炒め':      [{name:'なす'},{name:'豚こま肉'}], // 味噌は除外
+    'ほうれん草のおひたし':[ {name:'ほうれん草'},{name:'かつおぶし'} ],
+  },
+
+  '汁物': {
+    '豚汁':                [{name:'豚こま肉'},{name:'里いも'},{name:'にんじん'},{name:'大根'},{name:'ごぼう'},{name:'長ねぎ'}], // 味噌は除外
+    'けんちん汁':          [{name:'大根'},{name:'にんじん'},{name:'ごぼう'},{name:'里いも'},{name:'こんにゃく'},{name:'長ねぎ'}],
+    'お吸い物':            [{name:'三つ葉'},{name:'昆布'},{name:'かまぼこ'}],
+    'コーンスープ':        [{name:'コーンクリーム缶'},{name:'牛乳'},{name:'コンソメ'}],
+    'ポタージュ':          [{name:'じゃがいも'},{name:'玉ねぎ'},{name:'牛乳'},{name:'コンソメ'}],
+    'ミネストローネ':      [{name:'ベーコン'},{name:'玉ねぎ'},{name:'にんじん'},{name:'セロリ'},{name:'トマト缶'},{name:'コンソメ'}],
+    '中華スープ（卵入り）':[ {name:'中華スープの素'},{name:'卵'},{name:'長ねぎ'} ],
+  },
+
+  '洋風料理': {
+    'グラタン':            [{name:'マカロニ'},{name:'玉ねぎ'},{name:'しめじ'},{name:'ベーコン'},{name:'ホワイトソース缶'},{name:'ピザ用チーズ'}],
+    'ドリア':              [{name:'ご飯'},{name:'ホワイトソース缶'},{name:'ピザ用チーズ'},{name:'ベーコン'},{name:'玉ねぎ'}],
+    'ビーフシチュー':      [{name:'シチュールー'},{name:'牛角切り肉'},{name:'玉ねぎ'},{name:'にんじん'},{name:'じゃがいも'}],
+    'クリームシチュー':    [{name:'シチュールー'},{name:'鶏もも肉'},{name:'玉ねぎ'},{name:'にんじん'},{name:'じゃがいも'},{name:'ブロッコリー'}],
+    'ローストチキン':      [{name:'鶏もも肉（骨付き）'},{name:'にんにく'},{name:'ローズマリー'}],
+    'ステーキ':            [{name:'牛ステーキ用肉'},{name:'にんにく'},{name:'バター'}],
+    'ピザ（手作り）':      [{name:'強力粉'},{name:'ドライイースト'},{name:'トマトソース'},{name:'ピザ用チーズ'},{name:'ベーコン'},{name:'ピーマン'}],
+    'サンドイッチ':        [{name:'食パン'},{name:'ハム'},{name:'レタス'},{name:'きゅうり'},{name:'卵'},{name:'マヨネーズ'}],
+    'ミートソーススパゲッティ':[ {name:'スパゲッティ'},{name:'合い挽き肉'},{name:'玉ねぎ'},{name:'トマト缶'},{name:'にんにく'},{name:'コンソメ'} ],
+    'ナポリタン':          [{name:'スパゲッティ'},{name:'玉ねぎ'},{name:'ピーマン'},{name:'ウインナー'},{name:'ケチャップ'}],
+    'ペペロンチーノ':      [{name:'スパゲッティ'},{name:'にんにく'},{name:'唐辛子'},{name:'オリーブオイル'}],
+    'カルボナーラ':        [{name:'スパゲッティ'},{name:'ベーコン'},{name:'卵'},{name:'粉チーズ'},{name:'黒こしょう'}],
+  },
+
+  'その他定番': {
+    '餃子':                [{name:'餃子の皮'},{name:'豚ひき肉'},{name:'キャベツ'},{name:'にら'},{name:'にんにく'},{name:'しょうが'}],
+    '春巻き':              [{name:'春巻きの皮'},{name:'豚こま肉'},{name:'たけのこ水煮'},{name:'にんじん'},{name:'しいたけ'},{name:'春雨'}],
+    'お好み焼き':          [{name:'お好み焼き粉'},{name:'卵'},{name:'キャベツ'},{name:'豚バラ薄切り'}],
+    'たこ焼き':            [{name:'たこ焼き粉'},{name:'茹でだこ'},{name:'青ねぎ'},{name:'天かす'},{name:'紅しょうが'}],
+    'おでん':              [{name:'おでんの素'},{name:'大根'},{name:'卵'},{name:'こんにゃく'},{name:'ちくわ'},{name:'さつま揚げ'}],
+  }
+};
+
+/* === 追加：レシピ拡張（RECIPES の直後に貼り付け） === */
+
+// 卵料理：タイ風玉子焼き
+RECIPES['卵料理']['タイ風玉子焼き'] = [
+  {name:'卵'},
+  {name:'ナンプラー'},
+  {name:'青ねぎ'},
+  {name:'パクチー'},
+  {name:'赤玉ねぎ'},
+  {name:'ライム'}
+];
+
+// 洋風料理：タンドリーチキン
+RECIPES['洋風料理']['タンドリーチキン'] = [
+  {name:'鶏もも肉'},
+  {name:'プレーンヨーグルト'},
+  {name:'カレー粉'},
+  {name:'にんにく'},
+  {name:'しょうが'},
+  {name:'レモン'}
+];
+
+// 肉料理：チャーシュー
+RECIPES['肉料理']['チャーシュー'] = [
+  {name:'豚バラブロック'},
+  {name:'しょうが'},
+  {name:'長ねぎ（青い部分）'}
+];
+
+// ★新カテゴリ：鍋
+RECIPES['鍋'] = {
+  'すき焼き': [
+    {name:'牛薄切り肉'},
+    {name:'白菜'},
+    {name:'長ねぎ'},
+    {name:'春菊'},
+    {name:'木綿豆腐'},
+    {name:'しらたき'},
+    {name:'えのき'},
+    {name:'すき焼きの割り下'}
+  ],
+  'もつ鍋': [
+    {name:'牛もつ（下処理済み）'},
+    {name:'キャベツ'},
+    {name:'にら'},
+    {name:'にんにく'},
+    {name:'鷹の爪'},
+    {name:'鍋つゆ（もつ鍋用）'}
+  ],
+  '水炊き': [
+    {name:'鶏もも肉'},
+    {name:'白菜'},
+    {name:'長ねぎ'},
+    {name:'木綿豆腐'},
+    {name:'しめじ'},
+    {name:'昆布'}
+  ],
+  'しゃぶしゃぶ': [
+    {name:'牛しゃぶ用肉'},
+    {name:'白菜'},
+    {name:'長ねぎ'},
+    {name:'春菊'},
+    {name:'木綿豆腐'},
+    {name:'しらたき'},
+    {name:'昆布'}
+  ],
+  '海鮮鍋': [
+    {name:'たら切り身'},
+    {name:'えび'},
+    {name:'ほたて'},
+    {name:'白菜'},
+    {name:'長ねぎ'},
+    {name:'木綿豆腐'},
+    {name:'しめじ'},
+    {name:'鍋つゆ（寄せ鍋用）'}
+  ]
+};
+
+
+// 洋風料理：アクアパッツァ
+RECIPES['洋風料理']['アクアパッツァ'] = [
+  {name:'白身魚（鯛など）切り身'},
+  {name:'あさり'},
+  {name:'プチトマト'},
+  {name:'ブラックオリーブ'},
+  {name:'にんにく'},
+  {name:'白ワイン'},
+  {name:'イタリアンパセリ'}
+];
+
+
+
+// モーダル参照
+const modalRecipe = document.getElementById('modalRecipe');
+const recipeCat = document.getElementById('recipeCat');
+const recipeDish = document.getElementById('recipeDish');
+const recipeIngredients = document.getElementById('recipeIngredients');
+
+// レシピボタン開く
+document.getElementById('btnRecipe').onclick = openRecipe;
+
+function openRecipe(){
+  // 分類リスト作成
+  recipeCat.innerHTML = '';
+  Object.keys(RECIPES).forEach(cat => {
+    const opt = new Option(cat, cat);
+    recipeCat.add(opt);
+  });
+  // 先頭のカテゴリを選択
+  if (recipeCat.options.length) recipeCat.selectedIndex = 0;
+  // 料理リスト描画
+  renderRecipeDishes();
+  // 先頭料理の材料描画
+  renderRecipeIngredients();
+  modalRecipe.classList.add('open');
+}
+function closeRecipe(){ modalRecipe.classList.remove('open'); }
+
+// カテゴリ変更で料理一覧を更新
+recipeCat.onchange = renderRecipeDishes;
+function renderRecipeDishes(){
+  const cat = recipeCat.value;
+  recipeDish.innerHTML = '';
+  if(!cat) return;
+  Object.keys(RECIPES[cat]).forEach(name=>{
+    recipeDish.add(new Option(name, name));
+  });
+  if (recipeDish.options.length) recipeDish.selectedIndex = 0;
+  renderRecipeIngredients();
+}
+
+// 料理変更で材料更新
+recipeDish.onchange = renderRecipeIngredients;
+
+function renderRecipeIngredients(){
+  const cat = recipeCat.value;
+  const dish = recipeDish.value;
+  recipeIngredients.innerHTML = '';
+  if(!cat || !dish) return;
+
+  // 常備調味料除外
+  const base = (RECIPES[cat][dish] || []).filter(it => !PANTRY_SET.has(it.name));
+
+  for(const ing of base){
+    const li = document.createElement('li');
+    const id = crypto.randomUUID();
+    li.innerHTML = `
+      <input type="checkbox" id="${id}" checked>
+      <label class="ing-name" for="${id}">${escapeHtml(ing.name)}</label>
+      ${ing.qty ? `<span class="ing-qty">× ${escapeHtml(String(ing.qty))}</span>` : ''}
+    `;
+    recipeIngredients.appendChild(li);
+  }
+}
+
+// 全選択/解除
+document.getElementById('btnRecipeToggleAll').onclick = ()=>{
+  const boxes = recipeIngredients.querySelectorAll('input[type="checkbox"]');
+  const allChecked = Array.from(boxes).every(b=>b.checked);
+  boxes.forEach(b=> b.checked = !allChecked);
+};
+
+// 選択材料を買い物リストに追加（重複は追加しない）
+document.getElementById('btnAddSelectedIngredients').onclick = ()=>{
+  const sel = Array.from(recipeIngredients.querySelectorAll('input[type="checkbox"]:checked'));
+  if(!sel.length){ showToast('材料が選択されていません'); return; }
+
+  const names = sel.map(b => b.nextElementSibling.textContent.trim()).filter(Boolean);
+
+  // 既存チェック用（品名＋カテゴリで近似重複回避だが、まずは品名ベース）
+  const existing = new Set(items.map(it => normalize(it.name)));
+
+  let added = 0;
+  for(const name of names){
+    const n = normalize(name);
+    if(existing.has(n)) continue; // すでにある
+    const cat = guessCategory(name);
+    items.push({
+      id: crypto.randomUUID(),
+      name,
+      qty: 1,
+      category: cat,
+      checked: false,
+      skip: false,
+      createdAt: Date.now()
+    });
+    existing.add(n);
+    added++;
+  }
+
+  if(added>0){ save(); renderList(); showToast(`追加：${added}件`); }
+  else{ showToast('すでに全てリストにあります'); }
+  closeRecipe();
+};
+
+
+
 
 /* ========= 初期化 ========= */
 function init(){
