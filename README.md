@@ -1,1 +1,550 @@
-# kaimono_apps
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>買い物リスト（一体型）</title>
+<meta name="theme-color" content="#185adb">
+<style>
+:root{
+  --bg:#f0f6ff; --card:#ffffff; --line:#d6e4ff; --text:#0f172a; --muted:#5b6b8a;
+  --accent:#185adb; --accent-2:#0e49c7; --pill:#eaf2ff; --ok:#18a558; --warn:#ef4444;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui, -apple-system,"Segoe UI",Roboto,Arial}
+header{position:sticky;top:0;background:linear-gradient(180deg,#ffffff 0%,#f6f9ff 100%);
+  border-bottom:1px solid var(--line);padding:12px 16px;z-index:10}
+.brand{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.brand h1{font-size:20px;margin:0;color:#0b2256}
+.brand .supsel{margin-left:auto;display:flex;gap:8px;align-items:center}
+select,input,button,textarea{font:inherit}
+button{border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
+button.ghost{background:#fff;color:var(--accent)}
+button.line{background:#fff;border-color:var(--line);color:#0f172a}
+button.warn{background:var(--warn);border-color:var(--warn)}
+button.ok{background:var(--ok);border-color:var(--ok)}
+button.flat{border:none;background:transparent;color:var(--accent);padding:4px 8px}
+.tabbar{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.tabbar button{border:1px solid var(--line);background:#fff;color:#0f172a}
+.tabbar button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.page{display:none;padding:16px}
+.page.active{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px}
+.grid{display:grid;gap:12px}
+.grid.cols-2{grid-template-columns:repeat(2,1fr)}
+.grid.cols-3{grid-template-columns:repeat(3,1fr)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{background:var(--pill);color:var(--accent-2);padding:4px 8px;border-radius:999px;font-size:12px}
+input[type=text], input[type=search], select, textarea{
+  background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0
+}
+ul{list-style:none;margin:0;padding:0}
+.item{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);
+  border-radius:12px;padding:10px 12px;margin-bottom:8px;touch-action:pan-y}
+.item .name{flex:1;min-width:0}
+.item .cat{font-size:12px;color:var(--muted)}
+.item .qty{font-size:12px;color:#334155}
+.item.skip{background:repeating-linear-gradient(135deg,#f3f7ff 0 6px,#e6eeff 6px 12px);text-decoration:line-through}
+.kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;background:#eef3ff;border:1px solid #dbe6ff;border-radius:6px;padding:2px 6px;font-size:12px}
+
+/* album cards */
+.album-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.photo-card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.photo-card img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block;background:#eef3ff}
+.photo-meta{padding:8px 10px;border-top:1px solid var(--line);display:grid;gap:4px}
+.small{font-size:12px;color:var(--muted)}
+.tag{display:inline-block;background:var(--pill);color:var(--accent-2);border-radius:999px;padding:2px 8px;font-size:12px}
+
+/* modal */
+.modal{position:fixed;inset:0;background:rgba(11,16,40,.5);display:none;align-items:center;justify-content:center;padding:16px}
+.modal.open{display:flex}
+.sheet{background:#fff;border-radius:16px;border:1px solid var(--line);max-width:720px;width:100%;max-height:90vh;overflow:auto}
+.sheet .head{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
+.sheet .body{padding:12px 14px}
+.sheet .foot{padding:12px 14px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end}
+
+hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
+
+/* responsive tweaks */
+@media (max-width:480px){
+  .grid.cols-2{grid-template-columns:1fr}
+  .grid.cols-3{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>買い物リスト</h1>
+    <div class="supsel">
+      <span class="pill">青基調UI</span>
+      <label class="small">スーパー：</label>
+      <select id="superSelect"></select>
+      <button class="line" id="btnSort">売場順ソート</button>
+      <button class="line" id="btnUnsort">解除</button>
+    </div>
+  </div>
+  <div class="tabbar">
+    <button class="active" data-tab="list">リスト</button>
+    <button data-tab="market">スーパー登録</button>
+    <button data-tab="album">アルバム</button>
+    <span style="flex:1"></span>
+    <button id="btnExport" class="ghost">QRで共有</button>
+    <button id="btnImport" class="ghost">QR取り込み</button>
+  </div>
+</header>
+
+<main>
+  <!-- リスト -->
+  <section id="page-list" class="page active">
+    <div class="card">
+      <div class="grid cols-3">
+        <input id="inpName" type="text" placeholder="品名（例：牛乳）">
+        <select id="selQty">
+          <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+        </select>
+        <button id="btnAdd">追加</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="search" type="search" placeholder="検索…（未購入のみは右のチェック）" style="flex:1">
+        <label class="small"><input type="checkbox" id="onlyActive"> 未購入のみ</label>
+        <button class="line" id="btnClearActive">未購入クリア</button>
+        <button class="warn" id="btnClearAll">全クリア</button>
+      </div>
+      <ul id="list" style="margin-top:10px"></ul>
+    </div>
+  </section>
+
+  <!-- スーパー登録 -->
+  <section id="page-market" class="page">
+    <div class="card">
+      <h3 style="margin:0 0 8px">スーパー登録</h3>
+      <div class="row">
+        <input id="superName" type="text" placeholder="スーパー名" style="flex:1">
+        <button id="btnAddSuper">追加</button>
+      </div>
+      <div class="row small" style="margin-top:6px;color:var(--muted)">
+        左の一覧から選択 → 右で売場順（入口→奥）を構成。上下ボタンで並び替え、削除で除外。
+      </div>
+      <div class="grid cols-2" style="margin-top:12px">
+        <div class="card">
+          <div class="row" style="justify-content:space-between">
+            <strong>スーパー一覧</strong>
+            <button class="flat" id="btnDeleteSuper">選択削除</button>
+          </div>
+          <select id="superList" size="8" style="width:100%"></select>
+        </div>
+        <div class="card">
+          <strong>売場順（入口→奥）</strong>
+          <div class="row" style="margin:6px 0">
+            <select id="catPick" style="flex:1"></select>
+            <button id="btnShelfAdd">追加</button>
+            <span class="small" style="margin-left:auto">※重複可／何度でも並び替え可</span>
+          </div>
+          <ul id="shelfOrder"></ul>
+          <div class="row" style="justify-content:flex-end">
+            <button class="ok" id="btnSaveShelf">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- アルバム -->
+  <section id="page-album" class="page">
+    <div class="card">
+      <div class="grid cols-3">
+        <select id="albumCat">
+          <option value="">分類で絞り込み</option>
+        </select>
+        <input id="albumText" type="search" placeholder="品名メモで絞り込み">
+        <div class="row" style="justify-content:flex-end">
+          <input id="albumSuperOnly" type="checkbox"><label for="albumSuperOnly" class="small">選択スーパーのみ</label>
+        </div>
+      </div>
+      <div class="album-grid" id="albumGrid" style="margin-top:12px"></div>
+    </div>
+  </section>
+</main>
+
+<!-- Export Modal -->
+<div id="modalExport" class="modal" aria-hidden="true">
+  <div class="sheet">
+    <div class="head">
+      <strong>QRコードで共有</strong>
+      <button class="flat" onclick="closeExport()">閉じる</button>
+    </div>
+    <div class="body">
+      <div class="row small"><span class="pill">現在のリストを共有</span> 相手はカメラで読み取るか「QR取り込み」で画像から読めます。</div>
+      <div class="card" style="margin-top:8px;display:flex;justify-content:center"><div id="qrcode"></div></div>
+      <div class="row" style="margin-top:8px">
+        <label><input type="checkbox" id="compact"> 圧縮共有（品名・数量・分類のみ）</label>
+        <span class="small" style="margin-left:auto;color:var(--muted)">長大リストは圧縮推奨</span>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="line" onclick="downloadQR()">画像保存</button>
+      <button class="ok" onclick="closeExport()">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Modal -->
+<div id="modalImport" class="modal" aria-hidden="true">
+  <div class="sheet">
+    <div class="head">
+      <strong>QR取り込み</strong>
+      <button class="flat" onclick="closeImport()">閉じる</button>
+    </div>
+    <div class="body">
+      <input id="qrPick" type="file" accept="image/*" capture="environment">
+      <div class="small" style="margin-top:6px;color:var(--muted)">スクショや写真から読み取れます。</div>
+      <pre id="qrPreview" class="card" style="white-space:pre-wrap;max-height:180px;overflow:auto;margin-top:8px"></pre>
+    </div>
+    <div class="foot">
+      <button class="line" onclick="applyImport('merge')">マージ</button>
+      <button class="ok" onclick="applyImport('replace')">置換</button>
+    </div>
+  </div>
+</div>
+
+<!-- Photo Modal -->
+<div id="modalPhoto" class="modal" aria-hidden="true">
+  <div class="sheet">
+    <div class="head">
+      <strong>写真</strong>
+      <button class="flat" onclick="closePhoto()">閉じる</button>
+    </div>
+    <div class="body">
+      <img id="photoLarge" src="" alt="" style="width:100%;border-radius:10px;background:#eef3ff">
+      <div class="grid cols-2" style="margin-top:8px">
+        <div>
+          <div class="small">分類</div>
+          <div id="photoCat" class="pill"></div>
+        </div>
+        <div>
+          <div class="small">スーパー</div>
+          <div id="photoSuper" class="pill"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <textarea id="photoNote" rows="3" style="flex:1" placeholder="メモ（価格・規格など）"></textarea>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="line" onclick="deletePhoto()">削除</button>
+      <button class="ok" onclick="savePhotoNote()">更新</button>
+    </div>
+  </div>
+</div>
+
+<!-- libs -->
+<script src="https://unpkg.com/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+/* ========= 定数・分類 ========= */
+const CATEGORY_NAMES = [
+ '野菜・果物','精肉','鮮魚・刺身','惣菜・弁当','パン','乳製品','冷凍食品',
+ '豆腐・納豆・漬物','乾物','調味料・油・だし','菓子・スナック','飲料','酒類',
+ '缶詰・レトルト・インスタント麺','日用品・雑貨','卵','米','生麺','その他'
+];
+const CAT_RULES = [
+  {cat:'野菜・果物',keys:['トマト','レタス','きゅうり','にんじん','玉ねぎ','じゃが','白菜','ほうれん草','バナナ','りんご','みかん','いちご','ぶどう']},
+  {cat:'精肉',keys:['牛','豚','鶏','ひき肉','もも','むね','バラ','ベーコン','ハム','ソーセージ']},
+  {cat:'鮮魚・刺身',keys:['刺身','鮭','サーモン','サバ','アジ','イワシ','タコ','イカ','エビ','しらす','切り身']},
+  {cat:'惣菜・弁当',keys:['弁当','総菜','惣菜','唐揚げ','コロッケ','天ぷら','サラダ','寿司','おにぎり','サンドイッチ']},
+  {cat:'パン',keys:['パン','食パン','バゲット','ロール','クロワッサン']},
+  {cat:'乳製品',keys:['牛乳','ヨーグルト','チーズ','バター','生クリーム']},
+  {cat:'冷凍食品',keys:['冷凍','冷食','餃子(冷凍)','チャーハン(冷凍)','ピザ(冷凍)']},
+  {cat:'豆腐・納豆・漬物',keys:['豆腐','納豆','厚揚げ','油揚げ','漬物','キムチ','糠漬け']},
+  {cat:'乾物',keys:['海苔','のり','鰹節','煮干し','干し','春雨','切り干し','高野豆腐','乾燥']},
+  {cat:'調味料・油・だし',keys:['塩','砂糖','味噌','みそ','醤油','しょうゆ','酢','みりん','料理酒','胡椒','コショウ','だし','白だし','コンソメ','ごま油','サラダ油','オリーブオイル','ソース','ケチャップ','マヨネーズ','スパイス']},
+  {cat:'菓子・スナック',keys:['お菓子','菓子','スナック','ポテチ','クッキー','チョコ','キャンディ','ガム']},
+  {cat:'飲料',keys:['水','ミネラルウォーター','お茶','緑茶','麦茶','紅茶','コーヒー','ジュース','炭酸']},
+  {cat:'酒類',keys:['ビール','発泡酒','チューハイ','ワイン','日本酒','焼酎','ウイスキー','ハイボール']},
+  {cat:'缶詰・レトルト・インスタント麺',keys:['缶詰','ツナ','コーン缶','レトルト','インスタント','カップ麺','袋麺']},
+  {cat:'日用品・雑貨',keys:['ティッシュ','トイレット','キッチンペーパー','洗剤','スポンジ','歯磨き','歯ブラシ','シャンプー','ボディソープ','ラップ','アルミホイル','電池','ゴミ袋']},
+  {cat:'卵',keys:['卵','たまご']},
+  {cat:'米',keys:['米','こめ','白米','玄米']},
+  {cat:'生麺',keys:['生麺','生パスタ','生うどん','生そば','生ラーメン']},
+];
+let USER_DICT = {}; // 正規化名→カテゴリ
+function normalize(s){ if(!s) return ''; let t=s.normalize('NFKC');
+  t=t.replace(/[\uff61-\uff9f]/g,ch=>String.fromCharCode(ch.charCodeAt(0)+0x60)).toLowerCase();
+  return t.replace(/\s+/g,' ').trim();
+}
+function guessCategory(name){
+  const n=normalize(name);
+  if(USER_DICT[n]) return USER_DICT[n];
+  for(const r of CAT_RULES){ if(r.keys.some(k=>n.includes(normalize(k)))) return r.cat; }
+  for(const c of CATEGORY_NAMES){ if(n.includes(normalize(c))) return c; }
+  return 'その他';
+}
+
+/* ========= ストレージ ========= */
+const LS_ITEMS='shopping_items_v1';
+const LS_SUPERS='shopping_supers_v1';
+const LS_USERDICT='shopping_userdict_v1';
+let items = loadJSON(LS_ITEMS, []);
+let supers = loadJSON(LS_SUPERS, []);
+USER_DICT = loadJSON(LS_USERDICT, {});
+function save(){ localStorage.setItem(LS_ITEMS, JSON.stringify(items)); }
+function saveSupers(){ localStorage.setItem(LS_SUPERS, JSON.stringify(supers)); }
+function saveUserDict(){ localStorage.setItem(LS_USERDICT, JSON.stringify(USER_DICT)); }
+function loadJSON(k,def){ try{ return JSON.parse(localStorage.getItem(k)||JSON.stringify(def)); }catch(e){ return def; }}
+
+/* ========= IndexedDB（アルバム） ========= */
+const DB_NAME='ShoppingAlbumDB'; const DB_STORE='photos';
+let db=null;
+function openDB(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,1);
+  r.onupgradeneeded=e=>{ const d=e.target.result; d.createObjectStore(DB_STORE,{keyPath:'id'}); };
+  r.onsuccess=()=>{ db=r.result; res(); }; r.onerror=()=>rej(r.error);
+});}
+async function dbAdd(photo){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).add(photo);
+  tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
+async function dbPut(photo){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).put(photo);
+  tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
+async function dbGetAll(){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readonly'); const req=tx.objectStore(DB_STORE).getAll();
+  req.onsuccess=()=>res(req.result||[]); req.onerror=()=>rej(req.error); });}
+async function dbDelete(id){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).delete(id);
+  tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
+async function openDBIf(){ if(db) return; await openDB(); }
+
+/* ========= UI要素 ========= */
+const tabButtons=[...document.querySelectorAll('.tabbar button[data-tab]')];
+const pages={ list:document.getElementById('page-list'), market:document.getElementById('page-market'), album:document.getElementById('page-album') };
+tabButtons.forEach(b=>b.onclick=()=>{ tabButtons.forEach(x=>x.classList.remove('active')); b.classList.add('active');
+  Object.values(pages).forEach(p=>p.classList.remove('active')); pages[b.dataset.tab].classList.add('active');
+  if(b.dataset.tab==='album') renderAlbum(); if(b.dataset.tab==='market') refreshSuperList();
+});
+
+/* ========= スーパー選択・売場順 ========= */
+const selSuper=document.getElementById('superSelect');
+function refreshSuperSelect(){
+  const cur=selSuper.value; selSuper.innerHTML='';
+  const opt0=new Option('（未選択）',''); selSuper.add(opt0);
+  supers.forEach(s=> selSuper.add(new Option(s.name,s.id)) );
+  selSuper.value = supers.some(s=>s.id===cur)?cur:'';
+}
+function shelfOrderOf(id){ const s=supers.find(x=>x.id===id); return s?.shelfOrder || []; }
+document.getElementById('btnSort').onclick=()=>{ const so=shelfOrderOf(selSuper.value);
+  currentViewSorted = sortByShelf(items, so);
+  renderList(currentViewSorted);
+};
+document.getElementById('btnUnsort').onclick=()=>{ currentViewSorted=null; renderList(); };
+function sortByShelf(arr, orderArr){
+  const order=Object.fromEntries(orderArr.map((c,i)=>[c,i+1])); // 未知は0→先頭
+  const rank=cat=> (cat in order)?order[cat]:0;
+  const a=[...arr]; a.sort((x,y)=> rank(x.category)-rank(y.category)); return a;
+}
+
+/* ========= リスト：追加/表示/操作 ========= */
+const ul=document.getElementById('list');
+const inpName=document.getElementById('inpName'); const selQty=document.getElementById('selQty');
+const onlyActive=document.getElementById('onlyActive'); const search=document.getElementById('search');
+document.getElementById('btnAdd').onclick=()=>{
+  const name=inpName.value.trim(); if(!name) return;
+  const qty=Number(selQty.value||1);
+  items.push({id:crypto.randomUUID(),name,qty,category:guessCategory(name),checked:false,skip:false,createdAt:Date.now()});
+  save(); inpName.value=''; renderList();
+};
+document.getElementById('btnClearActive').onclick=()=>{ items=items.filter(x=>x.checked||x.skip); save(); renderList(); };
+document.getElementById('btnClearAll').onclick=()=>{ if(confirm('全アイテムを削除しますか？')){ items=[]; save(); renderList(); } };
+search.oninput=()=>renderList(); onlyActive.onchange=()=>renderList();
+
+let currentViewSorted=null; // null=通常順
+function renderList(view){
+  const src = view || items;
+  const q=normalize(search.value);
+  ul.innerHTML='';
+  src.filter(it=>{
+    if(onlyActive.checked && (it.checked||it.skip)) return false;
+    if(q && !normalize(it.name).includes(q)) return false;
+    return true;
+  }).forEach(it=>{
+    const li=document.createElement('li'); li.className='item'+(it.skip?' skip':'');
+    li.innerHTML=`
+      <input type="checkbox" ${it.checked?'checked':''} aria-label="チェック">
+      <div class="name"><div>${escapeHtml(it.name)}</div>
+        <div class="cat">${escapeHtml(it.category||'その他')}</div></div>
+      <div class="qty">×${it.qty}</div>
+      <button class="flat cam" title="撮影">📷</button>
+    `;
+    // チェック
+    li.querySelector('input').onchange=(e)=>{ it.checked=e.target.checked; save(); };
+    // 左スワイプ skip toggle
+    let sx=0, sy=0; li.addEventListener('touchstart',e=>{ sx=e.touches[0].clientX; sy=e.touches[0].clientY;},{passive:true});
+    li.addEventListener('touchend',e=>{
+      const dx=e.changedTouches[0].clientX-sx, dy=e.changedTouches[0].clientY-sy;
+      if(Math.abs(dx)>40 && Math.abs(dy)<30 && dx<0){ it.skip=!it.skip; save(); renderList(view); }
+    },{passive:true});
+    // カメラ
+    li.querySelector('.cam').onclick=()=>startCaptureForItem(it);
+    ul.appendChild(li);
+  });
+}
+function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+renderList();
+
+/* ========= カメラからアルバム追加 ========= */
+const hiddenPicker=document.createElement('input'); hiddenPicker.type='file'; hiddenPicker.accept='image/*'; hiddenPicker.capture='environment'; hiddenPicker.style.display='none'; document.body.appendChild(hiddenPicker);
+let captureContext=null; // {item, supermarketId}
+function startCaptureForItem(item){
+  captureContext={item, supermarketId: selSuper.value || ''};
+  hiddenPicker.value=''; hiddenPicker.click();
+}
+hiddenPicker.onchange=async (e)=>{
+  const f=e.target.files[0]; if(!f||!captureContext) return;
+  const img=await fileToImage(f);
+  const resized=await shrinkAndOrient(img,1280);
+  const photo={ id:crypto.randomUUID(), dataUrl:resized, category:captureContext.item.category,
+    name:captureContext.item.name, supermarketId:captureContext.supermarketId, takenAt:Date.now(), note:'' };
+  await dbAdd(photo); renderAlbum(); showToast('アルバムに保存しました');
+};
+function fileToImage(file){ return new Promise((res,rej)=>{ const url=URL.createObjectURL(file); const img=new Image(); img.onload=()=>{URL.revokeObjectURL(url); res(img)}; img.onerror=rej; img.src=url; });}
+async function shrinkAndOrient(img, maxSide){
+  const r= Math.min(1, maxSide/Math.max(img.width,img.height));
+  const w=Math.round(img.width*r), h=Math.round(img.height*r);
+  const cvs=document.createElement('canvas'); cvs.width=w; cvs.height=h;
+  const ctx=cvs.getContext('2d'); ctx.drawImage(img,0,0,w,h);
+  return cvs.toDataURL('image/jpeg',0.85);
+}
+
+/* ========= アルバム表示・詳細 ========= */
+const albumCat=document.getElementById('albumCat'); const albumText=document.getElementById('albumText'); const albumSuperOnly=document.getElementById('albumSuperOnly');
+CATEGORY_NAMES.forEach(c=> albumCat.add(new Option(c,c)) );
+albumCat.onchange=renderAlbum; albumText.oninput=renderAlbum; albumSuperOnly.onchange=renderAlbum;
+
+const albumGrid=document.getElementById('albumGrid'); let albumCache=[];
+async function renderAlbum(){
+  albumGrid.innerHTML='';
+  albumCache = await dbGetAll();
+  const cat=albumCat.value; const q=normalize(albumText.value); const superId=albumSuperOnly.checked?selSuper.value:'';
+  albumCache.filter(p=>{
+    if(cat && p.category!==cat) return false;
+    if(superId && p.supermarketId!==superId) return false;
+    if(q && !(normalize(p.name).includes(q) || normalize(p.note||'').includes(q))) return false;
+    return true;
+  }).sort((a,b)=>b.takenAt-a.takenAt)
+  .forEach(p=>{
+    const card=document.createElement('div'); card.className='photo-card'; card.tabIndex=0;
+    card.innerHTML=`
+      <img src="${p.dataUrl}" alt="">
+      <div class="photo-meta">
+        <div><span class="tag">${escapeHtml(p.category)}</span> <span class="small">${escapeHtml(p.name)}</span></div>
+        <div class="small">スーパー：${escapeHtml(superNameOf(p.supermarketId)||'—')}</div>
+        <div class="small">${fmtDate(p.takenAt)}</div>
+      </div>`;
+    card.onclick=()=>openPhoto(p);
+    albumGrid.appendChild(card);
+  });
+}
+function fmtDate(t){ const d=new Date(t); const pad=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function superNameOf(id){ return supers.find(s=>s.id===id)?.name || ''; }
+const modalPhoto=document.getElementById('modalPhoto');
+let currentPhoto=null;
+function openPhoto(p){ currentPhoto=p; document.getElementById('photoLarge').src=p.dataUrl;
+  document.getElementById('photoCat').textContent=p.category; document.getElementById('photoSuper').textContent=superNameOf(p.supermarketId)||'—';
+  document.getElementById('photoNote').value=p.note||''; modalPhoto.classList.add('open'); }
+function closePhoto(){ modalPhoto.classList.remove('open'); currentPhoto=null; }
+async function savePhotoNote(){ if(!currentPhoto) return; currentPhoto.note=document.getElementById('photoNote').value; await dbPut(currentPhoto); showToast('メモを更新しました'); closePhoto(); renderAlbum(); }
+async function deletePhoto(){ if(!currentPhoto) return; if(!confirm('この写真を削除しますか？')) return; await dbDelete(currentPhoto.id); closePhoto(); renderAlbum(); showToast('削除しました'); }
+
+/* ========= スーパー登録画面 ========= */
+const superName=document.getElementById('superName'); const btnAddSuper=document.getElementById('btnAddSuper');
+const superList=document.getElementById('superList'); const catPick=document.getElementById('catPick'); const shelfOrderUL=document.getElementById('shelfOrder');
+const btnShelfAdd=document.getElementById('btnShelfAdd'); const btnSaveShelf=document.getElementById('btnSaveShelf'); const btnDeleteSuper=document.getElementById('btnDeleteSuper');
+CATEGORY_NAMES.forEach(c=>catPick.add(new Option(c,c)));
+btnAddSuper.onclick=()=>{ const name=superName.value.trim(); if(!name) return; supers.push({id:crypto.randomUUID(),name,shelfOrder:[],updatedAt:Date.now()}); superName.value=''; saveSupers(); refreshSuperList(); refreshSuperSelect(); showToast('追加しました'); };
+btnDeleteSuper.onclick=()=>{ const id=superList.value; if(!id) return; if(!confirm('選択スーパーを削除しますか？')) return;
+  supers=supers.filter(s=>s.id!==id); saveSupers(); refreshSuperList(); refreshSuperSelect(); };
+function refreshSuperList(){
+  superList.innerHTML=''; supers.forEach(s=> superList.add(new Option(s.name,s.id)) );
+  renderShelfOrder(superList.value);
+}
+superList.onchange=()=>renderShelfOrder(superList.value);
+function renderShelfOrder(id){
+  shelfOrderUL.innerHTML='';
+  const so = shelfOrderOf(id);
+  so.forEach((c,idx)=>{
+    const li=document.createElement('li'); li.className='item'; li.innerHTML=`
+      <div class="name">${escapeHtml(c)}</div>
+      <div class="row">
+        <button class="line up">↑</button>
+        <button class="line dn">↓</button>
+        <button class="line rm">削除</button>
+      </div>`;
+    li.querySelector('.up').onclick=()=>{ if(idx>0){ [so[idx-1],so[idx]]=[so[idx],so[idx-1]]; renderShelfOrder(id);} };
+    li.querySelector('.dn').onclick=()=>{ if(idx<so.length-1){ [so[idx+1],so[idx]]=[so[idx],so[idx+1]]; renderShelfOrder(id);} };
+    li.querySelector('.rm').onclick=()=>{ so.splice(idx,1); renderShelfOrder(id); };
+    shelfOrderUL.appendChild(li);
+  });
+}
+btnShelfAdd.onclick=()=>{ const id=superList.value; if(!id) return; const c=catPick.value; const s=supers.find(x=>x.id===id); s.shelfOrder.push(c); renderShelfOrder(id); };
+btnSaveShelf.onclick=()=>{ const id=superList.value; if(!id) return; const s=supers.find(x=>x.id===id); s.updatedAt=Date.now(); saveSupers(); refreshSuperSelect(); showToast('売場順を保存しました'); };
+
+/* ========= QR共有 ========= */
+const modalExport=document.getElementById('modalExport'); const modalImport=document.getElementById('modalImport');
+document.getElementById('btnExport').onclick=()=>openExport(); document.getElementById('btnImport').onclick=()=>openImport();
+const compact=document.getElementById('compact'); let qrInst=null;
+function openExport(){ modalExport.classList.add('open'); const box=document.getElementById('qrcode'); box.innerHTML='';
+  qrInst = new QRCode(box,{ text: makePayload(compact.checked), width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
+}
+function closeExport(){ modalExport.classList.remove('open'); }
+function makePayload(isCompact){ const data={type:'shopping-list',v:1,exportedAt:Date.now(),
+  items: isCompact? items.map(({name,qty,category})=>({name,qty,category})) : items
+}; return JSON.stringify(data); }
+function downloadQR(){ const box=document.getElementById('qrcode'); const img=box.querySelector('img'); const cvs=box.querySelector('canvas');
+  let dataUrl=''; if(img?.src) dataUrl=img.src; if(!dataUrl&&cvs) dataUrl=cvs.toDataURL('image/png');
+  if(!dataUrl) return alert('画像が見つかりません'); const a=document.createElement('a'); a.href=dataUrl; a.download='shopping_qr.png'; a.click(); }
+function openImport(){ modalImport.classList.add('open'); document.getElementById('qrPick').value=''; document.getElementById('qrPreview').textContent=''; importData=null; }
+function closeImport(){ modalImport.classList.remove('open'); }
+let importData=null;
+document.getElementById('qrPick').onchange=async (e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const img=await fileToImage(f); const {data,w,h}=await imageToRGBA(img);
+  const code = jsQR(data, w, h);
+  if(!code){ alert('QRコードが見つかりません'); return; }
+  try{ const obj=JSON.parse(code.data); if(obj.type!=='shopping-list') throw 0; importData=obj;
+    document.getElementById('qrPreview').textContent=`プレビュー：${obj.items?.length||0}件\n`+truncate(code.data,300);
+  }catch{ alert('形式が正しくありません'); }
+};
+function truncate(s,n){ return s.length>n ? s.slice(0,n)+'…':s; }
+async function imageToRGBA(img){
+  const scale=Math.min(1,1024/Math.max(img.width,img.height)); const w=Math.round(img.width*scale), h=Math.round(img.height*scale);
+  const cvs=document.createElement('canvas'); cvs.width=w; cvs.height=h; const ctx=cvs.getContext('2d'); ctx.drawImage(img,0,0,w,h);
+  const id=ctx.getImageData(0,0,w,h); return {data:id.data, w, h};
+}
+function applyImport(mode){
+  if(!importData) return alert('先にQRを読み込んでください');
+  const incoming=(importData.items||[]).map(normalizeIncoming);
+  if(mode==='replace'){ items=incoming; }
+  else{
+    const keyOf=it=>`${it.name}__${it.category||''}__${it.qty||1}`.toLowerCase();
+    const map=new Map(items.map(it=>[keyOf(it),it])); for(const it of incoming){ if(!map.has(keyOf(it))) map.set(keyOf(it),it); }
+    items=Array.from(map.values());
+  }
+  save(); renderList(); closeImport();
+}
+function normalizeIncoming(it){ return { id:crypto.randomUUID(), name:it.name||'', qty:Number(it.qty||1),
+  category: it.category || guessCategory(it.name||''), checked:false, skip:false, createdAt:Date.now() }; }
+
+/* ========= 初期化 ========= */
+function init(){
+  refreshSuperSelect(); refreshSuperList(); renderList(); renderAlbum();
+  // アルバムカテゴリ選択肢は初期化済み
+}
+init();
+
+/* ========= 小物 ========= */
+function showToast(msg){ const t=document.createElement('div'); t.textContent=msg;
+  t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#0b2256;color:#fff;padding:8px 12px;border-radius:999px;opacity:0.95;z-index:9999';
+  document.body.appendChild(t); setTimeout(()=>{ t.remove(); },1600);
+}
+selSuper.onchange=()=>{ /* album filter option respects checkbox */ };
+function escape(s){return s.replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
+</script>
+</body>
+</html>
+0
