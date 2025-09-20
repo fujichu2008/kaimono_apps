@@ -168,6 +168,22 @@ ul{list-style:none;margin:0;padding:0}
 /* サムネ画像のはみ出し保険 */
 #modalPhoto img, .photo-card img{ max-width:100%; height:auto; }
 
+/* ★追記：売場順ドラッグ用タイル */
+.dnd-list{ display:grid; gap:8px; }
+.dnd-item{
+  display:flex; align-items:center; gap:10px;
+  background:#fff; border:1px solid var(--line); border-radius:12px;
+  padding:10px 12px;
+  touch-action:none; /* タッチD&Dの誤スクロール抑制 */
+}
+.dnd-item .handle{
+  user-select:none; cursor:grab; font-size:18px; line-height:1;
+  padding:4px 8px; border-radius:8px; background:#eef3ff; border:1px solid #dbe6ff;
+}
+.dnd-item.dragging{ opacity:.6; }
+.dnd-placeholder{
+  height:44px; border:2px dashed var(--accent-2); border-radius:12px; background:#f7faff;
+}
 
 
 </style>
@@ -237,18 +253,17 @@ ul{list-style:none;margin:0;padding:0}
           </div>
           <select id="superList" size="8" style="width:100%"></select>
         </div>
-        <div class="card">
-          <strong>売場順（入口→奥）</strong>
-          <div class="row" style="margin:6px 0">
-            <select id="catPick" style="flex:1"></select>
-            <button id="btnShelfAdd">追加</button>
-            <span class="small" style="margin-left:auto">※重複不可（追加済みは選択肢に出ません）</span>
-          </div>
-          <ul id="shelfOrder"></ul>
-          <div class="row" style="justify-content:flex-end">
-            <button class="ok" id="btnSaveShelf">保存</button>
-          </div>
-        </div>
+<div class="card">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <strong>売場順（ドラッグで並べ替え）</strong>
+    <button class="line" id="btnShelfReset">デフォルトに戻す</button>
+  </div>
+  <!-- 並べ替え用のリスト -->
+  <div id="dndList" class="dnd-list" aria-label="売場順リスト"></div>
+  <div class="row" style="justify-content:flex-end;margin-top:8px">
+    <button class="ok" id="btnSaveShelf">保存</button>
+  </div>
+</div>
       </div>
     </div>
   </section>
@@ -361,6 +376,31 @@ ul{list-style:none;margin:0;padding:0}
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 /* ========= 定数・分類 ========= */
+
+// ★追記：スーパーごとの初期「売場順」デフォルト
+const DEFAULT_SHELF_ORDER = [
+  '野菜・果物',
+  '豆腐・納豆・漬物',
+  '生麺',
+  '卵',
+  '鮮魚・刺身',
+  '精肉',
+  '乾物',
+  '調味料・油・だし',
+  '菓子・スナック',
+  '缶詰・レトルト・インスタント麺',
+  '乳製品',
+  '冷凍食品',
+  '惣菜・弁当',
+  'パン',
+  '飲料',
+  '酒類',
+  '日用品・雑貨',
+  '米',
+  'その他'
+];
+
+
 const CATEGORY_NAMES = [
  '野菜・果物','精肉','鮮魚・刺身','惣菜・弁当','パン','乳製品','冷凍食品',
  '豆腐・納豆・漬物','乾物','調味料・油・だし','菓子・スナック','飲料','酒類',
@@ -687,50 +727,145 @@ document.getElementById('btnAlbumDeleteAll').onclick=async ()=>{
   showToast(`削除：${n}件`); renderAlbum();
 };
 
-/* ========= スーパー登録画面（売場順：選択済みを除外） ========= */
-const superName=document.getElementById('superName'); const btnAddSuper=document.getElementById('btnAddSuper');
-const superList=document.getElementById('superList'); const catPick=document.getElementById('catPick'); const shelfOrderUL=document.getElementById('shelfOrder');
-const btnShelfAdd=document.getElementById('btnShelfAdd'); const btnSaveShelf=document.getElementById('btnSaveShelf'); const btnDeleteSuper=document.getElementById('btnDeleteSuper');
+/* ========= スーパー登録画面（売場順：ドラッグ並べ替え） ========= */
+const superName = document.getElementById('superName');
+const btnAddSuper = document.getElementById('btnAddSuper');
+const superList = document.getElementById('superList');
+const btnSaveShelf = document.getElementById('btnSaveShelf');
+const btnDeleteSuper = document.getElementById('btnDeleteSuper');
+const btnShelfReset = document.getElementById('btnShelfReset');
+const dndList = document.getElementById('dndList');
 
-btnAddSuper.onclick=()=>{ const name=superName.value.trim(); if(!name) return; supers.push({id:crypto.randomUUID(),name,shelfOrder:[],updatedAt:Date.now()}); superName.value=''; saveSupers(); refreshSuperList(); refreshSuperSelect(); showToast('追加しました'); };
-btnDeleteSuper.onclick=()=>{ const id=superList.value; if(!id) return; if(!confirm('選択スーパーを削除しますか？')) return;
-  supers=supers.filter(s=>s.id!==id); saveSupers(); refreshSuperList(); refreshSuperSelect(); };
+// 新規スーパーはデフォルト順を初期セット
+btnAddSuper.onclick = () => {
+  const name = superName.value.trim(); if(!name) return;
+  supers.push({ id: crypto.randomUUID(), name, shelfOrder: [...DEFAULT_SHELF_ORDER], updatedAt: Date.now() });
+  superName.value = '';
+  saveSupers(); refreshSuperList(); refreshSuperSelect(); showToast('追加しました');
+};
 
+btnDeleteSuper.onclick = () => {
+  const id = superList.value; if(!id) return;
+  if(!confirm('選択スーパーを削除しますか？')) return;
+  supers = supers.filter(s => s.id !== id);
+  saveSupers(); refreshSuperList(); refreshSuperSelect();
+};
+
+// リスト表示＆選択時
 function refreshSuperList(){
   superList.innerHTML=''; supers.forEach(s=> superList.add(new Option(s.name,s.id)) );
-  renderShelfOrder(superList.value);
+  renderShelfDnd(superList.value);
 }
-superList.onchange=()=>renderShelfOrder(superList.value);
+superList.onchange = () => renderShelfDnd(superList.value);
 
-function refreshCatPickOptions(used){
-  catPick.innerHTML='';
-  const remaining = CATEGORY_NAMES.filter(c=> !used.includes(c));
-  remaining.forEach(c=> catPick.add(new Option(c,c)));
-  if(!remaining.length) catPick.add(new Option('（全て追加済み）',''));
-}
-function renderShelfOrder(id){
-  shelfOrderUL.innerHTML='';
-  const so = shelfOrderOf(id);
-  refreshCatPickOptions(so); // 使用済みを選択肢から除外
+// 表示中の作業順
+let workingOrder = [];
 
-  so.forEach((c,idx)=>{
-    const li=document.createElement('li'); li.className='item'; li.innerHTML=`
-      <div class="name">${escapeHtml(c)}</div>
-      <div class="row">
-        <button class="line up">↑</button>
-        <button class="line dn">↓</button>
-        <button class="line rm">削除</button>
-      </div>`;
-    li.querySelector('.up').onclick=()=>{ if(idx>0){ [so[idx-1],so[idx]]=[so[idx],so[idx-1]]; renderShelfOrder(id);} };
-    li.querySelector('.dn').onclick=()=>{ if(idx<so.length-1){ [so[idx+1],so[idx]]=[so[idx],so[idx+1]]; renderShelfOrder(id);} };
-    li.querySelector('.rm').onclick=()=>{ so.splice(idx,1); renderShelfOrder(id); }; // 削除で候補復活
-    shelfOrderUL.appendChild(li);
+// 現在のスーパーの順を DnD リストに展開
+function renderShelfDnd(id){
+  dndList.innerHTML = '';
+  if(!id){ workingOrder = []; return; }
+  const s = supers.find(x=>x.id===id);
+  // もし空/未設定ならデフォルトで埋める
+  workingOrder = (s?.shelfOrder && s.shelfOrder.length) ? [...s.shelfOrder] : [...DEFAULT_SHELF_ORDER];
+
+  workingOrder.forEach((cat, idx)=>{
+    const row = document.createElement('div');
+    row.className = 'dnd-item';
+    row.dataset.index = String(idx);
+    row.innerHTML = `
+      <span class="handle" title="ドラッグで並べ替え">≡</span>
+      <div class="name">${escapeHtml(cat)}</div>
+    `;
+    // マウス/タッチ双方に対応した軽量D&D
+    attachRowDnD(row);
+    dndList.appendChild(row);
   });
 }
-btnShelfAdd.onclick=()=>{ const id=superList.value; if(!id) return; const c=catPick.value; if(!c) return;
-  const s=supers.find(x=>x.id===id); if(!s.shelfOrder.includes(c)) s.shelfOrder.push(c); renderShelfOrder(id); };
-btnSaveShelf.onclick=()=>{ const id=superList.value; if(!id) return; const s=supers.find(x=>x.id===id); s.updatedAt=Date.now(); saveSupers(); refreshSuperSelect(); showToast('売場順を保存しました'); };
 
+// 並べ替え UI：マウス（HTML5 DnD）＋ タッチ（touchmoveで入れ替え）
+function attachRowDnD(el){
+  // ---- マウスD&D（デスクトップ想定） ----
+  el.draggable = true;
+  el.addEventListener('dragstart', (e)=>{
+    el.classList.add('dragging');
+    e.dataTransfer?.setData('text/plain', el.dataset.index||'0');
+    e.dataTransfer?.setDragImage?.(el, 20, 20);
+  });
+  el.addEventListener('dragend', ()=> el.classList.remove('dragging'));
+  dndList.addEventListener('dragover', (e)=>{
+    e.preventDefault();
+    const from = Number((e.dataTransfer?.getData('text/plain'))||-1);
+    const target = closestItem(e.clientY);
+    if(from<0 || !target) return;
+    const to = Number(target.dataset.index||-1);
+    if(to<0 || to===from) return;
+    moveIndex(workingOrder, from, to);
+    renderShelfDnd(superList.value);
+  }, { passive:false });
+
+  // ---- タッチD&D（モバイル想定） ----
+  let dragging = false, fromIdx = -1;
+  el.addEventListener('touchstart', (ev)=>{
+    dragging = true;
+    fromIdx = Number(el.dataset.index||-1);
+    el.classList.add('dragging');
+  }, { passive:true });
+  el.addEventListener('touchmove', (ev)=>{
+    if(!dragging) return;
+    const t = ev.touches[0];
+    const target = document.elementFromPoint(t.clientX, t.clientY);
+    const row = target?.closest?.('.dnd-item');
+    if(!row) return;
+    const to = Number(row.dataset.index||-1);
+    if(to<0 || to===fromIdx) return;
+    moveIndex(workingOrder, fromIdx, to);
+    fromIdx = to;
+    renderShelfDnd(superList.value);
+  }, { passive:true });
+  el.addEventListener('touchend', ()=>{
+    dragging = false;
+    el.classList.remove('dragging');
+  }, { passive:true });
+
+  // 補助：Y位置から最も近いアイテムを取得
+  function closestItem(clientY){
+    const items=[...dndList.querySelectorAll('.dnd-item')];
+    let best=null, bestDy=Infinity;
+    items.forEach(it=>{
+      const r=it.getBoundingClientRect();
+      const cy=(r.top+r.bottom)/2;
+      const dy=Math.abs(cy-clientY);
+      if(dy<bestDy){bestDy=dy; best=it;}
+    });
+    return best;
+  }
+}
+
+function moveIndex(arr, from, to){
+  if(from===to) return;
+  const v = arr.splice(from,1)[0];
+  arr.splice(to,0,v);
+}
+
+btnShelfReset.onclick = ()=>{
+  if(!superList.value) return;
+  workingOrder = [...DEFAULT_SHELF_ORDER];
+  renderShelfDnd(superList.value);
+  showToast('デフォルト順に戻しました');
+};
+
+btnSaveShelf.onclick = ()=>{
+  const id = superList.value; if(!id) return;
+  const s = supers.find(x=>x.id===id); if(!s) return;
+  // 「その他」を常に末尾へ寄せたい場合は以下を有効化（任意）
+  // workingOrder = workingOrder.filter(c=>c!=='その他').concat('その他');
+
+  s.shelfOrder = [...workingOrder];
+  s.updatedAt = Date.now();
+  saveSupers(); refreshSuperSelect();
+  showToast('売場順を保存しました');
+};
 /* ========= QR共有（qrcode-generator） ========= */
 const modalExport=document.getElementById('modalExport'); const modalImport=document.getElementById('modalImport');
 document.getElementById('btnExport').onclick=()=>openExport(); document.getElementById('btnImport').onclick=()=>openImport();
