@@ -78,7 +78,7 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
   <div class="brand">
     <h1>買い物リスト</h1>
     <div class="supsel">
-      <span class="pill">青基調UI</span>
+      <!-- 青基調UIバッジ削除 -->
       <label class="small">スーパー：</label>
       <select id="superSelect"></select>
       <button class="line" id="btnSort">売場順ソート</button>
@@ -163,6 +163,16 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
           <input id="albumSuperOnly" type="checkbox"><label for="albumSuperOnly" class="small">選択スーパーのみ</label>
         </div>
       </div>
+
+      <!-- 追加：一括削除 & カテゴリ削除 -->
+      <div class="row" style="margin-top:8px;justify-content:flex-end;gap:8px">
+        <button class="warn" id="btnAlbumDeleteAll">アルバム一括削除</button>
+        <select id="albumDelCat">
+          <option value="">分類を選択して削除</option>
+        </select>
+        <button class="line" id="btnAlbumDeleteByCat">この分類を削除</button>
+      </div>
+
       <div class="album-grid" id="albumGrid" style="margin-top:12px"></div>
     </div>
   </section>
@@ -205,6 +215,8 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
     <div class="foot">
       <button class="line" onclick="applyImport('merge')">マージ</button>
       <button class="ok" onclick="applyImport('replace')">置換</button>
+      <!-- 追加：ライブスキャン -->
+      <button class="line" id="btnLiveScan">カメラでスキャン</button>
     </div>
   </div>
 </div>
@@ -239,7 +251,7 @@ hr.sep{border:none;border-top:1px dashed var(--line);margin:8px 0}
   </div>
 </div>
 
-<!-- libs -->
+<!-- libs（オンラインCDN） -->
 <script src="https://unpkg.com/qrcodejs@1.0.0/qrcode.min.js"></script>
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
@@ -309,6 +321,8 @@ async function dbGetAll(){ await openDBIf(); return new Promise((res,rej)=>{ con
   req.onsuccess=()=>res(req.result||[]); req.onerror=()=>rej(req.error); });}
 async function dbDelete(id){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).delete(id);
   tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
+async function dbDeleteBulk(filterFn){ await openDBIf(); const list=await dbGetAll(); const targets=list.filter(filterFn);
+  for(const p of targets){ await dbDelete(p.id); } return targets.length; }
 async function openDBIf(){ if(db) return; await openDB(); }
 
 /* ========= UI要素 ========= */
@@ -414,6 +428,8 @@ async function shrinkAndOrient(img, maxSide){
 /* ========= アルバム表示・詳細 ========= */
 const albumCat=document.getElementById('albumCat'); const albumText=document.getElementById('albumText'); const albumSuperOnly=document.getElementById('albumSuperOnly');
 CATEGORY_NAMES.forEach(c=> albumCat.add(new Option(c,c)) );
+const albumDelCat=document.getElementById('albumDelCat'); CATEGORY_NAMES.forEach(c=> albumDelCat.add(new Option(c,c)) );
+
 albumCat.onchange=renderAlbum; albumText.oninput=renderAlbum; albumSuperOnly.onchange=renderAlbum;
 
 const albumGrid=document.getElementById('albumGrid'); let albumCache=[];
@@ -450,6 +466,20 @@ function openPhoto(p){ currentPhoto=p; document.getElementById('photoLarge').src
 function closePhoto(){ modalPhoto.classList.remove('open'); currentPhoto=null; }
 async function savePhotoNote(){ if(!currentPhoto) return; currentPhoto.note=document.getElementById('photoNote').value; await dbPut(currentPhoto); showToast('メモを更新しました'); closePhoto(); renderAlbum(); }
 async function deletePhoto(){ if(!currentPhoto) return; if(!confirm('この写真を削除しますか？')) return; await dbDelete(currentPhoto.id); closePhoto(); renderAlbum(); showToast('削除しました'); }
+
+/* 追加：アルバム一括削除／カテゴリ削除 */
+document.getElementById('btnAlbumDeleteAll').onclick=async ()=>{
+  if(!confirm('アルバム内のすべての写真を削除しますか？')) return;
+  const n = await dbDeleteBulk(()=>true);
+  showToast(`削除：${n}件`); renderAlbum();
+};
+document.getElementById('btnAlbumDeleteByCat').onclick=async ()=>{
+  const c = albumDelCat.value;
+  if(!c){ alert('削除する分類を選択してください'); return; }
+  if(!confirm(`分類「${c}」の写真をすべて削除しますか？`)) return;
+  const n = await dbDeleteBulk(p=>p.category===c);
+  showToast(`削除：${n}件（${c}）`); renderAlbum();
+};
 
 /* ========= スーパー登録画面 ========= */
 const superName=document.getElementById('superName'); const btnAddSuper=document.getElementById('btnAddSuper');
@@ -488,36 +518,79 @@ btnSaveShelf.onclick=()=>{ const id=superList.value; if(!id) return; const s=sup
 const modalExport=document.getElementById('modalExport'); const modalImport=document.getElementById('modalImport');
 document.getElementById('btnExport').onclick=()=>openExport(); document.getElementById('btnImport').onclick=()=>openImport();
 const compact=document.getElementById('compact'); let qrInst=null;
-function openExport(){ modalExport.classList.add('open'); const box=document.getElementById('qrcode'); box.innerHTML='';
-  qrInst = new QRCode(box,{ text: makePayload(compact.checked), width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
+
+function makePayload(isCompact){
+  const data={type:'shopping-list',v:1,exportedAt:Date.now(),
+    items: isCompact? items.map(({name,qty,category})=>({name,qty,category})) : items
+  };
+  return JSON.stringify(data);
+}
+function payloadBytes(str){ return new Blob([str]).size; }
+function validatePayloadSize(str){
+  const bytes = payloadBytes(str);
+  if (bytes > 2000) { showToast(`QRが濃すぎる可能性（${bytes}B）。圧縮共有を推奨`); }
+}
+
+function openExport(){
+  modalExport.classList.add('open');
+  const box=document.getElementById('qrcode'); box.innerHTML='';
+  const payload = makePayload(compact.checked);
+  validatePayloadSize(payload);
+  qrInst = new QRCode(box,{ text: payload, width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
 }
 function closeExport(){ modalExport.classList.remove('open'); }
-function makePayload(isCompact){ const data={type:'shopping-list',v:1,exportedAt:Date.now(),
-  items: isCompact? items.map(({name,qty,category})=>({name,qty,category})) : items
-}; return JSON.stringify(data); }
-function downloadQR(){ const box=document.getElementById('qrcode'); const img=box.querySelector('img'); const cvs=box.querySelector('canvas');
+function downloadQR(){
+  const box=document.getElementById('qrcode'); const img=box.querySelector('img'); const cvs=box.querySelector('canvas');
   let dataUrl=''; if(img?.src) dataUrl=img.src; if(!dataUrl&&cvs) dataUrl=cvs.toDataURL('image/png');
-  if(!dataUrl) return alert('画像が見つかりません'); const a=document.createElement('a'); a.href=dataUrl; a.download='shopping_qr.png'; a.click(); }
-function openImport(){ modalImport.classList.add('open'); document.getElementById('qrPick').value=''; document.getElementById('qrPreview').textContent=''; importData=null; }
+  if(!dataUrl) return alert('画像が見つかりません');
+  const a=document.createElement('a'); a.href=dataUrl; a.download='shopping_qr.png'; a.click();
+}
+function openImport(){
+  modalImport.classList.add('open');
+  document.getElementById('qrPick').value='';
+  document.getElementById('qrPreview').textContent='';
+  importData=null;
+}
 function closeImport(){ modalImport.classList.remove('open'); }
+
 let importData=null;
 document.getElementById('qrPick').onchange=async (e)=>{
   const f=e.target.files[0]; if(!f) return;
   const img=await fileToImage(f); const {data,w,h}=await imageToRGBA(img);
   const code = jsQR(data, w, h);
   if(!code){ alert('QRコードが見つかりません'); return; }
-  try{ const obj=JSON.parse(code.data); if(obj.type!=='shopping-list') throw 0; importData=obj;
+  try{
+    const obj=JSON.parse(code.data); if(obj.type!=='shopping-list') throw 0;
+    importData=obj;
     document.getElementById('qrPreview').textContent=`プレビュー：${obj.items?.length||0}件\n`+truncate(code.data,300);
   }catch{ alert('形式が正しくありません'); }
 };
 function truncate(s,n){ return s.length>n ? s.slice(0,n)+'…':s; }
+
 async function imageToRGBA(img){
-  const scale=Math.min(1,1024/Math.max(img.width,img.height)); const w=Math.round(img.width*scale), h=Math.round(img.height*scale);
-  const cvs=document.createElement('canvas'); cvs.width=w; cvs.height=h; const ctx=cvs.getContext('2d'); ctx.drawImage(img,0,0,w,h);
-  const id=ctx.getImageData(0,0,w,h); return {data:id.data, w, h};
+  // 縮小 & 軽いコントラスト補正で読み取り精度UP
+  const maxSide = 1024;
+  const scale = Math.min(1, maxSide/Math.max(img.width,img.height));
+  const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
+  const cvs=document.createElement('canvas'); cvs.width=w; cvs.height=h;
+  const ctx=cvs.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(img,0,0,w,h);
+  const id=ctx.getImageData(0,0,w,h);
+  const d=id.data;
+  for(let i=0;i<d.length;i+=4){
+    const gray = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114);
+    let v = (gray - 128) * 1.2 + 128;
+    v = Math.max(0, Math.min(255, v));
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(id,0,0);
+  return {data:id.data, w, h};
 }
 function applyImport(mode){
-  if(!importData) return alert('先にQRを読み込んでください');
+  if(!importData){ alert('先にQRを読み込んでください'); return; }
+  if (Array.isArray(importData.items) && importData.items.length > 2000) {
+    alert('アイテム数が多すぎます。圧縮共有か分割QRをご利用ください。'); return;
+  }
   const incoming=(importData.items||[]).map(normalizeIncoming);
   if(mode==='replace'){ items=incoming; }
   else{
@@ -530,10 +603,71 @@ function applyImport(mode){
 function normalizeIncoming(it){ return { id:crypto.randomUUID(), name:it.name||'', qty:Number(it.qty||1),
   category: it.category || guessCategory(it.name||''), checked:false, skip:false, createdAt:Date.now() }; }
 
+/* === 圧縮チェックが変わったら即再生成 === */
+document.getElementById('compact').addEventListener('change', () => {
+  const box=document.getElementById('qrcode'); if(!box) return;
+  box.innerHTML='';
+  const payload=makePayload(document.getElementById('compact').checked);
+  validatePayloadSize(payload);
+  new QRCode(box,{ text: payload, width:256, height:256, correctLevel: QRCode.CorrectLevel.M });
+});
+
+/* === ライブスキャン（カメラ） === */
+let stream=null, scanRAF=null;
+const liveCanvas=document.createElement('canvas'); const liveCtx=liveCanvas.getContext('2d');
+const liveVideo=document.createElement('video'); liveVideo.setAttribute('playsinline','');
+document.getElementById('btnLiveScan').addEventListener('click', async ()=>{
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' } });
+  }catch(e){
+    showToast('カメラが使用できません'); return;
+  }
+  const body=document.querySelector('#modalImport .body');
+  const wrap=document.createElement('div'); wrap.className='card'; wrap.style.marginTop='8px'; wrap.style.display='flex'; wrap.style.justifyContent='center';
+  wrap.appendChild(liveVideo); body.appendChild(wrap);
+  liveVideo.srcObject=stream; await liveVideo.play();
+
+  const scan=()=>{
+    if(!liveVideo.videoWidth){ scanRAF=requestAnimationFrame(scan); return; }
+    const w=liveVideo.videoWidth, h=liveVideo.videoHeight;
+    const scale=Math.min(1, 640/Math.max(w,h));
+    liveCanvas.width=Math.round(w*scale); liveCanvas.height=Math.round(h*scale);
+    liveCtx.drawImage(liveVideo,0,0,liveCanvas.width,liveCanvas.height);
+    const id=liveCtx.getImageData(0,0,liveCanvas.width,liveCanvas.height);
+    const code=jsQR(id.data, liveCanvas.width, liveCanvas.height);
+    if(code && code.data){
+      cancelAnimationFrame(scanRAF); scanRAF=null;
+      if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+      liveVideo.srcObject=null; wrap.remove();
+      try{
+        const obj=JSON.parse(code.data); if(obj.type!=='shopping-list') throw 0;
+        importData=obj; document.getElementById('qrPreview').textContent=`プレビュー：${obj.items?.length||0}件\n`+truncate(code.data,300);
+        showToast('QRを検出しました');
+      }catch{ showToast('形式が正しくありません'); }
+      return;
+    }
+    scanRAF=requestAnimationFrame(scan);
+  };
+  scan();
+});
+const _origCloseImport = closeImport;
+closeImport = function(){
+  if(scanRAF){ cancelAnimationFrame(scanRAF); scanRAF=null; }
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  const body=document.querySelector('#modalImport .body');
+  [...body.querySelectorAll('video')].forEach(v=>v.remove());
+  _origCloseImport();
+};
+
 /* ========= 初期化 ========= */
 function init(){
   refreshSuperSelect(); refreshSuperList(); renderList(); renderAlbum();
-  // アルバムカテゴリ選択肢は初期化済み
+
+  // QRライブラリの読み込み健全性チェック（オンライン時の確実動作）
+  window.addEventListener('load', ()=>{
+    if(!window.QRCode){ console.error('qrcode.min.js 読み込み失敗'); showToast('QR生成ライブラリの読み込みに失敗'); }
+    if(!window.jsQR){ console.error('jsQR.js 読み込み失敗'); showToast('QR読み取りライブラリの読み込みに失敗'); }
+  });
 }
 init();
 
@@ -542,7 +676,7 @@ function showToast(msg){ const t=document.createElement('div'); t.textContent=ms
   t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#0b2256;color:#fff;padding:8px 12px;border-radius:999px;opacity:0.95;z-index:9999';
   document.body.appendChild(t); setTimeout(()=>{ t.remove(); },1600);
 }
-selSuper.onchange=()=>{ /* album filter option respects checkbox */ };
+selSuper.onchange=()=>{ /* album filter respects checkbox */ };
 function escape(s){return s.replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
 </script>
 </body>
