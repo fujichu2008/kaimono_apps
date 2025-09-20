@@ -72,6 +72,14 @@ ul{list-style:none;margin:0;padding:0}
   line-height:1.2;
 }
 
+/* ★追記：ライブスキャン動画のレイアウト安定化 */
+#modalImport video{
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+
 /* album */
 .album-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
 .photo-card{position:relative;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
@@ -728,51 +736,118 @@ function applyImport(mode){
 function normalizeIncoming(it){ return { id:crypto.randomUUID(), name:it.name||'', qty:Number(it.qty||1),
   category: it.category || guessCategory(it.name||''), checked:false, skip:false, createdAt:Date.now() }; }
 
-/* ライブスキャン（カメラ） */
-let stream=null, scanRAF=null;
-const liveCanvas=document.createElement('canvas'); const liveCtx=liveCanvas.getContext('2d');
-const liveVideo=document.createElement('video'); liveVideo.setAttribute('playsinline','');
-document.getElementById('btnLiveScanTop').addEventListener('click', async ()=>{
-  try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' } }); }
-  catch(e){ showToast('カメラが使用できません'); return; }
-  const body=document.querySelector('#modalImport .body');
-  const wrap=document.createElement('div'); wrap.className='card'; wrap.style.marginTop='8px'; wrap.style.display='flex'; wrap.style.justifyContent='center';
-  wrap.appendChild(liveVideo); body.appendChild(wrap);
-  liveVideo.srcObject=stream; await liveVideo.play();
+// ★追記：HTTPS/ローカル確認（iOS Safari 等では http だと getUserMedia が失敗）
+function verifySecureContext(){
+  const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if(!isSecure){
+    showToast('カメラ使用にはHTTPSまたはlocalhostが必要です');
+    return false;
+  }
+  return true;
+}
 
-  const scan=()=>{
-    if(!liveVideo.videoWidth){ scanRAF=requestAnimationFrame(scan); return; }
-    const w=liveVideo.videoWidth, h=liveVideo.videoHeight;
-    const scale=Math.min(1, 640/Math.max(w,h));
-    liveCanvas.width=Math.round(w*scale); liveCanvas.height=Math.round(h*scale);
-    liveCtx.drawImage(liveVideo,0,0,liveCanvas.width,liveCanvas.height);
-    const id=liveCtx.getImageData(0,0,liveCanvas.width,liveCanvas.height);
-    const code=jsQR(id.data, liveCanvas.width, liveCanvas.height);
-    if(code && code.data){
-      cancelAnimationFrame(scanRAF); scanRAF=null;
-      if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
-      liveVideo.srcObject=null; wrap.remove();
-      try{
-        const obj=JSON.parse(code.data);
-        if(obj.type!=='shopping-list') throw 0;
-        importData=obj;
-        setListPreview((obj.items||[]).map(x=>({name:x.name, qty:x.qty||1})));
-        showToast('QRを検出しました');
-      }catch{ showToast('形式が正しくありません'); }
+
+
+/* ライブスキャン（カメラ） */
+let stream = null, scanRAF = null;
+const liveCanvas = document.createElement('canvas');
+const liveCtx = liveCanvas.getContext('2d', { willReadFrequently: true }); // ←★頻繁読み出し最適化
+const liveVideo = document.createElement('video');
+
+// スキャン中の多重起動防止フラグ
+let scanning = false;
+
+document.getElementById('btnLiveScanTop').addEventListener('click', async ()=>{
+  if (scanning) return;
+  if (!verifySecureContext()) return;
+
+  scanning = true;
+
+  try{
+    // iOS Safari 対策：autoplay/playsinline/muted を明示
+    liveVideo.setAttribute('playsinline','');
+    liveVideo.setAttribute('autoplay','');
+    liveVideo.muted = true;
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } , width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  }catch(e){
+    console.error(e);
+    showToast('カメラが使用できません（権限/HTTPSを確認）');
+    scanning = false;
+    return;
+  }
+
+  const body = document.querySelector('#modalImport .body');
+  const wrap = document.createElement('div');
+  wrap.className = 'card';
+  wrap.style.cssText = 'margin-top:8px;display:flex;justify-content:center;align-items:center;padding:8px;';
+  liveVideo.style.maxWidth = '100%';
+  liveVideo.style.width = '100%';
+  liveVideo.style.height = 'auto';
+  wrap.appendChild(liveVideo);
+  body.appendChild(wrap);
+
+  liveVideo.srcObject = stream;
+  try { await liveVideo.play(); } catch(e){ console.warn(e); }
+
+  // 画質を少し高めに（最大辺1024）→読み取り精度UP
+  const scan = ()=>{
+    if(!liveVideo.videoWidth){
+      scanRAF = requestAnimationFrame(scan);
       return;
     }
-    scanRAF=requestAnimationFrame(scan);
+    const vw = liveVideo.videoWidth, vh = liveVideo.videoHeight;
+    const scale = Math.min(1, 1024 / Math.max(vw, vh)); // ←★従来640→1024に
+    liveCanvas.width  = Math.round(vw * scale);
+    liveCanvas.height = Math.round(vh * scale);
+
+    const ctx = liveCtx;
+    ctx.imageSmoothingEnabled = false; // シャープに
+    ctx.drawImage(liveVideo, 0, 0, liveCanvas.width, liveCanvas.height);
+
+    // 直接 ImageData から jsQR
+    const id = ctx.getImageData(0, 0, liveCanvas.width, liveCanvas.height);
+    const code = jsQR(id.data, liveCanvas.width, liveCanvas.height, { inversionAttempts: 'attemptBoth' });
+
+    if(code && code.data){
+      // 片付け
+      if (scanRAF){ cancelAnimationFrame(scanRAF); scanRAF = null; }
+      if (stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+      liveVideo.srcObject = null;
+      wrap.remove();
+      scanning = false;
+
+      try{
+        const obj = JSON.parse(code.data);
+        if(obj.type !== 'shopping-list') throw 0;
+        importData = obj;
+        setListPreview((obj.items||[]).map(x=>({name:x.name, qty:x.qty||1})));
+        showToast('QRを検出しました');
+      }catch{
+        showToast('形式が正しくありません');
+      }
+      return;
+    }
+    scanRAF = requestAnimationFrame(scan);
   };
   scan();
 });
+
 const _origCloseImport = closeImport;
 closeImport = function(){
-  if(scanRAF){ cancelAnimationFrame(scanRAF); scanRAF=null; }
-  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
-  const body=document.querySelector('#modalImport .body');
-  [...body.querySelectorAll('video')].forEach(v=>v.remove());
+  if (scanRAF){ cancelAnimationFrame(scanRAF); scanRAF = null; }
+  if (stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  scanning = false;
+
+  const body = document.querySelector('#modalImport .body');
+  // video だけでなく、video を包む card も除去
+  [...body.querySelectorAll('video')].forEach(v=> v.parentElement?.remove());
   _origCloseImport();
 };
+
 
 /* ========= 初期化 ========= */
 function init(){
