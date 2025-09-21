@@ -191,6 +191,11 @@ ul{list-style:none;margin:0;padding:0}
 }
 
 
+  /* ★追加：キャプチャモーダルのフォームをスマホ用に調整 */
+  #modalCapture input,
+  #modalCapture select {
+    font-size:14px;
+  }
 
 
 }
@@ -238,7 +243,7 @@ ul{list-style:none;margin:0;padding:0}
 <!-- ★追加：レシピボタン -->
 <button class="line" id="btnRecipe" title="レシピ" aria-label="レシピ">ﾚｼﾋﾟ</button>
 
-
+<button class="line" id="btnQuickCam" title="写真撮影" aria-label="写真撮影">📷</button>
     <span class="spacer"></span>
     <!-- ※ QRボタンは brand-actions に移動済み -->
   </div>
@@ -382,6 +387,46 @@ ul{list-style:none;margin:0;padding:0}
     </div>
   </div>
 </div>
+
+<!-- Capture Modal (新規撮影→名前/分類/メモを入力) -->
+<div id="modalCapture" class="modal" aria-hidden="true">
+  <div class="sheet">
+    <div class="head">
+      <strong>写真の追加</strong>
+      <button class="flat" id="btnCapCancel">キャンセル</button>
+    </div>
+    <div class="body">
+      <img id="capPreview" src="" alt="" style="width:100%;border-radius:10px;background:#eef3ff">
+      <div class="grid cols-2" style="margin-top:10px">
+        <div>
+          <div class="small">品名</div>
+          <input id="capName" type="text" placeholder="例：牛乳">
+        </div>
+        <div>
+          <div class="small">分類</div>
+          <select id="capCategory"></select>
+        </div>
+      </div>
+      <div class="grid cols-2" style="margin-top:10px">
+        <div>
+          <div class="small">スーパー</div>
+          <div id="capSuper" class="pill"></div>
+        </div>
+        <div>
+          <div class="small">メモ</div>
+          <input id="capNote" type="text" placeholder="価格・規格など">
+        </div>
+      </div>
+      <div class="small" style="margin-top:8px;color:var(--muted)">
+        ※ 品名入力に応じて自動分類されます（手動で変更も可能）
+      </div>
+    </div>
+    <div class="foot">
+      <button class="ok" id="btnCapSave">アルバムに保存</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- Photo Modal -->
 <div id="modalPhoto" class="modal" aria-hidden="true">
@@ -729,18 +774,129 @@ renderList();
 /* ========= カメラからアルバム追加 ========= */
 const hiddenPicker=document.createElement('input'); hiddenPicker.type='file'; hiddenPicker.accept='image/*'; hiddenPicker.capture='environment'; hiddenPicker.style.display='none'; document.body.appendChild(hiddenPicker);
 let captureContext=null;
+
+// 新規撮影の下書き
+let currentCaptureDraft = null;
+
+// 入力モーダル参照
+const modalCapture  = document.getElementById('modalCapture');
+const capPreview    = document.getElementById('capPreview');
+const capName       = document.getElementById('capName');
+const capCategory   = document.getElementById('capCategory');
+const capNote       = document.getElementById('capNote');
+const capSuper      = document.getElementById('capSuper');
+const btnCapSave    = document.getElementById('btnCapSave');
+const btnCapCancel  = document.getElementById('btnCapCancel');
+
+// 分類プルダウン初期化
+function fillCapCategory(selectEl, selected){
+  selectEl.innerHTML = '';
+  CATEGORY_NAMES.forEach(c => selectEl.add(new Option(c, c, c===selected, c===selected)));
+}
+
+// 入力モーダルを開く
+function openCaptureModal(draft){
+  currentCaptureDraft = draft; // { dataUrl, supermarketId, name?, category?, note? }
+  capPreview.src = draft.dataUrl;
+  capName.value  = draft.name || '';
+  fillCapCategory(capCategory, draft.category || (draft.name ? guessCategory(draft.name) : 'その他'));
+  capNote.value  = draft.note || '';
+  capSuper.textContent = superNameOf(draft.supermarketId) || '—';
+  modalCapture.classList.add('open');
+}
+
+// 閉じる/クリア
+function closeCaptureModal(){
+  modalCapture.classList.remove('open');
+  currentCaptureDraft = null;
+  capPreview.src = '';
+  capName.value = '';
+  capNote.value = '';
+}
+
+// 品名入力に応じて自動分類（ユーザーが分類を手で触ったら上書きしない）
+let capCatTouched = false;
+capCategory.onchange = () => { capCatTouched = true; };
+capName.addEventListener('input', () => {
+  if (!capCatTouched){
+    const g = guessCategory(capName.value.trim());
+    fillCapCategory(capCategory, g);
+  }
+});
+btnCapCancel.onclick = () => closeCaptureModal();
+
+// 保存 → IndexedDB
+btnCapSave.onclick = async () => {
+  if(!currentCaptureDraft) return;
+  const name = capName.value.trim();
+  if(!name){ alert('品名を入力してください'); return; }
+  const category = capCategory.value || guessCategory(name);
+  const note = capNote.value.trim();
+
+  // 学習辞書に反映（次回以降の自動分類に活きる）
+  USER_DICT[normalize(name)] = category;
+  saveUserDict();
+
+  const photo = {
+    id: crypto.randomUUID(),
+    dataUrl: currentCaptureDraft.dataUrl,
+    category,
+    name,
+    supermarketId: currentCaptureDraft.supermarketId || '',
+    takenAt: Date.now(),
+    note
+  };
+  await dbAdd(photo);
+  closeCaptureModal();
+  showToast('アルバムに保存しました');
+  renderAlbum();
+  capCatTouched = false;
+};
+
+
+
 function startCaptureForItem(item){
   captureContext={item, supermarketId: selSuper.value || ''};
   hiddenPicker.value=''; hiddenPicker.click();
 }
-hiddenPicker.onchange=async (e)=>{
-  const f=e.target.files[0]; if(!f||!captureContext) return;
-  const img=await fileToImage(f);
-  const resized=await shrinkAndOrient(img,1280);
-  const photo={ id:crypto.randomUUID(), dataUrl:resized, category:captureContext.item.category,
-    name:captureContext.item.name, supermarketId:captureContext.supermarketId, takenAt:Date.now(), note:'' };
-  await dbAdd(photo); renderAlbum(); showToast('アルバムに保存しました');
+hiddenPicker.onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f || !captureContext) return;
+
+  const img = await fileToImage(f);
+  const resized = await shrinkAndOrient(img, 1280);
+
+  // 📷ボタンからの「フリーモード」
+  if (captureContext.mode === 'free') {
+    openCaptureModal({
+      dataUrl: resized,
+      supermarketId: captureContext.supermarketId || '',
+      name: '',
+      category: 'その他',
+      note: ''
+    });
+    captureContext = null; // リセット
+    return;
+  }
+
+  // 既存アイテムに紐付け（従来の動作）
+  if (captureContext.item) {
+    const photo = {
+      id: crypto.randomUUID(),
+      dataUrl: resized,
+      category: captureContext.item.category,
+      name: captureContext.item.name,
+      supermarketId: captureContext.supermarketId || '',
+      takenAt: Date.now(),
+      note: ''
+    };
+    await dbAdd(photo);
+    renderAlbum();
+    showToast('アルバムに保存しました');
+    captureContext = null;
+  }
 };
+
 function fileToImage(file){ return new Promise((res,rej)=>{ const url=URL.createObjectURL(file); const img=new Image(); img.onload=()=>{URL.revokeObjectURL(url); res(img)}; img.onerror=rej; img.src=url; });}
 async function shrinkAndOrient(img, maxSide){
   const r= Math.min(1, maxSide/Math.max(img.width,img.height));
@@ -1427,6 +1583,15 @@ const recipeIngredients = document.getElementById('recipeIngredients');
 
 // レシピボタン開く
 document.getElementById('btnRecipe').onclick = openRecipe;
+
+// 📷クイック撮影（レシピ横のボタン）
+document.getElementById('btnQuickCam').onclick = () => {
+  // 現在選択中のスーパーIDをコンテキストに
+  captureContext = { mode: 'free', supermarketId: selSuper.value || '' };
+  hiddenPicker.value = '';
+  hiddenPicker.click(); // 端末カメラ起動（環境カメラ）
+};
+
 
 function openRecipe(){
   // 分類リスト作成
