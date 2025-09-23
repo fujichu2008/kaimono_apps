@@ -217,6 +217,14 @@ ul{list-style:none;margin:0;padding:0}
 #recipeIngredients .ing-qty{ color:var(--muted); font-size:12px; }
 
 
+/* 花吹雪キャンバス（全画面・タップ無視） */
+#confettiCanvas{
+  position:fixed; inset:0;
+  width:100%; height:100%;
+  pointer-events:none;               /* 操作を邪魔しない */
+  z-index:10000;                     /* モーダルより前に出す場合は 1001〜 を様子見で調整 */
+  display:none;                      /* 通常は非表示。発火時のみ表示 */
+}
 
 
 /* サムネ画像のはみ出し保険 */
@@ -776,18 +784,45 @@ function refreshSuperSelect(){
 }
 function shelfOrderOf(id){ const s=supers.find(x=>x.id===id); return s?.shelfOrder || []; }
 document.getElementById('btnSort').onclick = () => {
-  let so = shelfOrderOf(selSuper.value);
-  if (!so || !so.length) so = DEFAULT_SHELF_ORDER;    // ← フォールバック
+  // ここではフォールバックせず、そのまま現在の売場順を渡す
+  const so = shelfOrderOf(selSuper.value);
   currentViewSorted = sortByShelf(items, so);
   renderList(currentViewSorted);
 };
 
+
 document.getElementById('btnUnsort').onclick=()=>{ currentViewSorted=null; renderList(); };
 function sortByShelf(arr, orderArr){
-  const order=Object.fromEntries(orderArr.map((c,i)=>[c,i+1])); // 未知は0→先頭
-  const rank=cat=> (cat in order)?order[cat]:0;
-  const a=[...arr]; a.sort((x,y)=> rank(x.category)-rank(y.category)); return a;
+  // 基準順：保存されている売場順 or 既定
+  let base = (orderArr && orderArr.length) ? [...orderArr] : [...DEFAULT_SHELF_ORDER];
+
+  // 「その他」はいったん除外して最後に固定
+  base = base.filter(c => c !== 'その他');
+
+  // 売場順に無い“新しい分類”を末尾に補完（例：後から追加したカテゴリ）
+  CATEGORY_NAMES.forEach(c => {
+    if (c !== 'その他' && !base.includes(c)) base.push(c);
+  });
+
+  // 「その他」を最終位置に固定
+  base.push('その他');
+
+  // ランク表（小さいほど前）
+  const rank = Object.fromEntries(base.map((c, i) => [c, i]));
+
+  const a = [...arr];
+  a.sort((x, y) => {
+    const rx = (rank[x.category] ?? 1e9);
+    const ry = (rank[y.category] ?? 1e9);
+    if (rx !== ry) return rx - ry;
+    // 同ランク時は作成時刻→名前で安定化
+    const cx = x.createdAt || 0, cy = y.createdAt || 0;
+    if (cx !== cy) return cx - cy;
+    return (x.name || '').localeCompare(y.name || '');
+  });
+  return a;
 }
+
 
 /* ========= リスト：追加/表示/操作（分類は小型プルダウンのみ、変更で学習） ========= */
 const ul=document.getElementById('list');
@@ -914,6 +949,9 @@ function renderList(view){
 
     ul.appendChild(li);
   });
+
+  // ✅ ここで全コンプリート判定を呼び出す
+  setTimeout(celebrateIfCompleted, 0);
 }
 function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 renderList();
@@ -1848,6 +1886,136 @@ document.getElementById('btnAddSelectedIngredients').onclick = ()=>{
 };
 
 
+/* ========= コンプリート祝福：花吹雪 ========= */
+let _confettiRunning = false;
+let _confettiStopTimer = null;
+
+/** （必要なら）キャンバスを用意して返す */
+function ensureConfettiCanvas(){
+  let cvs = document.getElementById('confettiCanvas');
+  if(!cvs){
+    cvs = document.createElement('canvas');
+    cvs.id = 'confettiCanvas';
+    document.body.appendChild(cvs);
+  }
+  // サイズを毎回合わせる（回転時/アドレスバー縮み対策）
+  cvs.width  = window.innerWidth  * (window.devicePixelRatio || 1);
+  cvs.height = window.innerHeight * (window.devicePixelRatio || 1);
+  return cvs;
+}
+
+/** 花吹雪本体（簡易・依存なし） */
+function startConfetti(durationMs = 5000){
+  if(_confettiRunning) return;
+  const cvs = ensureConfettiCanvas();
+  const ctx = cvs.getContext('2d');
+
+  const dpr = window.devicePixelRatio || 1;
+  const W = cvs.width, H = cvs.height;
+
+  // パーティクル生成
+  const N = Math.min(220, Math.max(120, Math.floor((W/dpr) * 0.25))); // 画面幅に応じて
+  const colors = ['#F87171','#FBBF24','#34D399','#60A5FA','#A78BFA','#F472B6','#F59E0B','#10B981','#3B82F6'];
+  const parts = Array.from({length:N}, (_,i)=>({
+    x: Math.random()*W,
+    y: -Math.random()*H*0.5,
+    w: 6 + Math.random()*8,
+    h: 10 + Math.random()*12,
+    vy: 1.5 + Math.random()*2.5,
+    vx: -1 + Math.random()*2,
+    rot: Math.random()*Math.PI*2,
+    vr: (-0.15 + Math.random()*0.3),
+    color: colors[i % colors.length],
+    tilt: Math.random()*Math.PI*2,
+    vt: 0.05 + Math.random()*0.05
+  }));
+
+  cvs.style.display = 'block';
+  _confettiRunning = true;
+
+  const t0 = performance.now();
+  cancelAnimationFrame(startConfetti._rafId);
+
+  function frame(t){
+    const elapsed = t - t0;
+    ctx.clearRect(0,0,W,H);
+
+    for(const p of parts){
+      // ふわふわ横揺れ
+      p.tilt += p.vt;
+      p.x += p.vx + Math.sin(p.tilt)*0.6;
+      p.y += p.vy;
+      p.rot += p.vr;
+
+      // 描画
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+      ctx.restore();
+
+      // 画面下に落ち切ったら上に戻す（連続感）
+      if(p.y - p.h > H){
+        p.y = -20;
+        p.x = Math.random()*W;
+      }
+    }
+
+    // フェードアウト制御
+    if(elapsed < durationMs){
+      startConfetti._rafId = requestAnimationFrame(frame);
+    }else{
+      // なだらかに消す
+      const fade = Math.min(1, (elapsed - durationMs)/600);
+      ctx.fillStyle = `rgba(255,255,255,${fade})`;
+      ctx.fillRect(0,0,W,H);
+      if(fade < 1){
+        startConfetti._rafId = requestAnimationFrame(frame);
+      }else{
+        stopConfetti();
+      }
+    }
+  }
+  startConfetti._rafId = requestAnimationFrame(frame);
+
+  // 回転/リサイズ対応
+  const onResize = ()=> {
+    const scrolled = window.scrollY; // iOSアドレスバー対策で再計算
+    const cvs2 = ensureConfettiCanvas();
+    cvs2.style.top = '0px';
+    // 再計算したのでW/Hも更新してOK
+  };
+  window.addEventListener('resize', onResize, { passive:true });
+
+  _confettiStopTimer = setTimeout(()=>{ /* 自動ストップの予備 */ stopConfetti(); }, durationMs + 2000);
+
+  function stopConfetti(){
+    if(!_confettiRunning) return;
+    _confettiRunning = false;
+    cancelAnimationFrame(startConfetti._rafId);
+    clearTimeout(_confettiStopTimer);
+    window.removeEventListener('resize', onResize);
+    cvs.style.display = 'none';
+  }
+  // 外からも止められるようにハンドル公開
+  startConfetti.stop = stopConfetti;
+}
+
+/** 全コンプリート判定（skipは除外。未skipが全てcheckedなら祝福） */
+function celebrateIfCompleted(){
+  // アクティブ（skipでない）項目が対象
+  const active = items.filter(it => !it.skip);
+  if(active.length === 0) return;                     // 空リストでは祝福しない
+  const allDone = active.every(it => it.checked === true);
+  if(allDone){
+    // 連発防止：すでに走ってなければ
+    if(!_confettiRunning){
+      startConfetti(5200);
+      showToast('コンプリート！おつかれさま🎉');
+    }
+  }
+}
 
 
 /* ========= 初期化 ========= */
