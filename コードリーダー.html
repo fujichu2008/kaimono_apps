@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR/バーコード リーダー（文字化）</title>
+<meta name="theme-color" content="#185adb">
+<style>
+:root{--bg:#f4f7ff;--card:#fff;--line:#dbe4ff;--text:#0f172a;--muted:#5b6b8a;--accent:#185adb;--ok:#18a558;--warn:#ef4444;}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto}
+header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,#fff 0%,#f7faff 100%);border-bottom:1px solid var(--line);padding:12px 16px}
+h1{margin:0;font-size:18px}
+main{padding:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);padding:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{appearance:none;border:1px solid var(--accent);background:#fff;color:var(--accent);padding:8px 12px;border-radius:10px;font-weight:600}
+.btn.primary{background:var(--accent);color:#fff}
+.btn.ghost{border-color:var(--line);color:var(--text)}
+.btn:disabled{opacity:.5}
+.badge{display:inline-block;background:#eef4ff;border:1px solid var(--line);padding:2px 8px;border-radius:999px;font-size:12px;color:var(--muted)}
+#videoWrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+video{width:100%;height:auto;display:block;background:#000}
+#guide{position:absolute;inset:0;border:2px dashed rgba(255,255,255,.6);border-radius:12px;pointer-events:none}
+#overlay{position:absolute;inset:0;pointer-events:none}
+#status{font-size:14px;color:var(--muted)}
+pre{white-space:pre-wrap;word-break:break-all;background:#f8faff;border:1px solid var(--line);padding:10px;border-radius:10px;margin:8px 0}
+small{color:var(--muted)}
+hr{border:none;border-top:1px solid var(--line);margin:12px 0}
+footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>QR/バーコード リーダー（文字化）</h1>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <button id="startBtn" class="btn primary">カメラでスキャン開始</button>
+      <button id="stopBtn" class="btn ghost" disabled>停止</button>
+      <button id="torchBtn" class="btn" disabled>ライト</button>
+      <span id="supportBadge" class="badge">環境チェック中…</span>
+    </div>
+    <div id="videoWrap" style="margin-top:8px;display:none">
+      <video id="video" playsinline muted></video>
+      <div id="guide"></div>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="status" style="margin-top:8px">未開始</div>
+    <hr>
+    <div class="row">
+      <input type="file" id="fileInp" accept="image/*" class="btn">
+      <small>→ 画像からも読み取り可</small>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <div class="row">
+      <strong>読み取り結果</strong>
+      <span id="typeBadge" class="badge" style="display:none"></span>
+    </div>
+    <pre id="resultText">（ここに読み取った文字が表示されます）</pre>
+    <div class="row">
+      <button id="copyBtn" class="btn">コピー</button>
+      <button id="shareBtn" class="btn">共有</button>
+      <small id="timeStamp"></small>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <details>
+      <summary>対応形式・ヒント</summary>
+      <ul>
+        <li>対応（端末依存）：QR, EAN-13/8, UPC-A/E, Code128, Code39, ITF, PDF417, DataMatrix, Aztec 等</li>
+        <li>ピントが合わない時は、距離を前後したりライトを有効化</li>
+        <li>うまくいかない場合は画像から読み取りを試す</li>
+      </ul>
+    </details>
+  </div>
+</main>
+<footer>ローカル動作・カメラ映像は送信されません</footer>
+
+<script>
+(() => {
+  const q = (s)=>document.querySelector(s);
+  const $start = q('#startBtn'), $stop=q('#stopBtn'), $torch=q('#torchBtn');
+  const $support = q('#supportBadge'), $video=q('#video'), $wrap=q('#videoWrap');
+  const $overlay = q('#overlay'), $guide=q('#guide'), $status=q('#status');
+  const $file = q('#fileInp'), $res=q('#resultText'), $type=q('#typeBadge'), $ts=q('#timeStamp');
+  const $copy=q('#copyBtn'), $share=q('#shareBtn');
+  let stream = null, det = null, raf = null, track = null, imageCapture = null, torchOn=false;
+
+  const supportedFormats = [
+    'qr_code','ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','pdf417','data_matrix','aztec'
+  ];
+
+  async function initSupport(){
+    const hasBD = 'BarcodeDetector' in window;
+    if(hasBD){
+      try{
+        const formats = await BarcodeDetector.getSupportedFormats();
+        const ok = formats.filter(f=>supportedFormats.includes(f)).length>0;
+        $support.textContent = ok ? 'BarcodeDetector 対応' : '一部のみ対応';
+        $support.style.background = '#eaf2ff';
+      }catch(e){
+        $support.textContent = '検出APIは存在するが利用不可';
+        $support.style.background = '#fff3cd';
+      }
+    }else{
+      $support.textContent = 'BarcodeDetector 非対応（画像読み取りを利用）';
+      $support.style.background = '#fff3cd';
+    }
+  }
+
+  function drawBox(box, type){
+    const cv = $overlay, ctx = cv.getContext('2d');
+    cv.width = $video.videoWidth; cv.height = $video.videoHeight;
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if(!box) return;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,200,0,.9)';
+    ctx.strokeRect(box.x, box.y, box.width, box.height);
+    ctx.font = '16px system-ui';
+    ctx.fillStyle = 'rgba(0,0,0,.5)';
+    ctx.fillRect(box.x, box.y-24, ctx.measureText(type).width+10, 22);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(type, box.x+5, box.y-8);
+  }
+
+  function showResult({rawValue, format}){
+    $res.textContent = rawValue || '(空)';
+    $type.textContent = format || 'unknown';
+    $type.style.display = 'inline-block';
+    $ts.textContent = new Date().toLocaleString();
+  }
+
+  async function start(){
+    try{
+      // prefer back camera
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } , width:{ideal:1280}, height:{ideal:720} },
+        audio: false
+      });
+      $video.srcObject = stream;
+      await $video.play();
+      $wrap.style.display = '';
+      $status.textContent = 'スキャン中…';
+      $start.disabled = true; $stop.disabled = false;
+
+      track = stream.getVideoTracks()[0];
+      if ('ImageCapture' in window && track) {
+        try{
+          imageCapture = new ImageCapture(track);
+          const caps = await imageCapture.getPhotoCapabilities?.();
+          // Torch availability varies
+          $torch.disabled = !(track.getCapabilities && track.getCapabilities().torch);
+        }catch(e){ $torch.disabled = true; }
+      } else {
+        // Some browsers expose torch via track.getCapabilities only
+        $torch.disabled = !(track && track.getCapabilities && track.getCapabilities().torch);
+      }
+
+      if('BarcodeDetector' in window){
+        det = new BarcodeDetector({ formats: supportedFormats });
+        loopDetect();
+      }else{
+        $status.textContent = 'この端末はリアルタイム検出が未対応。画像読込でお試しください。';
+      }
+    }catch(e){
+      console.error(e);
+      $status.textContent = 'カメラ起動に失敗: ' + e.message;
+    }
+  }
+
+  async function loopDetect(){
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d');
+    const step = async () => {
+      if(!$video.videoWidth){ raf = requestAnimationFrame(step); return; }
+      cv.width = $video.videoWidth; cv.height = $video.videoHeight;
+      ctx.drawImage($video, 0, 0, cv.width, cv.height);
+      try{
+        const bitmap = await createImageBitmap(cv);
+        const codes = await det.detect(bitmap);
+        if(codes && codes.length){
+          const c = codes[0];
+          showResult({rawValue:c.rawValue, format:c.format});
+          drawBox(c.boundingBox, c.format);
+        }else{
+          drawBox(null);
+        }
+      }catch(e){
+        // ignore intermittent errors
+      }
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  }
+
+  async function stop(){
+    if(raf) cancelAnimationFrame(raf), raf=null;
+    if(stream){
+      stream.getTracks().forEach(t=>t.stop());
+      stream=null; track=null; imageCapture=null;
+    }
+    $start.disabled=false; $stop.disabled=true; $torch.disabled=true;
+    $wrap.style.display='none';
+    $status.textContent='停止しました';
+  }
+
+  async function toggleTorch(){
+    try{
+      if(!track) return;
+      const caps = track.getCapabilities?.() || {};
+      if(!caps.torch){ return; }
+      torchOn = !torchOn;
+      await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+      $torch.textContent = torchOn ? 'ライト（ON）' : 'ライト';
+    }catch(e){
+      console.warn('Torch error', e);
+    }
+  }
+
+  async function readFromImage(file){
+    // 画像を <video> と同サイズに合わせた仮canvasで BarcodeDetector.detect を使用
+    if(!file) return;
+    const img = new Image();
+    img.onload = async () => {
+      const cv = document.createElement('canvas');
+      const ctx = cv.getContext('2d');
+      // 過度な高解像度は縮小（速度・安定性向上）
+      const maxSide = 1600;
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      cv.width = Math.round(img.width*scale);
+      cv.height = Math.round(img.height*scale);
+      ctx.drawImage(img, 0, 0, cv.width, cv.height);
+
+      if('BarcodeDetector' in window){
+        try{
+          const bitmap = await createImageBitmap(cv);
+          const codes = await (new BarcodeDetector({formats:supportedFormats})).detect(bitmap);
+          if(codes && codes.length){
+            const c = codes[0];
+            showResult({rawValue:c.rawValue, format:c.format});
+            $status.textContent = '画像から読み取りました';
+            return;
+          }
+        }catch(e){/* fallback below */}
+      }
+      $status.textContent = '画像から読めませんでした（端末非対応/画像品質）';
+    };
+    img.onerror = () => $status.textContent = '画像読込に失敗しました';
+    img.src = URL.createObjectURL(file);
+  }
+
+  $start.addEventListener('click', start);
+  $stop.addEventListener('click', stop);
+  $torch.addEventListener('click', toggleTorch);
+  $file.addEventListener('change', (e)=> readFromImage(e.target.files?.[0]));
+  $copy.addEventListener('click', async ()=>{
+    try{ await navigator.clipboard.writeText($res.textContent||''); $status.textContent='コピーしました'; }
+    catch(e){ $status.textContent='コピー失敗: ' + e.message; }
+  });
+  $share.addEventListener('click', async ()=>{
+    const text = $res.textContent || '';
+    if(navigator.share){
+      try{ await navigator.share({text}); }catch(_){}
+    }else{
+      try{ await navigator.clipboard.writeText(text); $status.textContent='共有未対応：コピーしました'; }catch(_){}
+    }
+  });
+
+  // 初期化
+  initSupport();
+
+  // ページ離脱時にカメラ停止
+  window.addEventListener('pagehide', stop);
+})();
+</script>
+</body>
+</html>
