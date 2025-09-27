@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>QR/バーコード リーダー（画像フォールバック対応）</title>
+<title>QR/バーコード リーダー（iPhone安定・画像フォールバック）</title>
 <meta name="theme-color" content="#185adb">
 <style>
-:root{--bg:#f4f7ff;--card:#fff;--line:#dbe4ff;--text:#0f172a;--muted:#5b6b8a;--accent:#185adb;}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto}
+:root{--bg:#f4f7ff;--card:#fff;--line:#dbe4ff;--text:#0f172a;--muted:#5b6b8a;--accent:#185adb;--ok:#18a558;--warn:#ef4444}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto}
 header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,#fff 0%,#f7faff 100%);border-bottom:1px solid var(--line);padding:12px 16px}
 h1{margin:0;font-size:18px}
 main{padding:12px}
@@ -18,11 +19,11 @@ main{padding:12px}
 .btn.ghost{border-color:var(--line);color:var(--text)}
 .btn:disabled{opacity:.5}
 .badge{display:inline-block;background:#eef4ff;border:1px solid var(--line);padding:2px 8px;border-radius:999px;font-size:12px;color:var(--muted)}
-#videoWrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+#videoWrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);margin-top:8px;display:none}
 video{width:100%;height:auto;display:block;background:#000}
 #guide{position:absolute;inset:0;border:2px dashed rgba(255,255,255,.6);border-radius:12px;pointer-events:none}
 #overlay{position:absolute;inset:0;pointer-events:none}
-#status{font-size:14px;color:var(--muted)}
+#status{font-size:14px;color:var(--muted);min-height:1.4em}
 pre{white-space:pre-wrap;word-break:break-all;background:#f8faff;border:1px solid var(--line);padding:10px;border-radius:10px;margin:8px 0}
 small{color:var(--muted)}
 hr{border:none;border-top:1px solid var(--line);margin:12px 0}
@@ -34,6 +35,7 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
 </head>
 <body>
 <header><h1>QR/バーコード リーダー（文字化）</h1></header>
+
 <main>
   <div class="card">
     <div class="row">
@@ -42,16 +44,16 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
       <button id="torchBtn" class="btn" disabled>ライト</button>
       <span id="supportBadge" class="badge">環境チェック中…</span>
     </div>
-    <div id="videoWrap" style="margin-top:8px;display:none">
+    <div id="videoWrap">
       <video id="video" playsinline muted></video>
       <div id="guide"></div>
       <canvas id="overlay"></canvas>
     </div>
-    <div id="status" style="margin-top:8px">未開始</div>
+    <div id="status">未開始</div>
     <hr>
     <div class="row">
       <input type="file" id="fileInp" accept="image/*" class="btn">
-      <small>→ 画像からも読み取り（フォールバック対応）</small>
+      <small>→ 画像からも読み取り（BD → jsQR → ZXing の順で自動）</small>
     </div>
   </div>
 
@@ -72,13 +74,15 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     <details>
       <summary>対応形式・ヒント</summary>
       <ul>
-        <li>カメラ：端末対応時は BarcodeDetector（QR/EAN/UPC/Code128/Code39/ITF/PDF417/DataMatrix/Aztec 等）</li>
-        <li>画像：BarcodeDetector → jsQR（QR）→ ZXing（QR/1D/2D）で自動フォールバック</li>
-        <li>ピントや傾きがシビアです。よく写った写真でお試しください</li>
+        <li>ライブ: iPhoneはZXing（動画連続）を優先、他はBarcodeDetector→ZXing→jsQRの順</li>
+        <li>画像: BarcodeDetector → jsQR（QR専用）→ ZXing（QR/1D/2D）</li>
+        <li>対応（端末依存）: QR, EAN-13/8, UPC-A/E, Code128, Code39, ITF, PDF417, DataMatrix, Aztec 等</li>
+        <li>HTTPSで開いてください（カメラ許可が必要です）</li>
       </ul>
     </details>
   </div>
 </main>
+
 <footer>ローカル動作・カメラ映像は送信されません</footer>
 
 <script>
@@ -86,41 +90,30 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
   const q = (s)=>document.querySelector(s);
   const $start = q('#startBtn'), $stop=q('#stopBtn'), $torch=q('#torchBtn');
   const $support = q('#supportBadge'), $video=q('#video'), $wrap=q('#videoWrap');
-  const $overlay=q('#overlay'), $guide=q('#guide'), $status=q('#status');
+  const $overlay=q('#overlay'), $status=q('#status');
   const $file=q('#fileInp'), $res=q('#resultText'), $type=q('#typeBadge'), $ts=q('#timeStamp');
   const $copy=q('#copyBtn'), $share=q('#shareBtn');
+
   let stream=null, det=null, raf=null, track=null, torchOn=false;
+  let zxingReader=null, zxingStopper=null, jsqrRAF=null;
 
   const supportedFormats = [
     'qr_code','ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','pdf417','data_matrix','aztec'
   ];
 
-  async function initSupport(){
-    if('BarcodeDetector' in window){
-      try{
-        const formats = await BarcodeDetector.getSupportedFormats();
-        const ok = formats.some(f=>supportedFormats.includes(f));
-        $support.textContent = ok ? 'BarcodeDetector 対応' : '一部のみ対応';
-        $support.style.background = '#eaf2ff';
-      }catch{
-        $support.textContent = '検出APIあり/利用不可（画像はフォールバック使用）';
-        $support.style.background = '#fff3cd';
-      }
-    }else{
-      $support.textContent = 'BarcodeDetector 非対応（画像はフォールバック使用）';
-      $support.style.background = '#fff3cd';
-    }
-  }
+  const isIOS = /iP(ad|hone|od)/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+  // ---- UI helpers ----
   function showResult(text, format){
-    if(!text) return;
+    if(text == null) return;
     $res.textContent = text;
     if(format){ $type.textContent = format; $type.style.display='inline-block'; }
     $ts.textContent = new Date().toLocaleString();
   }
-
   function drawBox(box, label){
     const cv = $overlay, ctx = cv.getContext('2d');
+    if(!$video.videoWidth){ return; }
     cv.width = $video.videoWidth; cv.height = $video.videoHeight;
     ctx.clearRect(0,0,cv.width,cv.height);
     if(!box) return;
@@ -129,42 +122,125 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     ctx.strokeRect(box.x, box.y, box.width, box.height);
     ctx.font = '16px system-ui';
     ctx.fillStyle = 'rgba(0,0,0,.5)';
-    ctx.fillRect(box.x, box.y-24, ctx.measureText(label).width+10, 22);
+    const w = ctx.measureText(label).width+10;
+    ctx.fillRect(box.x, Math.max(0, box.y-24), w, 22);
     ctx.fillStyle = '#fff';
-    ctx.fillText(label, box.x+5, box.y-8);
+    ctx.fillText(label, box.x+5, Math.max(16, box.y-8));
   }
 
-  // ---- カメラ読み取り（BD対応端末のみ） ----
+  // ---- Support badge ----
+  async function initSupport(){
+    if('BarcodeDetector' in window){
+      try{
+        const formats = await BarcodeDetector.getSupportedFormats();
+        const ok = formats.some(f=>supportedFormats.includes(f));
+        $support.textContent = ok ? 'BarcodeDetector 対応' : '一部のみ対応';
+        $support.style.background = '#eaf2ff';
+      }catch{
+        $support.textContent = '検出APIあり/利用不可（フォールバック使用）';
+        $support.style.background = '#fff3cd';
+      }
+    }else{
+      $support.textContent = 'BarcodeDetector 非対応（フォールバック使用）';
+      $support.style.background = '#fff3cd';
+    }
+  }
+
+  // ---- Start (engine auto select) ----
   async function start(){
+    $status.textContent = 'カメラを初期化中…';
+    $start.disabled = true; $stop.disabled = false;
+
+    // iPhoneはZXingの動画連続を最優先
+    if(isIOS && window.ZXing){
+      try{
+        await startLiveWithZXing();
+        $status.textContent = 'スキャン中…（ZXing連続）';
+        return;
+      }catch(e){
+        console.warn('ZXing live failed on iOS, fallback to jsQR', e);
+        await startLiveWithJsQR();
+        $status.textContent = 'スキャン中…（jsQR連続）';
+        return;
+      }
+    }
+
+    // それ以外：まずは通常のカメラ起動
     try{
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal:'environment' }, width:{ideal:1280}, height:{ideal:720} },
         audio: false
       });
-      $video.srcObject = stream; await $video.play();
-      $wrap.style.display = ''; $start.disabled = true; $stop.disabled=false;
-      $status.textContent = 'スキャン中…';
-
-      track = stream.getVideoTracks()[0];
-      // トーチ対応判定
-      try{
-        const caps = track.getCapabilities?.() || {};
-        $torch.disabled = !caps.torch;
-      }catch{ $torch.disabled = true; }
-
-      if('BarcodeDetector' in window){
-        det = new BarcodeDetector({ formats: supportedFormats });
-        loopDetect();
-      }else{
-        $status.textContent = 'この端末はリアルタイム検出に未対応です（画像読込を使用）';
-      }
+      $video.srcObject = stream;
+      $video.setAttribute('playsinline','true');
+      $video.muted = true;
+      await $video.play();
+      $wrap.style.display = '';
     }catch(e){
       console.error(e);
       $status.textContent = 'カメラ起動に失敗: ' + e.message;
+      $start.disabled=false; $stop.disabled=true;
+      return;
     }
+
+    track = stream.getVideoTracks()[0];
+    try{
+      const caps = track.getCapabilities?.() || {};
+      $torch.disabled = !caps.torch;
+    }catch{ $torch.disabled = true; }
+
+    if('BarcodeDetector' in window){
+      try{
+        det = new BarcodeDetector({ formats: supportedFormats });
+        loopDetectWithBD();
+        $status.textContent = 'スキャン中…（BD）';
+        return;
+      }catch(e){
+        console.warn('BD init failed', e);
+      }
+    }
+
+    // BDが使えない → ZXing or jsQR
+    if(window.ZXing){
+      try{
+        await startLiveWithZXing();
+        $status.textContent = 'スキャン中…（ZXing連続）';
+        return;
+      }catch(e){ console.warn('ZXing live failed', e); }
+    }
+    await startLiveWithJsQR();
+    $status.textContent = 'スキャン中…（jsQR連続）';
   }
 
-  async function loopDetect(){
+  // ---- Stop (all engines) ----
+  async function stop(){
+    if(raf) cancelAnimationFrame(raf), raf=null;
+    if(jsqrRAF) cancelAnimationFrame(jsqrRAF), jsqrRAF=null;
+    if(zxingStopper){ try{ zxingStopper(); }catch{} zxingStopper=null; }
+
+    if(stream){
+      try{ stream.getTracks().forEach(t=>t.stop()); }catch{}
+      stream=null; track=null;
+    }
+    $wrap.style.display='none';
+    $start.disabled=false; $stop.disabled=true; $torch.disabled=true;
+    $status.textContent='停止しました';
+  }
+
+  // ---- Torch ----
+  async function toggleTorch(){
+    try{
+      if(!track) return;
+      const caps = track.getCapabilities?.() || {};
+      if(!caps.torch) return;
+      torchOn = !torchOn;
+      await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+      $torch.textContent = torchOn ? 'ライト（ON）' : 'ライト';
+    }catch(e){ console.warn('Torch error', e); }
+  }
+
+  // ---- BD loop ----
+  async function loopDetectWithBD(){
     const cv = document.createElement('canvas');
     const ctx = cv.getContext('2d');
     const step = async () => {
@@ -177,52 +253,119 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
         if(codes && codes.length){
           const c = codes[0];
           showResult(c.rawValue, c.format);
-          drawBox(c.boundingBox, c.format);
+          if(c.boundingBox) drawBox(c.boundingBox, c.format);
+          else drawBox(null);
         }else{
           drawBox(null);
         }
-      }catch{ /* ignore */ }
+      }catch{}
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
   }
 
-  async function stop(){
-    if(raf) cancelAnimationFrame(raf), raf=null;
-    if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; track=null; }
-    $wrap.style.display='none'; $start.disabled=false; $stop.disabled=true; $torch.disabled=true;
-    $status.textContent='停止しました';
-  }
+  // ---- ZXing live (video continuous) ----
+  async function startLiveWithZXing(){
+    if(!window.ZXing) throw new Error('ZXing not loaded');
 
-  async function toggleTorch(){
+    // できるだけ背面カメラを選ぶ
+    const deviceId = await pickEnvironmentCameraId().catch(()=>undefined);
+
+    $wrap.style.display = '';
+    zxingReader = new ZXing.BrowserMultiFormatReader();
+
+    await zxingReader.decodeFromVideoDevice(deviceId || undefined, $video, (result, err) => {
+      if(result && result.text){
+        const fmt = result.getBarcodeFormat ? String(result.getBarcodeFormat()) : 'zxing';
+        showResult(result.text, fmt);
+      }
+      // 失敗フレーム時の err は無視
+    });
+
+    // 停止関数
+    zxingStopper = () => {
+      try{ zxingReader?.reset(); }catch{}
+      zxingReader = null;
+    };
+
+    // トーチボタン
     try{
-      if(!track) return;
-      const caps = track.getCapabilities?.() || {};
-      if(!caps.torch) return;
-      torchOn = !torchOn;
-      await track.applyConstraints({ advanced: [{ torch: torchOn }] });
-      $torch.textContent = torchOn ? 'ライト（ON）' : 'ライト';
-    }catch(e){ console.warn('Torch error', e); }
+      const t = ($video.srcObject && $video.srcObject.getVideoTracks && $video.srcObject.getVideoTracks()[0]) || null;
+      const caps = t?.getCapabilities?.() || {};
+      $torch.disabled = !caps.torch;
+      track = t || null;
+    }catch{ $torch.disabled = true; }
   }
 
-  // ---- 画像ファイル読み取り：BD → jsQR → ZXing の順で試行 ----
+  async function pickEnvironmentCameraId(){
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const vids = devices.filter(d=>d.kind==='videoinput');
+    const back = vids.find(d=>/back|environment/i.test(d.label));
+    return (back || vids[0])?.deviceId;
+  }
+
+  // ---- jsQR live (video continuous, QR only) ----
+  async function startLiveWithJsQR(){
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} },
+      audio: false
+    });
+    $video.srcObject = stream;
+    $video.setAttribute('playsinline','true');
+    $video.muted = true;
+    await $video.play();
+    $wrap.style.display = '';
+
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d');
+
+    const step = ()=>{
+      if(!$video.videoWidth){ jsqrRAF = requestAnimationFrame(step); return; }
+      cv.width = $video.videoWidth; cv.height = $video.videoHeight;
+      ctx.drawImage($video, 0, 0, cv.width, cv.height);
+      try{
+        const img = ctx.getImageData(0,0,cv.width,cv.height);
+        const res = jsQR(img.data, img.width, img.height, { inversionAttempts:'attemptBoth' });
+        if(res && res.data){
+          showResult(res.data, 'qr_code(jsQR)');
+          // 枠描画
+          const minX = Math.min(res.location.topLeftCorner.x, res.location.bottomLeftCorner.x,
+                                res.location.topRightCorner.x, res.location.bottomRightCorner.x);
+          const minY = Math.min(res.location.topLeftCorner.y, res.location.bottomLeftCorner.y,
+                                res.location.topRightCorner.y, res.location.bottomRightCorner.y);
+          const maxX = Math.max(res.location.topLeftCorner.x, res.location.bottomLeftCorner.x,
+                                res.location.topRightCorner.x, res.location.bottomRightCorner.x);
+          const maxY = Math.max(res.location.topLeftCorner.y, res.location.bottomLeftCorner.y,
+                                res.location.topRightCorner.y, res.location.bottomRightCorner.y);
+          drawBox({x:minX,y:minY,width:maxX-minX,height:maxY-minY}, 'qr(jsQR)');
+        }else{
+          drawBox(null);
+        }
+      }catch(e){}
+      jsqrRAF = requestAnimationFrame(step);
+    };
+    jsqrRAF = requestAnimationFrame(step);
+  }
+
+  // ---- File (image) decoding: BD → jsQR → ZXing ----
   $file.addEventListener('change', async (e)=>{
     const file = e.target.files?.[0]; if(!file) return;
     $status.textContent = '画像を解析中…';
     try{
       const img = await loadImage(URL.createObjectURL(file));
       const {canvas, ctx} = drawScaled(img, 1600);
-      // 1) BarcodeDetector があればまず試す（対応端末はこれが最も精度/速度高い）
-      const bdText = await detectWithBD(canvas).catch(()=>null);
-      if(bdText){ showResult(bdText.text, bdText.format); $status.textContent='画像→BDで読み取り'; return; }
 
-      // 2) jsQR（QR専用）で尝试。回転 0/90/180/270
-      const qrText = detectWithJsQR(canvas, ctx);
-      if(qrText){ showResult(qrText, 'qr_code(jsQR)'); $status.textContent='画像→jsQRで読み取り'; return; }
+      // 1) BarcodeDetector
+      const bd = await detectWithBD(canvas).catch(()=>null);
+      if(bd){ showResult(bd.text, bd.format); $status.textContent='画像→BDで読み取り'; return; }
 
-      // 3) ZXing（QR/1D/2D対応）で最后の頼み
-      const zxText = await detectWithZXing(file).catch(()=>null);
-      if(zxText){ showResult(zxText.text, zxText.format); $status.textContent='画像→ZXingで読み取り'; return; }
+      // 2) jsQR（回転 0/90/180/270）
+      const qr = detectWithJsQR(canvas, ctx);
+      if(qr){ showResult(qr, 'qr_code(jsQR)'); $status.textContent='画像→jsQRで読み取り'; return; }
+
+      // 3) ZXing
+      const zx = await detectWithZXing(file).catch(()=>null);
+      if(zx){ showResult(zx.text, zx.format); $status.textContent='画像→ZXingで読み取り'; return; }
 
       $status.textContent = '画像から読めませんでした（ピント/解像度/光量をご確認ください）';
     }catch(err){
@@ -239,7 +382,6 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
       img.src = src;
     });
   }
-
   function drawScaled(img, maxSide=1600){
     const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
     const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
@@ -247,7 +389,6 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     const ctx = canvas.getContext('2d'); ctx.drawImage(img,0,0,w,h);
     return {canvas, ctx};
   }
-
   async function detectWithBD(canvas){
     if(!('BarcodeDetector' in window)) return null;
     try{
@@ -261,7 +402,6 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
       return null;
     }catch{ return null; }
   }
-
   function detectWithJsQR(canvas, ctx){
     if(!window.jsQR) return null;
     const rotations = [0,90,180,270];
@@ -274,10 +414,8 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     }
     return null;
   }
-
   function rotateCanvas(srcCanvas, deg){
     const rad = deg*Math.PI/180;
-    const s = Math.sin(rad), c = Math.cos(rad);
     const w = srcCanvas.width, h = srcCanvas.height;
     const dst = document.createElement('canvas');
     if(deg===90 || deg===270){ dst.width = h; dst.height = w; } else { dst.width = w; dst.height = h; }
@@ -287,17 +425,14 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     ctx.drawImage(srcCanvas, -w/2, -h/2);
     return dst;
   }
-
   async function detectWithZXing(file){
     if(!window.ZXing) return null;
     const reader = new ZXing.BrowserMultiFormatReader();
     try{
-      // ZXing は File/Blob から直接 decode するユーティリティがないため ImageBitmap 経由にする
       const imgUrl = URL.createObjectURL(file);
       const res = await reader.decodeFromImageUrl(imgUrl);
       URL.revokeObjectURL(imgUrl);
       if(res && res.text){
-        // フォーマット名は enum 値を文字列化
         const format = res.getBarcodeFormat ? String(res.getBarcodeFormat()) : 'zxing';
         return { text: res.text, format };
       }
@@ -307,6 +442,7 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
     }
   }
 
+  // ---- Buttons ----
   $start.addEventListener('click', start);
   $stop.addEventListener('click', stop);
   $torch.addEventListener('click', toggleTorch);
@@ -328,3 +464,4 @@ footer{padding:16px;text-align:center;color:var(--muted);font-size:12px}
 </script>
 </body>
 </html>
+
