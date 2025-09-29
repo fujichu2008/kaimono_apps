@@ -50,7 +50,9 @@ main{padding:12px}
 #cityWrap{position:relative;height:340px;overflow:hidden;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,#a8d1ff 0%,#d7ecff 50%,#d5f0d2 50%,#c9e8c4 100%)}
 #sky{position:absolute;inset:0 0 50% 0;overflow:hidden}
 #land{position:absolute;inset:50% 0 0 0;overflow:hidden;background:linear-gradient(180deg,#d5f0d2 0%,#c9e8c4 100%)}
-.obj{position:absolute;user-select:none}
+/* ★ ミニイベント専用レイヤー：renderCityのクリア対象外 */
+#microLayer{position:absolute;inset:0;pointer-events:none}
+.obj{position:absolute;user-select:none;line-height:1}
 .twinkle{animation:twinkle 2.2s infinite ease-in-out}
 @keyframes twinkle{0%,100%{opacity:.15;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}
 .cloud{animation:cloud 60s linear infinite}
@@ -91,6 +93,19 @@ input[type="checkbox"].sm:checked + .toggle::after{left:20px}
 
 /* 衰退時のやや暗転・しぼみ */
 .city-dim{filter:brightness(0.96) saturate(0.92); transform:scale(0.985); transition:.6s}
+
+/* === Chicken glow === */
+.glow {
+  position: relative;
+  animation: glowPulse 1.8s ease-in-out infinite;
+  filter:
+    drop-shadow(0 0 4px rgba(255,215,0,.85))
+    drop-shadow(0 0 9px rgba(255,200,0,.55));
+}
+@keyframes glowPulse {
+  0%,100% { transform: scale(1);   filter: drop-shadow(0 0 3px rgba(255,215,0,.8)) drop-shadow(0 0 7px rgba(255,200,0,.5)); }
+  50%     { transform: scale(1.06); filter: drop-shadow(0 0 8px rgba(255,230,120,.95)) drop-shadow(0 0 14px rgba(255,210,80,.65)); }
+}
 
 @media (max-width:480px){
   #cityWrap{height:280px}
@@ -155,6 +170,8 @@ input[type="checkbox"].sm:checked + .toggle::after{left:20px}
       <div id="cityWrap">
         <div id="sky"></div>
         <div id="land"></div>
+        <!-- ★ ミニイベント専用レイヤー（クリアされない） -->
+        <div id="microLayer"></div>
       </div>
       <div class="small" style="margin-top:6px">期間に合わせて“じわっ”と成長。100%で同じ最終形に到達します。</div>
     </div>
@@ -199,7 +216,7 @@ input[type="checkbox"].sm:checked + .toggle::after{left:20px}
 </main>
 
 <div id="celebration"></div>
-<footer class="small">v3 保存型×期間正規化×季節×UFO×完了時ミニイベント</footer>
+<footer class="small">v4 保存型×期間正規化×季節×UFO×ミニイベント×ニワトリ物語×2時ロールオーバー</footer>
 
 <script>
 /* ========= Storage Keys ========= */
@@ -210,7 +227,14 @@ const LS_META = 'MEDCITY_meta_v1'; // {streak,bestStreak,seed,celebed?}
 /* ========= Utilities ========= */
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
-const todayStr = (d=new Date()) => d.toLocaleDateString('sv-SE'); // YYYY-MM-DD
+
+/* ★ 2時ロールオーバー対応の日付キー */
+function todayStr(d=new Date()){
+  const dt = new Date(d);
+  if(dt.getHours() < 2){ dt.setDate(dt.getDate() - 1); }
+  return dt.toLocaleDateString('sv-SE'); // YYYY-MM-DD
+}
+
 function parseDate(str){ const [y,m,dd]=str.split('-').map(Number); return new Date(y, m-1, dd); }
 function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
 function lerp(a,b,t){ return a+(b-a)*t }
@@ -222,7 +246,8 @@ function makeRand(seed){ let s = seed|0 || 123456789; return function(){ s ^= s<
 /* ========= Time Slots ========= */
 function slotOf(now=new Date()){
   const h = now.getHours();
-  if (h>=4 && h<=10) return 'm';
+  // 日付切替は午前2時：2〜10時=朝 / 11〜16=昼 / それ以外=夕
+  if (h>=2 && h<=10) return 'm';
   if (h>=11 && h<=16) return 'n';
   return 'e';
 }
@@ -537,303 +562,349 @@ function defaultCityState(){
     dayKey: todayStr(),
     seed: Math.floor(Math.random()*1e9),
     gp: 0,
-    counts: { buildings: 4, trees: 18, people: 6, animals: 2, ruins: 0, landmarks: 0 }
+    counts: { buildings: 4, trees: 18, people: 6, animals: 2, ruins: 0, landmarks: 0 },
+    chicken: {         // 🐔 ミニストーリー（光る演出）
+      stage: null,     // null | 'egg' | 'chick' | 'hen'
+      rare: false,     // カラフル卵→レアひよこ/ニワトリ
+      twins: false,    // 双子卵
+      pos: null,       // {left:%, bottom:%}
+      hatched: 0
+    },
+    rareUnlocked: []   // レア建造物ID（🗽/🕌/🏟️/🏰/🗼）
   };
 }
+<!-- ========= ここから 2/3 ブロック目 ========= -->
 
-/* 前日の完了率（0..1） */
-function yesterdayScore(){
-  const s = load(LS_SETTINGS,{});
-  const log = load(LS_LOG,{});
-  const enabled = ['m','n','e'].filter(k=>s?.freq?.[k]);
-  if(enabled.length===0) return 0;
-  const d = new Date(); d.setDate(d.getDate()-1);
-  const key = todayStr(d);
-  const rec = log[key] || {};
-  const done = enabled.reduce((a,k)=>a + (rec[k]?1:0), 0);
-  return done / enabled.length;
-}
-
-/* ========= 期間正規化ターゲット（100%で同じ最終形） ========= */
-const CITY_MIN = { buildings: 4,  trees: 18,  people: 6,  animals: 2,  ruins: 0, landmarks: 0 };
-const CITY_MAX = { buildings: 60, trees: 160, people: 80, animals: 20, ruins: 0, landmarks: 6 };
-function lerpInt(a,b,t){ return Math.max(0, Math.round(a + (b-a)*t)); }
-
-function plannedTotal(){
+/* ======== 期間正規化：全期間で最終形は同じに ======== */
+function progressOverall(){ // 0..1（2時ロールオーバー対応）
   const s = load(LS_SETTINGS,{});
   if(!s?.startDate || !s?.endDate) return 0;
   const start = parseDate(s.startDate);
   const end   = parseDate(s.endDate);
-  const days = Math.max(0, Math.floor((end - start)/86400000) + 1);
-  const freqCount = ['m','n','e'].filter(k=>s.freq?.[k]).length;
-  return days * freqCount;
+  const today = new Date();
+  const last  = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const totalDays = Math.max(1, Math.floor((end - start)/86400000) + 1);
+  const elapsed   = Math.min(totalDays, Math.max(1, Math.floor((last - start)/86400000) + 1));
+  return Math.min(1, Math.max(0, elapsed/totalDays));
 }
-function cumulativeDone(){
-  const s = load(LS_SETTINGS,{});
-  const log = load(LS_LOG,{});
-  if(!s?.startDate) return 0;
-  const todayKey = todayStr(new Date());
-  let done=0;
-  Object.entries(log).forEach(([d,val])=>{
-    if(d <= todayKey){
-      done += ['m','n','e'].reduce((acc,k)=> acc + (val[k]?1:0), 0);
-    }
-  });
-  return done;
-}
-function progressOverall(){
-  const P = plannedTotal(); if(P<=0) return 0;
-  const D = cumulativeDone();
-  return Math.min(1, D / P);
-}
-function targetCountsForProgress(p){
-  const ease = (x)=> (x<0?0:(x>1?1:(0.5 - 0.5*Math.cos(Math.PI*x))));
-  const t = ease(p);
-  return {
-    buildings: lerpInt(CITY_MIN.buildings, CITY_MAX.buildings, t),
-    trees:     lerpInt(CITY_MIN.trees,     CITY_MAX.trees,     t),
-    people:    lerpInt(CITY_MIN.people,    CITY_MAX.people,    t),
-    animals:   lerpInt(CITY_MIN.animals,   CITY_MAX.animals,   t),
-    ruins:     lerpInt(CITY_MIN.ruins,     CITY_MAX.ruins,     t),
-    landmarks: lerpInt(CITY_MIN.landmarks, CITY_MAX.landmarks, t),
-  };
-}
+
+/** その日の完了に応じて“保存型の街”を少しずつターゲットへ寄せる */
 function syncCityToProgress(city){
-  const p = progressOverall();
-  const tgt = targetCountsForProgress(p);
-  const c = city.counts;
-  c.buildings = Math.max(c.buildings, tgt.buildings);
-  c.trees     = Math.max(c.trees,     tgt.trees);
-  c.people    = Math.max(c.people,    tgt.people);
-  c.animals   = Math.max(c.animals,   tgt.animals);
-  c.ruins     = Math.min(c.ruins,     tgt.ruins);
-  c.landmarks = Math.max(c.landmarks, tgt.landmarks);
+  const p = progressOverall();            // 期間の進行（0..1）
+  const { rate } = calcStats();           // コンプリート率（%）
+  const health = cityHealth();            // 0..1（衰退/回復）
+
+  // 最終ゴール（100%時）の賑わい設定
+  const FINAL = { buildings: 24, trees: 60, people: 34, animals: 10, landmarks: 6 };
+
+  // 期間の進み方に“手前ゆるやか→後半ぐんと”のカーブをかける
+  const ease = t => t<0 ? 0 : t>1 ? 1 : (1 - Math.pow(1 - t, 2.2)); // easeOut-ish
+  // コンプリート率を重みとして掛け（未達ならゆっくり）、健康度で微調整
+  const reach = ease( p * (0.6 + 0.4 * (rate/100)) * (0.8 + 0.2*health) );
+
+  // 現在のcountsを「reach * FINAL」に近づける（保存型：少しずつ吸い寄せ）
+  const tgt = {
+    buildings: Math.round(FINAL.buildings * reach),
+    trees:     Math.round(FINAL.trees     * reach),
+    people:    Math.round(FINAL.people    * reach),
+    animals:   Math.round(FINAL.animals   * reach),
+    landmarks: Math.round(FINAL.landmarks * (0.5*reach + 0.5*reach*reach)) // ランドマークは後半寄り
+  };
+  const step = (cur, goal, k=0.35)=> Math.round(cur + (goal - cur) * k); // 35%ずつ近づける
+  city.counts.buildings = step(city.counts.buildings, tgt.buildings);
+  city.counts.trees     = step(city.counts.trees,     tgt.trees);
+  city.counts.people    = step(city.counts.people,    tgt.people);
+  city.counts.animals   = step(city.counts.animals,   tgt.animals);
+  city.counts.landmarks = step(city.counts.landmarks, tgt.landmarks);
+
+  // 失敗時/低健康度で瓦礫少々、連続で回復なら瓦礫減少
+  const ruinsGoal = Math.max(0, Math.round(6 * (1 - health)));
+  city.counts.ruins = step(city.counts.ruins, ruinsGoal, 0.25);
+
   saveCity(city);
 }
 
-/* ====== 昨日→今日へロール（保存型の進行） ====== */
+/** 日付キーが変わっていたら街データをロールさせる */
 function ensureCityRolledToToday(){
-  let city = loadCity();
-  if(!city){ city = defaultCityState(); saveCity(city); return city; }
+  let city = loadCity() || defaultCityState();
   const todayKey = todayStr();
-  if(city.dayKey === todayKey){ return city; }
-
-  let cursor = new Date(city.dayKey);
-  for(let step=0; step<30 && todayStr(cursor) !== todayKey; step++){
-    const score = yesterdayScore(); // 0..1
-    city.gp += (score - 0.5);       // -0.5..+0.5
-
-    while(city.gp >= 1){
-      city.gp -= 1;
-      city.counts.buildings += 1;
-      city.counts.trees     += 3;
-      city.counts.people    += 2;
-      if(score>=1 && Math.random()<0.15) city.counts.landmarks += 1;
-    }
-    while(city.gp <= -1){
-      city.gp += 1;
-      city.counts.trees   = Math.max(0, city.counts.trees - 2);
-      city.counts.people  = Math.max(0, city.counts.people - 1);
-      if(Math.random()<0.25) city.counts.ruins += 1;
-      if(score===0 && Math.random()<0.10) city.counts.buildings = Math.max(0, city.counts.buildings-1);
-    }
-    const c=city.counts;
-    c.buildings = Math.max(0, Math.min(200, c.buildings));
-    c.trees     = Math.max(0, Math.min(600, c.trees));
-    c.people    = Math.max(0, Math.min(400, c.people));
-    c.animals   = Math.max(0, Math.min(200, c.animals));
-    c.ruins     = Math.max(0, Math.min(200, c.ruins));
-    c.landmarks = Math.max(0, Math.min(20,  c.landmarks));
-
-    cursor.setDate(cursor.getDate()+1);
-    city.dayKey = todayStr(cursor);
+  if (city.dayKey !== todayKey){
+    // 新しい日：シード少し進める
+    city.seed = (city.seed|0) + 17;
+    city.dayKey = todayKey;
+    syncCityToProgress(city);
+    saveCity(city);
+    // ★ レア建造物・ニワトリ物語：夜のうち進む可能性
+    if (Math.random() < 0.05) tryUnlockRareLandmark('rollover');
+    if (Math.random() < 0.06) checkChickenStoryEvent('rollover');
   }
-  city.dayKey = todayKey;
-  syncCityToProgress(city); // 期間正規化の目標へ寄せる
-  saveCity(city);
   return city;
 }
 
-/* ===== 季節デコ ===== */
-function addSeasonalDecor({ sky, land, rnd, isNight, micro, health, recoveryBoost }){
-  const { isHalloween, isChristmas, isNewYear, isNewFiscal } = getSeasonalFlags();
-
-  if(isHalloween){
-    const bats = Math.round((3 + 3*micro) * health);
-    for(let i=0;i<bats;i++){
-      addSkyObj('🦇','obj bird', sky, {top:(8+rnd()*20)+'%', left:(-10 - rnd()*40)+'%'});
-    }
-    if(health>0.35) addLandObj('🎃','obj', land, {left:(10+rnd()*20)+'%', bottom:'26%'});
-    if(isNight && rnd()<(0.6*health)) addSkyObj('🧙‍♀️','obj plane', sky, {top:(12+rnd()*10)+'%', left:'110%'});
-  }
-
-  if(isChristmas){
-    if(health>0.3) addLandObj('🎄','obj', land, {left:'12%', bottom:'30%'});
-    const flakes = Math.round((10 + 20*micro) * (0.5 + 0.5*health + 0.6*recoveryBoost));
-    for(let i=0;i<flakes;i++){
-      addSkyObj('❄️','obj', sky, {top:(rnd()*40)+'%', left:(rnd()*100)+'%'});
-    }
-    if(rnd()< (0.4*health + 0.3*recoveryBoost)) addLandObj('🎁','obj', land, {left:(70+rnd()*15)+'%', bottom:'24%'});
-  }
-
-  if(isNewYear){
-    addLandObj('🎍','obj', land, {left:'10%', bottom:'28%'});
-    addLandObj('🎍','obj', land, {left:'86%', bottom:'28%'});
-    if(rnd()<0.5*health + 0.3*recoveryBoost) addLandObj('🎌','obj', land, {left:'48%', bottom:'32%'});
-    if(rnd()<0.4*health + 0.2*recoveryBoost) addLandObj('🎯','obj', land, {left:'24%', bottom:'26%'});
-    if(rnd()<0.4*health + 0.2*recoveryBoost) addLandObj('🧧','obj', land, {left:'72%', bottom:'26%'});
-  }
-
-  if(isNewFiscal){
-    const petals = Math.round((12 + 18*micro) * (0.6 + 0.4*health + 0.6*recoveryBoost));
-    for(let i=0;i<petals;i++){
-      addSkyObj('🌸','obj', sky, {top:(rnd()*38)+'%', left:(rnd()*100)+'%', animation:'fall 3s linear forwards'});
-    }
-    if(rnd()<0.5*health + 0.3*recoveryBoost) addLandObj('🎒','obj', land, {left:(20+rnd()*20)+'%', bottom:'26%'});
-    if(rnd()<0.5*health + 0.3*recoveryBoost) addLandObj('🎓','obj', land, {left:(60+rnd()*20)+'%', bottom:'26%'});
-  }
+/* ===== レア建造物：条件解放 & 保存 ===== */
+const RARE_LANDMARKS = [
+  { id:'liberty',    emoji:'🗽', minProgress:0.60, minRate:85, rarity:'R',  weight:0.20 },
+  { id:'taj',        emoji:'🕌', minProgress:0.70, minRate:90, rarity:'SR', weight:0.12 },
+  { id:'stadium',    emoji:'🏟️', minProgress:0.50, minRate:80, rarity:'R',  weight:0.25 },
+  { id:'castle',     emoji:'🏰', minProgress:0.40, minRate:75, rarity:'R',  weight:0.30 },
+  { id:'tokyotower', emoji:'🗼', minProgress:0.55, minRate:85, rarity:'SR', weight:0.15 },
+];
+function emojiOfRare(id){ const f=RARE_LANDMARKS.find(x=>x.id===id); return f?f.emoji:'🏛️'; }
+function tryUnlockRareLandmark(reason='manual'){
+  const city = loadCity() || defaultCityState();
+  const unlocked = new Set(city.rareUnlocked || []);
+  const p = progressOverall();
+  const { rate } = calcStats();
+  const cand = RARE_LANDMARKS.filter(x => !unlocked.has(x.id) && p>=x.minProgress && rate>=x.minRate);
+  if(!cand.length) return false;
+  const sum = cand.reduce((a,c)=>a+c.weight,0);
+  let r = Math.random()*sum, pick=cand[0];
+  for(const c of cand){ r -= c.weight; if(r<=0){ pick=c; break; } }
+  city.rareUnlocked = [...unlocked, pick.id];
+  saveCity(city);
+  toast(`レア建造物を発見！ ${emojiOfRare(pick.id)} が解放された✨`);
+  return true;
 }
 
-/* ===== 空イベント（含：巨大UFO） ===== */
-function pickSkyEvents({health, recovery, season, isNight, rnd}){
-  const pool = [
-    {id:'ufo_giant', p: 1/200, priority:'S', cond:()=>true},
-    {id:'meteor_shower', p: 0.008*(isNight?1:0)*(0.7+0.6*(health+recovery)), priority:'S', cond:()=>isNight},
-    {id:'double_rainbow', p: 0.012*(isNight?0:1)*(health>0.6||recovery>0.1?1.3:1), priority:'A', cond:()=>!isNight},
-    {id:'aurora', p: 0.006*(isNight?1:0)*((season.isChristmas||season.isNewYear)?1.3:1), priority:'A', cond:()=>isNight},
-    {id:'satellite_train', p: 0.01*(isNight?1:0), priority:'A', cond:()=>isNight},
-    {id:'hot_air_balloons', p: 0.04*(isNight?0:1)*(1+recovery), priority:'B', cond:()=>!isNight},
-    {id:'paper_planes', p: 0.03*(isNight?0:1), priority:'B', cond:()=>!isNight},
-    {id:'kite', p: 0.02*(isNight?0:1)*(isWeekend()?1.5:1), priority:'B', cond:()=>!isNight},
-    {id:'helicopter', p: 0.02*(isNight?0.6:1), priority:'B', cond:()=>true},
-    {id:'fast_front', p: 0.06*(isNight?0.5:1), priority:'C', cond:()=>true},
-    {id:'thin_veil', p: 0.06*(isNight?0.3:1), priority:'C', cond:()=>!isNight},
-    {id:'shower', p: (health<0.5?0.08:0)*(1 - 0.6*recovery)*(isNight?0.8:1), priority:'C', cond:()=>true},
-    {id:'thunder', p: (health<0.35?0.04:0)*(1 - 0.6*recovery)*(isNight?0.9:1), priority:'C', cond:()=>true},
+/* ===== 建物パレット & サイズ調整 ===== */
+function cityTier(rate){
+  if(rate>=95) return 6; if(rate>=90) return 5; if(rate>=75) return 4;
+  if(rate>=60) return 3; if(rate>=40) return 2; if(rate>=20) return 1;
+  return 0;
+}
+function buildingsForTier(t, health=1){
+  const tbl=[
+    ['🛖'],
+    ['🏠','🏚️'],
+    ['🏠','🏡','🏪'],
+    ['🏢','🏫','🏬'],
+    ['🏢','🏭','🏛️','🏥'],
+    ['🗼','🏰','🏟️','🛕'],
+    ['🏰','🗽','🕌','⛩️']
   ];
-  const candidates = pool.filter(e=>e.cond());
-  const selected = [];
-  const maxEvents = 3;
-  const order = ['S','A','B','C'];
-  for(const prio of order){
-    for(const ev of candidates.filter(e=>e.priority===prio)){
-      if(selected.length>=maxEvents) break;
-      if(Math.random() < ev.p){
-        if(ev.id==='satellite_train' && selected.includes('meteor_shower')) continue;
-        if(ev.id==='meteor_shower' && selected.includes('satellite_train')) continue;
-        if(ev.id==='ufo_giant' && selected.length>=1){ selected.length=0; }
-        selected.push(ev.id);
-      }
-    }
-    if(selected.length>=maxEvents) break;
-  }
-  return selected;
+  const base = tbl[Math.min(t, tbl.length-1)].slice();
+  // 低健康度で少し“荒れ”を混ぜる
+  const decayExtras = ['🏚️','🚧','🧱'];
+  const addK = Math.floor((1-health)*3);
+  for(let i=0;i<addK;i++) base.push(decayExtras[Math.floor(Math.random()*decayExtras.length)]);
+  return base;
 }
-function spawnSkyEvent(id, ctx){
-  const {sky, land, rnd} = ctx;
-  const randPos = () => ({top:(5+rnd()*35)+'%', left:(-15 + rnd()*120)+'%'});
+
+// サイズ
+const SMALL_BUILDINGS = new Set(['🏠','🏡','🏪']);
+const MID_BUILDINGS   = new Set(['🏢','🏫','🏬','🏭','🏛️','🏥']);
+const BIG_LANDMARKS   = new Set(['🗼','🏰','🏟️','🛕','🗽','🕌','⛩️']);
+function buildingFontSizePx(emoji, tier, isForeground){
+  let base;
+  if (SMALL_BUILDINGS.has(emoji)) base = 18;
+  else if (MID_BUILDINGS.has(emoji)) base = 20;
+  else if (BIG_LANDMARKS.has(emoji)) base = 22;
+  else base = 18;
+  const tierScale = 1 + Math.min(0.55, (tier/6) * 0.55);
+  const depthScale = isForeground ? 1.10 : 0.90;
+  let size = base * tierScale * depthScale;
+  const MIN = 14, MAX = 36;
+  size = Math.max(MIN, Math.min(MAX, Math.round(size)));
+  return size + 'px';
+}
+
+/* ===== 空＆季節のランダムイベント ===== */
+function addSkyObj(emoji, cls, parent, style){ const el=document.createElement('div'); el.className=cls; el.textContent=emoji; Object.assign(el.style, style); parent.appendChild(el); }
+function addLandObj(emoji, cls, parent, style){ const el=document.createElement('div'); el.className=cls; el.textContent=emoji; Object.assign(el.style, style); parent.appendChild(el); }
+
+// 季節デコ
+function addSeasonalDecor({ sky, land, rnd, isNight, micro, health, recoveryBoost }){
+  const f = getSeasonalFlags();
+  if(f.isHalloween){
+    addLandObj('🎃','obj',land,{left:'10%',bottom:'24%'}); if(isNight && rnd()<0.4) addSkyObj('🦇','obj plane',sky,{top:'12%',left:'110%'});
+  }
+  if(f.isChristmas){
+    addLandObj('🎄','obj',land,{left:'84%',bottom:'26%'}); if(isNight && rnd()<0.4) addSkyObj('🦌','obj bird',sky,{top:'14%',left:'-10%'}); 
+  }
+  if(f.isNewYear){
+    addLandObj('🎍','obj',land,{left:'50%',bottom:'24%'}); if(rnd()<0.35) addLandObj('🎏','obj',land,{left:'18%',bottom:'28%'});
+  }
+  if(f.isNewFiscal){
+    if(rnd()<0.6) addSkyObj('🌸','obj',sky,{top:(10+rnd()*15)+'%',left:(5+rnd()*80)+'%',animation:'fall 2.2s linear forwards'});
+  }
+}
+
+// 空イベント抽選
+function pickSkyEvents({health, recovery, season, isNight, rnd}){
+  const events = [];
+  // 稀に巨大UFO（1/200）
+  if(rnd()<0.005) events.push('ufo_big');
+  // 健康度低＆夜で流星群
+  if(isNight && rnd() < 0.15*(health + 0.5*recovery)) events.push('meteor');
+  // 鳥の群れ（昼）
+  if(!isNight && rnd() < 0.18*(health + 0.5*recovery)) events.push('birds');
+  // 飛行機
+  if(!isNight && rnd() < 0.12*(health + 0.5*recovery)) events.push('plane');
+  return events;
+}
+function spawnSkyEvent(id, {sky, land, rnd}){
   switch(id){
-    case 'ufo_giant': {
-      addSkyObj('🛸','obj plane', sky, {top:(10+rnd()*20)+'%', left:'110%', fontSize:'40px', animationDuration:'35s'});
-      if(rnd()<0.5){ addSkyObj('🛸','obj plane', sky, {top:(15+rnd()*12)+'%', left:'120%', fontSize:'22px', animationDuration:'30s'}); }
-      if(!document.getElementById('ufoToast')){
-        const t=document.createElement('div');
-        t.id='ufoToast'; t.className='obj';
-        t.textContent='上空に未確認飛行物体…！？👽';
-        Object.assign(t.style,{right:'12px',top:'12px',padding:'6px 10px',borderRadius:'10px',background:'#fff',border:'1px solid #e5e7eb',boxShadow:'0 4px 12px #0001',fontSize:'12px',position:'absolute',zIndex:'20'});
-        sky.appendChild(t); setTimeout(()=>t.remove(), 3000);
-      }
+    case 'ufo_big':
+      addSkyObj('🛸','obj plane', sky, {top:(8+rnd()*20)+'%', left:'110%', fontSize:'28px'});
       break;
-    }
-    case 'meteor_shower': {
-      const n = 8 + Math.floor(rnd()*8);
-      for(let i=0;i<n;i++){
-        const top = (8 + rnd()*30)+'%';
-        const delay = (i*0.3 + rnd()*0.5)+'s';
-        const s = document.createElement('div');
-        s.className='obj'; s.textContent='🌠';
-        Object.assign(s.style,{top, left:'-10%', animation:`plane ${8+rnd()*6}s linear ${delay} infinite`});
-        sky.appendChild(s);
-      }
+    case 'meteor':
+      addSkyObj('🌠','obj', sky, {top:(10+rnd()*20)+'%', left:'-10%', animation:'plane 8s linear infinite'});
       break;
-    }
-    case 'double_rainbow': {
-      addSkyObj('🌈','obj', sky, {top:'8%', left:'8%', fontSize:'28px'});
-      addSkyObj('🌈','obj', sky, {top:'14%', left:'18%', fontSize:'24px'});
+    case 'birds':
+      for(let i=0;i<6;i++) addSkyObj('🐦','obj bird', sky, {top:(8+rnd()*20)+'%', left:'-10%'});
       break;
-    }
-    case 'aurora': {
-      const veil=document.createElement('div');
-      veil.className='obj'; veil.style.inset='0 0 50% 0';
-      veil.style.background='linear-gradient(90deg, rgba(125,249,255,.10), rgba(173,216,230,.18), rgba(125,249,255,.10))';
-      veil.style.filter='blur(2px)';
-      sky.appendChild(veil);
+    case 'plane':
+      addSkyObj('✈️','obj plane', sky, {top:(10+rnd()*20)+'%', left:'110%'});
       break;
-    }
-    case 'satellite_train': {
-      const n = 6 + Math.floor(rnd()*6);
-      for(let i=0;i<n;i++){
-        const top = (12 + rnd()*20)+'%';
-        const left = (110 + i*4)+'%';
-        addSkyObj('🛰️','obj plane', sky, {top, left, fontSize:'14px', animationDuration:(18+rnd()*8)+'s'});
-      }
-      break;
-    }
-    case 'hot_air_balloons': {
-      const n = 2 + Math.floor(rnd()*3);
-      for(let i=0;i<n;i++){
-        const p = randPos();
-        addSkyObj('🎈','obj cloud', sky, {top:p.top, left:(-10 - rnd()*30)+'%', fontSize:(18+rnd()*10)+'px'});
-      }
-      break;
-    }
-    case 'paper_planes': {
-      const n = 3 + Math.floor(rnd()*3);
-      for(let i=0;i<n;i++){
-        const p = randPos();
-        addSkyObj('🪁', 'obj bird', sky, {top:p.top, left:'-12%'});
-        addSkyObj('📨', 'obj bird', sky, {top:(8+rnd()*30)+'%', left:'-14%'});
-      }
-      break;
-    }
-    case 'kite': { addSkyObj('🪁','obj bird', sky, {top:(12+rnd()*18)+'%', left:'-10%'}); break; }
-    case 'helicopter': { addSkyObj('🚁','obj plane', sky, {top:(8+rnd()*25)+'%', left:'110%', fontSize:'18px', animationDuration:(20+rnd()*10)+'s'}); break; }
-    case 'fast_front': { for(let i=0;i<2;i++) addSkyObj('☁️','obj cloud fast', sky, {top:(6+rnd()*28)+'%', left:(-30 + rnd()*60)+'%'}); break; }
-    case 'thin_veil': { const v=document.createElement('div'); v.className='obj'; v.style.inset='0 0 50% 0'; v.style.background='rgba(255,255,255,.08)'; sky.appendChild(v); break; }
-    case 'shower': { addSkyObj('🌧️','obj', sky, {top:'6%', left:(rnd()*90)+'%'}); break; }
-    case 'thunder': { addSkyObj('⚡','obj', sky, {top:'8%', left:(rnd()*90)+'%'}); break; }
   }
 }
 
-
-
-/* ========= Sky/Land helpers ========= */
-function addSkyObj(emoji, cls, parent, style){
-  const el=document.createElement('div'); el.className=cls; el.textContent=emoji;
-  Object.assign(el.style, style); parent.appendChild(el);
+/* ===== ミニイベント（完了時 1/3） & トースト ===== */
+function toast(msg){
+  const layer = $('#microLayer') || $('#sky');
+  const t=document.createElement('div');
+  t.className='obj';
+  t.textContent=msg;
+  Object.assign(t.style,{right:'12px',top:'12px',padding:'6px 10px',borderRadius:'10px',background:'#fff',border:'1px solid #e5e7eb',boxShadow:'0 4px 12px #0002',fontSize:'12px',position:'absolute',zIndex:'20'});
+  layer.appendChild(t); setTimeout(()=>t.remove(), 3000);
 }
-function addLandObj(emoji, cls, parent, style){
-  const el=document.createElement('div'); el.className=cls; el.textContent=emoji;
-  Object.assign(el.style, style); parent.appendChild(el);
+function triggerMicroEvent(){
+  const sky = $('#microLayer') || $('#sky');
+  const land = $('#microLayer') || $('#land');
+  const pick = ['mini_fireworks','balloon_rain','confetti_swirl','mini_parade','sunbreak','cleanup','tree_volunteer','road_fix','souvenir_drop','mini_rainbow','bird_flock','single_meteor','seasonal_petite'];
+  const id = pick[Math.floor(Math.random()*pick.length)];
+  runMicroEvent(id, sky, land);
+}
+function runMicroEvent(id, sky, land){
+  switch(id){
+    case 'mini_fireworks': miniCelebrate(20); toast('小花火があがった🎇'); break;
+    case 'balloon_rain': for(let i=0;i<15;i++) addSkyObj('🎈','obj',sky,{top:'-6%',left:(5+Math.random()*90)+'%',animation:'fall 2.5s linear forwards'}); toast('風船が舞い降りた🎈'); break;
+    case 'confetti_swirl': for(let i=0;i<20;i++){ const s=document.createElement('div'); s.className='confetti'; s.textContent=['✨','⭐','💫'][i%3]; s.style.left=(50+(Math.cos(i/3)*25))+'%'; s.style.top=(-5)+'%'; s.style.animationDuration=(1.6+Math.random()*0.8)+'s'; $('#celebration').appendChild(s);} $('#celebration').style.display='block'; setTimeout(()=>{$('#celebration').style.display='none';},1600); toast('紙吹雪くるくる✨'); break;
+    case 'mini_parade': for(let i=0;i<6;i++) addLandObj(i%2?'🥁':'👯‍♀️','obj slow',land,{bottom:'24%',left:(110+i*6)+'%'}); toast('小さなパレード🥁'); break;
+    case 'sunbreak': addSkyObj('☀️','obj',sky,{top:'6%',left:'8%'}); toast('雲間からひかり☀️'); break;
+    case 'cleanup': { const city=loadCity()||defaultCityState(); city.counts.ruins=Math.max(0,city.counts.ruins-1); saveCity(city); renderCity(); toast('お掃除隊🧹'); break; }
+    case 'tree_volunteer': { const city=loadCity()||defaultCityState(); city.counts.trees+=1; saveCity(city); renderCity(); toast('木を植えた🌱'); break; }
+    case 'road_fix': addLandObj('🚧','obj',land,{bottom:'20%',left:'50%'}); setTimeout(()=>renderCity(), 4000); toast('道路補修🛠️'); break;
+    case 'souvenir_drop': addLandObj('🧧','obj',land,{bottom:'26%',left:(10+Math.random()*80)+'%'}); toast('お土産を見つけた🧧'); break;
+    case 'mini_rainbow': addSkyObj('🌈','obj',sky,{top:'10%',left:'12%'}); toast('小さな虹🌈'); break;
+    case 'bird_flock': for(let i=0;i<8;i++) addSkyObj('🐦','obj bird',sky,{top:(8+Math.random()*20)+'%',left:'-10%'}); toast('渡り鳥の群れ🐦'); break;
+    case 'single_meteor': addSkyObj('🌠','obj',sky,{top:'14%',left:'-10%',animation:'plane 8s linear infinite'}); toast('流れ星🌠'); break;
+    case 'seasonal_petite': {
+      const f=getSeasonalFlags();
+      if(f.isHalloween) { addLandObj('🕯️','obj',land,{left:'20%',bottom:'26%'}); toast('ハロウィンの灯り🎃'); }
+      else if(f.isChristmas){ addLandObj('🧑‍🎄','obj',land,{left:'78%',bottom:'28%'}); toast('サンタの影？🎄'); }
+      else if(f.isNewYear){ addLandObj('🎍','obj',land,{left:'50%',bottom:'28%'}); toast('門松が置かれた🎍'); }
+      else if(f.isNewFiscal){ addSkyObj('🌸','obj',sky,{top:'12%',left:'18%',animation:'fall 2.2s linear forwards'}); toast('花びらひらり🌸'); }
+      break;
+    }
+  }
 }
 
-/* ========= City Rendering ========= */
+/* ===== ニワトリ物語（光るエフェクトつき） ===== */
+function ensureChickenPos(city, FG_MIN=2, FG_MAX=14){
+  if(!city.chicken.pos){
+    const r = seededRand((city.seed||1) ^ 0xCE11);
+    city.chicken.pos = { left: 8 + Math.floor(r()*84), bottom: FG_MIN + Math.floor(r()*(FG_MAX-FG_MIN)) };
+  }
+}
+function storyChanceByPeriod(){
+  const s = load(LS_SETTINGS,{});
+  const start = s?.startDate? parseDate(s.startDate) : new Date();
+  const end   = s?.endDate?   parseDate(s.endDate)   : new Date();
+  const totalDays = Math.max(1, Math.floor((end - start)/86400000)+1);
+  if(totalDays <= 14) return { egg2chick:0.5, chick2hen:0.4, lay:0.33 };
+  if(totalDays <= 60) return { egg2chick:0.3, chick2hen:0.25, lay:0.25 };
+  return                 { egg2chick:0.2, chick2hen:0.2,  lay:0.22 };
+}
+function checkChickenStoryEvent(trigger='complete'){
+  const city = loadCity() || defaultCityState();
+  const { rate } = calcStats();
+  const p = progressOverall();
+  const chances = storyChanceByPeriod();
+
+  ensureChickenPos(city);
+
+  if(!city.chicken.stage && p>=0.10 && rate>=75){
+    if(Math.random() < 0.33){
+      city.chicken.stage = 'egg';
+      if(Math.random() < 0.05) city.chicken.twins = true;
+      if(Math.random() < 0.05) city.chicken.rare  = true;
+      toast('街の片隅に卵🥚が現れた！');
+    }
+  } else if(city.chicken.stage === 'egg'){
+    if(Math.random() < chances.egg2chick){
+      city.chicken.stage = 'chick';
+      city.chicken.hatched += city.chicken.twins ? 2 : 1;
+      toast(city.chicken.twins ? '双子のひよこ🐣🐣が誕生！' : 'ひよこ🐣が誕生！');
+      if(Math.random() < 0.08) miniCelebrate(24);
+    }
+  } else if(city.chicken.stage === 'chick'){
+    if(Math.random() < chances.chick2hen){
+      city.chicken.stage = 'hen';
+      toast(city.chicken.rare ? '特別なニワトリ🐓✨が育った！' : 'ニワトリ🐓に成長！');
+      if(Math.random() < 0.1) triggerMicroEvent();
+    }
+  } else if(city.chicken.stage === 'hen'){
+    if(Math.random() < chances.lay){
+      toast('ニワトリが卵を産んだ🥚！');
+      const sky = $('#microLayer') || $('#sky');
+      addSkyObj('🥚','obj glow', sky, {top:'12%', left:(10+Math.random()*80)+'%'});
+      setTimeout(()=>renderCity(), 2800);
+    }
+  }
+
+  saveCity(city);
+}
+function renderChicken(city, land, tier){
+  if(!city?.chicken?.stage) return;
+  const pos = city.chicken.pos || {left:50,bottom:8};
+  const cls = 'obj glow';
+  const fontBase = { egg:18, chick:18, hen:22 }[city.chicken.stage] || 18;
+  const size = Math.min(34, Math.round(fontBase * (1 + 0.1*tier/6)));
+  const place = (emoji, dx=0, dy=0)=>{
+    addLandObj(emoji, cls, land, {
+      left: (pos.left + dx) + '%',
+      bottom: (pos.bottom + dy) + '%',
+      fontSize: size+'px', lineHeight:'1'
+    });
+  };
+  if(city.chicken.stage === 'egg'){
+    if(city.chicken.twins){
+      place('🥚', -1.8, 0);
+      place(city.chicken.rare ? '🌈🥚' : '🥚', 1.8, 0);
+    } else {
+      place(city.chicken.rare ? '🌈🥚' : '🥚', 0, 0);
+    }
+  } else if(city.chicken.stage === 'chick'){
+    if(city.chicken.rare){
+      place('🐤', 0, 0);
+    }else if(city.chicken.twins){
+      place('🐣', -1.6, 0); place('🐣', 1.6, 0);
+    }else{
+      place('🐣', 0, 0);
+    }
+  } else if(city.chicken.stage === 'hen'){
+    place('🐓', 0, 0);
+  }
+}
+
+/* ===== メイン：街の描画 ===== */
 function renderCity(){
   const wrap = $('#cityWrap'); if(!wrap) return;
   const {rate, streak} = calcStats();
-  const city = ensureCityRolledToToday(); // 保存型を取得＆日付ロール
-  syncCityToProgress(city);               // 期間正規化の目標へ同期（当日完了も即反映）
+  const city = ensureCityRolledToToday();
+  syncCityToProgress(city);
 
-  const sky = $('#sky'); const land = $('#land');
-  sky.innerHTML=''; land.innerHTML='';
+  const sky = $('#sky'), land = $('#land');
+  sky.innerHTML=''; land.innerHTML=''; // microLayerはクリアしない
 
   // 時刻グラデーション
   const [t1,t2] = (()=>{
     const h=new Date().getHours();
-    if(h>=4 && h<=10) return ['#bfe1ff','#e6f3ff'];
-    if(h>=11 && h<=16) return ['#9bd1ff','#d6ecff'];
-    if(h>=17 && h<=23) return ['#ffb38a','#c8cfff'];
-    return ['#0b1020','#0e1640'];
+    if(h>=2 && h<=10) return ['#bfe1ff','#e6f3ff'];   // 朝
+    if(h>=11 && h<=16) return ['#9bd1ff','#d6ecff'];  // 昼
+    if(h>=17 && h<=23) return ['#ffb38a','#c8cfff'];  // 夕
+    return ['#0b1020','#0e1640'];                     // 深夜(〜1:59)
   })();
   wrap.style.background = `linear-gradient(180deg, ${t1} 0%, ${t2} 50%, #d5f0d2 50%, #c9e8c4 100%)`;
 
@@ -845,19 +916,9 @@ function renderCity(){
 
   // 日替わりシード
   const rnd = makeRand((city.seed||1) + Math.floor(Date.now()/86400000));
-  const isNight = (new Date().getHours()>=19 || new Date().getHours()<4);
+  const isNight = (new Date().getHours()>=19 || new Date().getHours()<2);
 
-  // スモッグ（健康度低いと濃く）
-  if(!isNight){
-    const smogAlpha = Math.max(0, (1-health)*0.18 - recoveryBoost*0.12);
-    if(smogAlpha>0.01){
-      const smog = document.createElement('div');
-      smog.className='obj'; smog.style.inset='0 0 50% 0';
-      smog.style.background=`rgba(60,60,60,${smogAlpha})`; sky.appendChild(smog);
-    }
-  }
-
-  // 星/雲などのベース
+  // 星/雲
   if(isNight){
     const stars = Math.round(12 + 48 * (0.4 + 0.6*health + 0.8*recoveryBoost));
     for(let i=0;i<stars;i++){
@@ -903,7 +964,7 @@ function renderCity(){
   const FG_MIN = 2, FG_MAX = ROAD_PCT-4;   // 前
   const BG_MIN = ROAD_PCT+10, BG_MAX = 48; // 奥
 
-  // 保存数に合わせて“安定配置”
+  // 安定配置用 RNG
   const rngTrees  = (i)=> seededRandN(city.seed, 'trees', i);
   const rngPeople = (i)=> seededRandN(city.seed, 'people', i);
   const rngAnimal = (i)=> seededRandN(city.seed, 'animals', i);
@@ -939,7 +1000,7 @@ function renderCity(){
     addLandObj(animal,'obj',land,{left:leftPct+'%', bottom:bottomPct+'%'});
   }
 
-  // Buildings（tierに応じたパレット）
+  // Buildings
   const tier = cityTier(rate);
   const palette = buildingsForTier(tier, Math.min(1, health + recoveryBoost));
   for(let i=0;i<city.counts.buildings;i++){
@@ -948,7 +1009,12 @@ function renderCity(){
     const bottomPct = useForeground ? (FG_MIN + r()*(FG_MAX-FG_MIN)) : (BG_MIN + r()*(BG_MAX-BG_MIN));
     const leftPct   = (2 + r()*92);
     const b = palette[i % palette.length];
-    addLandObj(b, 'obj', land, {left:leftPct+'%', bottom:bottomPct+'%'});
+    addLandObj(b, 'obj', land, {
+      left: leftPct+'%',
+      bottom: bottomPct+'%',
+      fontSize: buildingFontSizePx(b, tier, useForeground),
+      lineHeight: '1'
+    });
   }
 
   // Ruins
@@ -959,195 +1025,53 @@ function renderCity(){
     addLandObj('🏚️', 'obj', land, {left:leftPct+'%', bottom:bottomPct+'%'});
   }
 
-  // Landmarks
+  // Landmarks（通常）
   for(let i=0;i<city.counts.landmarks;i++){
     const r = rngLmk(i);
     const bottomPct = (BG_MIN + r()*(BG_MAX-BG_MIN));
     const leftPct   = (5 + r()*90);
     const lm = ['🎡','⛲','🗼','🏟️'][Math.floor(r()*4)];
-    addLandObj(lm, 'obj', land, {left:leftPct+'%', bottom:bottomPct+'%'});
+    addLandObj(lm, 'obj', land, {
+      left:leftPct+'%',
+      bottom:bottomPct+'%',
+      fontSize: buildingFontSizePx(lm, Math.max(tier, 4), false),
+      lineHeight: '1'
+    });
   }
+
+  // ★ レア建造物（解放済み）表示（最大3）
+  const rare = (loadCity()||defaultCityState()).rareUnlocked || [];
+  const showNum = Math.min(3, rare.length);
+  for(let i=0;i<showNum;i++){
+    const id = rare[i];
+    const r = rngLmk(1000+i);
+    const bottomPct = (BG_MIN + r()*(BG_MAX-BG_MIN));
+    const leftPct   = (8 + r()*84);
+    const em = emojiOfRare(id);
+    addLandObj(em, 'obj', land, {
+      left:leftPct+'%',
+      bottom:bottomPct+'%',
+      fontSize: buildingFontSizePx(em, Math.max(tier,5), false),
+      lineHeight:'1'
+    });
+  }
+
+  // ニワトリ物語（光る）
+  renderChicken(city, land, Math.max(tier, 3));
 
   // 賑わい小物
   if(rnd() < 0.12*(health + 0.8*recoveryBoost)) addLandObj('🎈','obj', land, {left:(2 + rnd()*92)+'%', bottom:(30 + rnd()*14)+'%'});
   if(rnd() < 0.10*(health + 0.8*recoveryBoost)) addLandObj('🛝','obj', land, {left:(5 + rnd()*20)+'%', bottom:(BG_MIN + 6)+'%'});
 }
 
-function cityTier(rate){
-  if(rate>=95) return 6; if(rate>=90) return 5; if(rate>=75) return 4;
-  if(rate>=60) return 3; if(rate>=40) return 2; if(rate>=20) return 1;
-  return 0;
-}
-function buildingsForTier(t, health=1){
-  const baseTbl=[
-    ['🛖'],
-    ['🏠','🏚️'],
-    ['🏠','🏡','🏪'],
-    ['🏢','🏫','🏬'],
-    ['🏢','🏭','🏛️','🏥'],
-    ['🗼','🏰','🏟️','🛕'],
-    ['🏰','🗽','🕌','⛩️']
-  ];
-  const base = baseTbl[Math.min(t, baseTbl.length-1)].slice();
-  const decayExtras = ['🏚️','🚧','🧱'];
-  const addK = Math.floor((1-health)*3);
-  for(let i=0;i<addK;i++) base.push(decayExtras[Math.floor(Math.random()*decayExtras.length)]);
-  return base;
-}
-
-/* ========= ミニイベント（完了時 1/3） ========= */
-function toast(msg){
-  const sky = $('#sky');
-  const t=document.createElement('div');
-  t.className='obj';
-  t.textContent=msg;
-  Object.assign(t.style,{right:'12px',top:'12px',padding:'6px 10px',borderRadius:'10px',background:'#fff',border:'1px solid #e5e7eb',boxShadow:'0 4px 12px #0001',fontSize:'12px',position:'absolute',zIndex:'20'});
-  sky.appendChild(t); setTimeout(()=>t.remove(), 3000);
-}
-
-function triggerMicroEvent(){
-  // 重複しにくい軽量プール
-  const types = [
-    'mini_fireworks','balloon_rain','confetti_swirl','mini_parade','sunbreak',
-    'cleanup','tree_volunteer','road_fix',
-    'stamp_collect','souvenir_drop',
-    'mini_rainbow','bird_flock','single_meteor',
-    'seasonal_petite','quick_next_bonus','photo_mode'
-  ];
-  const id = types[Math.floor(Math.random()*types.length)];
-  runMicroEvent(id);
-}
-
-function runMicroEvent(id){
-  const sky = $('#sky'), land = $('#land');
-  switch(id){
-    case 'mini_fireworks':
-      miniCelebrate(20); toast('よくできました！小花火があがった🎇'); break;
-
-    case 'balloon_rain':
-      for(let i=0;i<15;i++) addSkyObj('🎈','obj',sky,{top:'-6%',left:(5+Math.random()*90)+'%',animation:'fall 2.5s linear forwards'});
-      toast('風船が舞い降りた🎈'); break;
-
-    case 'confetti_swirl':
-      for(let i=0;i<20;i++){
-        const s=document.createElement('div'); s.className='confetti'; s.textContent=['✨','⭐','💫'][i%3];
-        s.style.left=(50+(Math.cos(i/3)*25))+'%'; s.style.top=(-5)+'%'; s.style.animationDuration=(1.6+Math.random()*0.8)+'s';
-        $('#celebration').appendChild(s);
-      }
-      $('#celebration').style.display='block'; setTimeout(()=>{$('#celebration').style.display='none';},1600);
-      toast('紙吹雪がくるくる✨'); break;
-
-    case 'mini_parade':
-      for(let i=0;i<6;i++) addLandObj(i%2?'🥁':'👯‍♀️','obj slow',land,{bottom:'24%',left:(110+i*6)+'%'});
-      toast('小さなパレードが通った🥁'); break;
-
-    case 'sunbreak':
-      addSkyObj('☀️','obj',sky,{top:'6%',left:'8%'}); toast('雲間からひかり☀️'); break;
-
-    case 'cleanup': {
-      const city=loadCity()||defaultCityState(); city.counts.ruins=Math.max(0,city.counts.ruins-1); saveCity(city);
-      renderCity(); toast('お掃除隊が街をきれいに🧹'); break;
-    }
-    case 'tree_volunteer': {
-      const city=loadCity()||defaultCityState(); city.counts.trees+=1; saveCity(city);
-      renderCity(); toast('ボランティアが木を植えた🌱'); break;
-    }
-    case 'road_fix':
-      addLandObj('🚧','obj',land,{bottom:'20%',left:'50%'}); setTimeout(()=>renderCity(), 4000);
-      toast('道路補修が行われた🛠️'); break;
-
-    case 'stamp_collect':
-      addDailyStamp(); toast('記念スタンプを獲得🗂️'); break;
-
-    case 'souvenir_drop':
-      addLandObj('🧧','obj',land,{bottom:'26%',left:(10+Math.random()*80)+'%'}); toast('お土産を見つけた！🧧'); break;
-
-    case 'mini_rainbow':
-      addSkyObj('🌈','obj',sky,{top:'10%',left:'12%'}); toast('小さな虹が出た🌈'); break;
-
-    case 'bird_flock':
-      for(let i=0;i<8;i++) addSkyObj('🐦','obj bird',sky,{top:(8+Math.random()*20)+'%',left:'-10%'}); toast('渡り鳥が飛んできた🐦'); break;
-
-    case 'single_meteor':
-      addSkyObj('🌠','obj',sky,{top:'14%',left:'-10%',animation:'plane 8s linear infinite'}); toast('流れ星！🌠'); break;
-
-    case 'seasonal_petite':
-      // 季節の小ネタだけ一発表示
-      const flg=getSeasonalFlags();
-      if(flg.isHalloween) { addLandObj('🕯️','obj',land,{left:'20%',bottom:'26%'}); toast('ハロウィンの灯りがともった🎃'); }
-      else if(flg.isChristmas){ addLandObj('🧑‍🎄','obj',land,{left:'78%',bottom:'28%'}); toast('サンタ？の影が…🎄'); }
-      else if(flg.isNewYear){ addLandObj('🎍','obj',land,{left:'50%',bottom:'28%'}); toast('門松が置かれた🎍'); }
-      else if(flg.isNewFiscal){ addSkyObj('🌸','obj',sky,{top:'12%',left:'18%',animation:'fall 2.2s linear forwards'}); toast('花びらがひらり🌸'); }
-      break;
-
-    case 'quick_next_bonus':
-      showQuickBonusHint(); toast('次を1時間以内にできれば特別演出！⏱️'); break;
-
-    case 'photo_mode':
-      showPhotoCTA(); toast('今日の街を記念撮影📸'); break;
-  }
-}
-
-// 簡単なスタンプ棚（設定タブの末尾にリスト表示）
-const LS_STAMPS = 'MEDCITY_stamps_v1';
-function addDailyStamp(){
-  const stamps = load(LS_STAMPS, []);
-  const today = todayStr();
-  if(stamps.find(s=>s.date===today)) return; // 同日1回
-  const pool = ['🐈','🐕','🌸','⭐','🍀','🚄','🎏','🧸','🌈','🪁','🎈','🎁','🧧'];
-  const icon = pool[Math.floor(Math.random()*pool.length)];
-  stamps.push({date:today, icon});
-  save(LS_STAMPS, stamps);
-  renderStampShelf();
-}
-function renderStampShelf(){
-  const sec = document.querySelector('#settings .card');
-  if(!sec) return;
-  let shelf = document.getElementById('stampShelf');
-  if(!shelf){
-    shelf = document.createElement('div');
-    shelf.id='stampShelf';
-    shelf.className='small';
-    shelf.style.marginTop='10px';
-    sec.appendChild(shelf);
-  }
-  const stamps = load(LS_STAMPS, []);
-  shelf.innerHTML = 'スタンプ：' + (stamps.map(s=>s.icon).join(' ') || '（まだありません）');
-}
-
-// “次を1時間以内に”のヒントUI（簡易）
-function showQuickBonusHint(){
-  let bar = document.getElementById('quickBonus');
-  if(bar) return;
-  bar = document.createElement('div');
-  bar.id='quickBonus';
-  Object.assign(bar.style,{position:'fixed',left:'12px',right:'12px',bottom:'12px',background:'#fff',border:'1px solid #e5e7eb',boxShadow:'0 6px 20px #0002',borderRadius:'12px',padding:'8px 12px',zIndex:50,fontSize:'13px'});
-  bar.textContent='次のスロットを1時間以内に完了すると特別演出が出るよ⏱️';
-  document.body.appendChild(bar);
-  setTimeout(()=>{ bar.style.opacity='0'; bar.style.transition='opacity .6s'; setTimeout(()=>bar.remove(), 600); }, 8000);
-}
-
-// 簡易写真モード（UIキャプチャ案内だけ）
-function showPhotoCTA(){
-  let btn = document.getElementById('photoCTA');
-  if(btn) return;
-  btn = document.createElement('button');
-  btn.id='photoCTA';
-  btn.textContent='📸 スクショしてシェア';
-  Object.assign(btn.style,{position:'fixed',right:'12px',bottom:'12px',background:'#185adb',color:'#fff',border:'none',padding:'10px 12px',borderRadius:'12px',boxShadow:'0 6px 20px #0003',zIndex:60});
-  btn.addEventListener('click', ()=>{
-    alert('端末のスクリーンショット機能で保存してください（iPhone: サイド+音量UP）');
-  });
-  document.body.appendChild(btn);
-  setTimeout(()=>{ if(btn) btn.remove(); }, 12000);
-}
+/* ========= ここまで 2/3 ブロック目 ========= */
+<!-- ========= ここから 3/3 ブロック目 ========= -->
 
 /* ========= Tabs ========= */
 $$('.tab button').forEach(btn=>btn.addEventListener('click', ()=>{
   $$('.tab button').forEach(b=>b.classList.remove('active')); btn.classList.add('active');
   const t = btn.dataset.tab; $$('.view').forEach(v=>v.style.display='none'); $('#'+t).style.display='block';
   if(t==='home') renderCity();
-  if(t==='settings') renderStampShelf();
 }));
 
 /* ========= Settings ========= */
@@ -1163,7 +1087,7 @@ $('#saveSettings').addEventListener('click', ()=>{
   recomputeStreak(); renderAll();
 });
 
-// リセット（設定と記録を初期化：起点=今日、終点=1週間後、freqクリア＋街＆スタンプも初期化）
+// リセット（設定と記録を初期化：起点=今日、終点=1週間後、freqクリア＋街も初期化）
 $('#resetAll').addEventListener('click', ()=>{
   if(!confirm('設定と記録を初期化し、起点を今日・終点を1週間後に仮設定します。よろしいですか？')) return;
   const newSettings = {
@@ -1174,9 +1098,7 @@ $('#resetAll').addEventListener('click', ()=>{
   save(LS_SETTINGS, newSettings);
   save(LS_LOG, {});
   save(LS_META, {streak:0,bestStreak:0,seed:Math.floor(Math.random()*1e9)});
-  localStorage.removeItem(LS_STAMPS);
-  renderStampShelf();
-  saveCity(defaultCityState()); // 街もリセット
+  saveCity(defaultCityState());
 
   // 設定タブへ
   $$('.tab button').forEach(b=>b.classList.remove('active'));
@@ -1208,15 +1130,26 @@ function toggleDone(slot){
   save(LS_LOG, log);
 
   if(!before && log[d][slot]){
+    // 服薬成功時の演出
     const meta = load(LS_META,{seed:1,streak:0,bestStreak:0});
     meta.seed = (meta.seed||1) + 3;
     save(LS_META, meta);
+
     miniCelebrate(12);
-    // 服薬都度、期間正規化ターゲットへ同期し即描画
+
+    // 保存型の街をターゲットへ少し寄せる
     const city = loadCity() || defaultCityState();
     syncCityToProgress(city);
-    // ★ 1/3でミニイベント
-    if (Math.random() < 1/3) triggerMicroEvent();
+
+    // ミニイベントは renderAll() の後フレームで発火（消されない）
+    const fire = window.__microEventForce || (Math.random() < 1/3);
+    if (fire) requestAnimationFrame(()=> triggerMicroEvent());
+
+    // レア建造物の解放抽選（25%）
+    if (Math.random() < 0.25) tryUnlockRareLandmark('complete');
+
+    // 🐔 ニワトリ物語：完了時にランダム進行
+    checkChickenStoryEvent('complete');
   }
 
   recomputeStreak();
@@ -1229,9 +1162,9 @@ function recomputeStreak(){
   const s = load(LS_SETTINGS,{}); if(!s?.startDate) return;
   const enabled = ['m','n','e'].filter(k=>s.freq[k]);
   const log = load(LS_LOG,{});
-  let streak=0; const today = new Date();
+  let streak=0; const now = new Date();
   for(let i=0;i<3650;i++){
-    const d = new Date(today.getFullYear(),today.getMonth(),today.getDate()-i);
+    const d = new Date(now.getFullYear(),now.getMonth(),now.getDate()-i);
     const key = todayStr(d);
     const rec = log[key];
     const ok = rec && enabled.every(k=>rec[k]);
@@ -1257,7 +1190,6 @@ loadSettingsUI();
 recomputeStreak();
 renderAll();
 checkFinishCelebration();
-renderStampShelf();
 
 // 20秒ごとに軽く更新（ホーム表示時）
 setInterval(()=>{
@@ -1265,7 +1197,7 @@ setInterval(()=>{
   if(homeShown) renderCity();
 }, 20*1000);
 
-/* ===== iPhone/PWA向け：0:00ロールオーバー検知 ===== */
+/* ===== 2:00 ロールオーバー検知 ===== */
 function getDayKey(){ return todayStr(); }
 function refreshIfDayChanged(){
   const nowKey = getDayKey();
@@ -1276,7 +1208,7 @@ function refreshIfDayChanged(){
     renderAll();
   }
 }
-function scheduleNextRolloverTick(hour=0){
+function scheduleNextRolloverTick(hour=2){
   const now = new Date();
   const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 1, 0); // +1秒
   if (now >= target) target.setDate(target.getDate()+1);
@@ -1292,13 +1224,15 @@ document.addEventListener('visibilitychange', ()=> { if (document.visibilityStat
 window.addEventListener('focus', refreshIfDayChanged);
 window.addEventListener('pageshow', refreshIfDayChanged);
 window.addEventListener('orientationchange', refreshIfDayChanged);
-scheduleNextRolloverTick(0);
+scheduleNextRolloverTick(2);
 
 // iOSスタンドアロン時は1分ハートビート
 const isIOSStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
 if (isIOSStandalone){
   setInterval(()=> { if (document.visibilityState==='visible') refreshIfDayChanged(); }, 60*1000);
 }
+
 </script>
 </body>
 </html>
+<!-- ========= ここまで 3/3 ブロック目 ========= -->
