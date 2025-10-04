@@ -18,7 +18,7 @@ header .bar{max-width:880px;margin:0 auto;padding:10px 12px;display:flex;gap:8px
 .title{display:flex;align-items:center;gap:10px;font-weight:700}
 .badge{font-size:12px;color:#fff;background:var(--accent);padding:3px 8px;border-radius:999px}
 .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-select,button{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:10px;padding:8px 10px;font-weight:600}
+select,button{border:1px solid var(--line);background:#fff;color:#0f172a;border-radius:10px;padding:8px 10px;font-weight:600}
 button.primary{background:var(--accent);color:#fff;border-color:transparent}
 button.ghost{background:#fff}
 #gameWrap{max-width:880px;margin:10px auto;padding:10px}
@@ -42,6 +42,8 @@ button.ghost{background:#fff}
 .toast{position:absolute;left:50%;top:18%;transform:translate(-50%,0);background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;box-shadow:0 10px 20px rgba(0,0,0,.1);display:none;z-index:7}
 .toast.show{display:block}
 .hitFX{position:absolute;pointer-events:none;z-index:5;font-size:28px}
+/* 紙吹雪 */
+.confetti{position:absolute;width:8px;height:12px;border-radius:2px;opacity:.95;pointer-events:none;z-index:8}
 .board{height:70vh;max-height:720px;min-height:480px}
 @media (max-width:480px){ .board{height:72vh;min-height:420px} }
 </style>
@@ -49,7 +51,7 @@ button.ghost{background:#fff}
 <body>
   <header>
     <div class="bar">
-      <div class="title">🚗 ゆるドライブ <span class="badge">v3</span></div>
+      <div class="title">🚗 ゆるドライブ <span class="badge">v3.1</span></div>
       <div class="controls">
         <label>モード
           <select id="modeSelect" title="モード選択">
@@ -105,7 +107,8 @@ button.ghost{background:#fff}
   const btnRestart = document.getElementById('btnRestart');
   const btnAgain = document.getElementById('btnAgain');
 
-  const EMOJI = { cone:'🚧', rock:'🪨', box:'📦' };
+  // 追加：🌳木オブジェクト、効果音、紙吹雪
+  const EMOJI = { cone:'🚧', rock:'🪨', box:'📦', tree:'🌳' };
 
   const DIGIT_JA = ['ゼロ','いち','に','さん','よん','ご','ろく','なな','はち','きゅう'];
 
@@ -113,22 +116,106 @@ button.ghost{background:#fff}
     running:false, paused:false,
     carX:0.5, carTargetX:0.5, carYRatio:0.82,
     speed:110, speedMax:170,
-    spawnMin:700, spawnMax:1200, spawnCd:0,
+    // 出現バランス微調整：ややテンポアップ
+    spawnMin:600, spawnMax:1100, spawnCd:0,
+    medalProb:0.5, // メダル出現（0.45→0.5へ）
     objs:[], lastT:0,
     score:0, medals:0,
     timeLeft:60.0,
     mode:'kids',
-    invul:0
+    invul:0,
+    combo:0  // 連続メダル用
   };
+
+  // ====== 効果音（WebAudioで合成、外部ファイル不要） ======
+  let audioCtx = null;
+  function ensureAudio(){
+    if(!audioCtx){
+      try{ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ audioCtx = null; }
+    }
+    return !!audioCtx;
+  }
+  function beep({type='sine', f1=880, f2=1320, dur=0.18, gain=0.05}={}){
+    if(!ensureAudio()) return;
+    const ctx = audioCtx;
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f1, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(f2, ctx.currentTime+dur*0.7);
+    g.gain.value = gain;
+    g.gain.setValueAtTime(gain, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+dur);
+    o.connect(g).connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime+dur);
+  }
+  function thud({f=110, dur=0.2, gain=0.08}={}){
+    if(!ensureAudio()) return;
+    const ctx = audioCtx;
+    const o = ctx.createOscillator();
+    const n = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type='sine'; n.type='triangle';
+    o.frequency.setValueAtTime(f, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(60, ctx.currentTime+dur);
+    n.frequency.setValueAtTime(f*0.5, ctx.currentTime);
+    n.frequency.exponentialRampToValueAtTime(40, ctx.currentTime+dur);
+    g.gain.value=gain;
+    g.gain.setValueAtTime(gain, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+dur);
+    o.connect(g); n.connect(g); g.connect(ctx.destination);
+    o.start(); n.start(); o.stop(ctx.currentTime+dur); n.stop(ctx.currentTime+dur);
+  }
+  function playSnd(kind){
+    if(kind==='medal'){ // チャリン系2音
+      beep({type:'sine', f1:1000, f2:1600, dur:0.12, gain:0.05});
+      setTimeout(()=>beep({type:'triangle', f1:800, f2:1400, dur:0.10, gain:0.045}), 60);
+    }else if(kind==='hit'){
+      thud({f:140, dur:0.22, gain:0.085});
+    }else if(kind==='confetti'){
+      beep({type:'square', f1:900, f2:1100, dur:0.08, gain:0.035});
+    }
+  }
+
+  // ====== 紙吹雪（小／大） ======
+  function rand(min,max){ return min + Math.random()*(max-min); }
+  function confettiBurst({count=40, big=false}={}){
+    const rect = board.getBoundingClientRect();
+    for(let i=0;i<count;i++){
+      const s = document.createElement('div');
+      s.className='confetti';
+      const x = rand(0, rect.width);
+      const y = big ? rand(-20, 20) : rand(40, 120);
+      s.style.left = x + 'px';
+      s.style.top  = y + 'px';
+      // ランダム色
+      const colors = ['#e74c3c','#f1c40f','#2ecc71','#3498db','#9b59b6','#e67e22','#1abc9c'];
+      s.style.background = colors[Math.floor(Math.random()*colors.length)];
+      s.style.transform = `rotate(${Math.floor(rand(-30,30))}deg)`;
+      board.appendChild(s);
+      const dy = rect.height + rand(80,160);
+      const dx = rand(-80,80);
+      const rot = rand(180, 720);
+      s.animate([
+        {transform:`translate(0,0) rotate(0deg)`, opacity:1},
+        {transform:`translate(${dx}px, ${dy}px) rotate(${rot}deg)`, opacity:0.9}
+      ], {duration: rand(1200, 2200), easing:'cubic-bezier(.2,.6,.2,1)'}).onfinish = ()=> s.remove();
+    }
+    playSnd('confetti');
+  }
+
+  function smallConfetti(){ confettiBurst({count:36, big:false}); }
+  function bigConfetti(){ confettiBurst({count:180, big:true}); }
 
   function reset(){
     state.running=false; state.paused=false; state.lastT=0;
     state.carX=0.5; state.carTargetX=0.5;
     state.speed = (modeSelect.value==='kids'?110:120);
     state.speedMax = (modeSelect.value==='kids'?170:190);
-    state.spawnMin = 700; state.spawnMax = 1200; state.spawnCd=0;
+    state.spawnMin = 600; state.spawnMax = 1100; state.spawnCd=0;
+    state.medalProb = 0.5;
     state.objs.length=0; world.innerHTML='';
-    state.score=0; state.medals=0; state.timeLeft=60.0; state.invul=0;
+    state.score=0; state.medals=0; state.timeLeft=60.0; state.invul=0; state.combo=0;
     state.mode = modeSelect.value;
     overlay.classList.remove('show');
     updateHUD();
@@ -151,12 +238,13 @@ button.ghost{background:#fff}
 
   function spawn(){
     const xRatio = 0.08 + Math.random()*0.84; // 8%〜92%
-    const isObstacle = Math.random() < 0.55;
-    if(isObstacle){
+    const isMedal = Math.random() < state.medalProb;
+    if(!isMedal){
+      // 障害物（🚧📦🪨🌳）
       const p = Math.random();
-      const type = p<0.6 ? 'cone' : (p<0.85? 'box' : 'rock');
+      const type = p<0.4 ? 'cone' : (p<0.7? 'box' : (p<0.88?'rock':'tree'));
       const el = document.createElement('div');
-      el.className='obj'; el.textContent = (type==='cone'? EMOJI.cone : type==='box'? EMOJI.box : EMOJI.rock);
+      el.className='obj'; el.textContent = (type==='cone'? EMOJI.cone : type==='box'? EMOJI.box : type==='rock'? EMOJI.rock : EMOJI.tree);
       el.dataset.type=type;
       world.appendChild(el);
       const o = { el, type, xRatio, y:-30 };
@@ -179,9 +267,21 @@ button.ghost{background:#fff}
 
   function positionObj(o){ const w = board.clientWidth; o.el.style.left = (o.xRatio*w) + 'px'; o.el.style.top  = (o.y) + 'px'; }
 
-  function showToast(text='+1'){ toast.textContent=text; toast.classList.add('show'); setTimeout(()=>toast.classList.remove('show'), 450); }
+  // === PART SPLIT HERE ===  （後半はこの続きにそのまま貼り付け）
 
-  function speakDigit(d){ try{ const u=new SpeechSynthesisUtterance(DIGIT_JA[d]||String(d)); u.lang='ja-JP'; u.rate=1.0; speechSynthesis.speak(u);}catch(e){} }
+  function showToast(text='+1'){
+    toast.textContent=text;
+    toast.classList.add('show');
+    setTimeout(()=>toast.classList.remove('show'), 450);
+  }
+
+  function speakDigit(d){
+    try{
+      const u=new SpeechSynthesisUtterance(DIGIT_JA[d]||String(d));
+      u.lang='ja-JP'; u.rate=1.0;
+      speechSynthesis.speak(u);
+    }catch(e){}
+  }
 
   function showHitFX(){
     const fx = document.createElement('div'); fx.className='hitFX'; fx.textContent='💥';
@@ -189,20 +289,40 @@ button.ghost{background:#fff}
     fx.style.left = (rect.left - brect.left + rect.width/2) + 'px';
     fx.style.top  = (rect.top - brect.top) + 'px';
     board.appendChild(fx);
-    fx.animate([{transform:'translate(-50%,-50%) scale(1)',opacity:1},{transform:'translate(-50%,-20%) scale(1.6)',opacity:0}],{duration:500,easing:'ease-out'}).onfinish=()=>fx.remove();
-    carEl.animate([{transform:'translate(-50%,0)'},{transform:'translate(-50%,0) rotate(-3deg)'},{transform:'translate(-50%,0) rotate(3deg)'},{transform:'translate(-50%,0)'}],{duration:280});
+    fx.animate(
+      [{transform:'translate(-50%,-50%) scale(1)',opacity:1},
+       {transform:'translate(-50%,-20%) scale(1.6)',opacity:0}],
+      {duration:500,easing:'ease-out'}
+    ).onfinish=()=>fx.remove();
+    carEl.animate(
+      [{transform:'translate(-50%,0)'},
+       {transform:'translate(-50%,0) rotate(-3deg)'},
+       {transform:'translate(-50%,0) rotate(3deg)'},
+       {transform:'translate(-50%,0)'}],
+      {duration:280}
+    );
   }
 
   function onCollectMedal(o){
     state.medals++;
     state.score += o.digit; // 数字分を加算
+    state.combo++;
     showToast('+'+o.digit);
     speakDigit(o.digit);
+    playSnd('medal');
+
+    // 連続5回ごとに小紙吹雪
+    if(state.combo>0 && state.combo % 5 === 0){
+      smallConfetti();
+    }
   }
 
   function onHitObstacle(){
     if(state.invul>0) return;
-    showHitFX(); state.invul = 600; // 0.6s 無敵
+    state.combo = 0; // 連続取得リセット
+    showHitFX();
+    playSnd('hit');
+    state.invul = 600; // 0.6s 無敵
     if(state.mode!== 'kids') state.score = Math.max(0, state.score - 10);
     state.speed = Math.max(90, state.speed - 20);
   }
@@ -212,6 +332,8 @@ button.ghost{background:#fff}
     finalScoreEl.textContent=state.score;
     finalMedalsEl.textContent=state.medals;
     overlay.classList.add('show');
+    // ゴール時は盛大な紙吹雪
+    bigConfetti();
   }
 
   function loop(t){
@@ -238,7 +360,9 @@ button.ghost{background:#fff}
     const carX = carRect.left - brect.left + carRect.width/2; const carY = carRect.top - brect.top + carRect.height*0.2;
 
     for(const o of state.objs){
-      if(o._gone) continue; const ox = o.xRatio * board.clientWidth; const oy = o.y; const dx = Math.abs(ox - carX); const dy = Math.abs(oy - carY);
+      if(o._gone) continue;
+      const ox = o.xRatio * board.clientWidth; const oy = o.y;
+      const dx = Math.abs(ox - carX); const dy = Math.abs(oy - carY);
       if(dx < 26 && dy < 26){
         if(o.type==='medal') onCollectMedal(o); else onHitObstacle();
         o._gone=true; o.el.remove();
@@ -246,7 +370,11 @@ button.ghost{background:#fff}
     }
 
     // 掃除
-    state.objs = state.objs.filter(o=>{ if(o._gone) return false; if(o.y > board.clientHeight + 60){ o.el.remove(); return false; } return true; });
+    state.objs = state.objs.filter(o=>{
+      if(o._gone) return false;
+      if(o.y > board.clientHeight + 60){ o.el.remove(); return false; }
+      return true;
+    });
 
     // 緩やか加速と無敵減衰
     state.speed = Math.min(state.speedMax, state.speed + dt*6);
@@ -256,15 +384,24 @@ button.ghost{background:#fff}
     requestAnimationFrame(loop);
   }
 
-  function rand(a,b){ return a + Math.random()*(b-a); }
+  // 入力：タップ/クリック/ペン（初回でAudio解放）
+  function unlockAudioOnce(){ ensureAudio(); touchLayer.removeEventListener('pointerdown', unlockAudioOnce); }
+  touchLayer.addEventListener('pointerdown', unlockAudioOnce, {once:false});
 
-  // 入力：タップ/クリック/ペン
-  touchLayer.addEventListener('pointerdown',(e)=>{ const rect = board.getBoundingClientRect(); const x=(e.clientX-rect.left)/rect.width; state.carTargetX = clamp(x,0.05,0.95); });
-  touchLayer.addEventListener('pointermove',(e)=>{ if(e.pressure===0 && !e.buttons) return; const rect = board.getBoundingClientRect(); const x=(e.clientX-rect.left)/rect.width; state.carTargetX = clamp(x,0.05,0.95); });
+  touchLayer.addEventListener('pointerdown',(e)=>{
+    const rect = board.getBoundingClientRect();
+    const x=(e.clientX-rect.left)/rect.width; state.carTargetX = clamp(x,0.05,0.95);
+  });
+  touchLayer.addEventListener('pointermove',(e)=>{
+    if(e.pressure===0 && !e.buttons) return;
+    const rect = board.getBoundingClientRect();
+    const x=(e.clientX-rect.left)/rect.width; state.carTargetX = clamp(x,0.05,0.95);
+  });
 
   // キー
   window.addEventListener('keydown',(e)=>{
-    const step = 0.05; if(e.key==='ArrowLeft'){ state.carTargetX = clamp(state.carTargetX-step,0.05,0.95); e.preventDefault(); }
+    const step = 0.05;
+    if(e.key==='ArrowLeft'){ state.carTargetX = clamp(state.carTargetX-step,0.05,0.95); e.preventDefault(); }
     if(e.key==='ArrowRight'){ state.carTargetX = clamp(state.carTargetX+step,0.05,0.95); e.preventDefault(); }
     if(e.key===' '){ pause(); e.preventDefault(); }
   });
@@ -282,4 +419,3 @@ button.ghost{background:#fff}
 </script>
 </body>
 </html>
-
