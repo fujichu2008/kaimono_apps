@@ -629,9 +629,17 @@ function rateGph(){ return (profile.beta||0.15)*(profile.r||0.70)*(profile.weigh
 
 /* ========= 分解起点 ========= */
 function resolveDecompTargetDay(){
-  const t=todayKey(); const y=ymdJST(addDays(jstDateFromKey(t),-1));
-  if(logs[y])return y; if(logs[t])return t; return null;
+  const t = todayKey();
+  const y = ymdJST(addDays(jstDateFromKey(t), -1));
+  const yHas = !!logs[y];
+  const tHas = !!logs[t];
+
+  // ★前日が存在しても、締切（翌日13:00）を過ぎていたら採用しない
+  if (yHas && !isPastDecompDeadline(y)) return y;
+  if (tHas) return t;
+  return null;
 }
+
 function resolveStartTs(dayKey){
   if(!dayKey) return null;
   const m = meta[dayKey];
@@ -1059,14 +1067,25 @@ function openDayDetail(key){
 
 /* ========= リスク（BAC推定） ========= */
 function estimateBAC(){
-  const key=resolveDecompTargetDay(); if(!key) return { bn:0, bp:0, key:null };
-  const totalG = sumDay(key).g||0; const r=profile.r||0.70; const w=profile.weightKg||70; const betaEff=(profile.beta||0.15)*toleranceMult();
-  const st=resolveStartTs(key); if(!st) return { bn:0, bp:0, key };
-  const now=jstNow().getTime(); const t_h=Math.max(0,(now-st)/3600000);
+  // ★ computeRemain() と同じ対象日を使う（締切ロジックとズレないように）
+  const d = computeRemain();
+  const key = d.dayKey;
+  if(!key) return { bn:0, bp:0, key:null };
+
+  const totalG = sumDay(key).g||0;
+  const r=profile.r||0.70;
+  const w=profile.weightKg||70;
+  const betaEff=(profile.beta||0.15)*toleranceMult();
+  const st=resolveStartTs(key);
+  if(!st) return { bn:0, bp:0, key };
+
+  const now=jstNow().getTime();
+  const t_h=Math.max(0,(now-st)/3600000);
   const bn=Math.max(0,(totalG/(r*w)) - betaEff*t_h) * 0.1;  // g/dL
   const bp=Math.max(bn, ((totalG/(r*w)) - betaEff*1) * 0.1); // +1h
   return { bn, bp, key };
 }
+
 function assessRiskInline(){
   const { bn, bp } = estimateBAC(); const x=Math.max(bn,bp);
   if(x>=0.12 && x<0.16) showSnack('このペースだと記憶が曖昧になる恐れ。水分とペース調整を。');
@@ -1152,14 +1171,20 @@ document.getElementById('btn-self').addEventListener('click', ()=>{
 
 // 起点モーダル
 document.getElementById('kpi-startLabel').addEventListener('click', ()=>{
-  const day=resolveDecompTargetDay(); const md=meta[day]||{decompMode:'auto'};
+  // ★ 締切を考慮した対象日を優先、なければ「今日」を初期値に
+  const dRemain = computeRemain();
+  const day = dRemain.dayKey || todayKey();
+
+  const md = meta[day] || {decompMode:'auto'};
   document.querySelectorAll('input[name="startMode"]').forEach(r=> r.checked = (r.value === (md.decompMode||'auto')));
-  const dt=day? jstDateFromKey(day) : jstNow(); document.getElementById('in-start-date').value = ymdJST(dt);
-  const time=md.decompStartTs? new Date(md.decompStartTs): jstNow();
+  const dt = jstDateFromKey(day);
+  document.getElementById('in-start-date').value = ymdJST(dt);
+  const time = md.decompStartTs ? new Date(md.decompStartTs) : jstNow();
   document.getElementById('in-start-time').value = `${pad(time.getHours())}:${pad(time.getMinutes())}`;
   document.getElementById('manualArea').style.opacity = (md.decompMode==='manual')?1:0.5;
   document.getElementById('modal-start').style.display='flex';
 });
+
 document.querySelectorAll('input[name="startMode"]').forEach(r=>{
   r.addEventListener('change', ()=>{ document.getElementById('manualArea').style.opacity = (r.value==='manual')?1:0.5; });
 });
