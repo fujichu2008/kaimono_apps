@@ -135,54 +135,113 @@
       window.addEventListener(evt, ()=>sfx.resume(), {once:true, passive:true});
     });
 
-    // === BGM (procedural chip loop) ===
+    // === BGM (procedural chip loop with modes) ===
     const bgm = {
-      playing:false, gain:null, vol:0.06, tempo:120,
+      playing:false, gain:null, vol:0.06,
       _timer:null, _step:0, _ahead:0.12, _interval:25, _nextEventTime:0,
-      _pattern:[
-        [48,55],[null,null],[52,55],[null,null],[55,60],[null,null],[52,55],[null,null],
-        [44,51],[null,null],[48,51],[null,null],[51,56],[null,null],[48,51],[null,null],
-        [41,48],[null,null],[45,48],[null,null],[48,53],[null,null],[45,48],[null,null],
-        [43,50],[null,null],[47,50],[null,null],[50,55],[null,null],[47,50],[null,null],
-      ],
+      _mode:'normal',
+      _tempo:120,
+      _patterns:{
+        normal: [
+          [48,55],null,[52,55],null,[55,60],null,[52,55],null,
+          [44,51],null,[48,51],null,[51,56],null,[48,51],null,
+          [41,48],null,[45,48],null,[48,53],null,[45,48],null,
+          [43,50],null,[47,50],null,[50,55],null,[47,50],null,
+        ],
+        boss: [
+          [48,60],[55,67],[51,63],[55,67],[48,60],[55,67],[51,63],[55,67],
+          [46,58],[53,65],[49,61],[53,65],[46,58],[53,65],[49,61],[53,65],
+        ],
+        boss2: [
+          [48,60],[52,64],[55,67],[59,71],[55,67],[59,71],[62,74],[59,71],
+          [50,62],[53,65],[57,69],[60,72],[57,69],[60,72],[64,76],[60,72],
+        ]
+      },
+      _tempos:{ normal:120, boss:138, boss2:156 },
       _midiToFreq(n){ return 440 * Math.pow(2, (n-69)/12); },
-      _makeBeep(freq, t, dur=0.18){
+      _ensureNodes(){
+        if(!audioCtx) return;
+        if(!this.gain){ this.gain=audioCtx.createGain(); this.gain.gain.value=0.8; this.gain.connect(audioCtx.destination); }
+      },
+      _lead(freq, t, dur=0.18){
         if(!audioCtx) return;
         const osc=audioCtx.createOscillator(), amp=audioCtx.createGain();
-        osc.type='square'; osc.frequency.setValueAtTime(freq, t);
+        const type = this._mode==='normal' ? 'square' : (this._mode==='boss' ? 'sawtooth' : 'square');
+        osc.type=type; osc.frequency.setValueAtTime(freq, t);
         amp.gain.setValueAtTime(0.0001, t);
         amp.gain.exponentialRampToValueAtTime(this.vol, t+0.01);
         amp.gain.exponentialRampToValueAtTime(0.0001, t+dur);
         osc.connect(amp).connect(this.gain);
         osc.start(t); osc.stop(t+dur+0.01);
       },
-      _ensureNodes(){
-        if(!audioCtx) return;
-        if(!this.gain){ this.gain=audioCtx.createGain(); this.gain.gain.value=0.8; this.gain.connect(audioCtx.destination); }
+      _kick(t){
+        const osc=audioCtx.createOscillator(), amp=audioCtx.createGain();
+        osc.type='sine';
+        osc.frequency.setValueAtTime(180, t);
+        osc.frequency.exponentialRampToValueAtTime(50, t+0.09);
+        amp.gain.setValueAtTime(0.0001, t);
+        amp.gain.exponentialRampToValueAtTime(0.28, t+0.005);
+        amp.gain.exponentialRampToValueAtTime(0.0001, t+0.12);
+        osc.connect(amp).connect(this.gain);
+        osc.start(t); osc.stop(t+0.14);
       },
-      start(){
-        if(!audioCtx) return; this._ensureNodes(); if(this.playing) return;
-        this.playing=true; this._step=0;
-        const spb=60/this.tempo, step=spb/2;
+      _hat(t){
+        const dur=0.05;
+        const size=Math.floor((audioCtx.sampleRate||44100)*dur);
+        const buf=audioCtx.createBuffer(1,size,audioCtx.sampleRate);
+        const data=buf.getChannelData(0);
+        for(let i=0;i<size;i++) data[i]=Math.random()*2-1;
+        const src=audioCtx.createBufferSource(); src.buffer=buf;
+        const amp=audioCtx.createGain();
+        amp.gain.setValueAtTime(0.12, t);
+        amp.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+        src.connect(amp).connect(this.gain);
+        src.start(t); src.stop(t+dur+0.01);
+      },
+      _schedulePattern(startAt){
+        const spb=60/this._tempo, step=spb/2;
+        const pat=this._patterns[this._mode];
         const scheduler=()=>{
           if(!this.playing) return;
           const now=audioCtx.currentTime;
           while(this._nextEventTime < now + this._ahead){
-            const pat=this._pattern[this._step % this._pattern.length];
-            if(pat && pat[0]!=null){
-              this._makeBeep(this._midiToFreq(pat[0]), this._nextEventTime, 0.16);
-              this._makeBeep(this._midiToFreq(pat[1]), this._nextEventTime+0.02, 0.14);
+            const idx = this._step % pat.length;
+            const note = pat[idx];
+            if(note){
+              this._lead(this._midiToFreq(note[0]), this._nextEventTime, 0.15);
+              this._lead(this._midiToFreq(note[1]), this._nextEventTime+0.02, 0.13);
             }
-            this._step++; this._nextEventTime += step;
+            if(this._mode!=='normal'){
+              const beat = this._step % 8;
+              if(beat===0) this._kick(this._nextEventTime);
+              if(beat===2 || beat===4 || beat===6) this._hat(this._nextEventTime);
+            }
+            this._step++;
+            this._nextEventTime += step;
           }
           this._timer=setTimeout(scheduler, this._interval);
         };
-        const startAt=(audioCtx.currentTime||0)+0.05;
         this._nextEventTime=startAt;
         this._timer=setTimeout(scheduler, this._interval);
       },
+      start(){
+        if(!audioCtx) return; this._ensureNodes();
+        if(this.playing) return;
+        this.playing=true; this._step=0;
+        this._tempo = this._tempos[this._mode];
+        const startAt=(audioCtx.currentTime||0)+0.05;
+        this._schedulePattern(startAt);
+      },
       stop(){ this.playing=false; if(this._timer){ clearTimeout(this._timer); this._timer=null; } },
-      setMuted(mute){ this._ensureNodes(); if(!this.gain) return; this.gain.gain.setValueAtTime(mute?0:0.8, audioCtx.currentTime); }
+      setMuted(mute){ this._ensureNodes(); if(!this.gain) return; this.gain.gain.setValueAtTime(mute?0:0.8, audioCtx.currentTime); },
+      switchMode(mode){
+        if(!(mode in this._patterns)) return;
+        this._mode = mode;
+        this._tempo = this._tempos[mode];
+        if(!this.playing || !audioCtx) return;
+        this._step = 0;
+        this._nextEventTime = audioCtx.currentTime + 0.06;
+      }
     };
 
     // ===== Game State (paused on boot) =====
@@ -396,13 +455,20 @@
       lastEnemySpawn=Date.now(); lastPowerupSpawn=Date.now(); lastBombSpawn=Date.now();
       if(pause) bgm.stop();
     }
-    function startGame(){ gameState.running=true; gameState.startTime=Date.now(); gameStartTime=Date.now(); bgm.start(); }
+    function startGame(){ 
+      gameState.running=true; 
+      gameState.startTime=Date.now(); 
+      gameStartTime=Date.now(); 
+      bgm.switchMode('normal'); 
+      bgm.start(); 
+    }
 
     // --- Boss spawn / morph (2nd form) ---
     function spawnBoss(){
       if(gameState.score>=nextBossScore && !bossActive && !bossDefeated){
         bossActive=true; bossIsSecondForm=false; bossDying=false;
         boss={ x:canvas.width/2, y:-100, targetY:150, width:120, height:100, maxHealth:50, health:50, speed:3, direction:1, lastBombDrop:Date.now(), bombDropDelay:2000, phase:1, animationFrame:0 };
+        bgm.switchMode('boss'); // ← ボスBGMに切替
       }
     }
     function morphBossToSecondForm(){
@@ -412,10 +478,13 @@
       boss.width*=2; boss.height*=2;
       boss.maxHealth=120; boss.health=boss.maxHealth;
       boss.speed=4; boss.bombDropDelay=900; boss.phase=2;
+      bgm.switchMode('boss2'); // ← 第二形態でさらに激しく
       for(let j=0;j<80;j++){ particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*10,vy:(Math.random()-.5)*10,life:50,maxLife:50,color:`hsl(${(Math.random()*40+300)|0},100%,60%)`}); }
     }
 
     /* ---- ここから先は後半（2/2）で続きます：updateBoss / 衝突判定 / ループ / 起動 ---- */
+
+
     // --- Boss update & rendering (includes death flash & big explosion) ---
     function updateBoss(){
       if(!boss) return;
@@ -433,9 +502,11 @@
         // after 1s: explode
         if(now>=bossDeathFlashUntil){
           const blastRadius=Math.max(boss.width,boss.height);
+          // flashy particles
           for(let j=0;j<200;j++){
             particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*20,vy:(Math.random()-.5)*20,life:70,maxLife:70,color:`hsl(${Math.random()*360},100%,60%)`});
           }
+          // expanding rings up to 2x body
           for(let r=blastRadius;r<=blastRadius*2;r+=14){
             particles.push({x:boss.x,y:boss.y,vx:0,vy:0,life:24,maxLife:24,ring:true,ringR:r,color:'#FFFFFF'});
           }
@@ -739,4 +810,3 @@
   </script>
 </body>
 </html>
-
