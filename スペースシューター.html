@@ -161,7 +161,7 @@
       _stage:1,           // 1 | 2
       _tempo:120,
       _patterns:{
-        1:{ // -------- Stage 1 --------
+        1:{
           normal: [
             [48,55],null,[52,55],null,[55,60],null,[52,55],null,
             [44,51],null,[48,51],null,[51,56],null,[48,51],null,
@@ -178,7 +178,7 @@
           ],
           tempos:{normal:120, boss:138, boss2:180}
         },
-        2:{ // -------- Stage 2 (faster, tense) --------
+        2:{
           normal: [
             [50,57],null,[53,57],null,[55,62],null,[53,57],null,
             [47,54],null,[50,54],null,[52,59],null,[50,54],null,
@@ -338,6 +338,10 @@
       1:{ enemySpawnDelay:1000, bombSpawnDelay:6000, powerupSpawnDelay:8000, speedStep:0.10, speedCap:2.0, bgGradient:['#000428','#004e92'] },
       2:{ enemySpawnDelay:750,  bombSpawnDelay:4200, powerupSpawnDelay:7000, speedStep:0.15, speedCap:2.3, bgGradient:['#0d0318','#3b005e'] }
     };
+
+    // ★ ステージ内スコア（ステージ2はこれが500到達でボス出現）
+    let stageScore = 0;
+    const STAGE2_BOSS_SCORE = 500;
 
     const player = { x: innerWidth/2, y: innerHeight-100, width:40, height:50, speed:8, bullets:[], lastShot:0, shootDelay:200 };
 
@@ -732,6 +736,9 @@
       activePowerup.type=null; activePowerup.endTime=0; invincibleUntil=0;
       gameSpeed=1.0; gameStartTime=Date.now();
       bossIsSecondForm=false; bossDying=false; bossDeathFlashUntil=0; playerInvulnUntil=0;
+
+      stageScore = 0; // ★ ステージ内累積スコアをリセット
+
       document.getElementById('score').textContent=String(gameState.score);
       document.getElementById('lives').textContent=String(gameState.lives);
       document.getElementById('timer').textContent='3:00';
@@ -751,18 +758,24 @@
 
     // --- Boss spawn / morph (stage-aware) ---
     function spawnBoss(){
-      if(gameState.score>=nextBossScore && !bossActive && !bossDefeated){
-        bossActive=true; bossIsSecondForm=false; bossDying=false;
+      if(bossActive || bossDefeated) return;
 
-        if(currentStage===1){
-          // 既存の三角戦艦
-          boss={ type:'ship', x:canvas.width/2, y:-100, targetY:150, width:120, height:100, maxHealth:50, health:50, speed:3, direction:1, lastBombDrop:Date.now(), bombDropDelay:2000, phase:1, animationFrame:0 };
-        }else{
-          // タコ型ボス
-          boss={ type:'octo', x:canvas.width/2, y:-140, targetY:200, width:130, height:120, maxHealth:70, health:70, speed:3.2, direction:1, lastBombDrop:Date.now(), bombDropDelay:1600, phase:1, animationFrame:0, tent:8, rushCooldown:0 };
+      if(currentStage === 2){
+        // ★ ステージ2：このステージ内の獲得スコアが500に到達したら出現
+        if(stageScore >= STAGE2_BOSS_SCORE){
+          bossActive=true; bossIsSecondForm=false; bossDying=false;
+          boss={ type:'octo', x:canvas.width/2, y:-140, targetY:200, width:130, height:120, maxHealth:70, health:70,
+                 speed:3.2, direction:1, lastBombDrop:Date.now(), bombDropDelay:1600, phase:1, animationFrame:0, tent:8, rushCooldown:0 };
+          bgm.switchMode('boss');
         }
-
-        bgm.switchMode('boss'); // ボスBGMへ
+      }else{
+        // ステージ1：従来のスコアトリガー
+        if(gameState.score >= nextBossScore){
+          bossActive=true; bossIsSecondForm=false; bossDying=false;
+          boss={ type:'ship', x:canvas.width/2, y:-100, targetY:150, width:120, height:100, maxHealth:50, health:50,
+                 speed:3, direction:1, lastBombDrop:Date.now(), bombDropDelay:2000, phase:1, animationFrame:0 };
+          bgm.switchMode('boss');
+        }
       }
     }
 
@@ -785,13 +798,13 @@
       for(let j=0;j<90;j++){ particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*10,vy:(Math.random()-.5)*10,life:50,maxLife:50,color:`hsl(${(Math.random()*40+300)|0},100%,60%)`}); }
     }
 
-    /* ---- ここから先は後半（2/2）：updateBoss（ship/octo）/ 衝突判定（無敵＆装甲対応）/ ステージ遷移 goToNextStage() / メインループ / 起動 ---- */
+    /* ---- ここから先は後半（2/2）：updateBoss（ship/octo）/ 衝突判定（無敵＆装甲＆stageScore加算）/ ステージ遷移 goToNextStage() / メインループ / 起動 ---- */
 
-    // ===== Boss update & rendering (共通の死亡フラッシュ/爆発処理を先に) =====
+    // ===== Boss update & rendering（死亡フラッシュと爆発は共通処理） =====
     function updateBoss(){
       if(!boss) return;
 
-      // 1秒フラッシュ → 大爆発（どのタイプでも共通）
+      // 1秒フラッシュ → 大爆発
       if(bossDying){
         const now=Date.now();
 
@@ -805,13 +818,14 @@
           ctx.lineTo(boss.width/2,boss.height/2);
           ctx.lineTo(-boss.width/2,boss.height/2);
           ctx.closePath(); ctx.fill();
-        }else{
+        }else{ // octo
           ctx.beginPath(); ctx.arc(0,0,Math.max(boss.width,boss.height)/2,0,Math.PI*2); ctx.fill();
         }
         ctx.restore();
 
         if(now>=bossDeathFlashUntil){
-          const bodyR = Math.max(boss.width,boss.height)/2;
+          const bodyR=Math.max(boss.width,boss.height)/2;
+
           // カラフル爆散
           for(let j=0;j<220;j++){
             particles.push({
@@ -827,7 +841,7 @@
           }
           sfx.explosion('big');
 
-          // 爆風ダメージ（無敵なら無効）
+          // 爆風ダメージ（無敵は無効）
           const dx=player.x-boss.x, dy=player.y-boss.y, dist=Math.hypot(dx,dy);
           const damageRadius=bodyR;
           if(dist<=damageRadius && Date.now()>=invincibleUntil){
@@ -849,7 +863,7 @@
       if(boss.type==='ship') updateBossShip();
       else updateBossOcto();
 
-      // HPバー表示（共通）
+      // HPバー（共通）
       if(boss){
         const barW=300, barH=20, barX=canvas.width/2-barW/2, barY=50;
         ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(barX-5,barY-5,barW+10,barH+10);
@@ -874,7 +888,7 @@
       }
     }
 
-    // --- Boss: Stage1 ship type ---
+    // --- Boss: Stage1（戦艦） ---
     function updateBossShip(){
       if(!boss) return;
       boss.animationFrame+=.1;
@@ -888,7 +902,7 @@
         boss.x+=boss.direction*moveSpeed;
         if(boss.x<=boss.width/2 || boss.x>=canvas.width-boss.width/2) boss.direction*=-1;
 
-        // 第二形態は緩追尾
+        // 第二形態：緩追尾
         if(bossIsSecondForm){
           const towardX=Math.sign(player.x-boss.x);
           boss.x+=towardX*.8*boss.speed;
@@ -903,12 +917,9 @@
           let waveA=2, waveF=.05;
           if(boss.phase===2){waveA=4;waveF=.08;}
           else if(boss.phase===3){waveA=6;waveF=.12;}
-          bombs.push({
-            x:boss.x, y:boss.y+boss.height/2, width:35, height:35,
-            speed:3*gameSpeed, pulse:0,
-            waveAmplitude:waveA, waveFrequency:waveF, waveOffset:0,
-            isBossBomb:true
-          });
+          bombs.push({ x:boss.x, y:boss.y+boss.height/2, width:35, height:35,
+                       speed:3*gameSpeed, pulse:0, waveAmplitude:waveA, waveFrequency:waveF,
+                       waveOffset:0, isBossBomb:true });
           boss.lastBombDrop=now;
         }
       }
@@ -927,26 +938,24 @@
       else ctx.shadowColor='#8800FF';
 
       const pulse=Math.sin(boss.animationFrame)*5;
-      // 外装
       ctx.fillStyle = bossIsSecondForm?'#8B0000' : (boss.phase===3?'#8B0000' : (boss.phase===2?'#FF4500':'#4B0082'));
       ctx.beginPath(); ctx.moveTo(0,-boss.height/2); ctx.lineTo(boss.width/2,boss.height/2); ctx.lineTo(-boss.width/2,boss.height/2); ctx.closePath(); ctx.fill();
-      // コア
+
       ctx.fillStyle = bossIsSecondForm?'#FF2222' : (boss.phase===3?'#FF0000' : (boss.phase===2?'#FFA500':'#9370DB'));
       ctx.beginPath(); ctx.arc(0,0,30+pulse,0,Math.PI*2); ctx.fill();
-      // 目
+
       ctx.fillStyle='#FF0000'; ctx.beginPath(); ctx.arc(-20,-10,8,0,Math.PI*2); ctx.arc(20,-10,8,0,Math.PI*2); ctx.fill();
-      // ウィング
+
       ctx.fillStyle = bossIsSecondForm?'#B22222' : (boss.phase===3?'#B22222' : (boss.phase===2?'#FF6347':'#663399'));
       ctx.fillRect(-boss.width/2-10,0,10,30); ctx.fillRect(boss.width/2,0,10,30);
       ctx.restore();
     }
 
-    // --- Boss: Stage2 octopus type ---
+    // --- Boss: Stage2（タコ） ---
     function updateBossOcto(){
       if(!boss) return;
       boss.animationFrame+=.1;
 
-      // 入場して上半分あたりでうねりながらランダム上下＋横移動
       if(boss.y<boss.targetY){ boss.y+=2.2; }
       else{
         const t=boss.animationFrame;
@@ -956,16 +965,14 @@
         boss.x += boss.direction*(boss.speed + wobbleX);
         if(boss.x<=boss.width/2 || boss.x>=canvas.width-boss.width/2) boss.direction*=-1;
 
-        // 一定間隔で体当たりラッシュ（逃げ道ありの緩加速）
+        // 体当たりラッシュ
         const now=Date.now();
         if(!bossIsSecondForm){
           if(now>boss.rushCooldown){
-            // 30%でラッシュ
             if(Math.random()<0.3){
               boss.rushCooldown = now + 2200;
               const dir = Math.sign(player.x - boss.x) || (Math.random()<.5?-1:1);
-              const rushTime = 500;
-              boss._rushEnd = now + rushTime;
+              boss._rushEnd = now + 500;
               boss._rushVX  = dir * (4.2*gameSpeed);
               boss._rushVY  = 1.2*gameSpeed;
             }else{
@@ -979,7 +986,6 @@
             boss.y=Math.max(boss.height/2, Math.min(boss.targetY+80, boss.y));
           }
         }else{
-          // 第二形態：ラッシュ頻度UP
           if(now>boss.rushCooldown){
             boss.rushCooldown = now + 1100;
             const dir = Math.sign(player.x - boss.x) || (Math.random()<.5?-1:1);
@@ -995,21 +1001,20 @@
           }
         }
 
-        // 爆弾（タコ墨？通常弾）：船より頻度高め、蛇行弱め
+        // 墨弾（蛇行弱め・たまに2個）
         const dropDelay = boss.bombDropDelay;
         if(now-boss.lastBombDrop>dropDelay){
           bombs.push({
             x:boss.x+(Math.random()*40-20), y:boss.y+boss.height/2,
             width:35, height:35, speed:(3.2+Math.random()*0.6)*gameSpeed,
-            pulse:0, waveAmplitude: (bossIsSecondForm?4:2), waveFrequency:(bossIsSecondForm?0.1:0.06),
+            pulse:0, waveAmplitude:(bossIsSecondForm?4:2), waveFrequency:(bossIsSecondForm?0.1:0.06),
             waveOffset:Math.random()*Math.PI*2, isBossBomb:true
           });
-          // たまに2個同時
           if(Math.random()<0.35){
             bombs.push({
               x:boss.x+(Math.random()*40-20), y:boss.y+boss.height/2-30,
               width:35, height:35, speed:(3.2+Math.random()*0.6)*gameSpeed,
-              pulse:0, waveAmplitude: (bossIsSecondForm?4:2), waveFrequency:(bossIsSecondForm?0.1:0.06),
+              pulse:0, waveAmplitude:(bossIsSecondForm?4:2), waveFrequency:(bossIsSecondForm?0.1:0.06),
               waveOffset:Math.random()*Math.PI*2, isBossBomb:true
             });
           }
@@ -1017,45 +1022,39 @@
         }
       }
 
-      // フェーズ管理（HP割合）
+      // フェーズ管理
       const hpPct=boss.health/boss.maxHealth;
       if(hpPct<=.3 && boss.phase<3){ boss.phase=3; boss.bombDropDelay=800; }
       else if(hpPct<=.6 && boss.phase<2){ boss.phase=2; boss.bombDropDelay=1100; }
 
-      // 描画：丸胴＋触手
+      // 描画（胴体＋触手）
       ctx.save(); ctx.translate(boss.x,boss.y);
       const coreR = Math.max(40, boss.width*0.28);
-      // 胴体
       ctx.shadowBlur=25;
       ctx.shadowColor = bossIsSecondForm ? '#ff1e6e' : '#a000ff';
       ctx.fillStyle   = bossIsSecondForm ? '#7a0022' : '#3a005e';
       ctx.beginPath(); ctx.arc(0,0,coreR,0,Math.PI*2); ctx.fill();
 
-      // 目
       ctx.fillStyle='#ff3b3b';
       ctx.beginPath(); ctx.ellipse(-coreR*0.28,-coreR*0.18,8,10,0,0,Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.ellipse( coreR*0.28,-coreR*0.18,8,10,0,0,Math.PI*2); ctx.fill();
 
-      // コア発光
       const pulse=Math.sin(boss.animationFrame*1.2)*4;
       ctx.fillStyle = bossIsSecondForm ? '#ff2a7f' : '#b366ff';
       ctx.beginPath(); ctx.arc(0,0,18+pulse,0,Math.PI*2); ctx.fill();
 
-      // 触手（8本）サイン波
-      const tent = boss.tent||8;
+      const tent=boss.tent||8, segs=6;
       for(let i=0;i<tent;i++){
-        const ang = (i/tent)*Math.PI*2 + Math.sin(boss.animationFrame*0.4)*0.15;
-        const len = (bossIsSecondForm? 70:55) + Math.sin(boss.animationFrame*0.9 + i)*6;
-        const segs=6;
+        const ang=(i/tent)*Math.PI*2 + Math.sin(boss.animationFrame*0.4)*0.15;
+        const len=(bossIsSecondForm?70:55) + Math.sin(boss.animationFrame*0.9+i)*6;
         let px=0, py=coreR*0.6;
-        ctx.strokeStyle = bossIsSecondForm ? '#ff4f9a' : '#b380ff';
-        ctx.lineWidth = 4;
-        ctx.beginPath(); ctx.moveTo(px,py);
+        ctx.strokeStyle=bossIsSecondForm?'#ff4f9a':'#b380ff';
+        ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(px,py);
         for(let s=1;s<=segs;s++){
-          const t = s/segs;
-          const wob = Math.sin(boss.animationFrame*0.9 + i + t*3)* (bossIsSecondForm?10:7);
-          const nx = Math.cos(ang)*t*len + Math.cos(ang+Math.PI/2)*wob;
-          const ny = py + Math.sin(ang)*t*len + Math.sin(ang+Math.PI/2)*wob;
+          const t=s/segs;
+          const wob=Math.sin(boss.animationFrame*0.9 + i + t*3)*(bossIsSecondForm?10:7);
+          const nx=Math.cos(ang)*t*len + Math.cos(ang+Math.PI/2)*wob;
+          const ny=py + Math.sin(ang)*t*len + Math.sin(ang+Math.PI/2)*wob;
           ctx.lineTo(nx,ny);
         }
         ctx.stroke();
@@ -1063,9 +1062,9 @@
       ctx.restore();
     }
 
-    // ===== Collisions (無敵＆装甲対応) =====
+    // ===== Collisions（無敵＆装甲＆ステージ2のstageScore加算） =====
     function checkCollisions(){
-      // bullets × enemies（装甲HP・タイプ別スコア）
+      // bullets × enemies
       for(let i=player.bullets.length-1;i>=0;i--){
         const b=player.bullets[i];
         let hit=false;
@@ -1073,17 +1072,21 @@
           const e=enemies[j];
           if(b.x>e.x-e.width/2 && b.x<e.x+e.width/2 && b.y>e.y-e.height/2 && b.y<e.y+e.height/2){
             createExplosion(e.x,e.y);
-            e.health = (e.health||1) - 1;
+            e.health=(e.health||1)-1;
             if(e.health<=0){
               enemies.splice(j,1);
-              gameState.score += (e.score||10);
+              const gain=(e.score||10);
+              gameState.score += gain;
               document.getElementById('score').textContent=gameState.score;
+              // ★ ステ2のボス出現用：ステージ内の「獲得スコア」を加算（減点は加算しない）
+              if(currentStage===2 && !bossActive && !bossDefeated){
+                stageScore += gain;
+              }
               sfx.explosion('small');
             }else{
-              sfx.hit(); // 装甲ヒット
+              sfx.hit();
             }
-            hit=true;
-            break;
+            hit=true; break;
           }
         }
         if(hit){ player.bullets.splice(i,1); }
@@ -1107,15 +1110,15 @@
 
       // player × bombs
       for(let i=bombs.length-1;i>=0;i--){
-        const b=bombs[i];
-        const dx=player.x-b.x, dy=player.y-b.y, dist=Math.hypot(dx,dy);
-        if(dist<(player.width/2 + b.width/2)){
+        const bb=bombs[i];
+        const dx=player.x-bb.x, dy=player.y-bb.y, dist=Math.hypot(dx,dy);
+        if(dist<(player.width/2+bb.width/2)){
           for(let j=0;j<30;j++){
-            particles.push({x:b.x,y:b.y,vx:(Math.random()-.5)*12,vy:(Math.random()-.5)*12,life:50,maxLife:50,color:'#FF0000'});
+            particles.push({x:bb.x,y:bb.y,vx:(Math.random()-.5)*12,vy:(Math.random()-.5)*12,life:50,maxLife:50,color:'#FF0000'});
           }
           bombs.splice(i,1);
-
           if(Date.now()>=invincibleUntil){
+            // 減点は stageScore には影響させない
             gameState.score=Math.max(0, gameState.score-50);
             document.getElementById('score').textContent=gameState.score;
             gameState.lives--;
@@ -1127,14 +1130,14 @@
         }
       }
 
-      // player × powerups（shield追加）
+      // player × powerups（shield対応）
       for(let i=powerups.length-1;i>=0;i--){
         const p=powerups[i];
         const dx=player.x-p.x, dy=player.y-p.y, dist=Math.hypot(dx,dy);
         if(dist<(player.width/2+p.width/2)){
           if(p.type==='shield'){
-            invincibleUntil = Date.now()+6000; // 6秒無敵
-            activePowerup.type=null; activePowerup.endTime=0; // 表示はリング演出
+            invincibleUntil=Date.now()+6000; // 6秒無敵
+            activePowerup.type=null; activePowerup.endTime=0; // 表示はリングで
             sfx.powerupShield();
           }else{
             activePowerup.type=p.type; activePowerup.endTime=Date.now()+5000; sfx.powerup();
@@ -1148,7 +1151,7 @@
       }
     }
 
-    // --- Boss collisions (bullets/body) ---
+    // --- Boss collisions（弾／体当たり） ---
     function checkBossCollisions(){
       if(!boss || boss.health<=0) return;
 
@@ -1156,12 +1159,12 @@
       for(let i=player.bullets.length-1;i>=0;i--){
         const bl=player.bullets[i];
         const dx=bl.x-boss.x, dy=bl.y-boss.y, dist=Math.hypot(dx,dy);
-        const hitR = (boss.type==='ship') ? boss.width/2 : Math.max(boss.width,boss.height)/2;
+        const hitR=(boss.type==='ship')?boss.width/2:Math.max(boss.width,boss.height)/2;
         if(dist<hitR){
           for(let j=0;j<5;j++){
             particles.push({
               x:bl.x,y:bl.y,
-              vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,
+              vx:(Math.random()-.5)*4, vy:(Math.random()-.5)*4,
               life:20,maxLife:20,
               color: bossIsSecondForm ? '#FF2222' : (boss.phase===3?'#FF0000':(boss.phase===2?'#FFA500':'#9370DB'))
             });
@@ -1174,24 +1177,23 @@
               morphBossToSecondForm();
               return;
             }else{
-              bossDying=true; sfx.flash(); bossDeathFlashUntil=Date.now()+1000;
+              bossDying=true; sfx.flash(); bossDeathFlashUntil=Date.now()+1000; // 1秒光る
               return;
             }
           }
         }
       }
 
-      // player × boss 体当たり（無敵なら無効／短い被弾無敵は playerInvuln）
+      // player × boss（体当たりダメージ・短期無敵）
       if(boss && !bossDying){
         const dx=player.x-boss.x, dy=player.y-boss.y, dist=Math.hypot(dx,dy);
-        const touchR = (boss.type==='ship') ? boss.width/2 : Math.max(boss.width,boss.height)/2;
-        if(dist<(player.width/2 + touchR)){
+        const touchR=(boss.type==='ship')?boss.width/2:Math.max(boss.width,boss.height)/2;
+        if(dist<(player.width/2+touchR)){
           const now=Date.now();
           if(now>playerInvulnUntil && now>=invincibleUntil){
             gameState.lives--; document.getElementById('lives').textContent=gameState.lives;
-            // ノックバック＆短い無敵
             player.x=canvas.width/2; player.y=canvas.height-120;
-            playerInvulnUntil=now+1000;
+            playerInvulnUntil=now+1000; // 1秒被弾無敵
             sfx.hit();
             if(navigator.vibrate) navigator.vibrate(120);
             if(gameState.lives<=0){ gameOver(); return; }
@@ -1200,22 +1202,18 @@
       }
     }
 
-    // ===== Stage transition =====
+    // ===== Stage transition（1→2） =====
     function goToNextStage(){
-      // トランジション表示
       const panel=document.getElementById('stagePanel');
       panel.style.display='flex';
       panel.style.opacity='0';
-      panel.offsetHeight; // reflow
+      panel.offsetHeight;
       panel.style.transition='opacity 250ms ease';
       panel.style.opacity='1';
 
-      // 少し待ってからステージ2開始
       setTimeout(()=>{
         bgm.stop();
-        // スコア・ライフ持ち越しでステージ2リセット
-        resetAndPause(false, /*stage*/2);
-        // パネルを少し残してフェードアウト
+        resetAndPause(false, /*stage*/2); // ライフ/スコアは持ち越し、stageScoreは0へ
         setTimeout(()=>{
           panel.style.opacity='0';
           setTimeout(()=>{ panel.style.display='none'; }, 250);
@@ -1248,11 +1246,11 @@
         }
 
         spawnEnemy();
-        spawnBoss();
+        spawnBoss();      // ★ ステージ2は stageScore>=500 で出現
         spawnPowerup();
         spawnBomb();
 
-        // パワーアップHUD（無敵はリング表示でわかるのでHUDは火力系のみ）
+        // パワーアップHUD（無敵はリング表示のみ／HUDは火力系のみ）
         const now=Date.now();
         const ps=document.getElementById('powerupStatus');
         if(activePowerup.type && now<activePowerup.endTime){
@@ -1287,4 +1285,5 @@
   </script>
 </body>
 </html>
+
 
