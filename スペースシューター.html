@@ -135,12 +135,13 @@
       window.addEventListener(evt, ()=>sfx.resume(), {once:true, passive:true});
     });
 
-    // === BGM (procedural chip loop with modes) ===
+    /* === BGM (procedural chip loop with modes: normal / boss / boss2-metal) === */
     const bgm = {
       playing:false, gain:null, vol:0.06,
       _timer:null, _step:0, _ahead:0.12, _interval:25, _nextEventTime:0,
       _mode:'normal',
       _tempo:120,
+
       _patterns:{
         normal: [
           [48,55],null,[52,55],null,[55,60],null,[52,55],null,
@@ -152,95 +153,170 @@
           [48,60],[55,67],[51,63],[55,67],[48,60],[55,67],[51,63],[55,67],
           [46,58],[53,65],[49,61],[53,65],[46,58],[53,65],[49,61],[53,65],
         ],
+        // 第二形態：16分で緊張感UP（ルート＋5度）
         boss2: [
-          [48,60],[52,64],[55,67],[59,71],[55,67],[59,71],[62,74],[59,71],
-          [50,62],[53,65],[57,69],[60,72],[57,69],[60,72],[64,76],[60,72],
+          [48,55],[null,null],[50,57],[null,null],[51,58],[null,null],[53,60],[null,null],
+          [55,62],[null,null],[56,63],[null,null],[58,65],[null,null],[60,67],[null,null],
         ]
       },
-      _tempos:{ normal:120, boss:138, boss2:156 },
-      _midiToFreq(n){ return 440 * Math.pow(2, (n-69)/12); },
+
+      _tempos:{ normal:120, boss:138, boss2:180 },
+
+      _midiToFreq(n){ return 440 * Math.pow(2,(n-69)/12); },
+
+      _makeDistortionCurve(amount=260){
+        const n=44100, curve=new Float32Array(n), deg=Math.PI/180;
+        for(let i=0;i<n;i++){ const x=i*2/n-1; curve[i]=(3+amount)*x*20*deg/(Math.PI+amount*Math.abs(x)); }
+        return curve;
+      },
+
       _ensureNodes(){
         if(!audioCtx) return;
-        if(!this.gain){ this.gain=audioCtx.createGain(); this.gain.gain.value=0.8; this.gain.connect(audioCtx.destination); }
+        if(!this.gain){
+          this.gain = audioCtx.createGain();
+          this.gain.gain.value = 0.8;
+          this.gain.connect(audioCtx.destination);
+        }
       },
-      _lead(freq, t, dur=0.18){
+
+      _lead(freq,t,dur=0.16){
+        if(!audioCtx) return;
+        const osc=audioCtx.createOscillator();
+        const amp=audioCtx.createGain();
+        const type = this._mode==='normal' ? 'square' : (this._mode==='boss' ? 'sawtooth' : 'square');
+        osc.type=type; osc.frequency.setValueAtTime(freq,t);
+        const peak = this._mode==='boss2' ? this.vol*1.1 : this.vol;
+        amp.gain.setValueAtTime(0.0001,t);
+        amp.gain.exponentialRampToValueAtTime(peak,t+0.01);
+        amp.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+        osc.connect(amp);
+
+        let last=amp;
+        if(this._mode==='boss2'){
+          const sh=audioCtx.createWaveShaper();
+          sh.curve=this._makeDistortionCurve(260); sh.oversample='2x';
+          last.connect(sh); last=sh;
+        }
+        last.connect(this.gain);
+        osc.start(t); osc.stop(t+dur+0.02);
+      },
+
+      _bass(freq,t,dur=0.10){
         if(!audioCtx) return;
         const osc=audioCtx.createOscillator(), amp=audioCtx.createGain();
-        const type = this._mode==='normal' ? 'square' : (this._mode==='boss' ? 'sawtooth' : 'square');
-        osc.type=type; osc.frequency.setValueAtTime(freq, t);
-        amp.gain.setValueAtTime(0.0001, t);
-        amp.gain.exponentialRampToValueAtTime(this.vol, t+0.01);
-        amp.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+        osc.type='square'; osc.frequency.setValueAtTime(freq,t);
+        amp.gain.setValueAtTime(0.0001,t);
+        amp.gain.exponentialRampToValueAtTime(this.vol*0.9,t+0.008);
+        amp.gain.exponentialRampToValueAtTime(0.0001,t+dur);
         osc.connect(amp).connect(this.gain);
         osc.start(t); osc.stop(t+dur+0.01);
       },
+
       _kick(t){
         const osc=audioCtx.createOscillator(), amp=audioCtx.createGain();
         osc.type='sine';
-        osc.frequency.setValueAtTime(180, t);
-        osc.frequency.exponentialRampToValueAtTime(50, t+0.09);
-        amp.gain.setValueAtTime(0.0001, t);
-        amp.gain.exponentialRampToValueAtTime(0.28, t+0.005);
-        amp.gain.exponentialRampToValueAtTime(0.0001, t+0.12);
+        osc.frequency.setValueAtTime(190,t);
+        osc.frequency.exponentialRampToValueAtTime(50,t+0.08);
+        amp.gain.setValueAtTime(0.0001,t);
+        amp.gain.exponentialRampToValueAtTime(0.30,t+0.004);
+        amp.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
         osc.connect(amp).connect(this.gain);
         osc.start(t); osc.stop(t+0.14);
       },
-      _hat(t){
-        const dur=0.05;
-        const size=Math.floor((audioCtx.sampleRate||44100)*dur);
-        const buf=audioCtx.createBuffer(1,size,audioCtx.sampleRate);
-        const data=buf.getChannelData(0);
+
+      _snare(t){
+        const dur=0.12, sr=audioCtx.sampleRate||44100, size=Math.floor(sr*dur);
+        const buf=audioCtx.createBuffer(1,size,sr), data=buf.getChannelData(0);
         for(let i=0;i<size;i++) data[i]=Math.random()*2-1;
         const src=audioCtx.createBufferSource(); src.buffer=buf;
-        const amp=audioCtx.createGain();
-        amp.gain.setValueAtTime(0.12, t);
-        amp.gain.exponentialRampToValueAtTime(0.0001, t+dur);
-        src.connect(amp).connect(this.gain);
+        const bpf=audioCtx.createBiquadFilter(); bpf.type='bandpass'; bpf.frequency.setValueAtTime(1800,t); bpf.Q.value=0.8;
+        const hp=audioCtx.createBiquadFilter(); hp.type='highpass'; hp.frequency.setValueAtTime(700,t);
+        const amp=audioCtx.createGain(); amp.gain.setValueAtTime(0.22,t); amp.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+        src.connect(bpf).connect(hp).connect(amp).connect(this.gain);
+        src.start(t); src.stop(t+dur+0.02);
+      },
+
+      _hat(t){
+        const dur=0.04, sr=audioCtx.sampleRate||44100, size=Math.floor(sr*dur);
+        const buf=audioCtx.createBuffer(1,size,sr), data=buf.getChannelData(0);
+        for(let i=0;i<size;i++) data[i]=Math.random()*2-1;
+        const src=audioCtx.createBufferSource(); src.buffer=buf;
+        const hp=audioCtx.createBiquadFilter(); hp.type='highpass'; hp.frequency.setValueAtTime(5000,t);
+        const amp=audioCtx.createGain(); amp.gain.setValueAtTime(0.12,t); amp.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+        src.connect(hp).connect(amp).connect(this.gain);
         src.start(t); src.stop(t+dur+0.01);
       },
+
       _schedulePattern(startAt){
-        const spb=60/this._tempo, step=spb/2;
         const pat=this._patterns[this._mode];
+        const spb=60/this._tempo;
+        const step=(this._mode==='boss2') ? spb/4 : spb/2; // boss2は16分
+
         const scheduler=()=>{
           if(!this.playing) return;
           const now=audioCtx.currentTime;
+
           while(this._nextEventTime < now + this._ahead){
-            const idx = this._step % pat.length;
-            const note = pat[idx];
+            const idx=this._step % pat.length;
+            const note=pat[idx];
+
             if(note){
-              this._lead(this._midiToFreq(note[0]), this._nextEventTime, 0.15);
-              this._lead(this._midiToFreq(note[1]), this._nextEventTime+0.02, 0.13);
+              this._lead(this._midiToFreq(note[0]), this._nextEventTime, this._mode==='boss2'?0.12:0.15);
+              this._lead(this._midiToFreq(note[1]), this._nextEventTime+0.02, this._mode==='boss2'?0.10:0.13);
             }
-            if(this._mode!=='normal'){
-              const beat = this._step % 8;
+
+            if(this._mode==='boss'){
+              const beat=this._step % 8;
               if(beat===0) this._kick(this._nextEventTime);
               if(beat===2 || beat===4 || beat===6) this._hat(this._nextEventTime);
+            }else if(this._mode==='boss2'){
+              const s=this._step % 16;
+              this._kick(this._nextEventTime);                     // 16分ダブルキック風
+              if(s===4 || s===12) this._snare(this._nextEventTime); // 2拍/4拍裏
+              if(s%2===1) this._hat(this._nextEventTime);           // オフ拍ハット
+
+              const root = note ? note[0] : 48;
+              const bassMidi = root-12;
+              this._bass(this._midiToFreq(bassMidi), this._nextEventTime, 0.09);
             }
+
             this._step++;
             this._nextEventTime += step;
           }
           this._timer=setTimeout(scheduler, this._interval);
         };
+
         this._nextEventTime=startAt;
         this._timer=setTimeout(scheduler, this._interval);
       },
+
       start(){
         if(!audioCtx) return; this._ensureNodes();
         if(this.playing) return;
         this.playing=true; this._step=0;
-        this._tempo = this._tempos[this._mode];
+        this._tempo=this._tempos[this._mode];
         const startAt=(audioCtx.currentTime||0)+0.05;
         this._schedulePattern(startAt);
       },
-      stop(){ this.playing=false; if(this._timer){ clearTimeout(this._timer); this._timer=null; } },
-      setMuted(mute){ this._ensureNodes(); if(!this.gain) return; this.gain.gain.setValueAtTime(mute?0:0.8, audioCtx.currentTime); },
+
+      stop(){
+        this.playing=false;
+        if(this._timer){ clearTimeout(this._timer); this._timer=null; }
+      },
+
+      setMuted(mute){
+        this._ensureNodes(); if(!this.gain) return;
+        this.gain.gain.setValueAtTime(mute?0:0.8, audioCtx.currentTime);
+      },
+
+      // 'normal' | 'boss' | 'boss2'
       switchMode(mode){
         if(!(mode in this._patterns)) return;
-        this._mode = mode;
-        this._tempo = this._tempos[mode];
+        this._mode=mode;
+        this._tempo=this._tempos[mode];
         if(!this.playing || !audioCtx) return;
-        this._step = 0;
-        this._nextEventTime = audioCtx.currentTime + 0.06;
+        this._step=0;
+        this._nextEventTime=audioCtx.currentTime+0.06;
       }
     };
 
@@ -455,12 +531,12 @@
       lastEnemySpawn=Date.now(); lastPowerupSpawn=Date.now(); lastBombSpawn=Date.now();
       if(pause) bgm.stop();
     }
-    function startGame(){ 
-      gameState.running=true; 
-      gameState.startTime=Date.now(); 
-      gameStartTime=Date.now(); 
-      bgm.switchMode('normal'); 
-      bgm.start(); 
+    function startGame(){
+      gameState.running=true;
+      gameState.startTime=Date.now();
+      gameStartTime=Date.now();
+      bgm.switchMode('normal'); // 通常BGMから開始
+      bgm.start();
     }
 
     // --- Boss spawn / morph (2nd form) ---
@@ -468,7 +544,7 @@
       if(gameState.score>=nextBossScore && !bossActive && !bossDefeated){
         bossActive=true; bossIsSecondForm=false; bossDying=false;
         boss={ x:canvas.width/2, y:-100, targetY:150, width:120, height:100, maxHealth:50, health:50, speed:3, direction:1, lastBombDrop:Date.now(), bombDropDelay:2000, phase:1, animationFrame:0 };
-        bgm.switchMode('boss'); // ← ボスBGMに切替
+        bgm.switchMode('boss'); // ボスBGMへ
       }
     }
     function morphBossToSecondForm(){
@@ -478,45 +554,55 @@
       boss.width*=2; boss.height*=2;
       boss.maxHealth=120; boss.health=boss.maxHealth;
       boss.speed=4; boss.bombDropDelay=900; boss.phase=2;
-      bgm.switchMode('boss2'); // ← 第二形態でさらに激しく
+      bgm.switchMode('boss2'); // 第二形態でさらに激しく
       for(let j=0;j<80;j++){ particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*10,vy:(Math.random()-.5)*10,life:50,maxLife:50,color:`hsl(${(Math.random()*40+300)|0},100%,60%)`}); }
     }
 
     /* ---- ここから先は後半（2/2）で続きます：updateBoss / 衝突判定 / ループ / 起動 ---- */
-
-
     // --- Boss update & rendering (includes death flash & big explosion) ---
     function updateBoss(){
       if(!boss) return;
 
-      // Dying flash (1s) -> huge explosion
+      // 残り1秒の発光 → 大爆発
       if(bossDying){
         const now=Date.now();
-        // bright white flash body
+
+        // 眩しい白フラッシュのボディ
         ctx.save(); ctx.translate(boss.x,boss.y);
         ctx.shadowBlur=60; ctx.shadowColor='#FFFFFF'; ctx.globalAlpha=.85;
         ctx.fillStyle='#FFFFFF';
-        ctx.beginPath(); ctx.moveTo(0,-boss.height/2); ctx.lineTo(boss.width/2,boss.height/2); ctx.lineTo(-boss.width/2,boss.height/2); ctx.closePath(); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(0,-boss.height/2);
+        ctx.lineTo(boss.width/2,boss.height/2);
+        ctx.lineTo(-boss.width/2,boss.height/2);
+        ctx.closePath(); ctx.fill();
         ctx.restore();
 
-        // after 1s: explode
+        // フラッシュ終了で大爆発
         if(now>=bossDeathFlashUntil){
           const blastRadius=Math.max(boss.width,boss.height);
-          // flashy particles
-          for(let j=0;j<200;j++){
-            particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*20,vy:(Math.random()-.5)*20,life:70,maxLife:70,color:`hsl(${Math.random()*360},100%,60%)`});
+
+          // ド派手粒子
+          for(let j=0;j<220;j++){
+            particles.push({
+              x:boss.x, y:boss.y,
+              vx:(Math.random()-.5)*22, vy:(Math.random()-.5)*22,
+              life:70, maxLife:70,
+              color:`hsl(${Math.random()*360},100%,60%)`
+            });
           }
-          // expanding rings up to 2x body
-          for(let r=blastRadius;r<=blastRadius*2;r+=14){
+          // 体の2倍まで広がるリング
+          for(let r=blastRadius; r<=blastRadius*2; r+=14){
             particles.push({x:boss.x,y:boss.y,vx:0,vy:0,life:24,maxLife:24,ring:true,ringR:r,color:'#FFFFFF'});
           }
           sfx.explosion('big');
 
-          // explosion damage (radius = boss body size)
+          // 爆風ダメージ（半径＝ボス本体サイズ）
           const dx=player.x-boss.x, dy=player.y-boss.y, dist=Math.hypot(dx,dy);
           const damageRadius=blastRadius;
           if(dist<=damageRadius){
-            gameState.lives--; gameState.score=Math.max(0, gameState.score-200);
+            gameState.lives--;
+            gameState.score=Math.max(0, gameState.score-200);
             document.getElementById('lives').textContent=gameState.lives;
             document.getElementById('score').textContent=gameState.score;
             if(navigator.vibrate) navigator.vibrate(200);
@@ -526,43 +612,43 @@
           boss=null; bossActive=false; bossIsSecondForm=false; bossDying=false;
           gameClear('boss');
         }
-        return; // during flash, stop further logic
+        return; // フラッシュ中は他の処理止める
       }
 
       if(boss.health<=0) return;
 
       boss.animationFrame+=.1;
 
-      // enter screen
+      // 画面内へ降下
       if(boss.y<boss.targetY){
         boss.y+=2;
       }else{
-        // horizontal movement by phase
+        // フェーズに応じた横移動
         let moveSpeed=boss.speed;
         if(boss.phase===2) moveSpeed*=2;
         if(boss.phase===3) moveSpeed*=3;
         boss.x+=boss.direction*moveSpeed;
 
-        // bounce on edges
+        // 端で反転
         if(boss.x<=boss.width/2 || boss.x>=canvas.width-boss.width/2){
           boss.direction*=-1;
         }
 
-        // second-form pressure: gentle tracking and vertical wobble
+        // 第二形態：緩い追尾＋縦揺れ
         if(bossIsSecondForm){
           const towardX=Math.sign(player.x-boss.x);
-          boss.x+=towardX*.8*boss.speed;
-          boss.y+=Math.sin(boss.animationFrame*.5)*.8;
+          boss.x+=towardX*.9*boss.speed;
+          boss.y+=Math.sin(boss.animationFrame*.55)*.9;
           boss.x=Math.max(boss.width/2, Math.min(canvas.width-boss.width/2, boss.x));
           boss.y=Math.max(boss.height/2, Math.min(boss.targetY+40, boss.y));
         }
 
-        // drop boss bombs (wavy)
+        // 爆弾投下（蛇行）
         const now=Date.now();
         if(now-boss.lastBombDrop>boss.bombDropDelay){
           let waveA=2, waveF=.05;
-          if(boss.phase===2){waveA=4;waveF=.08;}
-          else if(boss.phase===3){waveA=6;waveF=.12;}
+          if(boss.phase===2){ waveA=4; waveF=.08; }
+          else if(boss.phase===3){ waveA=6; waveF=.12; }
           bombs.push({
             x:boss.x, y:boss.y+boss.height/2,
             width:35, height:35, speed:3*gameSpeed, pulse:0,
@@ -573,12 +659,12 @@
         }
       }
 
-      // phase shift thresholds
+      // フェーズ変更
       const hpPct=boss.health/boss.maxHealth;
-      if(hpPct<=.3 && boss.phase<3){ boss.phase=3; boss.bombDropDelay=1000; }
-      else if(hpPct<=.6 && boss.phase<2){ boss.phase=2; boss.bombDropDelay=1500; }
+      if(hpPct<=.3 && boss.phase<3){ boss.phase=3; boss.bombDropDelay=900; }
+      else if(hpPct<=.6 && boss.phase<2){ boss.phase=2; boss.bombDropDelay=1300; }
 
-      // draw boss
+      // ボス描画
       ctx.save(); ctx.translate(boss.x,boss.y);
       ctx.shadowBlur=30;
       if(bossIsSecondForm) ctx.shadowColor='#FF2222';
@@ -588,25 +674,25 @@
 
       const pulse=Math.sin(boss.animationFrame)*5;
 
-      // hull
+      // 外装
       ctx.fillStyle = bossIsSecondForm?'#8B0000' : (boss.phase===3?'#8B0000' : (boss.phase===2?'#FF4500':'#4B0082'));
       ctx.beginPath(); ctx.moveTo(0,-boss.height/2); ctx.lineTo(boss.width/2,boss.height/2); ctx.lineTo(-boss.width/2,boss.height/2); ctx.closePath(); ctx.fill();
 
-      // core
+      // コア
       ctx.fillStyle = bossIsSecondForm?'#FF2222' : (boss.phase===3?'#FF0000' : (boss.phase===2?'#FFA500':'#9370DB'));
       ctx.beginPath(); ctx.arc(0,0,30+pulse,0,Math.PI*2); ctx.fill();
 
-      // eyes
+      // 目
       ctx.fillStyle='#FF0000';
       ctx.beginPath(); ctx.arc(-20,-10,8,0,Math.PI*2); ctx.arc(20,-10,8,0,Math.PI*2); ctx.fill();
 
-      // wings
+      // ウイング
       ctx.fillStyle = bossIsSecondForm?'#B22222' : (boss.phase===3?'#B22222' : (boss.phase===2?'#FF6347':'#663399'));
       ctx.fillRect(-boss.width/2-10,0,10,30);
       ctx.fillRect(boss.width/2,0,10,30);
       ctx.restore();
 
-      // HP bar
+      // HPバー
       const barW=300, barH=20, barX=canvas.width/2-barW/2, barY=50;
       ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(barX-5,barY-5,barW+10,barH+10);
       ctx.fillStyle='#333'; ctx.fillRect(barX,barY,barW,barH);
@@ -716,11 +802,11 @@
 
           if(boss.health<=0){
             if(!bossIsSecondForm){
-              // morph to 2nd form
+              // 第二形態に変身
               morphBossToSecondForm();
               return;
             }else{
-              // start dying flash
+              // 1秒フラッシュ開始 → 大爆発
               bossDying=true;
               sfx.flash();
               bossDeathFlashUntil=Date.now()+1000;
@@ -730,14 +816,15 @@
         }
       }
 
-      // player × boss body (ramming)
+      // player × boss 体当たり（無敵時間付き）
       if(boss && !bossDying){
         const dx=player.x-boss.x, dy=player.y-boss.y, dist=Math.hypot(dx,dy);
         if(dist<(player.width/2 + boss.width/2)){
           const now=Date.now();
           if(now>playerInvulnUntil){
-            gameState.lives--; document.getElementById('lives').textContent=gameState.lives;
-            // knockback + brief invuln
+            gameState.lives--;
+            document.getElementById('lives').textContent=gameState.lives;
+            // ノックバック＆短い無敵
             player.x=canvas.width/2; player.y=canvas.height-120;
             playerInvulnUntil=now+1000;
             sfx.hit();
@@ -750,7 +837,7 @@
 
     // --- Main loop ---
     function gameLoop(){
-      // clear with subtle trail
+      // うっすら残像
       ctx.fillStyle='rgba(0, 4, 40, .3)';
       ctx.fillRect(0,0,canvas.width,canvas.height);
 
@@ -767,6 +854,7 @@
             player.x=Math.max(player.width/2, Math.min(canvas.width-player.width/2, player.x));
             player.y=Math.max(player.height/2, Math.min(canvas.height-player.height/2, player.y));
           }
+          // 自動射撃
           shoot();
         }
 
@@ -775,7 +863,7 @@
         spawnPowerup();
         spawnBomb();
 
-        // powerup HUD
+        // パワーアップHUD
         const now=Date.now();
         const ps=document.getElementById('powerupStatus');
         if(activePowerup.type && now<activePowerup.endTime){
@@ -804,9 +892,10 @@
       requestAnimationFrame(gameLoop);
     }
 
-    // boot: show title, pause; then render loop
+    // 起動：タイトル表示＆一時停止 → ループ開始
     resetAndPause(true);
     gameLoop();
   </script>
 </body>
 </html>
+
