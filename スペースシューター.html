@@ -11,7 +11,7 @@
     body{overflow:hidden;background:#000;font-family:Arial,Helvetica,sans-serif;touch-action:none}
     #gameCanvas{display:block;background:linear-gradient(to bottom,#000428,#004e92);margin:0 auto;touch-action:none}
     #ui{position:absolute;top:20px;left:20px;color:#fff;font-size:24px;text-shadow:2px 2px 4px rgba(0,0,0,.8);z-index:10;pointer-events:none}
-    #powerupStatus{position:absolute;top:20px;right:20px;color:#fff;font-size:20px;text-shadow:2px 2px 4px rgba(0,0,0,.8);z-index:10;pointer-events:none;background:rgba(0,0,0,.5);padding:10px 20px;border-radius:10px;display:none}
+    #powerupStatus{position:absolute;top:20px;right:140px;color:#fff;font-size:20px;text-shadow:2px 2px 4px rgba(0,0,0,.8);z-index:10;pointer-events:none;background:rgba(0,0,0,.5);padding:10px 20px;border-radius:10px;display:none}
     #gameOver{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.9);padding:40px 60px;border-radius:20px;text-align:center;color:#fff;display:none;z-index:20}
     #gameOver h1{font-size:48px;margin-bottom:20px;color:#ff4444}
     #gameOver p{font-size:32px;margin-bottom:30px}
@@ -28,6 +28,14 @@
     .starfield{position:absolute;inset:0;pointer-events:none;overflow:hidden}
     .dot{position:absolute;width:3px;height:3px;border-radius:50%;background:#bdf4ff;opacity:.8;animation:twinkle 2.2s infinite ease-in-out}
     @keyframes twinkle{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+
+    /* BGMミュートボタン */
+    #muteBtn{
+      position:absolute; top:20px; right:20px; z-index:15;
+      font: 12px 'Press Start 2P', monospace; padding:10px 12px;
+      border-radius:10px; border:none; cursor:pointer;
+      background:#222; color:#9ee7ff; box-shadow:0 0 8px rgba(0,200,255,.3);
+    }
   </style>
 </head>
 <body>
@@ -47,6 +55,8 @@
     <div>時間: <span id="timer">3:00</span></div>
   </div>
   <div id="powerupStatus"></div>
+  <button id="muteBtn">BGM: ON</button>
+
   <div id="gameOver">
     <h1>ゲームオーバー</h1>
     <p>最終スコア: <span id="finalScore">0</span></p>
@@ -125,6 +135,56 @@
       window.addEventListener(evt, ()=>sfx.resume(), {once:true, passive:true});
     });
 
+    // === BGM (procedural chip loop) ===
+    const bgm = {
+      playing:false, gain:null, vol:0.06, tempo:120,
+      _timer:null, _step:0, _ahead:0.12, _interval:25, _nextEventTime:0,
+      _pattern:[
+        [48,55],[null,null],[52,55],[null,null],[55,60],[null,null],[52,55],[null,null],
+        [44,51],[null,null],[48,51],[null,null],[51,56],[null,null],[48,51],[null,null],
+        [41,48],[null,null],[45,48],[null,null],[48,53],[null,null],[45,48],[null,null],
+        [43,50],[null,null],[47,50],[null,null],[50,55],[null,null],[47,50],[null,null],
+      ],
+      _midiToFreq(n){ return 440 * Math.pow(2, (n-69)/12); },
+      _makeBeep(freq, t, dur=0.18){
+        if(!audioCtx) return;
+        const osc=audioCtx.createOscillator(), amp=audioCtx.createGain();
+        osc.type='square'; osc.frequency.setValueAtTime(freq, t);
+        amp.gain.setValueAtTime(0.0001, t);
+        amp.gain.exponentialRampToValueAtTime(this.vol, t+0.01);
+        amp.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+        osc.connect(amp).connect(this.gain);
+        osc.start(t); osc.stop(t+dur+0.01);
+      },
+      _ensureNodes(){
+        if(!audioCtx) return;
+        if(!this.gain){ this.gain=audioCtx.createGain(); this.gain.gain.value=0.8; this.gain.connect(audioCtx.destination); }
+      },
+      start(){
+        if(!audioCtx) return; this._ensureNodes(); if(this.playing) return;
+        this.playing=true; this._step=0;
+        const spb=60/this.tempo, step=spb/2;
+        const scheduler=()=>{
+          if(!this.playing) return;
+          const now=audioCtx.currentTime;
+          while(this._nextEventTime < now + this._ahead){
+            const pat=this._pattern[this._step % this._pattern.length];
+            if(pat && pat[0]!=null){
+              this._makeBeep(this._midiToFreq(pat[0]), this._nextEventTime, 0.16);
+              this._makeBeep(this._midiToFreq(pat[1]), this._nextEventTime+0.02, 0.14);
+            }
+            this._step++; this._nextEventTime += step;
+          }
+          this._timer=setTimeout(scheduler, this._interval);
+        };
+        const startAt=(audioCtx.currentTime||0)+0.05;
+        this._nextEventTime=startAt;
+        this._timer=setTimeout(scheduler, this._interval);
+      },
+      stop(){ this.playing=false; if(this._timer){ clearTimeout(this._timer); this._timer=null; } },
+      setMuted(mute){ this._ensureNodes(); if(!this.gain) return; this.gain.gain.setValueAtTime(mute?0:0.8, audioCtx.currentTime); }
+    };
+
     // ===== Game State (paused on boot) =====
     let gameState = { running:false, score:0, lives:3, startTime:Date.now(), gameTimeLimit:180000 };
     const player = { x: innerWidth/2, y: innerHeight-100, width:40, height:50, speed:8, bullets:[], lastShot:0, shootDelay:200 };
@@ -157,6 +217,16 @@
     document.getElementById('restartBtn').addEventListener('click', ()=>{
       sfx.click();
       resetAndPause(false); startGame();
+    });
+
+    // BGMミュートボタン
+    const muteBtn = document.getElementById('muteBtn');
+    let bgmMuted = false;
+    muteBtn.addEventListener('click', ()=>{
+      bgmMuted = !bgmMuted;
+      bgm.setMuted(bgmMuted);
+      muteBtn.textContent = 'BGM: ' + (bgmMuted ? 'OFF' : 'ON');
+      sfx.click();
     });
 
     // --- Draw player ---
@@ -297,8 +367,21 @@
     }
 
     // --- Game Over / Clear ---
-    function gameOver(){ sfx.gameover(); gameState.running=false; document.getElementById('finalScore').textContent=gameState.score; document.getElementById('gameOver').style.display='block'; }
-    function gameClear(reason){ sfx.clear(); gameState.running=false; const panel=document.getElementById('gameOver'); const h=panel.querySelector('h1'); h.textContent='ゲームクリア!🎉'; h.style.color='#4CAF50'; const p=panel.querySelector('p'); p.innerHTML=(reason==='boss'?`ボス撃破!<br>最終スコア: <span id="finalScore">${gameState.score}</span>`:`3分生存達成!<br>最終スコア: <span id="finalScore">${gameState.score}</span>`); panel.style.display='block'; }
+    function gameOver(){
+      bgm.stop(); sfx.gameover();
+      gameState.running=false;
+      document.getElementById('finalScore').textContent=gameState.score;
+      document.getElementById('gameOver').style.display='block';
+    }
+    function gameClear(reason){
+      bgm.stop(); sfx.clear();
+      gameState.running=false;
+      const panel=document.getElementById('gameOver');
+      const h=panel.querySelector('h1'); h.textContent='ゲームクリア!🎉'; h.style.color='#4CAF50';
+      const p=panel.querySelector('p');
+      p.innerHTML=(reason==='boss'?`ボス撃破!<br>最終スコア: <span id="finalScore">${gameState.score}</span>`:`3分生存達成!<br>最終スコア: <span id="finalScore">${gameState.score}</span>`);
+      panel.style.display='block';
+    }
 
     // --- Reset / Start helpers ---
     function resetAndPause(pause=true){
@@ -311,8 +394,9 @@
       document.getElementById('powerupStatus').style.display='none';
       const over=document.getElementById('gameOver'); over.style.display='none'; const h=over.querySelector('h1'); h.textContent='ゲームオーバー'; h.style.color='#ff4444'; over.querySelector('p').innerHTML='最終スコア: <span id="finalScore">0</span>';
       lastEnemySpawn=Date.now(); lastPowerupSpawn=Date.now(); lastBombSpawn=Date.now();
+      if(pause) bgm.stop();
     }
-    function startGame(){ gameState.running=true; gameState.startTime=Date.now(); gameStartTime=Date.now(); }
+    function startGame(){ gameState.running=true; gameState.startTime=Date.now(); gameStartTime=Date.now(); bgm.start(); }
 
     // --- Boss spawn / morph (2nd form) ---
     function spawnBoss(){
@@ -331,7 +415,7 @@
       for(let j=0;j<80;j++){ particles.push({x:boss.x,y:boss.y,vx:(Math.random()-.5)*10,vy:(Math.random()-.5)*10,life:50,maxLife:50,color:`hsl(${(Math.random()*40+300)|0},100%,60%)`}); }
     }
 
-    /* ---- ここから先は後半（2/2）で続きます：updateBoss / 衝突判定 / ループなど ---- */
+    /* ---- ここから先は後半（2/2）で続きます：updateBoss / 衝突判定 / ループ / 起動 ---- */
     // --- Boss update & rendering (includes death flash & big explosion) ---
     function updateBoss(){
       if(!boss) return;
@@ -655,3 +739,4 @@
   </script>
 </body>
 </html>
+
