@@ -25,7 +25,7 @@
   .board{
     position:relative;border:1px solid #243049;border-radius:16px;overflow:hidden;background:
       radial-gradient(1000px 400px at 50% 20%, rgba(255,255,255,.04), transparent 60%),
-      linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+      linear-gradient(180deg, var(--bg-top),var(--bg-bot));
     height:70vh;min-height:460px;touch-action:none;
   }
   canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
@@ -61,18 +61,25 @@
   .sub{font-size:12px;opacity:.65;letter-spacing:.35px;text-transform:uppercase}
 
   .floatText{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-weight:800;letter-spacing:1px;pointer-events:none;text-shadow:0 2px 10px rgba(0,0,0,.45)}
-  .ft-perfect{color:#fff}.ft-good{color:#cfe0ff}.ft-miss{color:#fda4af}
+  .ft-perfect{color:#fff}
+  .ft-good{color:#cfe0ff}
+  .ft-miss{color:#fda4af}
 
-  /* Ending credits (強化版) */
+  /* Ending credits 強化：常時背景アニメ＋手前スクロール */
   .creditsWrap{position:absolute;inset:0;display:none;align-items:flex-end;justify-content:center;pointer-events:none}
   .credits{width:min(700px,92%);max-height:82%;overflow:hidden;position:relative}
   .scroll{display:block;white-space:pre-line;line-height:1.9;letter-spacing:.6px;font-weight:800;text-align:center;text-shadow:0 2px 16px rgba(0,0,0,.65);animation:roll 30s linear forwards; filter: drop-shadow(0 6px 18px rgba(0,0,0,.6));}
-  .credits::after{ /* 上下フェードマスク */
+  .credits::after{
     content:""; position:absolute; inset:0;
     background:linear-gradient(180deg, rgba(0,0,0,.8), transparent 18%, transparent 82%, rgba(0,0,0,.8));
     pointer-events:none;
   }
   @keyframes roll{from{transform:translateY(100%)}to{transform:translateY(-108%)}}
+
+  /* 画面フラッシュ（コンボ演出） */
+  .flash{position:absolute;inset:0;background:rgba(255,255,255,.0);pointer-events:none}
+  .flash.show{animation:flashFx .45s ease}
+  @keyframes flashFx{0%{background:rgba(255,255,255,.0)}30%{background:rgba(255,255,255,.28)}100%{background:rgba(255,255,255,.0)}}
 
   @media (max-width:560px){.btn.wide{min-width:140px}}
 </style>
@@ -89,6 +96,7 @@
         <div class="badge">ACC: <span id="ac">100%</span></div>
         <div class="badge">WORLD: <span id="wp">0%</span></div>
         <div class="badge" id="modeBadge" style="display:none">MODE: <span>WA</span></div>
+        <div class="badge">VSF: <span id="vfxNow">-</span></div>
       </div>
     </div>
 
@@ -99,7 +107,6 @@
         <div class="chip">BPM: <strong id="bpmTxt">80</strong></div>
         <div class="chip">LANES: <strong id="lanesTxt">4</strong></div>
         <div class="chip">WINDOW: <strong>±50ms / ±150ms</strong></div>
-        <div class="chip">VFX: <strong id="vfxTxt">Fireworks / Wind / Waves / Aurora</strong></div>
       </div>
 
       <div class="hitLine"></div>
@@ -110,8 +117,9 @@
       </div>
 
       <div class="overlay" id="ov"><div class="card" id="card"></div></div>
+      <div class="flash" id="flashFx"></div>
 
-      <!-- Ending credits overlay（背景はCanvasアニメ、手前でスクロール） -->
+      <!-- Ending credits（背景＝Canvas、前面＝スクロール） -->
       <div class="creditsWrap" id="creditsWrap">
         <div class="credits"><div class="scroll" id="creditsText"></div></div>
       </div>
@@ -126,7 +134,7 @@
   // ====== Level / Mode ======
   let LEVEL = 1;
   const MAX_LEVEL = 5;
-  let isWaMode = false; // ★ Lv5で50%抽選
+  let isWaMode = false; // Lv2〜5で各50%抽選
 
   // ====== Constants ======
   const MAX_LANES = 5;
@@ -144,7 +152,6 @@
   let LANE_COUNT = 4;
   const SCALE4 = [261.63, 293.66, 329.63, 392.00];           // C D E G
   const SCALE5 = [246.94, 277.18, 329.63, 369.99, 440.0];    // B C# E F# A
-  // ★ 和風：YO音階（C D F G A）
   const SCALE4_WA = [261.63, 293.66, 349.23, 392.00];        // C D F G
   const SCALE5_WA = [261.63, 293.66, 349.23, 392.00, 440.00];// C D F G A
 
@@ -159,8 +166,10 @@
   const scEl = document.getElementById('sc'), coEl = document.getElementById('co'), acEl = document.getElementById('ac'), wpEl = document.getElementById('wp'), lvEl = document.getElementById('lv');
   const startBtn = document.getElementById('startBtn'), tapBtn = document.getElementById('tapBtn');
   const ov = document.getElementById('ov'), card = document.getElementById('card');
-  const bpmTxt = document.getElementById('bpmTxt'), lanesTxt = document.getElementById('lanesTxt'), vfxTxt = document.getElementById('vfxTxt'), modeBadge = document.getElementById('modeBadge');
+  const bpmTxt = document.getElementById('bpmTxt'), lanesTxt = document.getElementById('lanesTxt'), modeBadge = document.getElementById('modeBadge');
+  const vfxNow = document.getElementById('vfxNow');
   const creditsWrap = document.getElementById('creditsWrap'), creditsText = document.getElementById('creditsText');
+  const flashFx = document.getElementById('flashFx');
 
   // ====== Resize ======
   let DPR = window.devicePixelRatio || 1;
@@ -175,13 +184,16 @@
   // ====== State ======
   let audioCtx=null, masterGain=null;
   let layers={}, melodyBus=null, delayNode=null, panNodes=[];
-  let bgm=null, endingBgm=null;
+  let bgm=null;
   let particles=[], windStreaks=[], petals=[], lanterns=[];
   let running=false, endingMode=false;
 
   let chart=[], songStartTime=0, score=0, combo=0, hits=0, judgedCount=0;
   let unlockedIndex=-1, goodHitsForColor=0;
   let targetScore=8000;
+
+  // VSF検出補助
+  let fireworksActive=0, confettiActive=0, wavesActive=0, auroraActive=0, raysActive=0, seigaihaActive=0;
 
   // ====== Helpers ======
   const clamp=(v,min=0,max=1)=>Math.max(min,Math.min(max,v));
@@ -198,14 +210,13 @@
     NOTE_TRAVEL = Math.max(1.5, 2.0 - (LEVEL-1)*0.15);
     LANE_COUNT = (LEVEL>=3)?5:4;
 
-    // Lv5抽選
-    if(LEVEL===5){ isWaMode = Math.random() < 0.5; } else { isWaMode = false; }
-    // 表示
+    // ★ Lv2〜Lv5は各50%で和風（Lv1はモノクロ無BGM）
+    isWaMode = (LEVEL>=2) ? (Math.random()<0.5) : false;
+
     bpmTxt.textContent = Math.round(BPM);
     lanesTxt.textContent = LANE_COUNT;
     lvEl.textContent = LEVEL;
     modeBadge.style.display = isWaMode ? 'inline-block' : 'none';
-    vfxTxt.textContent = isWaMode ? 'Sakura / Gold Clouds / Seigaiha / Rays' : 'Fireworks / Wind / Waves / Aurora';
   }
 
   // ====== Lanes ======
@@ -249,20 +260,17 @@
   }
 
   function playLaneTone(time, lane){
-    // スケール切替
     const scale = isWaMode
       ? ((LANE_COUNT===4)?SCALE4_WA:SCALE5_WA)
       : ((LANE_COUNT===4)?SCALE4:SCALE5);
     const freq=scale[Math.max(0,Math.min(scale.length-1,lane))];
 
-    // 和風時は尺八風に少しブレスノイズ混ぜ、通常はシンプルシンセ
     const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
     f.type='lowpass'; f.frequency.value = isWaMode? (1600 + LEVEL*220) : (1800 + LEVEL*300);
     const lfo=audioCtx.createOscillator(), lg=audioCtx.createGain(); lfo.frequency.value=isWaMode? 5: (2+LEVEL*0.5); lg.gain.value=isWaMode? 6: (3+LEVEL*2);
     lfo.connect(lg).connect(o.frequency); lfo.start(time);
 
-    o.type = isWaMode ? 'sine' : 'sine';
-    o.frequency.value=freq;
+    o.type='sine'; o.frequency.value=freq;
     g.gain.setValueAtTime(0.0001,time);
     g.gain.exponentialRampToValueAtTime( (isWaMode?0.28:0.22)+LEVEL*0.02, time+0.015);
     g.gain.exponentialRampToValueAtTime(0.0001, time+ (isWaMode?0.6:0.45) );
@@ -271,7 +279,6 @@
     o.start(time); o.stop(time+(isWaMode?0.7:0.6));
 
     if(isWaMode){
-      // ブレスノイズ(尺八の息っぽさ)
       const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.2, audioCtx.sampleRate);
       const d=n.getChannelData(0); for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.02)); }
       const s=audioCtx.createBufferSource(); s.buffer=n;
@@ -280,7 +287,7 @@
     }
   }
 
-  // SFX by color
+  // SFX by color（和／洋切替）
   function colorSfx(t){
     const name=COLOR_ORDER[Math.max(0,unlockedIndex)]; if(!name) return;
     if(isWaMode){
@@ -308,7 +315,7 @@
   function lead(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter(); o.type='sine'; o.frequency.value=880+LEVEL*12; f.type='lowpass'; f.frequency.value=1800+LEVEL*120;
     g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.16+LEVEL*0.01,t+0.015); g.gain.exponentialRampToValueAtTime(0.0001,t+0.5); o.connect(f).connect(g).connect(layers.red); o.start(t); o.stop(t+0.52);}
 
-  // --- Wa SFX (簡易合成)
+  // --- Wa SFX
   function taikoLow(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type='sine'; o.frequency.setValueAtTime(100,t); o.frequency.exponentialRampToValueAtTime(45,t+0.14);
     g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.35,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.22); o.connect(g).connect(layers.yellow); o.start(t); o.stop(t+0.25); }
   function woodClap(t){ const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.05, audioCtx.sampleRate); const d=n.getChannelData(0); for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.005)); }
@@ -333,15 +340,18 @@
     bus.scheduleAll=(startTime)=>{
       const beatsTotal=64;
       const useDrum=LEVEL>=2, useBass=LEVEL>=3, usePad=LEVEL>=4;
-      // Lv5は最高潮（通常：Arp+Lead、和風：琴アルペジオ＋尺八リード）
-      const useArp = LEVEL>=5;
-      const useLead= LEVEL>=5;
+      const useArp = LEVEL>=5, useLead=LEVEL>=5;
 
       const now=audioCtx.currentTime;
       const fade=(node,target)=>{ node.gain.cancelScheduledValues(now); node.gain.setValueAtTime(node.gain.value,now); node.gain.linearRampToValueAtTime(target, now+1.2); };
 
+      // Lvごとバランス（和はドラム強・アルペジオ前面）
       if(isWaMode){
-        fade(bus.drum,0.95); fade(bus.bass,0.6); fade(bus.pad,0.55); fade(bus.arp,0.55); fade(bus.lead,0.42);
+        fade(bus.drum, useDrum?0.95:0);
+        fade(bus.bass, useBass?0.6:0);
+        fade(bus.pad , usePad ?0.55:0);
+        fade(bus.arp , useArp ?0.55:(LEVEL>=3?0.35:0));
+        fade(bus.lead, useLead?0.42:0);
       }else{
         fade(bus.drum,useDrum?0.9:0); fade(bus.bass,useBass?0.7:0); fade(bus.pad,usePad?0.55:0); fade(bus.arp,useArp?0.5:0); fade(bus.lead,useLead?0.4:0);
       }
@@ -349,16 +359,16 @@
       const beatToTime=(beat)=> startTime + LEADIN + beat*SEC_PER_BEAT;
 
       if(isWaMode){
-        // 太鼓（キック代替）＆拍子木、笛のアクセント、琴アルペジオ、尺八リード
         for(let m=0;m<beatsTotal;m+=8){
-          [0,2,4,6].forEach(off=> taiko(beatToTime(m+off)));
-          [1.5,5.5].forEach(off=> wood(beatToTime(m+off)));
-          for(let i=0;i<8;i++){ const t=beatToTime(m)+i*(SEC_PER_BEAT/2); kotoArp(t); }
+          // 太鼓／拍子木（Lv2〜段階的に）
+          if(LEVEL>=2){ [0,2,4,6].forEach(off=> taiko(beatToTime(m+off))); }
+          if(LEVEL>=3){ [1.5,5.5].forEach(off=> wood(beatToTime(m+off))); }
+          // 琴アルペジオ（Lv3〜）
+          if(LEVEL>=3){ for(let i=0;i<8;i++){ const t=beatToTime(m)+i*(SEC_PER_BEAT/2); kotoArp(t); } }
         }
-        for(let m=8;m<beatsTotal;m+=8){ [0,3.5,6].forEach(off=> shakuhachi(beatToTime(m+off))); }
-
+        // 尺八リード（Lv5）
+        if(LEVEL>=5){ for(let m=8;m<beatsTotal;m+=8){ [0,3.5,6].forEach(off=> shakuhachi(beatToTime(m+off))); } }
       }else{
-        // Western（従来）
         if(useDrum){
           [0,2,4,6].forEach(b=> kick(beatToTime(b)));
           [2,6].forEach(b=> snare(beatToTime(b)));
@@ -410,8 +420,8 @@
       function taiko(t){ taikoLow(t); }
       function wood(t){ woodClap(t); }
       function kotoArp(t){
-        const scale = SCALE5_WA; // 固定で心地よく
-        const idxs=[0,2,3,4,2,1,0]; // C F G A F D C
+        const scale = SCALE5_WA;
+        const idxs=[0,2,3,4,2,1,0];
         idxs.forEach((si,i)=>{
           const tt=t+i*(SEC_PER_BEAT/4);
           const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter(); o.type='triangle';
@@ -458,7 +468,6 @@
     }
     chart.forEach(n=> n.time = LEADIN + n.beat*SEC_PER_BEAT);
 
-    // 空譜面保険
     if(chart.length===0){
       for(let i=0;i<16;i++){ chart.push({beat:i*0.5, time:0, notes:[{lane:(i%LANE_COUNT)}], judged:false, hitCount:0, missed:false}); }
       chart.forEach(n=> n.time = LEADIN + n.beat*SEC_PER_BEAT);
@@ -484,12 +493,12 @@
 
   // ====== VFX ======
   function addBurst(x,y,color,count=20,speed=2){ for(let i=0;i<count;i++){ const ang=Math.random()*Math.PI*2, sp=(Math.random()*0.8+0.2)*speed;
-    particles.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,color,type:'burst'}) } }
+    particles.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,color,type:'burst'}) } fireworksActive=10; }
   function addFireworks(x,y,colors){ const rings=3+Math.min(LEVEL,3); for(let r=0;r<rings;r++){ const c=colors[r%colors.length]; addBurst(x,y,c,28+r*10,2.5+r*0.8); } }
   function addConfetti(n=20){ const W=canvas.width,H=canvas.height, cols=unlockedColors();
-    for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff'; particles.push({x:Math.random()*W,y:-20,vx:(Math.random()*2-1)*1.5,vy:Math.random()*2+1,life:1.2,color:c,type:'confetti',rot:Math.random()*Math.PI*2}); } }
+    for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff'; particles.push({x:Math.random()*W,y:-20,vx:(Math.random()*2-1)*1.5,vy:Math.random()*2+1,life:1.2,color:c,type:'confetti',rot:Math.random()*Math.PI*2}); } confettiActive=20; }
   function unlockedColors(){ const arr=[]; for(let i=0;i<=unlockedIndex;i++) arr.push(colorOf(COLOR_ORDER[i])); return arr.length?arr:['#ffffff']; }
-  function spawnWind(){ const W=canvas.width,H=canvas.height,n=2+LEVEL; for(let i=0;i<n;i++){ windStreaks.push({x:-50,y:Math.random()*H*0.8,vx:3+LEVEL*0.8,vy:(Math.random()*2-1)*0.2,alpha:0.03+0.02*LEVEL,life:1}); } }
+  function spawnWind(){ const W=canvas.width,H=canvas.height,n=2+LEVEL; for(let i=0;i<n;i++){ windStreaks.push({x:-50,y:Math.random()*H*0.8,vx:3+LEVEL*0.8+combo*0.01,vy:(Math.random()*2-1)*0.2,alpha:0.03+0.02*LEVEL,life:1}); } }
 
   // 和風追加：桜と提灯
   function spawnSakura(count=6){
@@ -504,14 +513,13 @@
       p.x+=p.vx; p.y+=p.vy; p.rot+=p.vr; p.life-=0.006;
       ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot);
       ctx.globalAlpha = Math.max(0, p.life*0.9);
-      ctx.fillStyle = 'rgba(255,182,193,0.9)'; // さくら
+      ctx.fillStyle = 'rgba(255,182,193,0.9)';
       ctx.beginPath();
       ctx.ellipse(0,0,6*DPR,3*DPR, Math.PI/4, 0, Math.PI*2);
       ctx.fill();
       ctx.restore();
     }
     petals = petals.filter(p=> p.y < H+30 && p.x > -40 && p.life>0);
-    // たまに発生
     if(Math.random()<0.05) spawnSakura(3+((LEVEL>=5)?4:0));
   }
   function spawnLanterns(){
@@ -544,7 +552,6 @@
     wrap.style.setProperty('--gray',(1-p).toFixed(3));
 
     if(isWaMode){
-      // 朱と金の和配色
       const top = hsl(30+30*p, 0.8, 0.28+0.12*p, 1);
       const bot = hsl(210-30*p, 0.6+0.25*p, 0.15+0.25*p, 1);
       document.documentElement.style.setProperty('--bg-top', top);
@@ -564,6 +571,7 @@
     applyLevelParams(); initAudio(); buildChart();
     running=true; score=0; combo=0; hits=0; judgedCount=0; unlockedIndex=-1; goodHitsForColor=0; updateStats();
     ov.style.display='none'; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0;
+    fireworksActive=confettiActive=wavesActive=auroraActive=raysActive=seigaihaActive=0;
     const now=audioCtx.currentTime; Object.values(layers).forEach(g=>{ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(0,now); }); melodyBus.gain.setValueAtTime(0.8, now);
     songStartTime = now + 0.10; applyWorldVisuals();
     if(bgm){ bgm.stop(); } if(LEVEL>=2){ bgm.start(songStartTime); }
@@ -596,8 +604,8 @@
     }
     if(!best) return;
     const adiff=Math.abs(best.time - t);
-    if(adiff<=PERFECT) applyHit(bestIdx,lane,'perfect');
-    else if(adiff<=GOOD) applyHit(bestIdx,lane,'good');
+    if(adiff<=PERFECT) applyHit(bestIdx,lane,'PERFECT');
+    else if(adiff<=GOOD) applyHit(bestIdx,lane,'GOOD');
     else { floatText('MISS','ft-miss'); combo=0; updateStats(); }
   }
 
@@ -606,21 +614,42 @@
   tapBtn.addEventListener('click', onTapButton);
   startBtn.addEventListener('click', async ()=>{ if(!audioCtx){ initAudio(); } try{ if(audioCtx.state!=='running'){ await audioCtx.resume(); } }catch(e){} showStartOverlay(); });
 
-  // ====== Hit / Stats ======
+  // ====== Hit / Stats & Combo演出 ======
   function applyHit(noteIndex,lane,grade){
     const n=chart[noteIndex]; const part=n.notes.find(nt=>nt.lane===lane); if(!part||part.hit) return; part.hit=true; n.hitCount++; if(n.hitCount>=n.notes.length){ n.judged=true; judgedCount++; }
-    const now=audioCtx.currentTime; const add=(grade==='perfect'?1000:650)*(1+Math.floor(combo/25)*0.1); score+=add; combo++; hits++;
+    const now=audioCtx.currentTime; const add=(grade==='PERFECT'?1000:650)*(1+Math.floor(combo/25)*0.1); score+=add; combo++; hits++;
     goodHitsForColor++; if(goodHitsForColor>=HITS_PER_COLOR){ unlockNextColor(); }
     playLaneTone(now,lane); colorSfx(now);
+
+    // 視覚演出
     const centers=laneCenters(), x=centers[lane], y=canvas.height*HIT_LINE_RATIO;
     const c = isWaMode
       ? ['#ffd166','#ff8fab','#c0ffaa','#88ccff'][lane % 4]
       : (unlockedColors()[(lane+n.notes.length)%unlockedColors().length]||'#ffffff');
     addBurst(x,y,c, Math.round(18+worldProgress()*24)+(n.notes.length>1?8:0), 2.2);
-    if([20,40,60].includes(combo)){ addFireworks(canvas.width*0.5, canvas.height*0.3, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors()); spawnWind(); addConfetti(15+LEVEL*6); }
+
+    // 判定テキスト（復活）
+    floatText(grade, grade==='PERFECT'?'ft-perfect':'ft-good');
+
+    // コンボ演出
+    if(combo===10){ // うっすら色パルス
+      flashOnce(0.18);
+    }else if(combo===25){
+      addConfetti(20+LEVEL*6);
+    }else if(combo===50){
+      addFireworks(canvas.width*0.5, canvas.height*0.32, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
+      flashOnce(0.28);
+    }else if(combo===100){
+      addFireworks(canvas.width*0.3, canvas.height*0.28, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
+      addFireworks(canvas.width*0.7, canvas.height*0.28, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
+      flashOnce(0.36);
+      spawnLanterns();
+    }
+
     updateStats(); applyWorldVisuals();
   }
   function updateStats(){ scEl.textContent=score|0; coEl.textContent=combo|0; const acc=judgedCount?(hits/judgedCount):1; acEl.textContent=(acc*100).toFixed(0)+'%'; wpEl.textContent=Math.round(worldProgress()*100)+'%'; }
+  function flashOnce(power=0.25){ flashFx.classList.remove('show'); void flashFx.offsetWidth; flashFx.style.setProperty('opacity', power); flashFx.classList.add('show'); }
 
   function floatText(txt, cls){
     const d=document.createElement('div'); d.className=`floatText ${cls}`; d.textContent=txt; d.style.opacity='0'; boardEl.appendChild(d);
@@ -635,15 +664,16 @@
     const p=worldProgress();
 
     // 背景
+    let usedVfx = []; // VSF表示用
     if(isWaMode){
-      // 金雲グラデ
       const g0=ctx.createLinearGradient(0,0,0,H);
       g0.addColorStop(0, hsl(35, 0.8, 0.35+0.15*p, 0.8));
       g0.addColorStop(1, hsl(200, 0.6, 0.20+0.20*p, 0.9));
       ctx.fillStyle=g0; ctx.fillRect(0,0,W,H);
+      usedVfx.push('Gold Clouds');
 
       // 光芒
-      raysT += 0.005+0.01*p;
+      raysT += 0.005+0.01*p; raysActive=8;
       for(let i=0;i<12;i++){
         const ang = (i/12)*Math.PI*2 + raysT;
         const x = W/2 + Math.cos(ang)*40*DPR, y = H*0.3 + Math.sin(ang)*20*DPR;
@@ -652,6 +682,7 @@
         grd.addColorStop(1, 'rgba(255,220,120,0.00)');
         ctx.fillStyle=grd; ctx.fillRect(0,0,W,H);
       }
+      usedVfx.push('Sunrays');
     }else{
       const baseHue=lerp(220,60,p), baseCol=hsl(baseHue,lerp(0.25,0.85,p),lerp(0.25,0.55,p), lerp(0.10,0.35,p));
       const g0=ctx.createRadialGradient(W/2,H*0.25,10, W/2,H*0.25, Math.max(W,H)*0.9); g0.addColorStop(0,baseCol); g0.addColorStop(1,'rgba(0,0,0,0)'); ctx.fillStyle=g0; ctx.fillRect(0,0,W,H);
@@ -659,18 +690,17 @@
 
     drawLanes( isWaMode ? lerp(0.02,0.06,p) : lerp(0.03,0.08,p) );
 
-    // 風／桜／提灯
+    // 風
     if(Math.random()<0.01+LEVEL*0.004) spawnWind();
     ctx.lineCap='round';
     windStreaks.forEach(w=>{ ctx.globalAlpha=w.alpha; ctx.strokeStyle=isWaMode?'rgba(255,230,170,0.9)':'white'; ctx.lineWidth=3*DPR; ctx.beginPath(); ctx.moveTo(w.x,w.y); ctx.lineTo(w.x+60,w.y+8); ctx.stroke(); w.x+=w.vx; w.y+=w.vy; w.life-=0.01; });
     windStreaks=windStreaks.filter(w=> w.x<W+80 && w.life>0); ctx.globalAlpha=1;
+    usedVfx.push('Wind');
 
     if(isWaMode){
-      drawSakura();
-      drawLanterns();
-      // 青海波（淡い）
+      drawSakura(); drawLanterns(); usedVfx.push('Sakura','Lanterns');
       if(p>0.4){
-        const waveAmp=10*DPR;
+        const waveAmp=10*DPR; seigaihaActive=6;
         for(let li=0; li<3; li++){
           const yy = H*(0.62 + 0.04*li);
           ctx.globalAlpha=0.05+0.05*p;
@@ -684,11 +714,12 @@
           ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
         }
         ctx.globalAlpha=1;
+        usedVfx.push('Seigaiha');
       }
     }else{
-      // 従来：青い波／オーロラ
+      // 洋：波
       if(unlockedIndex>=2){
-        waveTime += 0.016 + p*0.008;
+        waveTime += 0.016 + p*0.008; wavesActive=8;
         const amp=8*DPR+16*DPR*p, layers=3+LEVEL;
         for(let li=0; li<layers; li++){
           const yy=H*(0.62+0.03*li); ctx.globalAlpha=0.05+0.05*p; ctx.fillStyle=colorOf('blue'); ctx.beginPath(); ctx.moveTo(0,H);
@@ -696,15 +727,17 @@
           ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
         }
         ctx.globalAlpha=1;
+        usedVfx.push('Waves');
       }
       if(p>0.55){
-        auroraTime += 0.005 + 0.01*p;
+        auroraTime += 0.005 + 0.01*p; auroraActive=8;
         const bands=2+Math.floor(p*3), cols=unlockedColors().length?unlockedColors():['#a8b6ff'];
         for(let b=0;b<bands;b++){
           const yy=H*(0.18+0.18*b), grad=ctx.createLinearGradient(0,yy,W,yy);
           grad.addColorStop(0, addAlpha(cols[b%cols.length],0.08)); grad.addColorStop(0.5, addAlpha(cols[(b+1)%cols.length],0.18)); grad.addColorStop(1, addAlpha(cols[(b+2)%cols.length],0.08));
           ctx.fillStyle=grad; ctx.globalAlpha=0.5*p; ctx.fillRect(0, yy + Math.sin(auroraTime*1.1+b)*8*DPR, W, 12*DPR); ctx.globalAlpha=1;
         }
+        usedVfx.push('Aurora');
       }
     }
 
@@ -745,7 +778,29 @@
     }
     particles = particles.filter(p=>p.life>0); ctx.globalAlpha=1;
 
-    // 終了
+    // VSF（実際に使っているもののみ）
+    const vs = [];
+    if(usedVfx.includes('Gold Clouds')) vs.push('Gold Clouds');
+    if(usedVfx.includes('Sunrays')) vs.push('Sunrays');
+    if(usedVfx.includes('Sakura')) vs.push('Sakura');
+    if(usedVfx.includes('Lanterns')) vs.push('Lanterns');
+    if(usedVfx.includes('Seigaiha')) vs.push('Seigaiha');
+    if(usedVfx.includes('Wind')) vs.push('Wind');
+    if(usedVfx.includes('Waves')) vs.push('Waves');
+    if(usedVfx.includes('Aurora')) vs.push('Aurora');
+    if(fireworksActive>0) vs.push('Fireworks');
+    if(confettiActive>0) vs.push('Confetti');
+    vfxNow.textContent = vs.length ? vs.join(' / ') : '-';
+
+    // 減衰
+    if(fireworksActive>0) fireworksActive--;
+    if(confettiActive>0) confettiActive--;
+    if(wavesActive>0) wavesActive--;
+    if(auroraActive>0) auroraActive--;
+    if(raysActive>0) raysActive--;
+    if(seigaihaActive>0) seigaihaActive--;
+
+    // 終了判定
     const lastTime=chart.length?chart[chart.length-1].time:0;
     if(t > lastTime + 3){ endSong(); return; }
 
@@ -761,7 +816,7 @@
     const acc = judgedCount?(hits/judgedCount):1; const worldPct=Math.round(worldProgress()*100);
     if(LEVEL>=MAX_LEVEL){
       showResultCard(true, acc, worldPct);
-      setTimeout(()=> playEnding(score, acc, worldPct), 800);
+      setTimeout(()=> playEnding(score, acc, worldPct), 300); // すぐにエンドロール開始
     }else{
       showResultCard(false, acc, worldPct);
     }
@@ -793,126 +848,12 @@
     document.getElementById('closeBtn').onclick = ()=> ov.style.display='none';
   }
 
-  // ====== Ending Movie (Western / Wa 2系統) ======
+  // ====== Ending（同時：背景アニメ＋即時エンドロール） ======
   function playEnding(finalScore, acc, worldPct){
-    endingMode=true; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0; ov.style.display='none';
-    const accPct = acc*100;
-    const tier = (finalScore>30000 && accPct>95 && worldPct>90) ? 'AURORA'
-               : (finalScore>22000 && accPct>90) ? 'WAVE'
-               : 'BLOOM';
-    startEndingBgm(isWaMode?('WA_'+tier):tier);
+    endingMode=true; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0;
+    ov.style.display='none';
 
-    const duration = 28000; // ms
-    const startMs = performance.now();
-    const colsAll = isWaMode ? ['#ffcd6b','#ff8fab','#c6ffb2','#9dd6ff'] : ['#ffd166','#5af38f','#6ab8ff','#ff6b6b'];
-
-    function renderEnding(nowMs){
-      const W=canvas.width,H=canvas.height;
-      ctx.clearRect(0,0,W,H);
-
-      const t = (nowMs - startMs)/1000;
-
-      if(isWaMode){
-        // 金雲＋光芒
-        const g0=ctx.createLinearGradient(0,0,0,H);
-        g0.addColorStop(0, hsl(35, 0.85, 0.35, 0.9));
-        g0.addColorStop(1, hsl(210, 0.6, 0.35, 0.9));
-        ctx.fillStyle=g0; ctx.fillRect(0,0,W,H);
-        // 波紋
-        for(let li=0; li<5; li++){
-          const yy = H*(0.65 + 0.03*li);
-          ctx.globalAlpha = 0.08 + 0.04*Math.sin(t*0.8+li);
-          ctx.fillStyle = addAlpha(colsAll[li%colsAll.length], 0.7);
-          ctx.beginPath(); ctx.moveTo(0,H);
-          for(let x=0;x<=W;x+=10*DPR){
-            const y = yy + Math.sin((x/(70*DPR))+t*(0.9+li*0.12))*(10*DPR)*(0.6+li*0.2);
-            ctx.lineTo(x,y);
-          }
-          ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
-        }
-        // 桜雪
-        drawSakura(); drawLanterns();
-      }else{
-        // 虹色のリボン・波・オーロラ
-        const hueBase = 45 + Math.sin(t*0.15)*25;
-        const top = hsl(hueBase, 0.8, 0.35, 0.6);
-        const bot = hsl(hueBase+120, 0.85, 0.45, 0.85);
-        const gbg = ctx.createLinearGradient(0,0,0,H); gbg.addColorStop(0, top); gbg.addColorStop(1, bot); ctx.fillStyle=gbg; ctx.fillRect(0,0,W,H);
-
-        const bands = tier==='AURORA'? 6 : (tier==='WAVE'?4:3);
-        for(let i=0;i<bands;i++){
-          const c = colsAll[i%colsAll.length];
-          const amp = (tier==='AURORA'? 80: 60) * DPR;
-          const y0 = H*0.3 + Math.sin(t*0.4 + i)*amp*0.1;
-          const y1 = H*0.5 + Math.sin(t*0.6 + i*0.7)*amp*0.15;
-          const y2 = H*0.7 + Math.sin(t*0.8 + i*1.1)*amp*0.12;
-          ctx.globalAlpha = 0.14 + 0.06*Math.sin(t*1.2+i);
-          ctx.strokeStyle = addAlpha(c, 0.85);
-          ctx.lineWidth = (12 + i*4) * DPR;
-          ctx.beginPath();
-          ctx.moveTo(0, y0);
-          ctx.bezierCurveTo(W*0.33, y1, W*0.66, y2, W, H*0.5 + Math.sin(t*0.5+i)*amp*0.05);
-          ctx.stroke();
-        }
-        ctx.globalAlpha = 1;
-      }
-
-      // 粒子の輝き
-      if(Math.random() < (isWaMode?0.18:0.12)){
-        const x = Math.random()*W, y = H*(0.2 + Math.random()*0.7);
-        const c = colsAll[(Math.random()*colsAll.length)|0];
-        addBurst(x,y,c, 12+(tier==='AURORA'?14:6), 2.2);
-      }
-      for(const ptl of particles){ ptl.x+=ptl.vx; ptl.y+=ptl.vy; ptl.vy+=0.01; ptl.life-=0.015; ctx.globalAlpha=Math.max(0,ptl.life); ctx.fillStyle=ptl.color; ctx.beginPath(); ctx.arc(ptl.x,ptl.y,2.6*DPR,0,Math.PI*2); ctx.fill(); }
-      particles = particles.filter(p=>p.life>0); ctx.globalAlpha=1;
-
-      // タイトル淡フェード
-      if(t<4.5){ const a = Math.min(1, Math.max(0, (t-0.6)/1.2 )); ctx.globalAlpha = a*0.9; ctx.fillStyle = 'rgba(255,255,255,0.92)';
-        ctx.font = `${Math.round(32*DPR)}px system-ui, -apple-system, sans-serif`; ctx.textAlign='center'; ctx.fillText(isWaMode?'彩、満ちる':'THE WORLD REBORN', W/2, H*0.22); ctx.globalAlpha=1; }
-
-      if(nowMs - startMs < duration){ requestAnimationFrame(renderEnding); }
-      else{ showCredits(finalScore, acc, worldPct); }
-    }
-    requestAnimationFrame(renderEnding);
-  }
-
-  function startEndingBgm(tier){
-    if(!audioCtx) return;
-    const pad = audioCtx.createGain(); pad.gain.value=0; pad.connect(masterGain);
-    const bell= audioCtx.createGain(); bell.gain.value=0; bell.connect(masterGain);
-    const rev  = audioCtx.createDelay(); rev.delayTime.value=0.28;
-    const fb   = audioCtx.createGain(); fb.gain.value=0.45;
-    bell.connect(rev).connect(fb).connect(rev); rev.connect(masterGain);
-
-    const now=audioCtx.currentTime;
-    const isWa = String(tier).startsWith('WA_');
-
-    // Pad chord loop
-    const chord = isWa ? [[0,5,7],[2,7,9],[5,9,12],[7,12,14]] : [[0,4,7],[2,5,9],[4,7,11],[5,9,12]];
-    chord.forEach((ch,idx)=>{
-      const t = now + 0.6 + idx*2.6;
-      const g=audioCtx.createGain(); g.gain.value=0; g.connect(pad);
-      g.gain.linearRampToValueAtTime(isWa?0.5:0.45, t+0.8); g.gain.linearRampToValueAtTime(0.0, t+2.3);
-      ch.forEach(se=>{ const o=audioCtx.createOscillator(); o.type='sine'; o.frequency.value=(isWa?220:220)*Math.pow(2,se/12); o.connect(g); o.start(t); o.stop(t+2.5); });
-    });
-    pad.gain.linearRampToValueAtTime(0.6, now+1.0);
-
-    // Twinkles
-    const speedMod = /AURORA|WA_AURORA/.test(tier)? 0.08 : /WAVE|WA_WAVE/.test(tier)? 0.06 : 0.0;
-    for(let i=0;i<30;i++){
-      const t = now + 1.0 + i*(0.45 - speedMod) + Math.random()*0.12;
-      const f = (isWa? 660 : 660) * Math.pow(2, (Math.random()<0.5?0:7)/12);
-      const o=audioCtx.createOscillator(), g=audioCtx.createGain();
-      o.type = isWa ? 'triangle' : 'triangle';
-      o.frequency.value=f;
-      g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.09, t+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t+0.20);
-      o.connect(g).connect(bell); o.start(t); o.stop(t+0.25);
-    }
-    bell.gain.linearRampToValueAtTime(0.55, now+1.2);
-  }
-
-  function showCredits(finalScore, acc, worldPct){
-    // クレジット本文（指定どおり）
+    // クレジット本文
     const body =
 `PRODUCER
 Hisashi Fujinaka
@@ -942,25 +883,116 @@ SCORE ${finalScore|0}  /  ACC ${(acc*100).toFixed(1)}%  /  WORLD ${worldPct}%
 
 MONOCHROME REBIRTH
 © Hisashi Fujinaka`;
-
     creditsText.textContent = body;
-    creditsWrap.style.display='flex';
+    creditsWrap.style.display='flex'; // ★開始と同時に流す
 
-    // クレジット終了後に再スタートUI
-    setTimeout(()=>{
-      ov.style.display='flex';
-      card.innerHTML = `
-        <div class="logo"><span class="dot"></span><span class="word">MONOCHROME REBIRTH</span><span class="dot"></span></div>
-        <h1>Thank You for Playing</h1>
-        <p>${isWaMode?'彩は巡り、音は還る。':'The colors return, the rhythm remains.'}</p>
-        <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:10px">
-          <button class="btn" id="again">Play Again (Lv1)</button>
-          <button class="btn primary" id="stay">Stay</button>
-        </div>
-      `;
-      document.getElementById('again').onclick = ()=>{ creditsWrap.style.display='none'; LEVEL=1; startGame(); };
-      document.getElementById('stay').onclick = ()=>{ creditsWrap.style.display='none'; ov.style.display='none'; };
-    }, 31000);
+    // 背景アニメ & BGM
+    const accPct = acc*100;
+    const tier = (finalScore>30000 && accPct>95 && worldPct>90) ? 'AURORA'
+               : (finalScore>22000 && accPct>90) ? 'WAVE'
+               : 'BLOOM';
+    startEndingBgm(isWaMode?('WA_'+tier):tier);
+
+    const duration = 30000; // エンドロールと揃える
+    const startMs = performance.now();
+    const colsAll = isWaMode ? ['#ffcd6b','#ff8fab','#c6ffb2','#9dd6ff'] : ['#ffd166','#5af38f','#6ab8ff','#ff6b6b'];
+
+    function renderEnding(nowMs){
+      const W=canvas.width,H=canvas.height;
+      ctx.clearRect(0,0,W,H);
+      const t = (nowMs - startMs)/1000;
+
+      if(isWaMode){
+        const g0=ctx.createLinearGradient(0,0,0,H);
+        g0.addColorStop(0, hsl(35, 0.85, 0.35, 0.9));
+        g0.addColorStop(1, hsl(210, 0.6, 0.35, 0.9));
+        ctx.fillStyle=g0; ctx.fillRect(0,0,W,H);
+        for(let li=0; li<5; li++){
+          const yy = H*(0.65 + 0.03*li);
+          ctx.globalAlpha = 0.08 + 0.04*Math.sin(t*0.8+li);
+          ctx.fillStyle = addAlpha(colsAll[li%colsAll.length], 0.7);
+          ctx.beginPath(); ctx.moveTo(0,H);
+          for(let x=0;x<=W;x+=10*DPR){
+            const y = yy + Math.sin((x/(70*DPR))+t*(0.9+li*0.12))*(10*DPR)*(0.6+li*0.2);
+            ctx.lineTo(x,y);
+          }
+          ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+        }
+        drawSakura(); drawLanterns();
+      }else{
+        const hueBase = 45 + Math.sin(t*0.15)*25;
+        const top = hsl(hueBase, 0.8, 0.35, 0.6);
+        const bot = hsl(hueBase+120, 0.85, 0.45, 0.85);
+        const gbg = ctx.createLinearGradient(0,0,0,H); gbg.addColorStop(0, top); gbg.addColorStop(1, bot); ctx.fillStyle=gbg; ctx.fillRect(0,0,W,H);
+        const bands = tier==='AURORA'? 6 : (tier==='WAVE'?4:3);
+        for(let i=0;i<bands;i++){
+          const c = colsAll[i%colsAll.length];
+          const amp = (tier==='AURORA'? 80: 60) * DPR;
+          const y0 = H*0.3 + Math.sin(t*0.4 + i)*amp*0.1;
+          const y1 = H*0.5 + Math.sin(t*0.6 + i*0.7)*amp*0.15;
+          const y2 = H*0.7 + Math.sin(t*0.8 + i*1.1)*amp*0.12;
+          ctx.globalAlpha = 0.14 + 0.06*Math.sin(t*1.2+i);
+          ctx.strokeStyle = addAlpha(c, 0.85);
+          ctx.lineWidth = (12 + i*4) * DPR;
+          ctx.beginPath();
+          ctx.moveTo(0, y0);
+          ctx.bezierCurveTo(W*0.33, y1, W*0.66, y2, W, H*0.5 + Math.sin(t*0.5+i)*amp*0.05);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      if(nowMs - startMs < duration){ requestAnimationFrame(renderEnding); }
+      else{
+        // 終了UI
+        ov.style.display='flex';
+        card.innerHTML = `
+          <div class="logo"><span class="dot"></span><span class="word">MONOCHROME REBIRTH</span><span class="dot"></span></div>
+          <h1>Thank You for Playing</h1>
+          <p>${isWaMode?'彩は巡り、音は還る。':'The colors return, the rhythm remains.'}</p>
+          <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:10px">
+            <button class="btn" id="again">Play Again (Lv1)</button>
+            <button class="btn primary" id="stay">Stay</button>
+          </div>
+        `;
+        document.getElementById('again').onclick = ()=>{ creditsWrap.style.display='none'; LEVEL=1; startGame(); };
+        document.getElementById('stay').onclick = ()=>{ creditsWrap.style.display='none'; ov.style.display='none'; };
+      }
+    }
+    requestAnimationFrame(renderEnding);
+  }
+
+  function startEndingBgm(tier){
+    if(!audioCtx) return;
+    const pad = audioCtx.createGain(); pad.gain.value=0; pad.connect(masterGain);
+    const bell= audioCtx.createGain(); bell.gain.value=0; bell.connect(masterGain);
+    const rev  = audioCtx.createDelay(); rev.delayTime.value=0.28;
+    const fb   = audioCtx.createGain(); fb.gain.value=0.45;
+    bell.connect(rev).connect(fb).connect(rev); rev.connect(masterGain);
+
+    const now=audioCtx.currentTime;
+    const isWa = String(tier).startsWith('WA_');
+
+    const chord = isWa ? [[0,5,7],[2,7,9],[5,9,12],[7,12,14]] : [[0,4,7],[2,5,9],[4,7,11],[5,9,12]];
+    chord.forEach((ch,idx)=>{
+      const t = now + 0.6 + idx*2.6;
+      const g=audioCtx.createGain(); g.gain.value=0; g.connect(pad);
+      g.gain.linearRampToValueAtTime(isWa?0.5:0.45, t+0.8); g.gain.linearRampToValueAtTime(0.0, t+2.3);
+      ch.forEach(se=>{ const o=audioCtx.createOscillator(); o.type='sine'; o.frequency.value=220*Math.pow(2,se/12); o.connect(g); o.start(t); o.stop(t+2.5); });
+    });
+    pad.gain.linearRampToValueAtTime(0.6, now+1.0);
+
+    const speedMod = /AURORA|WA_AURORA/.test(tier)? 0.08 : /WAVE|WA_WAVE/.test(tier)? 0.06 : 0.0;
+    for(let i=0;i<30;i++){
+      const t = now + 1.0 + i*(0.45 - speedMod) + Math.random()*0.12;
+      const f = 660 * Math.pow(2, (Math.random()<0.5?0:7)/12);
+      const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.value=f;
+      g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.09, t+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t+0.20);
+      o.connect(g).connect(bell); o.start(t); o.stop(t+0.25);
+    }
+    bell.gain.linearRampToValueAtTime(0.55, now+1.2);
   }
 
   // ====== Minimal Start overlay ======
