@@ -112,6 +112,10 @@ const canvas = document.getElementById('arena');
 const ctx = canvas.getContext('2d');
 const DPR = Math.max(1, window.devicePixelRatio || 1);
 let W=0,H=0,MID=0;
+
+// --- Initialize AI brain early (so it's available before use) ---
+const aiBrain = { tx: 0, ty: 0, react: 0, homeX: 0, homeY: 0 };
+
 function resize(){
   const rect = canvas.getBoundingClientRect();
   W = Math.floor(rect.width * DPR);
@@ -152,6 +156,11 @@ const you = new Paddle(W/2, H*0.82, '#00d1ff','you');
 const ai  = new Paddle(W/2, H*0.18, '#7a5cff','ai');
 const puck = new Puck();
 
+// Now that ai & puck exist, compute homeY safely and keep it updated on resize
+function computeHomeY(){ aiBrain.homeY = Math.max(ai.r, (20*DPR) + puck.r); }
+computeHomeY();
+addEventListener('resize', computeHomeY, {passive:true});
+
 function startServe(side){
   // side: 'AI' or 'YOU'
   puck.x = W/2; puck.y = H/2; puck.vx = (Math.random()*160-80)*DPR; const sp = 260*DPR; puck.vy = (side==='AI' ? -sp : sp);
@@ -159,9 +168,8 @@ function startServe(side){
   aiServeBoost = (side==='AI') ? [1.18,1.28,1.38][state.diff] : 0;
 }
 
-// --- Physics tuning & AI brain ---
+// --- Physics tuning & AI vars ---
 const PHYS = { air: 0.9985, wallRest: 0.92, wallFric: 0.985, minSp: 400*DPR, maxSp: 2200*DPR };
-const aiBrain = { tx: W/2, ty: H*0.18, react: 0, homeX: W/2 };
 let aiServeBoost = 0, aiCounterBias = 0, aiCounterSide = 0;
 
 // --------------------------------------------------------
@@ -213,7 +221,7 @@ canvas.addEventListener('touchend', onTouchEnd, {passive:false});
 canvas.addEventListener('touchcancel', onTouchEnd, {passive:false});
 
 // --------------------------------------------------------
-// Human-like AI
+// Human-like AI (front-intercept + goal-line defense)
 // --------------------------------------------------------
 function aiUpdate(dt){
   if(state.mode!=='1P') return;
@@ -281,9 +289,10 @@ function aiUpdate(dt){
     targetX = Math.max(ai.r, Math.min(W-ai.r, targetX));
     targetY = Math.max(ai.r, Math.min(MID - ai.r*1.02, targetY));
   } else {
-    // Patrol when puck is leaving/idle
-    targetX = Math.max(ai.r, Math.min(W-ai.r, aiBrain.homeX + Math.sin(performance.now()/450)*86*DPR));
-    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.12, H*0.15 + Math.cos(performance.now()/610)*42*DPR));
+    // Patrol deep near own goal (defensive stance)
+    const goalY = Math.max(ai.r + 20*DPR, aiBrain.homeY || (puck.r + 80*DPR));
+    targetX = Math.max(ai.r, Math.min(W-ai.r, (W/2) + Math.sin(performance.now()/520)*60*DPR));
+    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.25, goalY + Math.cos(performance.now()/740)*24*DPR));
   }
 
   // Reaction window
@@ -418,6 +427,7 @@ let timeAcc=0;
 function startGame(){
   state.you=0; state.ai=0; state.time=60; state.running=true; updateHUD();
   you.x=W/2; you.y=H*0.82; ai.x=W/2; ai.y=H*0.18; you.active=false; ai.active=(state.mode==='2P'? false:true);
+  computeHomeY(); // ensure homeY reflects current DPR and radii
   // Serve: start towards random side with slow speed
   const side = Math.random()<0.5 ? 'AI' : 'YOU'; startServe(side);
   hide(document.getElementById('startOverlay')); hide(document.getElementById('resultOverlay'));
@@ -485,6 +495,12 @@ function runSelfTests(){
   // 4) serve direction toward AI is upward (vy<0)
   startServe('AI'); ok('Serve to AI has upward vy', puck.vy < 0 && Math.abs(puck.vy) < 500*DPR && Math.abs(puck.vy) > 150*DPR);
   startServe('YOU'); ok('Serve to YOU has downward vy', puck.vy > 0 && Math.abs(puck.vy) < 500*DPR && Math.abs(puck.vy) > 150*DPR);
+  // 5) aiBrain.homeY initialized (>0 assumed after entities)
+  ok('aiBrain.homeY initialized', typeof aiBrain.homeY==='number' && aiBrain.homeY >= ai.r);
+  // 6) When puck is on player half, AI tends to stay near goal (not near center)
+  puck.x=W*0.7; puck.y=H*0.85; for(let i=0;i<25;i++){ aiUpdate(0.016);} ok('AI idles near goal when puck far', ai.y < MID*0.85);
+  // 7) computeHomeY keeps value >= ai.r after call
+  const prevHomeY = aiBrain.homeY; computeHomeY(); ok('computeHomeY keeps >= ai.r', aiBrain.homeY >= ai.r && aiBrain.homeY >= 20*DPR);
   state.mode = wasMode;
   const passed = results.every(r=>r.pass);
   if(passed) showToast('Self-tests passed');
