@@ -216,6 +216,14 @@ const touches = new Map(); // id -> {sx,sy,st,lx,ly,lt,near}
 
 function isYouSide(py){ return py >= MID; }
 function nearPuck(x,y){ const dx=x-puck.x, dy=y-puck.y; return Math.hypot(dx,dy) <= flick.prox(); }
+// moving fast handle: expand proximity based on paddle speed and time step to prevent tunneling
+function movingNearPuck(p, dt){
+  const base = flick.prox();
+  const padSpeed = Math.hypot(p.vx, p.vy);
+  const extra = Math.min(140*DPR, padSpeed * dt * 0.9);
+  const dx = p.x - puck.x, dy = p.y - puck.y;
+  return Math.hypot(dx,dy) <= base + extra;
+}
 
 function tryFlick(sx,sy,ex,ey,dt){
   // Generic flick for either half; puck must be mostly on the same half as the finger start
@@ -267,88 +275,94 @@ canvas.addEventListener('touchcancel', onTouchEnd, {passive:false});
 // --------------------------------------------------------
 function aiUpdate(dt){
   if(state.mode!=='1P') return;
-  // Front-intercept with goal-line defense & counter
-  const ACCEL = [2000,2900,3800].map(v=>v*DPR);   // base acceleration
-  const MAXSP = [1400,2000,2600].map(v=>v*DPR);   // base max speed
-  const DASHB = [1.20,1.40,1.70];                 // boost when far/fast/near-goal
-  const REACT = [0.06,0.04,0.022];                // reaction delay
-  const ERR   = [18,9,4].map(v=>v*DPR);           // aiming error window
-  const LATK  = [28,40,56].map(v=>v*DPR);         // lateral offset base (wrap)
-  const FRNT  = [32,46,64].map(v=>v*DPR);         // front offset along -vel
-  const GBias = [220,320,420].map(v=>v*DPR);      // downward counter push on save
-  const GX    = [120,160,220].map(v=>v*DPR);      // side push on save
+  // Anticipatory AI with wide-arc intercept and difficulty-scaled precision
+  const ACCEL   = [1800,2600,3600].map(v=>v*DPR);
+  const MAXSP   = [1300,1900,2600].map(v=>v*DPR);
+  const REACT   = [0.080,0.045,0.020];
+  const ERR     = [28,14,6].map(v=>v*DPR);
+  const PREDICT = [0.85,1.00,1.20];
+  const MISS    = [0.18,0.08,0.02];
+  const FRONT   = [30,44,62].map(v=>v*DPR);
+  const LATERAL = [32,44,64].map(v=>v*DPR); // slightly larger for wider arc
+  const DASHB   = [1.20,1.40,1.70];
+  const COUNTER = [260,340,440].map(v=>v*DPR);
+  const SIDEK   = [110,150,210].map(v=>v*DPR);
 
   let accel = ACCEL[state.diff];
   let maxSpeed = MAXSP[state.diff];
   const reactBase = REACT[state.diff];
   const err = ERR[state.diff];
 
-  const incoming = puck.vy < 0;                    // puck heading to AI
-  const fastIncoming = puck.vy < -520*DPR;         // very fast
-  const nearGoal = puck.y < (puck.r + 74*DPR);     // goal-line defense zone
-  const onAiHalf = puck.y < MID*0.97;
+  const incoming   = puck.vy < 0;
+  const veryFast   = puck.vy < -560*DPR;
+  const nearGoal   = puck.y < (puck.r + 90*DPR); // enlarge goal danger zone
+  const onAiHalf   = puck.y < MID*0.98;
+  const distToPuck = Math.hypot(puck.x-ai.x, puck.y-ai.y);
 
-  let targetX, targetY;
-  aiCounterBias = 0; aiCounterSide = 0; // reset unless entering defense
+  let targetX = ai.x, targetY = ai.y;
+  aiCounterBias = 0; aiCounterSide = 0;
+
+  // Helper: force a side-approach offset away from goal mouth
+  function sideApproach(px,py,pv,vfx,vfy){
+    const ux=-vfy, uy=vfx;
+    const sideSign = (px < W/2 ? -1 : 1);
+    const frontMag = FRONT[state.diff] + Math.min(90*DPR, pv*0.05);
+    let latMag   = LATERAL[state.diff] + Math.min(110*DPR, pv*0.05);
+    // widen even more when close to goal line to avoid own-goals
+    const goalTight = Math.max(0, (puck.r + 120*DPR) - py) / (120*DPR);
+    latMag *= (1.0 + goalTight*1.2);
+    let tx = px - vfx*frontMag + ux*latMag*sideSign;
+    let ty = py - vfy*frontMag + uy*latMag*sideSign;
+    // keep away from goal line by safety margin
+    const safeY = Math.max(ai.r + 18*DPR, puck.r + ai.r + 28*DPR);
+    ty = Math.max(safeY, ty);
+    tx = Math.max(ai.r, Math.min(W-ai.r, tx));
+    ty = Math.max(ai.r, Math.min(MID - ai.r*1.02, ty));
+    return [tx,ty];
+  }
 
   if(nearGoal && (incoming || onAiHalf)){
-    // --- Goal-line block & counter ---
+    // Goal-line: do not sit on the line; approach from the side and slightly forward
     const pv = Math.hypot(puck.vx, puck.vy) || 1;
-    const vfx = puck.vx / pv, vfy = puck.vy / pv;
-    const ux = -vfy, uy = vfx; // perpendicular unit
-    const dist0 = Math.hypot(puck.x-ai.x, puck.y-ai.y);
-    const dash = (fastIncoming || dist0>220*DPR) ? DASHB[state.diff] : 1.0;
+    const vfx = puck.vx/pv, vfy = puck.vy/pv;
+    const dash = (veryFast || distToPuck>220*DPR) ? DASHB[state.diff] : 1.0;
     maxSpeed *= dash; accel *= dash;
-
-    // Block right in front of goal line, centered to puck with small lateral bias
-    const blockY = Math.max(ai.r + 6*DPR, puck.r + ai.r + 10*DPR);
-    const sideSign = (puck.x < W/2 ? -1 : 1);
-    const sideMag = Math.min(90*DPR, LATK[state.diff] + pv*0.035);
-    targetX = Math.max(ai.r, Math.min(W-ai.r, puck.x + ux*sideMag*sideSign));
-    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.02, blockY));
-
-    // Mark counter-intent so collision adds a downward push & slight side
-    aiCounterBias = GBias[state.diff];
-    aiCounterSide = GX[state.diff] * sideSign;
+    const px=puck.x, py=Math.max(puck.y, puck.r + ai.r + 36*DPR);
+    [targetX,targetY] = sideApproach(px,py,pv,vfx,vfy);
+    aiCounterBias = COUNTER[state.diff];
+    aiCounterSide = SIDEK[state.diff] * (px < W/2 ? -1 : 1);
   } else if(incoming || onAiHalf){
-    // --- Front-intercept with wrap-around ---
+    // Predict and meet on a wide arc
     const pv = Math.hypot(puck.vx, puck.vy) || 1;
-    const vfx = puck.vx / pv, vfy = puck.vy / pv;
-    const ux = -vfy, uy = vfx;
-    const dx0 = (puck.x - ai.x), dy0 = (puck.y - ai.y);
-    const dist0 = Math.hypot(dx0,dy0);
-    const dash = (fastIncoming || dist0>280*DPR) ? DASHB[state.diff] : 1.0;
+    const vfx = puck.vx/pv, vfy = puck.vy/pv;
+    const dash = (veryFast || distToPuck>280*DPR) ? DASHB[state.diff] : 1.0;
     maxSpeed *= dash; accel *= dash;
-    const relSp = Math.max(1, pv + maxSpeed*0.6);
-    const t = Math.max(0.05, Math.min(0.85, dist0 / relSp * 1.25));
-    const px = puck.x + puck.vx * t;
-    const py = puck.y + puck.vy * t;
-    const sideSign = (px < W/2 ? -1 : 1);
-    const sideMag = LATK[state.diff] + Math.min(90*DPR, pv*0.045);
-    const frontMag = FRNT[state.diff] + Math.min(90*DPR, pv*0.05);
-    targetX = px - vfx * frontMag + ux * sideMag * sideSign;
-    targetY = py - vfy * frontMag + uy * sideMag * sideSign;
-    targetX = Math.max(ai.r, Math.min(W-ai.r, targetX));
-    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.02, targetY));
+    const relSp = Math.max(1, pv + maxSpeed*0.65);
+    const tBase = distToPuck / relSp;
+    const t = Math.max(0.06, Math.min(0.9, tBase * PREDICT[state.diff]));
+    const px = puck.x + puck.vx*t;
+    const py = puck.y + puck.vy*t;
+    [targetX,targetY] = sideApproach(px,py,pv,vfx,vfy);
   } else {
-    // Patrol deep near own goal (defensive stance)
+    // Idle patrol
     const goalY = Math.max(ai.r + 20*DPR, aiBrain.homeY || (puck.r + 80*DPR));
     targetX = Math.max(ai.r, Math.min(W-ai.r, (W/2) + Math.sin(performance.now()/520)*60*DPR));
     targetY = Math.max(ai.r, Math.min(MID - ai.r*1.25, goalY + Math.cos(performance.now()/740)*24*DPR));
   }
 
-  // Reaction window
+  // Reaction & precision
   if(aiBrain.react>0){ aiBrain.react -= dt; }
   else {
-    aiBrain.tx = targetX; aiBrain.ty = targetY;
+    let jx = (Math.random()-0.5)*err;
+    let jy = (Math.random()-0.5)*err;
+    if(Math.random() < MISS[state.diff]){ jx *= 1.4; jy *= 1.4; }
+    aiBrain.tx = targetX + jx; aiBrain.ty = targetY + jy;
     aiBrain.react = reactBase + Math.random()*reactBase*0.35;
   }
 
-  // Human-like aiming error
-  const tx = Math.max(ai.r, Math.min(W-ai.r, aiBrain.tx + (Math.random()-0.5)*err));
-  const ty = Math.max(ai.r, Math.min(MID - ai.r*1.02, aiBrain.ty + (Math.random()-0.5)*err));
+  const tx = Math.max(ai.r, Math.min(W-ai.r, aiBrain.tx));
+  const ty = Math.max(ai.r, Math.min(MID - ai.r*1.02, aiBrain.ty));
 
-  // Accelerate toward target with inertia
   const ddx = tx - ai.x, ddy = ty - ai.y; const d = Math.hypot(ddx,ddy);
   if(d>1){
     const desiredVx = ddx/d * maxSpeed;
@@ -375,6 +389,11 @@ function collidePaddle(p){
     const vn2 = -vn * e; const vt2 = vt * mu + spin;
     rvx = vn2*nx + vt2*tx; rvy = vn2*ny + vt2*ty;
     puck.vx = rvx + p.vx; puck.vy = rvy + p.vy;
+    // Difficulty-scaled return speed (softer on Easy/Normal)
+    const sp = Math.hypot(puck.vx, puck.vy) || 1;
+    const scale = [0.72,0.88,1.0][state.diff];
+    const target = Math.max(PHYS.minSp*0.9, Math.min(PHYS.maxSp, sp*scale));
+    puck.vx = puck.vx / sp * target; puck.vy = puck.vy / sp * target;
     clampPuckSpeed(); s_hit(); state.flash = 0.18;
   }
 
@@ -439,33 +458,44 @@ function clampPuckSpeed(){
 }
 
 function physics(dt){
-  // integrate
-  puck.x += puck.vx*dt; puck.y += puck.vy*dt;
-  // air drag (very light) for hover feel
-  puck.vx *= PHYS.air; puck.vy *= PHYS.air;
+  // Sub-step integration to prevent tunneling when paddles move fast
+  const maxMove = puck.r*0.75; // max puck travel per substep
+  const move = Math.max(Math.abs(puck.vx), Math.abs(puck.vy)) * dt;
+  let steps = Math.ceil(move / maxMove);
+  steps = Math.max(1, Math.min(steps, 6));
+  const sdt = dt / steps;
+  for(let s=0; s<steps; s++){
+    // integrate
+    puck.x += puck.vx*sdt; puck.y += puck.vy*sdt;
+    // air drag
+    puck.vx *= Math.pow(PHYS.air, sdt/ (1/60)); // scale drag to substep
+    puck.vy *= Math.pow(PHYS.air, sdt/ (1/60));
 
-  // walls (left/right) with soft cushion
-  if(puck.x < puck.r){ puck.x=puck.r; puck.vx = -puck.vx*PHYS.wallRest; puck.vy *= PHYS.wallFric; s_hit(); }
-  if(puck.x > W-puck.r){ puck.x=W-puck.r; puck.vx = -puck.vx*PHYS.wallRest; puck.vy *= PHYS.wallFric; s_hit(); }
+    // walls (left/right)
+    if(puck.x < puck.r){ puck.x=puck.r; puck.vx = -puck.vx*PHYS.wallRest; puck.vy *= PHYS.wallFric; s_hit(); }
+    if(puck.x > W-puck.r){ puck.x=W-puck.r; puck.vx = -puck.vx*PHYS.wallRest; puck.vy *= PHYS.wallFric; s_hit(); }
 
-  // goals (top/bottom)
-  if(puck.y < puck.r){ state.you++; goal('YOU'); }
-  if(puck.y > H-puck.r){ state.ai++; goal('AI'); }
+    // goals (top/bottom)
+    if(puck.y < puck.r){ state.you++; goal('YOU'); break; }
+    if(puck.y > H-puck.r){ state.ai++; goal('AI'); break; }
 
-  // paddle collisions (ghost unless near the puck)
-  if(you.active && nearPuck(you.x, you.y)) collidePaddle(you);
-  if(state.mode==='1P'){
-    aiUpdate(dt);
-    collidePaddle(ai);
-  } else if(state.mode==='2P' && ai.active && nearPuck(ai.x, ai.y)){
-    collidePaddle(ai);
+    // AI update once per frame on first substep; light adjust on later
+    if(s===0){ if(state.mode==='1P'){ aiUpdate(sdt); } }
+
+    // paddle collisions (use movingNearPuck to avoid passthrough on fast handle)
+    if(you.active && movingNearPuck(you, sdt)) collidePaddle(you);
+    if(state.mode==='2P'){
+      if(ai.active && movingNearPuck(ai, sdt)) collidePaddle(ai);
+    } else {
+      collidePaddle(ai);
+    }
   }
 
-  // illegal cross penalties (with cooldown)
-  if(state.penaltyCooldown<=0){
-    if(you.y < MID - you.r*0.4) penalize('YOU');
-    if(state.mode==='2P' && ai.y > MID + ai.r*0.4) penalize('AI');
-  } else state.penaltyCooldown -= dt;
+  // warnings & flashes decay
+  if(state.flash>0) state.flash -= dt; if(warnFlash>0) warnFlash -= dt*2.5;
+
+  // timer
+  timeAcc += dt; if(timeAcc>=1){ timeAcc-=1; state.time--; updateHUD(); if(state.time<=0) finish(); }
 }
 
 function goal(who){ s_goal(); puck.reset(); state.flash=0.4; showToast(`${who} GOAL!`); updateHUD(); }
@@ -682,7 +712,31 @@ function testFlick(){
   // restore
   puck.x=was.px; puck.y=was.py; puck.vx=was.vx; puck.vy=was.vy;
 }
-setTimeout(()=>{ runSelfTests(); testGoalLineSave(); testGrazingSave(); testFlick(); }, 0);
+// New tests: (9) Prevent tunneling on fast handle, (10) AI wide-arc avoids own-goal
+function testNoTunnel(){
+  const was={x:puck.x,y:puck.y,vx:puck.vx,vy:puck.vy};
+  // put puck just in front, move handle quickly across it
+  puck.x=W*0.5; puck.y=MID+120*DPR; puck.vx=0; puck.vy=600*DPR; // moving down -> should score AI if no hit
+  you.x=puck.x-200*DPR; you.y=MID+130*DPR; you.vx=1800*DPR; you.vy=0; you.active=true;
+  const yBefore=puck.y;
+  physics(1/60);
+  const hitHappened = Math.abs(puck.y - yBefore) < 1e-3 ? false : (puck.vy < 0); // reversed means hit
+  console[hitHappened?'log':'error']('[TEST '+(hitHappened?'PASS':'FAIL')+'] No tunneling on fast handle', {vy:puck.vy});
+  // restore
+  puck.x=was.x; puck.y=was.y; puck.vx=was.vx; puck.vy=was.vy; you.active=false;
+}
+function testAIWideArc(){
+  const was={ax:ai.x,ay:ai.y, px:puck.x,py:puck.y,vx:puck.vx,vy:puck.vy};
+  state.mode='1P';
+  puck.x=W*0.52; puck.y=puck.r+70*DPR; puck.vx=0; puck.vy=-520*DPR; // toward AI goal
+  ai.x=W*0.6; ai.y=MID*0.2; ai.vx=0; ai.vy=0; ai.active=true;
+  for(let i=0;i<10;i++){ aiUpdate(1/120); }
+  const avoidedGoalMouth = ai.y > (puck.r + ai.r + 20*DPR);
+  console[avoidedGoalMouth?'log':'error']('[TEST '+(avoidedGoalMouth?'PASS':'FAIL')+'] AI uses wide arc near goal', {aiY:ai.y});
+  // restore
+  ai.x=was.ax; ai.y=was.ay; puck.x=was.px; puck.y=was.py; puck.vx=was.vx; puck.vy=was.vy;
+}
+setTimeout(()=>{ runSelfTests(); testGoalLineSave(); testGrazingSave(); testFlick(); testNoTunnel(); testAIWideArc(); }, 0);
 
 </script>
 </body>
