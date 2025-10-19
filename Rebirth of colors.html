@@ -86,7 +86,7 @@
         <div class="chip">BPM: <strong id="bpmTxt">80</strong></div>
         <div class="chip">LANES: <strong id="lanesTxt">4</strong></div>
         <div class="chip">WINDOW: <strong>±50ms / ±150ms</strong></div>
-        <div class="chip">演出: <strong>花火・風・青波・オーロラ</strong></div>
+        <div class="chip">演出: <strong>花火・風・青波・オーロラ＋BGM進化</strong></div>
       </div>
       <div class="hitLine"></div>
 
@@ -131,7 +131,7 @@
   // ====== Parameters (some derive from level) ======
   let BPM = BASE_BPM;
   let SEC_PER_BEAT = 60 / BPM;
-  let LEADIN = 1.0;
+  const LEADIN = 1.0;
   let NOTE_TRAVEL = 2.0;       // 到達時間（Lvで短縮）
   const PERFECT = 0.050;
   const GOOD = 0.150;
@@ -188,10 +188,11 @@
   let audioCtx = null, masterGain = null;
   let layers = {};
   let melodyBus = null;        // メロディ用バス
-  let delayNode = null;        // レベルに応じたショートディレイ
+  let delayNode = null;        // ショートディレイ
   let panNodes = [];           // レーンごとのステレオパン
+  let bgm = null;              // BGMコントローラ
   let particles = [];
-  let windStreaks = [];        // 風演出
+  let windStreaks = [];
   let running = false;
 
   let chart = [];              // {beat,time,notes:[{lane}],judged/hit/missed}
@@ -208,6 +209,12 @@
   function hsl(h,s,l,a=1){ return `hsla(${h},${(s*100).toFixed(1)}%,${(l*100).toFixed(1)}%,${a})`; }
   function colorOf(c){ return {'yellow':'#ffd166','green':'#5af38f','blue':'#6ab8ff','red':'#ff6b6b'}[c]||'#ffffff'; }
   function labelOf(c){ return {yellow:'黄',green:'緑',blue:'青',red:'赤'}[c]||c; }
+  function addAlpha(hex, a){
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if(!m) return hex;
+    const r = parseInt(m[1],16), g=parseInt(m[2],16), b=parseInt(m[3],16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
 
   // ====== Level -> Parameters ======
   function applyLevelParams(){
@@ -238,47 +245,106 @@
     return best;
   }
 
-  // ====== Chart (density scales with level, allow chords) ======
+  // ====== Stereo Panner（互換・安全実装） ======
+  function makePanner(panValue){
+    try{
+      if (audioCtx.createStereoPanner) {
+        const p = audioCtx.createStereoPanner();
+        p.pan.value = panValue;
+        return p;
+      } else if (typeof StereoPannerNode !== 'undefined') {
+        return new StereoPannerNode(audioCtx, {pan: panValue});
+      }
+    }catch(_e){}
+    // フォールバック（パン不可だが発音は担保）
+    const g = audioCtx.createGain();
+    return g;
+  }
+
+  // ====== Chart (density scales with level, allow chords, safe) ======
   function buildChart(){
     chart = [];
     const blocks = 8;
-    const chordProb = clamp(0.10 + (LEVEL-1)*0.06, 0.1, 0.5); // Lvで和音確率UP
+    const chordProb = clamp(0.10 + (LEVEL-1)*0.06, 0.1, 0.5); // 和音確率UP（別レーン）
     const extraNotes = (LEVEL-1)*2;                           // ブロック当たり追加ノーツ
-    const lanesScale = (LANE_COUNT===4)? SCALE4 : SCALE5;
+
+    // 同一レーン・同時刻（1/4拍スロット）での同時ノーツ最大数（4以上禁止→最大3）
+    const slotCapPerLane = 3;
+    const SLOT_Q = 0.25;             // 1/4拍で束ねる
+    const laneSlotCount = new Map(); // key: "lane@slot" → count
 
     let beat=0;
     for(let b=0;b<blocks;b++){
       const base=beat;
-      // 基本パターン
       const patt = (b%2===0)
         ? [0,0,2, 2,1, 3, 4, 5.5, 6, 7.5]
         : [0,1, 1.75, 2.5, 3.25, 4.0,5.0, 6.0, 7.0];
-      // 生成
-      patt.forEach((off,idx)=>{
+
+      patt.forEach((off)=>{
         const lanes = [randLane()];
-        // 和音にする？
         if(Math.random() < chordProb){
           let l2 = randLane();
           if(l2===lanes[0]) l2 = (l2+1)%LANE_COUNT;
           lanes.push(l2);
         }
-        push(base+off, lanes);
+        pushWithCap(base+off, lanes);
       });
-      // レベルに応じた追加ノーツ
+
       for(let i=0;i<extraNotes;i++){
-        push(base + randRange(0,8,true), [randLane()]);
+        pushWithCap(base + randRange(0,8,true), [randLane()]);
       }
       beat+=8;
     }
+
     chart.forEach(n=> n.time = LEADIN + n.beat * SEC_PER_BEAT);
 
-    function push(beat, lanes){ chart.push({beat,time:0,notes:lanes.map(l=>({lane:l})), judged:false, hitCount:0, missed:false}); }
-    function randLane(){ return (Math.random()*LANE_COUNT)|0; }
-    function randRange(a,b,half){ return half? (a + Math.round(Math.random()*(b-a)*2)/2) : (a + Math.random()*(b-a)); }
+    // ★空譜面保険：万一0なら簡易譜面を挿入（必ず流れる）
+    if(chart.length===0){
+      for(let i=0;i<16;i++){
+        chart.push({beat:i*0.5, time:0, notes:[{lane:(i%LANE_COUNT)}], judged:false, hitCount:0, missed:false});
+      }
+      chart.forEach(n=> n.time = LEADIN + n.beat*SEC_PER_BEAT);
+    }
 
     // 目標スコア（Perfect 75%想定）
     const approxNotes = chart.reduce((s,n)=> s + n.notes.length, 0);
     targetScore = Math.max(8000, Math.floor(approxNotes * 900 * 0.75));
+
+    function pushWithCap(beat, lanes){
+      const outLanes = [];
+      const slot = Math.round(beat / SLOT_Q) * SLOT_Q;
+
+      for(const lane of lanes){
+        if(tryPlace(lane, slot)) { outLanes.push(lane); continue; }
+        // 隣レーンで同時刻を試す
+        const alt = (lane + 1) % LANE_COUNT;
+        if(tryPlace(alt, slot)) { outLanes.push(alt); continue; }
+        // 1スロット後ろにずらして同レーンを試す
+        const slot2 = slot + SLOT_Q;
+        if(tryPlace(lane, slot2)) {
+          chart.push({beat: slot2, time:0, notes:[{lane}], judged:false, hitCount:0, missed:false});
+          continue;
+        }
+        // これでも無理なら捨てる（過密回避）
+      }
+
+      if(outLanes.length){
+        chart.push({beat, time:0, notes: outLanes.map(l=>({lane:l})), judged:false, hitCount:0, missed:false});
+      }
+    }
+
+    function tryPlace(lane, slot){
+      const key = `${lane}@${slot.toFixed(2)}`;
+      const cur = laneSlotCount.get(key) || 0;
+      if(cur < slotCapPerLane){
+        laneSlotCount.set(key, cur + 1);
+        return true;
+      }
+      return false;
+    }
+
+    function randLane(){ return (Math.random()*LANE_COUNT)|0; }
+    function randRange(a,b,half){ return half? (a + Math.round(Math.random()*(b-a)*2)/2) : (a + Math.random()*(b-a)); }
   }
 
   // ====== Audio ======
@@ -288,7 +354,7 @@
     masterGain = audioCtx.createGain(); masterGain.gain.value = 0.9; masterGain.connect(audioCtx.destination);
 
     // Ambient Pad（世界の息吹）
-    const amb = makePad({freqs:[110, 220, 330], gain:0.06}); amb.connect(masterGain);
+    const amb = makePad({freqs:[110, 220, 330], gain:0.05}); amb.connect(masterGain);
 
     // 色レイヤー
     layers.yellow = makeLayerGain();
@@ -296,20 +362,23 @@
     layers.blue   = makeLayerGain();
     layers.red    = makeLayerGain();
 
-    // メロディバス + ディレイ（レベルでフィードバック増）
+    // メロディバス + ディレイ（レベルでフィードバック/ミックス増）
     melodyBus = audioCtx.createGain(); melodyBus.gain.value = 0.8;
-    delayNode = audioCtx.createDelay(); delayNode.delayTime.value = 0.18; // short echo
+    delayNode = audioCtx.createDelay(); delayNode.delayTime.value = 0.18;
     const fb = audioCtx.createGain(); fb.gain.value = clamp(0.15 + (LEVEL-1)*0.05, 0.15, 0.45);
     melodyBus.connect(delayNode).connect(fb).connect(delayNode);
     const mix = audioCtx.createGain(); mix.gain.value = 0.35 + (LEVEL-1)*0.05;
     delayNode.connect(mix).connect(masterGain);
     melodyBus.connect(masterGain); // 原音
 
-    // レーンPAN
+    // レーンPAN（安全実装）
     panNodes = Array.from({length: MAX_LANES}, (_,i)=>{
-      const p = new (audioCtx.createStereoPanner||StereoPannerNode)(audioCtx, {pan: lerp(-0.8,0.8, i/(Math.max(1,MAX_LANES-1)))});
+      const p = makePanner(lerp(-0.8,0.8, i/(Math.max(1,MAX_LANES-1))));
       p.connect(melodyBus); return p;
     });
+
+    // BGMバス（各パートへ）
+    bgm = createBgmEngine();
   }
   function makeLayerGain(){ const g = audioCtx.createGain(); g.gain.value=0; g.connect(masterGain); return g; }
   function makePad({freqs, gain}){
@@ -324,7 +393,7 @@
     return g;
   }
 
-  // メロディ音（レーン毎にパン・軽いフィルタ・レベルでコーラス風LFO）
+  // メロディ音（レーン毎にパン・軽いフィルタ・レベルでコーラスLFO）
   function playLaneTone(time, lane){
     if(!audioCtx) return;
     const scale = (LANE_COUNT===4) ? SCALE4 : SCALE5;
@@ -382,6 +451,137 @@
     o.connect(f).connect(g).connect(layers.red); o.start(t); o.stop(t+0.52);
   }
 
+  // ====== BGM Engine (level-evolving) ======
+  function createBgmEngine(){
+    const bus = {
+      drum: audioCtx.createGain(), // Kick/Snare/Hat
+      bass: audioCtx.createGain(),
+      pad : audioCtx.createGain(),
+      arp : audioCtx.createGain(),
+      lead: audioCtx.createGain(),
+      mix : audioCtx.createGain(),
+      stop(){ /* no-op for this simple scheduler */ },
+      start(startTime){ this.scheduleAll(startTime); }
+    };
+    bus.drum.gain.value = 0.0; bus.bass.gain.value = 0.0; bus.pad.gain.value = 0.0; bus.arp.gain.value = 0.0; bus.lead.gain.value = 0.0;
+    // routing
+    bus.drum.connect(bus.mix); bus.bass.connect(bus.mix); bus.pad.connect(bus.mix); bus.arp.connect(bus.mix); bus.lead.connect(bus.mix);
+    bus.mix.gain.value = 0.8; bus.mix.connect(masterGain);
+
+    bus.scheduleAll = (startTime)=>{
+      const beatsTotal = 64; // 8小節 × 8拍
+      const useDrum = LEVEL>=2;
+      const useBass = LEVEL>=3;
+      const usePad  = LEVEL>=4;
+      const useArp  = LEVEL>=5;
+      const useLead = LEVEL>=6;
+
+      const now = audioCtx.currentTime;
+      const fade = (node, target)=>{ node.gain.cancelScheduledValues(now); node.gain.setValueAtTime(node.gain.value, now); node.gain.linearRampToValueAtTime(target, now+1.2); };
+      fade(bus.drum, useDrum?0.9:0.0);
+      fade(bus.bass, useBass?0.7:0.0);
+      fade(bus.pad , usePad ?0.55:0.0);
+      fade(bus.arp , useArp ?0.45:0.0);
+      fade(bus.lead, useLead?0.35:0.0);
+
+      const beatToTime = (beat)=> startTime + LEADIN + beat*SEC_PER_BEAT;
+
+      // Drum pattern (Lv2+)
+      if(useDrum){
+        const patKick = [0, 2, 4, 6];
+        const patSn   = [2, 6];
+        const patHat  = Array.from({length: beatsTotal*2}, (_,i)=> i*0.5); // 8分刻み
+        patKick.forEach(b=> schedKick(beatToTime(b)));
+        patSn.forEach(b=>   schedSnare(beatToTime(b)));
+        patHat.forEach(b=>  schedHat(beatToTime(b)));
+        for(let m=0;m<beatsTotal;m+=8){ schedHat(beatToTime(m+7.5), 1.5); }
+      }
+
+      // Bass (Lv3+)
+      if(useBass){
+        const rootHz = 55; // A1
+        for(let m=0;m<beatsTotal;m+=8){
+          [0,2,4,6].forEach(off=> schedBass(beatToTime(m+off), rootHz));
+          [1,5].forEach(off=> schedBass(beatToTime(m+off), rootHz*1.5));
+          [3,7].forEach(off=> schedBass(beatToTime(m+off), rootHz*2));
+        }
+      }
+
+      // Pad (Lv4+)
+      if(usePad){
+        const prog = [[0,4,7],[2,5,9],[4,7,11],[5,9,12]];
+        for(let s=0;s<beatsTotal;s+=8){
+          const ch = prog[(s/8)%prog.length];
+          schedPad(beatToTime(s), ch, 8*SEC_PER_BEAT);
+        }
+      }
+
+      // Arp (Lv5+)
+      if(useArp){
+        for(let m=0;m<beatsTotal;m+=8){
+          for(let b=0;b<8;b+=2){
+            for(let i=0;i<8;i++){
+              const t = beatToTime(m+b) + i*(SEC_PER_BEAT/4);
+              schedArp(t);
+            }
+          }
+        }
+      }
+
+      // Lead (Lv6+)
+      if(useLead){
+        for(let m=16;m<beatsTotal;m+=8){
+          [0,1.5,3,4.5,6].forEach(off=> schedLead(beatToTime(m+off)));
+        }
+      }
+
+      // ---- schedule funcs ----
+      function schedKick(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+        o.type='sine'; o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(55,t+0.12);
+        g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.28 + (LEVEL-2)*0.02,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18);
+        o.connect(g).connect(bus.drum); o.start(t); o.stop(t+0.2);
+      }
+      function schedSnare(t){ const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.2, audioCtx.sampleRate);
+        const d=n.getChannelData(0); for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.03)); }
+        const s=audioCtx.createBufferSource(); const g=audioCtx.createGain();
+        g.gain.setValueAtTime(0.001,t); g.gain.exponentialRampToValueAtTime(0.22 + (LEVEL-2)*0.02,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.2);
+        s.buffer=n; s.connect(g).connect(bus.drum); s.start(t);
+      }
+      function schedHat(t, mult=1){ const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.08, audioCtx.sampleRate);
+        const d=n.getChannelData(0); for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.01)); }
+        const s=audioCtx.createBufferSource(); const g=audioCtx.createGain();
+        g.gain.setValueAtTime(0.0008*mult,t); g.gain.exponentialRampToValueAtTime(0.08*mult,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.06);
+        s.buffer=n; s.connect(g).connect(bus.drum); s.start(t);
+      }
+      function schedBass(t, f0){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
+        o.type='sawtooth'; o.frequency.setValueAtTime(f0, t); f.type='lowpass'; f.frequency.setValueAtTime(220 + LEVEL*40, t);
+        g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25 + (LEVEL-3)*0.02,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.32);
+        o.connect(f).connect(g).connect(bus.bass); o.start(t); o.stop(t+0.36);
+      }
+      function schedPad(t, semis, dur){
+        const g=audioCtx.createGain(); g.gain.value=0.0; g.connect(bus.pad);
+        g.gain.linearRampToValueAtTime(0.35, t+0.3); g.gain.linearRampToValueAtTime(0.0, t+dur-0.2);
+        semis.forEach(se=>{
+          const o=audioCtx.createOscillator(); o.type='sine';
+          o.frequency.value = 220 * Math.pow(2, se/12);
+          const f=audioCtx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=1200 + LEVEL*200;
+          o.connect(f).connect(g); o.start(t); o.stop(t+dur);
+        });
+      }
+      function schedArp(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+        o.type='triangle'; o.frequency.value = 440 * Math.pow(2, ((Math.random()<0.5?0:7))/12);
+        g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.08 + (LEVEL-5)*0.01,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.14);
+        o.connect(g).connect(bus.arp); o.start(t); o.stop(t+0.16);
+      }
+      function schedLead(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+        o.type='sine'; o.frequency.value=660 + LEVEL*8; g.gain.setValueAtTime(0.0008,t);
+        g.gain.exponentialRampToValueAtTime(0.12 + (LEVEL-6)*0.01,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.28);
+        o.connect(g).connect(bus.lead); o.start(t); o.stop(t+0.3);
+      }
+    };
+    return bus;
+  }
+
   // ====== Particles / VFX ======
   function addBurst(x,y,color,count=20, speed=2){
     for(let i=0;i<count;i++){
@@ -391,7 +591,6 @@
     }
   }
   function addFireworks(x,y,colors){
-    // 大花火（レベルアップ・色解放・大コンボで）
     const rings = 3 + Math.min(LEVEL,3);
     for(let r=0;r<rings;r++){
       const c = colors[r % colors.length];
@@ -415,7 +614,6 @@
     return arr.length?arr:['#ffffff'];
   }
   function spawnWind(){
-    // 風のストリーク（レベルに応じて本数/速度）
     const W=canvas.width, H=canvas.height;
     const n = 2 + LEVEL;
     for(let i=0;i<n;i++){
@@ -438,7 +636,6 @@
   function applyWorldVisuals(){
     const p = worldProgress();
     wrap.style.setProperty('--gray', (1-p).toFixed(3));
-    // 背景グラデ：群青→暁→金
     const topHue = lerp(220, 200, p), topSat = lerp(0.20, 0.70, p), topLum = lerp(0.05, 0.25, p);
     const botHue = lerp(220, 45,  p), botSat = lerp(0.18, 0.85, p), botLum = lerp(0.08, 0.42, p);
     document.documentElement.style.setProperty('--bg-top', hsl(topHue, topSat, topLum, 1));
@@ -463,8 +660,13 @@
     melodyBus.gain.setValueAtTime(0.8, now);
 
     particles.length = 0; windStreaks.length = 0;
-    songStartTime = now + 0.05;
+    songStartTime = now + 0.10; // 少し余裕
     applyWorldVisuals();
+
+    // レベル連動BGM：Lv1は無音、それ以降は進化
+    if(bgm){ bgm.stop(); }
+    if(LEVEL>=2){ bgm.start(songStartTime); }
+
     requestAnimationFrame(loop);
   }
 
@@ -474,12 +676,10 @@
     const name = COLOR_ORDER[unlockedIndex];
     goodHitsForColor = 0;
 
-    // レイヤーfade-in
     const now = audioCtx.currentTime;
     const g = layers[name];
     if(g){ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(g.gain.value, now); g.gain.linearRampToValueAtTime(0.7 + 0.05*LEVEL, now+1.0); }
 
-    // 祝砲（色混合花火＋紙吹雪）
     const cx = canvas.width/2, cy = canvas.height*0.35;
     const cols = unlockedColors();
     addFireworks(cx, cy, cols);
@@ -512,7 +712,6 @@
   }
   function judgeTap(lane){
     const t = audioCtx.currentTime - songStartTime;
-    // もっとも近い未判定のノート（かつそのノート内にlaneを含む）を探す
     let best=null, bestAdt=1e9, bestIdx=-1;
     for(let i=0;i<chart.length;i++){
       const n = chart[i];
@@ -538,10 +737,17 @@
   addEventListener('keydown', (e)=>{ if(e.code === 'Space'){ e.preventDefault(); onTapButton(); }}, {passive:false});
   tapBtn.addEventListener('click', onTapButton);
 
-  startBtn.addEventListener('click', ()=>{
-    if(!audioCtx || audioCtx.state !== 'running'){ initAudio(); audioCtx.resume(); }
+  // ★ Start は必ず resume を await してから開始（モバイル/一部ブラウザ対策）
+  startBtn.addEventListener('click', async ()=>{
+    if(!audioCtx){ initAudio(); }
+    try{
+      if(audioCtx.state !== 'running'){
+        await audioCtx.resume();
+      }
+    }catch(_e){}
     startGame();
   });
+
   retryBtn.addEventListener('click', startGame);
   nextBtn.addEventListener('click', ()=>{
     LEVEL++; startGame();
@@ -551,7 +757,6 @@
   // ====== Judgement ======
   function applyHit(noteIndex, lane, grade){
     const n = chart[noteIndex];
-    // そのノート内の対象レーンが未HITならカウント
     const part = n.notes.find(nt=>nt.lane===lane);
     if(!part || part.hit) return;
     part.hit = true;
@@ -562,17 +767,14 @@
     const add = (grade==='perfect'? 1000 : 650) * (1 + Math.floor(combo/25)*0.1);
     score += add; combo++; hits++;
 
-    // 色ゲージ
     goodHitsForColor++;
     if(goodHitsForColor >= HITS_PER_COLOR){ unlockNextColor(); }
     const progress = clamp(((unlockedIndex+1)*HITS_PER_COLOR + goodHitsForColor) / (COLOR_ORDER.length*HITS_PER_COLOR));
     barEl.style.width = (progress*100).toFixed(1)+'%';
 
-    // 音と演出
     playLaneTone(now, lane);
     colorSfx(now);
 
-    // パーティクル（判定ライン位置・色ミックス）
     const centers = laneCenters();
     const x = centers[lane], y = canvas.height * HIT_LINE_RATIO;
     const cols = unlockedColors();
@@ -582,7 +784,6 @@
 
     floatText(grade.toUpperCase(), grade==='perfect'?'ft-perfect':'ft-good');
 
-    // 大コンボで花火
     if(combo===20 || combo===40 || combo===60){
       addFireworks(canvas.width*0.5, canvas.height*0.3, cols);
       spawnWind();
@@ -617,7 +818,7 @@
   }
 
   // ====== Render & VFX ======
-  let mistTime = 0, waveTime = 0, auroraTime = 0;
+  let waveTime = 0, auroraTime = 0;
   function loop(){
     if(!running) return;
 
@@ -637,7 +838,7 @@
     // レーン背景（薄）
     drawLanes(lerp(0.03, 0.08, p));
 
-    // 風（Wind）— レベルに応じて強化
+    // 風
     if(Math.random() < 0.01 + LEVEL*0.004) spawnWind();
     ctx.lineCap='round';
     windStreaks.forEach(w=>{
@@ -650,7 +851,7 @@
     windStreaks = windStreaks.filter(w=>w.x < W+80 && w.life>0);
     ctx.globalAlpha=1;
 
-    // 青い波（Blue Waves）— 青解放以降
+    // 青い波（Blue Waves）
     if(unlockedIndex>=2){
       waveTime += 0.016 + p*0.008;
       const amp = 8*DPR + 16*DPR*p;
@@ -670,7 +871,7 @@
       ctx.globalAlpha = 1;
     }
 
-    // オーロラ（Aurora）— 全色解放近いと強化
+    // オーロラ
     if(p>0.55){
       auroraTime += 0.005 + 0.01*p;
       const bands = 2 + Math.floor(p*3);
@@ -698,7 +899,7 @@
     const spawnY  = H * SPAWN_RATIO;
     const bottomY = H * BOTTOM_RATIO;
 
-    // ノーツ描画（上→判定→最下部へ）
+    // ノーツ
     for(const n of chart){
       if(!n.judged && (t - n.time) > GOOD){
         n.missed = true; n.judged = true; judgedCount++; combo = 0; updateStats();
@@ -723,7 +924,7 @@
       }
     }
 
-    // 花火/紙吹雪/通常粒子
+    // パーティクル
     for(const ptl of particles){
       if(ptl.type==='confetti'){
         ptl.rot += 0.08; ptl.vy += 0.02;
@@ -794,17 +995,9 @@
       ACCURACY: <b>${(acc*100).toFixed(1)}%</b><br/>
       World Restored: <b>${Math.round(worldProgress()*100)}%</b><br/>
       Colors Restored: <b>${unlockedIndex+1}/${COLOR_ORDER.length}</b><br/>
-      次のレベルでは、<b>ノーツ密度↑・落下速度↑・演出↑</b>！
+      次のレベルでは、<b>ノーツ密度↑・落下速度↑・BGM豪華↑</b>！
     `;
     ov.style.display = 'flex';
-  }
-
-  // ====== Utils ======
-  function addAlpha(hex, a){
-    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-    if(!m) return hex;
-    const r = parseInt(m[1],16), g=parseInt(m[2],16), b=parseInt(m[3],16);
-    return `rgba(${r},${g},${b},${a})`;
   }
 
   // 初回：イントロ表示
@@ -812,9 +1005,10 @@
     document.getElementById('ovTitle').textContent = 'Monochrome Rebirth';
     document.getElementById('ovMsg').innerHTML = `
       失われた色と音。<br/>
-      レーン上をタップして、色の精霊と世界の色を取り戻そう。<br/>
-      レベルが上がるほど、<b>音は精錬</b>され、<b>花火・風・青い波・オーロラ</b>などの演出が強化。<br/>
-      難易度も上がり、ノーツ密度や落下速度、同時押しが増えていきます。
+      レーン上をタップして、色と音を取り戻そう。<br/>
+      <b>Lv1はBGMなし</b>。Lv2でドラム、Lv3でベース、Lv4でPad、Lv5+でアルペジオ/リード…<br/>
+      同一レーンに一度に<b>4つ以上</b>は出ません（見やすさ優先）。<br/>
+      難易度はレベルに応じて段階的に上がります。
     `;
     ov.style.display = 'flex';
     applyWorldVisuals();
