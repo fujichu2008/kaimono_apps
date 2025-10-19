@@ -113,7 +113,7 @@ const ctx = canvas.getContext('2d');
 const DPR = Math.max(1, window.devicePixelRatio || 1);
 let W=0,H=0,MID=0;
 
-// --- Initialize AI brain early (so it's available before use) ---
+// --- Initialize AI brain early ---
 const aiBrain = { tx: 0, ty: 0, react: 0, homeX: 0, homeY: 0 };
 
 function resize(){
@@ -144,9 +144,20 @@ const state = {
 // --------------------------------------------------------
 // Entities
 // --------------------------------------------------------
-class Paddle{ constructor(x,y,color,side){ this.x=x; this.y=y; this.r=38*DPR; this.vx=0; this.vy=0; this.color=color; this.side=side; this.active=false; this.touchId=null; }
-  clampToSide(){ if(this.side==='you') this.y=Math.max(MID+this.r, Math.min(H-this.r, this.y)); else this.y=Math.min(MID-this.r, Math.max(this.r, this.y));
-                 this.x=Math.max(this.r, Math.min(W-this.r, this.x)); }
+class Paddle{ 
+  constructor(x,y,color,side){ 
+    this.x=x; this.y=y; this.vx=0; this.vy=0; this.color=color; this.side=side; this.active=false; this.touchId=null; 
+    // bar (capsule) paddle parameters
+    this.shape='bar';
+    this.barHalf = 56*DPR;   // half length of the bar
+    this.barRad  = 22*DPR;   // round cap radius / thickness
+    this.r = 38*DPR;         // legacy radius used for clamping & tests (keep similar size)
+  }
+  clampToSide(){ 
+    if(this.side==='you') this.y=Math.max(MID+this.r, Math.min(H-this.r, this.y)); 
+    else this.y=Math.min(MID-this.r, Math.max(this.r, this.y));
+    this.x=Math.max(this.r, Math.min(W-this.r, this.x)); 
+  }
 }
 class Puck{ constructor(){ this.reset(); }
   reset(){ this.x=W/2; this.y=H/2; const ang=(Math.random()*Math.PI*2); const sp= (DPR* (9 + Math.random()*3)); this.vx=Math.cos(ang)*sp; this.vy=Math.sin(ang)*sp; this.r=20*DPR; }
@@ -156,7 +167,7 @@ const you = new Paddle(W/2, H*0.82, '#00d1ff','you');
 const ai  = new Paddle(W/2, H*0.18, '#7a5cff','ai');
 const puck = new Puck();
 
-// Now that ai & puck exist, compute homeY safely and keep it updated on resize
+// compute homeY after entities exist
 function computeHomeY(){ aiBrain.homeY = Math.max(ai.r, (20*DPR) + puck.r); }
 computeHomeY();
 addEventListener('resize', computeHomeY, {passive:true});
@@ -321,17 +332,13 @@ function aiUpdate(dt){
 // Physics
 // --------------------------------------------------------
 function collidePaddle(p){
-  const dx = puck.x - p.x; const dy = puck.y - p.y;
-  const dist = Math.hypot(dx,dy); const minDist = puck.r + p.r;
-  if(dist < minDist){
-    const nx = (dx||1)/(dist||1), ny = (dy||0)/(dist||1);
-    const overlap = (minDist - dist) + 0.6;
-    puck.x += nx*overlap; puck.y += ny*overlap;
+  // helper: apply collision response with current normal nx,ny
+  function resolveWithNormal(nx, ny, p){
+    // relative velocity
     let rvx = puck.vx - p.vx; let rvy = puck.vy - p.vy;
-    const vn = rvx*nx + rvy*ny; const tx = -ny, ty = nx; let vt = rvx*tx + rvy*ty;
-    let e = 1.05; // base restitution
-    if(p===ai && aiServeBoost>0){ e *= aiServeBoost; aiServeBoost = 0; }
-    // Extra counter force when saving at goal line
+    const vn = rvx*nx + rvy*ny;
+    const tx = -ny, ty = nx; let vt = rvx*tx + rvy*ty;
+    let e = 1.05; if(p===ai && aiServeBoost>0){ e *= aiServeBoost; aiServeBoost = 0; }
     if(p===ai && aiCounterBias>0){ puck.vy += aiCounterBias; puck.vx += aiCounterSide; aiCounterBias = 0; aiCounterSide = 0; }
     const mu = 0.90; const spin = (p.vx*tx + p.vy*ty)*0.35;
     const vn2 = -vn * e; const vt2 = vt * mu + spin;
@@ -339,9 +346,66 @@ function collidePaddle(p){
     puck.vx = rvx + p.vx; puck.vy = rvy + p.vy;
     clampPuckSpeed(); s_hit(); state.flash = 0.18;
   }
+
+  if(p.shape==='bar'){
+    // Capsule (horizontal) vs circle collision
+    const hw=p.barHalf, rr=p.barRad;
+    // Closest point on segment to puck center
+    let ax=p.x-hw, ay=p.y, bx=p.x+hw, by=p.y;
+    const abx=bx-ax, aby=by-ay; // (length 2*hw, horizontal)
+    let t = ((puck.x-ax)*abx + (puck.y-ay)*aby) / (abx*abx + aby*aby);
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + abx*t, cy = ay + aby*t; // closest point on segment center-line
+    let nx = puck.x - cx, ny = puck.y - cy; // vector to closest point
+    let dist = Math.hypot(nx,ny);
+    const minDist = puck.r + rr;
+
+    // --- goal-line "grazing" assist: treat near-miss as save ---
+    const nearMiss = (p===ai && aiCounterBias>0 && puck.vy<0 && dist < minDist + 10*DPR);
+    if(nearMiss){
+      // compute and normalize normal; push puck onto contact shell
+      nx = (nx||(1)) / (dist||1); ny = (ny||(0)) / (dist||1);
+      const overlap = Math.max(0.6, (minDist - dist) + 0.6);
+      puck.x += nx*overlap; puck.y += ny*overlap;
+      resolveWithNormal(nx, ny, p);
+      return;
+    }
+
+    if(dist < minDist){
+      nx = (nx||(1)) / (dist||1); ny = (ny||(0)) / (dist||1);
+      const overlap = (minDist - dist) + 0.6;
+      puck.x += nx*overlap; puck.y += ny*overlap;
+      resolveWithNormal(nx, ny, p);
+    }
+    return;
+  }
+
+  // circle fallback (not used now)
+  const dx = puck.x - p.x; const dy = puck.y - p.y;
+  let dist = Math.hypot(dx,dy); const minDist = puck.r + p.r;
+  let nx = (dx||1)/(dist||1), ny = (dy||0)/(dist||1);
+
+  // goal-line "grazing" assist for circle, too
+  const nearMiss = (p===ai && aiCounterBias>0 && puck.vy<0 && dist < minDist + 10*DPR);
+  if(nearMiss){
+    const overlap = Math.max(0.6, (minDist - dist) + 0.6);
+    puck.x += nx*overlap; puck.y += ny*overlap;
+    resolveWithNormal(nx, ny, p);
+    return;
+  }
+
+  if(dist < minDist){
+    const overlap = (minDist - dist) + 0.6;
+    puck.x += nx*overlap; puck.y += ny*overlap;
+    resolveWithNormal(nx, ny, p);
+  }
 }
 
-function clampPuckSpeed(){ const sp = Math.hypot(puck.vx, puck.vy) || 1; const ns = Math.max(PHYS.minSp, Math.min(PHYS.maxSp, sp)); puck.vx = puck.vx/sp*ns; puck.vy = puck.vy/sp*ns; }
+function clampPuckSpeed(){
+  const sp = Math.hypot(puck.vx, puck.vy) || 1;
+  const ns = Math.max(PHYS.minSp, Math.min(PHYS.maxSp, sp));
+  puck.vx = puck.vx/sp*ns; puck.vy = puck.vy/sp*ns;
+}
 
 function physics(dt){
   // integrate
@@ -376,8 +440,32 @@ function penalize(who){ s_pen(); state.penaltyCooldown = 1.2; if(who==='YOU' && 
 
 // --------------------------------------------------------
 // Render (neon styles)
-// --------------------------------------------------------
 function glowCircle(x,y,r, color, innerColor){ ctx.save(); ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); const g=ctx.createRadialGradient(x,y,r*0.3,x,y,r); g.addColorStop(0, innerColor || '#ffffff'); g.addColorStop(1, color); ctx.fillStyle=g; ctx.fill(); ctx.shadowColor=color; ctx.shadowBlur=r*0.8; ctx.strokeStyle=color; ctx.lineWidth = Math.max(2*DPR, r*0.08); ctx.stroke(); ctx.restore(); }
+
+function drawPaddle(p){
+  if(p.shape==='bar'){
+    const hw=p.barHalf, rr=p.barRad; 
+    ctx.save();
+    // neon glow
+    ctx.shadowColor = p===ai ? 'rgba(122,92,255,.8)' : 'rgba(0,209,255,.8)';
+    ctx.shadowBlur = rr*1.1;
+    ctx.fillStyle = p===ai ? 'rgba(200,180,255,.85)' : 'rgba(200,255,255,.9)';
+    ctx.strokeStyle = p===ai ? 'rgba(122,92,255,.6)' : 'rgba(0,209,255,.6)';
+    ctx.lineWidth = 3*DPR;
+    // rounded capsule path (horizontal bar)
+    ctx.beginPath();
+    ctx.moveTo(p.x-hw, p.y-rr);
+    ctx.lineTo(p.x+hw, p.y-rr);
+    ctx.arc(p.x+hw, p.y, rr, -Math.PI/2, Math.PI/2, false);
+    ctx.lineTo(p.x-hw, p.y+rr);
+    ctx.arc(p.x-hw, p.y, rr, Math.PI/2, -Math.PI/2, false);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  } else {
+    glowCircle(p.x, p.y, p.r, p===ai ? 'rgba(122,92,255,.45)':'rgba(0,209,255,.5)','rgba(255,255,255,.9)');
+  }
+}
 
 function draw(){ ctx.clearRect(0,0,W,H);
   // center neon line
@@ -395,8 +483,8 @@ function draw(){ ctx.clearRect(0,0,W,H);
   if(state.flash>0){ ctx.save(); ctx.globalAlpha = Math.min(0.7, state.flash*2); const rr=puck.r*2.4; glowCircle(puck.x,puck.y, rr, 'rgba(36,228,255,.35)','rgba(255,255,255,.8)'); ctx.restore(); }
 
   // paddles
-  if(state.mode==='2P' ? ai.active : true){ glowCircle(ai.x, ai.y, ai.r, 'rgba(122,92,255,.45)','rgba(200,180,255,.85)'); }
-  if(you.active) glowCircle(you.x, you.y, you.r, 'rgba(0,209,255,.5)','rgba(200,255,255,.9)');
+  if(state.mode==='2P' ? ai.active : true){ drawPaddle(ai); }
+  if(you.active) drawPaddle(you);
 
   // puck
   glowCircle(puck.x, puck.y, puck.r, 'rgba(36,228,255,.55)','rgba(255,255,255,.95)');
@@ -467,14 +555,20 @@ highlightSelect(); toggleDiffVisible();
 // Accessibility: keyboard (for desktop testing)
 // --------------------------------------------------------
 let k= {l:false,r:false,u:false,d:false};
-document.addEventListener('keydown',(e)=>{ if(e.key==='Enter' && startOv.style.display!=='none'){ startGame(); }
-  if(e.key==='1') state.mode='1P', highlightSelect(), toggleDiffVisible(); if(e.key==='2') state.mode='2P', highlightSelect(), toggleDiffVisible();
-  if(e.key==='ArrowLeft') k.l=true; if(e.key==='ArrowRight') k.r=true; if(e.key==='ArrowUp') k.u=true; if(e.key==='ArrowDown') k.d=true; });
+document.addEventListener('keydown',(e)=>{ 
+  if(e.key==='Enter' && startOv.style.display!=='none'){ startGame(); }
+  if(e.key==='1') { state.mode='1P'; highlightSelect(); toggleDiffVisible(); }
+  if(e.key==='2') { state.mode='2P'; highlightSelect(); toggleDiffVisible(); }
+  if(e.key==='ArrowLeft') k.l=true; 
+  if(e.key==='ArrowRight') k.r=true; 
+  if(e.key==='ArrowUp') k.u=true; 
+  if(e.key==='ArrowDown') k.d=true; 
+});
 document.addEventListener('keyup',(e)=>{ if(e.key==='ArrowLeft') k.l=false; if(e.key==='ArrowRight') k.r=false; if(e.key==='ArrowUp') k.u=false; if(e.key==='ArrowDown') k.d=false; });
 function desktopYou(dt){ const speed=900*DPR; let vx=0,vy=0; if(k.l) vx-=speed; if(k.r) vx+=speed; if(k.u) vy-=speed; if(k.d) vy+=speed; if(vx||vy){ you.active=true; you.x += vx*dt; you.y += vy*dt; you.clampToSide(); }
 }
 // hook into loop by monkey-patching aiUpdate call when not touching on desktop
-const _aiUpdate = aiUpdate; aiUpdate = function(dt){ _aiUpdate(dt); if(!('ontouchstart' in window)) desktopYou(dt); }
+const _aiUpdate = aiUpdate; aiUpdate = function(dt){ _aiUpdate(dt); if(!('ontouchstart' in window)){ desktopYou(dt); } }
 
 // --------------------------------------------------------
 // Prevent scrolling on touch move outside canvas on iOS
@@ -501,7 +595,14 @@ function runSelfTests(){
   puck.x=W*0.7; puck.y=H*0.85; for(let i=0;i<25;i++){ aiUpdate(0.016);} ok('AI idles near goal when puck far', ai.y < MID*0.85);
   // 7) computeHomeY keeps value >= ai.r after call
   const prevHomeY = aiBrain.homeY; computeHomeY(); ok('computeHomeY keeps >= ai.r', aiBrain.homeY >= ai.r && aiBrain.homeY >= 20*DPR);
-  state.mode = wasMode;
+  // 8) Bar collision returns puck opposite vertically when hitting near center of bar
+  const saveState = {px:puck.x, py:puck.y, vx:puck.vx, vy:puck.vy, ax:ai.x, ay:ai.y};
+  puck.x = ai.x; puck.y = ai.y + ai.barRad + puck.r - 2*DPR; puck.vx = 0; puck.vy = -600*DPR; ai.vx=0; ai.vy=0; ai.active=true; state.mode='1P';
+  collidePaddle(ai);
+  ok('Bar hit flips vertical direction', puck.vy > 0);
+  // restore
+  puck.x=saveState.px; puck.y=saveState.py; puck.vx=saveState.vx; puck.vy=saveState.vy; ai.x=saveState.ax; ai.y=saveState.ay; state.mode=wasMode;
+
   const passed = results.every(r=>r.pass);
   if(passed) showToast('Self-tests passed');
 }
@@ -520,7 +621,18 @@ function testGoalLineSave(){
   // restore
   puck.x=was.x; puck.y=was.y; puck.vx=was.vx; puck.vy=was.vy; ai.x=was.ax; ai.y=was.ay;
 }
-setTimeout(()=>{ runSelfTests(); testGoalLineSave(); }, 0);
+// Additional grazing-save test: within tolerance still pushes downward
+function testGrazingSave(){
+  const was = {x:puck.x,y:puck.y,vx:puck.vx,vy:puck.vy, ax:ai.x, ay:ai.y};
+  puck.x = W*0.5; puck.y = puck.r + 70*DPR; puck.vx = 30*DPR; puck.vy = -420*DPR;
+  ai.x = puck.x; ai.y = puck.y + ai.r + 20*DPR; // slightly further -> near-miss region
+  ai.active=true; state.mode='1P'; aiUpdate(0.016); collidePaddle(ai);
+  const passed = (puck.vy > 0);
+  console[passed?'log':'error']('[TEST '+(passed?'PASS':'FAIL')+'] Grazing goal-line save downward', {vy:puck.vy});
+  // restore
+  puck.x=was.x; puck.y=was.y; puck.vx=was.vx; puck.vy=was.vy; ai.x=was.ax; ai.y=was.ay;
+}
+setTimeout(()=>{ runSelfTests(); testGoalLineSave(); testGrazingSave(); }, 0);
 
 </script>
 </body>
