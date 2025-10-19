@@ -261,84 +261,116 @@ canvas.addEventListener('touchcancel', onTouchEnd, {passive:false});
 // --------------------------------------------------------
 function aiUpdate(dt){
   if(state.mode!=='1P') return;
-  // Front-intercept with goal-line defense & counter
-  const ACCEL = [2000,2900,3800].map(v=>v*DPR);   // base acceleration
-  const MAXSP = [1400,2000,2600].map(v=>v*DPR);   // base max speed
-  const DASHB = [1.20,1.40,1.70];                 // boost when far/fast/near-goal
-  const REACT = [0.06,0.04,0.022];                // reaction delay
-  const ERR   = [18,9,4].map(v=>v*DPR);           // aiming error window
-  const LATK  = [28,40,56].map(v=>v*DPR);         // lateral offset base (wrap)
-  const FRNT  = [32,46,64].map(v=>v*DPR);         // front offset along -vel
-  const GBias = [220,320,420].map(v=>v*DPR);      // downward counter push on save
-  const GX    = [120,160,220].map(v=>v*DPR);      // side push on save
+
+  // ====== CONFIG (difficulty-scaled) ======
+  const ACCEL = [2600,3400,4600].map(v=>v*DPR);     // stronger acceleration
+  const MAXSP = [1700,2300,3000].map(v=>v*DPR);     // quicker top speed
+  const DASHB = [1.25,1.5,1.85];                    // panic boost near goal / far chases
+  const REACT = [0.05,0.032,0.018];                 // shorter reaction window
+  const ERR   = [14,7,3].map(v=>v*DPR);             // lower aiming error
+  const LATK  = [34,52,72].map(v=>v*DPR);           // lateral wrap magnitude
+  const FRNT  = [38,56,78].map(v=>v*DPR);           // front offset magnitude
+  const GBias = [260,380,520].map(v=>v*DPR);        // downward counter push on save (stronger)
+  const GX    = [160,220,280].map(v=>v*DPR);        // side push on save (stronger)
+  const ARC_R = [48,64,86].map(v=>v*DPR);           // arc radius to go around puck before hit
 
   let accel = ACCEL[state.diff];
   let maxSpeed = MAXSP[state.diff];
   const reactBase = REACT[state.diff];
   const err = ERR[state.diff];
 
-  const incoming = puck.vy < 0;                    // puck heading to AI
-  const fastIncoming = puck.vy < -520*DPR;         // very fast
-  const nearGoal = puck.y < (puck.r + 74*DPR);     // goal-line defense zone
-  const onAiHalf = puck.y < MID*0.97;
+  // ====== SITUATION AWARENESS ======
+  const incoming   = puck.vy < 0;                   // puck is heading to AI
+  const veryFast   = puck.vy < -640*DPR;            // very fast shot
+  const nearGoal   = puck.y < (puck.r + 90*DPR);    // goal mouth danger zone
+  const onAiHalf   = puck.y < MID*0.98;
+  const centerLine = W/2;
 
   let targetX, targetY;
   aiCounterBias = 0; aiCounterSide = 0; // reset unless entering defense
 
+  // Choose a preferred counter direction: return to the side OPPOSITE from player's paddle
+  const playerOnLeft = you.x < centerLine;
+  const preferRight  = playerOnLeft;                      // shoot away from the human
+  const sideSignPref = preferRight ? +1 : -1;             // +1 => right, -1 => left
+
+  // ====== STATE 1: GOAL-LINE SAVE (highest priority) ======
   if(nearGoal && (incoming || onAiHalf)){
-    // --- Goal-line block & counter ---
     const pv = Math.hypot(puck.vx, puck.vy) || 1;
     const vfx = puck.vx / pv, vfy = puck.vy / pv;
     const ux = -vfy, uy = vfx; // perpendicular unit
+
     const dist0 = Math.hypot(puck.x-ai.x, puck.y-ai.y);
-    const dash = (fastIncoming || dist0>220*DPR) ? DASHB[state.diff] : 1.0;
+    const dash = (veryFast || dist0>220*DPR) ? DASHB[state.diff] : 1.0;
     maxSpeed *= dash; accel *= dash;
 
-    // Block right in front of goal line, centered to puck with small lateral bias
+    // Stand just in front of the line, biased to the side away from the human
     const blockY = Math.max(ai.r + 6*DPR, puck.r + ai.r + 10*DPR);
-    const sideSign = (puck.x < W/2 ? -1 : 1);
-    const sideMag = Math.min(90*DPR, LATK[state.diff] + pv*0.035);
-    targetX = Math.max(ai.r, Math.min(W-ai.r, puck.x + ux*sideMag*sideSign));
+    const sideMag = Math.min(100*DPR, LATK[state.diff] + pv*0.04);
+    targetX = Math.max(ai.r, Math.min(W-ai.r, puck.x + ux*sideMag*sideSignPref));
     targetY = Math.max(ai.r, Math.min(MID - ai.r*1.02, blockY));
 
-    // Mark counter-intent so collision adds a downward push & slight side
     aiCounterBias = GBias[state.diff];
-    aiCounterSide = GX[state.diff] * sideSign;
-  } else if(incoming || onAiHalf){
-    // --- Front-intercept with wrap-around ---
+    aiCounterSide = GX[state.diff] * sideSignPref;
+  }
+  // ====== STATE 2: FRONT-INTERCEPT with ARC (arrive from the front & around) ======
+  else if(incoming || onAiHalf){
     const pv = Math.hypot(puck.vx, puck.vy) || 1;
-    const vfx = puck.vx / pv, vfy = puck.vy / pv;
-    const ux = -vfy, uy = vfx;
+    const vfx = puck.vx / pv, vfy = puck.vy / pv;         // puck forward
+    const ux = -vfy, uy = vfx;                            // left normal
+
     const dx0 = (puck.x - ai.x), dy0 = (puck.y - ai.y);
     const dist0 = Math.hypot(dx0,dy0);
-    const dash = (fastIncoming || dist0>280*DPR) ? DASHB[state.diff] : 1.0;
+    const dash = (veryFast || dist0>260*DPR) ? DASHB[state.diff] : 1.0;
     maxSpeed *= dash; accel *= dash;
-    const relSp = Math.max(1, pv + maxSpeed*0.6);
-    const t = Math.max(0.05, Math.min(0.85, dist0 / relSp * 1.25));
+
+    // Predict intercept time a bit longer to avoid body checks and arrive "ahead"
+    const relSp = Math.max(1, pv + maxSpeed*0.8);
+    const t = Math.max(0.06, Math.min(0.95, dist0 / relSp * 1.35));
     const px = puck.x + puck.vx * t;
     const py = puck.y + puck.vy * t;
-    const sideSign = (px < W/2 ? -1 : 1);
-    const sideMag = LATK[state.diff] + Math.min(90*DPR, pv*0.045);
-    const frontMag = FRNT[state.diff] + Math.min(90*DPR, pv*0.05);
-    targetX = px - vfx * frontMag + ux * sideMag * sideSign;
-    targetY = py - vfy * frontMag + uy * sideMag * sideSign;
+
+    // Choose lateral/front offsets to push the puck downwards & to the free side
+    const sideMag  = LATK[state.diff] + Math.min(100*DPR, pv*0.05);
+    const frontMag = FRNT[state.diff] + Math.min(100*DPR, pv*0.055);
+
+    // Arc approach: first a waypoint that swings around the puck, then the strike point
+    const arcR = ARC_R[state.diff];
+    const arcX = px + ux * arcR * sideSignPref;           // curve around on the preferred side
+    const arcY = py + uy * arcR * sideSignPref;
+
+    // Strike point slightly in front of puck, biased laterally to aim away from human
+    const strikeX = px - vfx * frontMag + ux * sideMag * sideSignPref;
+    const strikeY = py - vfy * frontMag + uy * sideMag * sideSignPref;
+
+    // Choose target between the arc waypoint and strike point depending on distance
+    const toArc = Math.hypot(arcX-ai.x, arcY-ai.y);
+    const toStrike = Math.hypot(strikeX-ai.x, strikeY-ai.y);
+    const goArcFirst = toArc + 40*DPR < toStrike;         // small bias to arc first
+
+    targetX = goArcFirst ? arcX : strikeX;
+    targetY = goArcFirst ? arcY : strikeY;
+
     targetX = Math.max(ai.r, Math.min(W-ai.r, targetX));
     targetY = Math.max(ai.r, Math.min(MID - ai.r*1.02, targetY));
-  } else {
-    // Patrol deep near own goal (defensive stance)
+  }
+  // ====== STATE 3: DEFENSIVE PATROL (idle but alert near goal) ======
+  else {
     const goalY = Math.max(ai.r + 20*DPR, aiBrain.homeY || (puck.r + 80*DPR));
-    targetX = Math.max(ai.r, Math.min(W-ai.r, (W/2) + Math.sin(performance.now()/520)*60*DPR));
-    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.25, goalY + Math.cos(performance.now()/740)*24*DPR));
+    // Micro patrol: bias slightly toward the side opposite the human to be ready to counter
+    const bias = (preferRight ? +1 : -1) * 50*DPR;
+    targetX = Math.max(ai.r, Math.min(W-ai.r, (W/2) + bias + Math.sin(performance.now()/520)*48*DPR));
+    targetY = Math.max(ai.r, Math.min(MID - ai.r*1.25, goalY + Math.cos(performance.now()/740)*20*DPR));
   }
 
-  // Reaction window
+  // ====== Reaction & Movement ======
   if(aiBrain.react>0){ aiBrain.react -= dt; }
   else {
     aiBrain.tx = targetX; aiBrain.ty = targetY;
-    aiBrain.react = reactBase + Math.random()*reactBase*0.35;
+    aiBrain.react = reactBase + Math.random()*reactBase*0.3; // slight jitter
   }
 
-  // Human-like aiming error
+  // Human-like aiming error (reduced with difficulty)
   const tx = Math.max(ai.r, Math.min(W-ai.r, aiBrain.tx + (Math.random()-0.5)*err));
   const ty = Math.max(ai.r, Math.min(MID - ai.r*1.02, aiBrain.ty + (Math.random()-0.5)*err));
 
@@ -349,6 +381,10 @@ function aiUpdate(dt){
     const desiredVy = ddy/d * maxSpeed;
     ai.vx += Math.max(-accel*dt, Math.min(accel*dt, desiredVx - ai.vx));
     ai.vy += Math.max(-accel*dt, Math.min(accel*dt, desiredVy - ai.vy));
+    // apply small lateral steering to avoid head-on pre-collisions
+    const steer = 0.06 * (preferRight ? 1 : -1);
+    ai.vx += steer * (Math.random()*0.5+0.5) * DPR;
+
     ai.x += ai.vx*dt; ai.y += ai.vy*dt; ai.vx *= 0.90; ai.vy *= 0.90; ai.clampToSide();
   }
 }
