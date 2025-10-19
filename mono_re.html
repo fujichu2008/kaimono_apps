@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="ja">
 <head>
@@ -199,8 +198,21 @@
   let unlockedIndex=-1, goodHitsForColor=0;
   let targetScore=8000;
 
-  // VSF検出補助
-  let fireworksActive=0, confettiActive=0, wavesActive=0, auroraActive=0, raysActive=0, seigaihaActive=0;
+  // VSF検出用（今使っている演出だけ表示するために、フレーム毎に収集）
+  let vfxUsedFrame = [];
+
+  // ====== Swipe（スワイプで同時ヒット）補助 ======
+  let isSwiping=false;
+  let swipeLastLane=-1;
+  let swipeHitCooldownMs=70;                 // 同じレーンを連打しすぎないよう簡易クールダウン
+  const swipeLaneLastHit = new Map();        // lane -> last time (ms)
+  const SWIPE_Y_TOL = 48;                    // ヒットライン付近の縦許容(px, 物理)
+  function pointerPosToCanvas(e){
+    const r=canvas.getBoundingClientRect();
+    const cx=(e.clientX - r.left) * DPR;
+    const cy=(e.clientY - r.top)  * DPR;
+    return {cx,cy};
+  }
 
   // ====== Helpers ======
   const clamp=(v,min=0,max=1)=>Math.max(min,Math.min(max,v));
@@ -515,10 +527,10 @@
 
   // ====== VFX ======
   function addBurst(x,y,color,count=20,speed=2){ for(let i=0;i<count;i++){ const ang=Math.random()*Math.PI*2, sp=(Math.random()*0.8+0.2)*speed;
-    particles.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,color,type:'burst'}) } fireworksActive=10; }
+    particles.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,color,type:'burst'}) } }
   function addFireworks(x,y,colors){ const rings=3+Math.min(LEVEL,3); for(let r=0;r<rings;r++){ const c=colors[r%colors.length]; addBurst(x,y,c,28+r*10,2.5+r*0.8); } }
   function addConfetti(n=20){ const W=canvas.width,H=canvas.height, cols=unlockedColors();
-    for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff'; particles.push({x:Math.random()*W,y:-20,vx:(Math.random()*2-1)*1.5,vy:Math.random()*2+1,life:1.2,color:c,type:'confetti',rot:Math.random()*Math.PI*2}); } confettiActive=20; }
+    for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff'; particles.push({x:Math.random()*W,y:-20,vx:(Math.random()*2-1)*1.5,vy:Math.random()*2+1,life:1.2,color:c,type:'confetti',rot:Math.random()*Math.PI*2}); } }
   function unlockedColors(){ const arr=[]; for(let i=0;i<=unlockedIndex;i++) arr.push(colorOf(COLOR_ORDER[i])); return arr.length?arr:['#ffffff']; }
   function spawnWind(){ const W=canvas.width,H=canvas.height,n=2+LEVEL; for(let i=0;i<n;i++){ windStreaks.push({x:-50,y:Math.random()*H*0.8,vx:3+LEVEL*0.8+combo*0.01,vy:(Math.random()*2-1)*0.2,alpha:0.03+0.02*LEVEL,life:1}); } }
 
@@ -593,7 +605,6 @@
     applyLevelParams(); buildChart();
     running=true; score=0; combo=0; hits=0; judgedCount=0; unlockedIndex=-1; goodHitsForColor=0; updateStats();
     ov.style.display='none'; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0;
-    fireworksActive=confettiActive=0;
     const now=audioCtx.currentTime; Object.values(layers).forEach(g=>{ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(0,now); }); melodyBus.gain.setValueAtTime(0.8, now);
     songStartTime = now + 0.10; applyWorldVisuals();
     if(bgm){ /*noop*/ } if(LEVEL>=2){ bgm.start(songStartTime); }
@@ -610,48 +621,108 @@
     floatText(isWaMode? '+ 彩 解放' : `+ ${name.toUpperCase()}`,'ft-perfect'); applyWorldVisuals();
   }
 
-  // ====== Input ======
-  function onTapAtCanvas(clientX){ if(!running||!audioCtx||endingMode) return; const r=canvas.getBoundingClientRect(); const cx=(clientX-r.left)*DPR; judgeTap(laneFromCanvasX(cx)); }
-  function onTapButton(){ judgeTap(Math.floor(LANE_COUNT/2)); }
-  function judgeTap(lane){
-    const t=audioCtx.currentTime - songStartTime;
-    let best=null,bestAdt=1e9,bestIdx=-1;
-    for(let i=0;i<chart.length;i++){
-      const n=chart[i];
-      if(n.judged && n.hitCount>=n.notes.length) continue;
-      if(!n.notes.some(nt=>nt.lane===lane)) continue;
-      const dt=n.time - t, adt=Math.abs(dt);
-      if(adt<bestAdt){ bestAdt=adt; best=n; bestIdx=i; }
-      if(dt<-GOOD && !n.missed){ n.missed=true; judgedCount++; combo=0; }
-    }
-    if(!best) return;
-    const adiff=Math.abs(best.time - t);
-    if(adiff<=PERFECT) applyHit(bestIdx,lane,'PERFECT');
-    else if(adiff<=GOOD) applyHit(bestIdx,lane,'GOOD');
-    else { floatText('MISS','ft-miss'); combo=0; updateStats(); }
+  // ====== Input / Swipe support ======
+  function withinHitY(cy){
+    const r=canvas.getBoundingClientRect();
+    const hitY = r.height * HIT_LINE_RATIO; // 物理px
+    return Math.abs((cy/DPR) - hitY) <= SWIPE_Y_TOL;
   }
+  function onTapAtCanvas(clientX){ if(!running||!audioCtx||endingMode) return; const r=canvas.getBoundingClientRect(); const cx=(clientX-r.left)*DPR; judgeTap(laneFromCanvasX(cx), false); }
+  function onTapButton(){ judgeTap(Math.floor(LANE_COUNT/2), false); }
 
-  boardEl.addEventListener('pointerdown', e=>{ e.preventDefault(); if(e.pointerType==='mouse'&&e.button!==0) return; onTapAtCanvas(e.clientX); }, {passive:false});
+  boardEl.addEventListener('pointerdown', e=>{
+    e.preventDefault();
+    if(e.pointerType==='mouse'&&e.button!==0) return;
+    isSwiping=true;
+    const {cx,cy}=pointerPosToCanvas(e);
+    swipeLastLane = laneFromCanvasX(cx);
+    if(withinHitY(cy)){
+      const now=performance.now();
+      const last=swipeLaneLastHit.get(swipeLastLane)||0;
+      if(now-last>swipeHitCooldownMs){ judgeTap(swipeLastLane, true); swipeLaneLastHit.set(swipeLastLane, now); }
+    }else{
+      onTapAtCanvas(e.clientX);
+    }
+  }, {passive:false});
+
+  boardEl.addEventListener('pointermove', e=>{
+    if(!isSwiping) return;
+    const {cx,cy}=pointerPosToCanvas(e);
+    const lane = laneFromCanvasX(cx);
+    if(lane===swipeLastLane) return;
+
+    // スワイプ方向の全レーンを一気にヒット（一直線でなぞる要件）
+    const step = lane>swipeLastLane ? 1 : -1;
+    for(let l=swipeLastLane+step; l!==lane+step; l+=step){
+      if(!withinHitY(cy)) break;
+      const now=performance.now();
+      const last=swipeLaneLastHit.get(l)||0;
+      if(now-last>swipeHitCooldownMs){
+        judgeTap(l, true);
+        swipeLaneLastHit.set(l, now);
+      }
+    }
+    swipeLastLane = lane;
+  }, {passive:true});
+
+  addEventListener('pointerup', ()=>{ isSwiping=false; }, {passive:true});
+  addEventListener('pointercancel', ()=>{ isSwiping=false; }, {passive:true});
+
   addEventListener('keydown', e=>{ if(e.code==='Space'){ e.preventDefault(); onTapButton(); }}, {passive:false});
   tapBtn.addEventListener('click', onTapButton);
   startBtn.addEventListener('click', () => { showStartOverlay(); });
 
   // ====== Hit / Stats & Combo演出 ======
-  function applyHit(noteIndex,lane,grade){
-    const n=chart[noteIndex]; const part=n.notes.find(nt=>nt.lane===lane); if(!part||part.hit) return; part.hit=true; n.hitCount++; if(n.hitCount>=n.notes.length){ n.judged=true; judgedCount++; }
-    const now=audioCtx.currentTime; const add=(grade==='PERFECT'?1000:650)*(1+Math.floor(combo/25)*0.1); score+=add; combo++; hits++;
-    goodHitsForColor++; if(goodHitsForColor>=HITS_PER_COLOR){ unlockNextColor(); }
-    playLaneTone(now,lane); colorSfx(now);
+  function judgeTap(lane, fromSwipe){
+    const t=audioCtx.currentTime - songStartTime;
+    let best=null,bestAdt=1e9,bestIdx=-1;
+    for(let i=0;i<chart.length;i++){
+      const n=chart[i];
+      if(n.judged && n.hitCount>=n.notes.length) continue;
+      if(!n.notes.some(nt=>nt.lane===lane && !nt.hit)) continue;
+      const dt=n.time - t, adt=Math.abs(dt);
+      if(adt<bestAdt){ bestAdt=adt; best=n; bestIdx=i; }
+      if(dt<-GOOD && !n.missed){ n.missed=true; n.judged=true; judgedCount++; combo=0; updateStats(); }
+    }
+    if(!best) return;
+    const adiff=Math.abs(best.time - t);
+    if(adiff<=PERFECT) applyHit(bestIdx,lane,'PERFECT', fromSwipe);
+    else if(adiff<=GOOD) applyHit(bestIdx,lane,'GOOD', fromSwipe);
+    else { if(!fromSwipe){ floatText('MISS','ft-miss'); combo=0; updateStats(); } }
+  }
+
+  function applyHit(noteIndex,lane,grade, fromSwipe){
+    const n=chart[noteIndex]; const part=n.notes.find(nt=>nt.lane===lane && !nt.hit); if(!part) return;
+    // 通常ヒット
+    doHit(n, part, grade);
+
+    // スワイプ時：同時刻の同一ノート内の残りレーンも、なぞれば個別に判定されるが、
+    // 「一直線なぞり」で通過した瞬間にまとめて拾えるよう、近接レーンを補助的にヒット
+    if(fromSwipe){
+      const neighbors = n.notes.filter(nt=>!nt.hit && Math.abs(nt.lane-lane)<=1);
+      for(const nb of neighbors){ doHit(n, nb, grade==='PERFECT'?'GOOD':grade); }
+    }
+
+    if(n.hitCount>=n.notes.length){ n.judged=true; judgedCount++; }
+    updateStats(); applyWorldVisuals();
+  }
+
+  function doHit(n, part, grade){
+    part.hit=true; n.hitCount++;
+    const now=audioCtx.currentTime;
+    const add=(grade==='PERFECT'?1000:650)*(1+Math.floor(combo/25)*0.1); score+=add; combo++; hits++; goodHitsForColor++;
+    if(goodHitsForColor>=HITS_PER_COLOR){ unlockNextColor(); }
+    playLaneTone(now,part.lane); colorSfx(now);
 
     // 視覚演出
-    const centers=laneCenters(), x=centers[lane], y=canvas.height*HIT_LINE_RATIO;
+    const centers=laneCenters(), x=centers[part.lane], y=canvas.height*HIT_LINE_RATIO;
     const c = isWaMode
-      ? ['#ffd166','#ff8fab','#c0ffaa','#88ccff'][lane % 4]
-      : (unlockedColors()[(lane+n.notes.length)%unlockedColors().length]||'#ffffff');
-    addBurst(x,y,c, Math.round(18+worldProgress()*24)+(n.notes.length>1?8:0), 2.2);
+      ? ['#ffd166','#ff8fab','#c0ffaa','#88ccff'][part.lane % 4]
+      : (unlockedColors()[(part.lane+n.notes.length)%unlockedColors().length]||'#ffffff');
+    addBurst(x,y,c, Math.round(16+worldProgress()*24)+(n.notes.length>1?6:0), 2.1);
 
-    // 判定テキスト
-    floatText(grade, grade==='PERFECT'?'ft-perfect':'ft-good');
+    // 判定テキスト（スワイプ時は控えめ）
+    if(combo%5===0 || !arguments[3]){ floatText(grade, grade==='PERFECT'?'ft-perfect':'ft-good'); }
 
     // コンボ演出
     if(combo===10){ flashOnce(0.18); }
@@ -659,15 +730,15 @@
     else if(combo===50){
       addFireworks(canvas.width*0.5, canvas.height*0.32, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
       flashOnce(0.28);
+      spawnLanterns();
     }else if(combo===100){
       addFireworks(canvas.width*0.3, canvas.height*0.28, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
       addFireworks(canvas.width*0.7, canvas.height*0.28, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
       flashOnce(0.36);
       spawnLanterns();
     }
-
-    updateStats(); applyWorldVisuals();
   }
+
   function updateStats(){ scEl.textContent=score|0; coEl.textContent=combo|0; const acc=judgedCount?(hits/judgedCount):1; acEl.textContent=(acc*100).toFixed(0)+'%'; wpEl.textContent=Math.round(worldProgress()*100)+'%'; }
   function flashOnce(power=0.25){ flashFx.classList.remove('show'); void flashFx.offsetWidth; flashFx.style.setProperty('opacity', power); flashFx.classList.add('show'); }
 
@@ -684,7 +755,7 @@
     const p=worldProgress();
 
     // 背景
-    let usedVfx = [];
+    const usedVfx = []; // このフレームで実際に使った演出のみ収集
     if(isWaMode){
       const g0=ctx.createLinearGradient(0,0,0,H);
       g0.addColorStop(0, hsl(35, 0.8, 0.35+0.15*p, 0.8));
@@ -718,7 +789,8 @@
     usedVfx.push('Wind');
 
     if(isWaMode){
-      drawSakura(); drawLanterns(); usedVfx.push('Sakura','Lanterns');
+      drawSakura(); if(petals.length) usedVfx.push('Sakura');
+      drawLanterns(); if(lanterns.length) usedVfx.push('Lanterns');
       if(p>0.4){
         const waveAmp=10*DPR;
         for(let li=0; li<3; li++){
@@ -798,15 +870,8 @@
     }
     particles = particles.filter(p=>p.life>0); ctx.globalAlpha=1;
 
-    // VSF（実際に使っているもののみ）
-    const vs = [];
-    if(isWaMode){ vs.push('Gold Clouds','Sunrays'); }
-    vs.push('Wind');
-    if(isWaMode){ if(petals.length) vs.push('Sakura'); if(lanterns.length) vs.push('Lanterns'); }
-    else { if(unlockedIndex>=2) vs.push('Waves'); if(worldProgress()>0.55) vs.push('Aurora'); }
-    if(fireworksActive>0) vs.push('Fireworks');
-    if(confettiActive>0) vs.push('Confetti');
-    vfxNow.textContent = vs.length ? vs.join(' / ') : '-';
+    // VSF（このフレームで実際に使ったものだけ表示）
+    vfxNow.textContent = usedVfx.length ? usedVfx.join(' / ') : '-';
 
     // 終了判定
     const lastTime=chart.length?chart[chart.length-1].time:0;
@@ -824,7 +889,8 @@
     const acc = judgedCount?(hits/judgedCount):1; const worldPct=Math.round(worldProgress()*100);
     if(LEVEL>=MAX_LEVEL){
       showResultCard(true, acc, worldPct);
-      setTimeout(()=> playEnding(score, acc, worldPct), 300);
+      // ★Lv5：結果表示を少し長め（従来300ms → 1600ms）
+      setTimeout(()=> playEnding(score, acc, worldPct), 1600);
     }else{
       showResultCard(false, acc, worldPct);
     }
@@ -1039,6 +1105,3 @@ MONOCHROME REBIRTH
 </script>
 </body>
 </html>
-
-
-
