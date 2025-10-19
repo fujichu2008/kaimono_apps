@@ -192,34 +192,70 @@
   let layers={}, melodyBus=null, delayNode=null, panNodes=[];
   let bgm=null;
   let particles=[], windStreaks=[], petals=[], lanterns=[];
+  let ribbons=[], serpents=[], pulses=[];
   let running=false, endingMode=false;
 
   let chart=[], songStartTime=0, score=0, combo=0, hits=0, judgedCount=0;
   let unlockedIndex=-1, goodHitsForColor=0;
   let targetScore=8000;
 
-  // VSF検出用（今使っている演出だけ表示するために、フレーム毎に収集）
+  // VSF：そのフレームで実際に描画した演出だけ表示
   let vfxUsedFrame = [];
 
-  // ====== Swipe（スワイプで同時ヒット）補助 ======
-  let isSwiping=false;
-  let swipeLastLane=-1;
-  let swipeHitCooldownMs=70;                 // 同じレーンを連打しすぎないよう簡易クールダウン
-  const swipeLaneLastHit = new Map();        // lane -> last time (ms)
-  const SWIPE_Y_TOL = 48;                    // ヒットライン付近の縦許容(px, 物理)
-  function pointerPosToCanvas(e){
-    const r=canvas.getBoundingClientRect();
-    const cx=(e.clientX - r.left) * DPR;
-    const cy=(e.clientY - r.top)  * DPR;
-    return {cx,cy};
+  // ====== 拍同期（BPMに合わせてEmitter発火） ======
+  let nextBeat=0, beatStarted=false;
+  function resetBeatSync(){ nextBeat=0; beatStarted=false; }
+  function runBeatSync(tNow){
+    if(!beatStarted){ nextBeat = LEADIN; beatStarted=true; }
+    while(tNow + 0.02 >= nextBeat){
+      onBeat(Math.round((nextBeat-LEADIN)/SEC_PER_BEAT)); // 整数ビート番号
+      nextBeat += SEC_PER_BEAT;
+    }
   }
+  function onBeat(beatIdx){
+    // Lvに応じて紙吹雪やランタン明滅、パルス等を拍で放出
+    if(LEVEL>=4){
+      if(!isWaMode){
+        // NORMAL：拍で前景コンフェッティ少量
+        emitConfettiBeat(6 + Math.floor(LEVEL*1.5));
+      }else{
+        // WA：提灯の明滅パルス／桜少量補充
+        pulses.push({t:0, life:0.5, x:canvas.width/2, y:canvas.height*0.3, r:10*DPR, w:12*DPR, color:'rgba(255,220,120,0.25)'});
+        if(Math.random()<0.35) spawnSakura(3);
+      }
+    }
+    if(LEVEL>=5){
+      // 祝祭感：紙テープ（リボン）発射
+      spawnRibbons( (isWaMode?2:3) );
+      // 群衆クラップ・パルス
+      pulses.push({t:0, life:0.35, x:canvas.width/2, y:canvas.height*0.75, r:14*DPR, w:16*DPR, color: isWaMode?'rgba(255,230,170,0.25)':'rgba(255,255,255,0.18)'});
+    }
+    // ときどき Color Serpent（左右から渦巻く彩帯）
+    if(LEVEL>=5 && Math.random()<0.25){
+      spawnSerpent(Math.random()<0.5?'L':'R');
+    }
+  }
+
+
 
   // ====== Helpers ======
   const clamp=(v,min=0,max=1)=>Math.max(min,Math.min(max,v));
   const lerp=(a,b,t)=>a+(b-a)*t;
   const hsl=(h,s,l,a=1)=>`hsla(${h},${(s*100).toFixed(1)}%,${(l*100).toFixed(1)}%,${a})`;
   const colorOf=c=>({'yellow':'#ffd166','green':'#5af38f','blue':'#6ab8ff','red':'#ff6b6b'}[c]||'#ffffff');
+
   function addAlpha(hex,a){ const m=/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex); if(!m) return hex; const r=parseInt(m[1],16), g=parseInt(m[2],16), b=parseInt(m[3],16); return `rgba(${r},${g},${b},${a})`; }
+
+  // （※上のcolorOfにタイプミスがない版を別途用意）
+  function colorOfSafe(name){
+    switch(name){
+      case 'yellow': return '#ffd166';
+      case 'green': return '#5af38f';
+      case 'blue': return '#6ab8ff';
+      case 'red': return '#ff6b6b';
+      default: return '#ffffff';
+    }
+  }
 
   // ====== Level params ======
   function applyLevelParams(){
@@ -287,11 +323,6 @@
   function makePad({freqs,gain}){ const g=audioCtx.createGain(); g.gain.value=gain;
     freqs.forEach(f=>{ const o=audioCtx.createOscillator(), env=audioCtx.createGain(); env.gain.value=0.0008; o.type='sine'; o.frequency.value=f; o.connect(env).connect(g); o.start();
       const lfo=audioCtx.createOscillator(), lfog=audioCtx.createGain(); lfo.frequency.value=0.07; lfog.gain.value=f*0.015; lfo.connect(lfog).connect(o.frequency); lfo.start(); }); return g; }
-  function makePanner(panValue){
-    try{ if(audioCtx.createStereoPanner){ const p=audioCtx.createStereoPanner(); p.pan.value=panValue; return p; }
-      else if(typeof StereoPannerNode!=='undefined'){ return new StereoPannerNode(audioCtx,{pan:panValue}); } }catch(e){}
-    const g=audioCtx.createGain(); return g;
-  }
 
   function playLaneTone(time, lane){
     const scale = isWaMode
@@ -364,17 +395,33 @@
   function shakuhachiFall(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type='sine'; o.frequency.setValueAtTime(880,t); o.frequency.exponentialRampToValueAtTime(660,t+0.28);
     g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.14,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.45); o.connect(g).connect(layers.red); o.start(t); o.stop(t+0.5); }
 
-  // ====== BGM Engine ======
+  // ====== BGM Engine（祝祭拡張：brass / chant / crowdClap） ======
   function createBgmEngine(){
-    const bus={drum:audioCtx.createGain(), bass:audioCtx.createGain(), pad:audioCtx.createGain(), arp:audioCtx.createGain(), lead:audioCtx.createGain(), mix:audioCtx.createGain(),
-      stop(){}, start(startTime){ this.scheduleAll(startTime);} };
-    [bus.drum,bus.bass,bus.pad,bus.arp,bus.lead].forEach(n=> n.gain.value=0);
-    bus.drum.connect(bus.mix); bus.bass.connect(bus.mix); bus.pad.connect(bus.mix); bus.arp.connect(bus.mix); bus.lead.connect(bus.mix); bus.mix.gain.value=0.8; bus.mix.connect(masterGain);
+    const bus={
+      drum:audioCtx.createGain(),
+      bass:audioCtx.createGain(),
+      pad:audioCtx.createGain(),
+      arp:audioCtx.createGain(),
+      lead:audioCtx.createGain(),
+      brass:audioCtx.createGain(),    // Lv5 NORMAL 祝祭リフ
+      chant:audioCtx.createGain(),    // Lv5 WA 掛け声
+      crowdClap:audioCtx.createGain(),// Lv5 群衆クラップ
+      mix:audioCtx.createGain(),
+      stop(){},
+      start(startTime){ this.scheduleAll(startTime);}
+    };
+    [bus.drum,bus.bass,bus.pad,bus.arp,bus.lead,bus.brass,bus.chant,bus.crowdClap].forEach(n=> n.gain.value=0);
+    bus.drum.connect(bus.mix); bus.bass.connect(bus.mix); bus.pad.connect(bus.mix); bus.arp.connect(bus.mix); bus.lead.connect(bus.mix);
+    bus.brass.connect(bus.mix); bus.chant.connect(bus.mix); bus.crowdClap.connect(bus.mix);
+    bus.mix.gain.value=0.85; bus.mix.connect(masterGain);
 
     bus.scheduleAll=(startTime)=>{
       const beatsTotal=64;
       const useDrum=LEVEL>=2, useBass=LEVEL>=3, usePad=LEVEL>=4;
       const useArp = LEVEL>=5, useLead=LEVEL>=5;
+      const useBrass = (!isWaMode && LEVEL>=5);
+      const useChant = (isWaMode && LEVEL>=5);
+      const useClap  = (LEVEL>=5);
 
       const now=audioCtx.currentTime;
       const fade=(node,target)=>{ node.gain.cancelScheduledValues(now); node.gain.setValueAtTime(node.gain.value,now); node.gain.linearRampToValueAtTime(target, now+1.2); };
@@ -386,28 +433,47 @@
         fade(bus.pad , usePad ?0.55:0);
         fade(bus.arp , useArp ?0.55:(LEVEL>=3?0.35:0));
         fade(bus.lead, useLead?0.42:0);
+        fade(bus.brass, 0);
+        fade(bus.chant, useChant?0.55:0);
+        fade(bus.crowdClap, useClap?0.35:0);
       }else{
-        fade(bus.drum,useDrum?0.9:0); fade(bus.bass,useBass?0.7:0); fade(bus.pad,usePad?0.55:0); fade(bus.arp,useArp?0.5:0); fade(bus.lead,useLead?0.4:0);
+        fade(bus.drum,useDrum?0.9:0);
+        fade(bus.bass,useBass?0.7:0);
+        fade(bus.pad ,usePad ?0.55:0);
+        fade(bus.arp ,useArp ?0.5:0);
+        fade(bus.lead,useLead?0.4:0);
+        fade(bus.brass,useBrass?0.6:0);
+        fade(bus.chant,0);
+        fade(bus.crowdClap,useClap?0.28:0);
       }
 
       const beatToTime=(beat)=> startTime + LEADIN + beat*SEC_PER_BEAT;
 
       if(isWaMode){
+        // ====== 和モードスケジュール ======
         for(let m=0;m<beatsTotal;m+=8){
-          // 太鼓／拍子木（Lv2〜段階的に）
           if(LEVEL>=2){ [0,2,4,6].forEach(off=> taiko(beatToTime(m+off))); }
           if(LEVEL>=3){ [1.5,5.5].forEach(off=> wood(beatToTime(m+off))); }
-          // 琴アルペジオ（Lv3〜）
           if(LEVEL>=3){ for(let i=0;i<8;i++){ const t=beatToTime(m)+i*(SEC_PER_BEAT/2); kotoArp(t); } }
         }
-        // 尺八リード（Lv5）
-        if(LEVEL>=5){ for(let m=8;m<beatsTotal;m+=8){ [0,3.5,6].forEach(off=> shakuhachi(beatToTime(m+off))); } }
+        if(LEVEL>=5){
+          for(let m=0;m<beatsTotal;m+=8){
+            [0,3.5,6].forEach(off=> shakuhachi(beatToTime(m+off)));
+            // 掛け声（簡易合成ワンショット）
+            [1.0, 5.0].forEach(off=> chantEv(beatToTime(m+off)));
+            // 群衆クラップ（四分裏にも）
+            [0,2,4,6].forEach(off=> crowdClapEv(beatToTime(m+off)+SEC_PER_BEAT*0.5));
+          }
+        }
       }else{
+        // ====== 通常（洋）スケジュール ======
         if(useDrum){
-          [0,2,4,6].forEach(b=> kick(beatToTime(b)));
-          [2,6].forEach(b=> snare(beatToTime(b)));
-          for(let i=0;i<beatsTotal*2;i++) hat(beatToTime(i*0.5));
-          for(let m=0;m<beatsTotal;m+=8){ hat(beatToTime(m+7.5),1.5); }
+          for(let m=0;m<beatsTotal;m+=8){
+            [0,2,4,6].forEach(b=> kick(beatToTime(m+b)));
+            [2,6].forEach(b=> snare(beatToTime(m+b)));
+            for(let i=0;i<16;i++) hat(beatToTime(m+i*0.5));
+            hat(beatToTime(m+7.5),1.5);
+          }
         }
         if(useBass){
           const root=55;
@@ -422,10 +488,26 @@
           for(let s=0;s<beatsTotal;s+=8){ const ch=prog[(s/8)%prog.length]; padEv(beatToTime(s),ch,8*SEC_PER_BEAT); }
         }
         if(useArp){
-          for(let m=0;m<beatsTotal;m+=8){ for(let b=0;b<8;b+=2){ for(let i=0;i<8;i++){ arpEv(beatToTime(m+b)+i*(SEC_PER_BEAT/4)); } } }
+          for(let m=0;m<beatsTotal;m+=8){
+            for(let b=0;b<8;b+=2){
+              for(let i=0;i<8;i++){ arpEv(beatToTime(m+b)+i*(SEC_PER_BEAT/4)); }
+            }
+          }
         }
         if(useLead){
           for(let m=16;m<beatsTotal;m+=8){ [0,1.5,3,4.5,6].forEach(off=> leadEv(beatToTime(m+off))); }
+        }
+        if(useBrass){
+          // 祝祭リフ（ブラス：単純なファンファーレ）
+          for(let m=8;m<beatsTotal;m+=8){
+            [0,2,4,6].forEach(off=> brassEv(beatToTime(m+off), 784)); // G5 付近
+            [1,5].forEach(off=> brassEv(beatToTime(m+off), 880));    // A5 付近
+          }
+        }
+        if(useClap){
+          for(let m=0;m<beatsTotal;m+=8){
+            [2,6].forEach(off=> crowdClapEv(beatToTime(m+off)));
+          }
         }
       }
 
@@ -449,6 +531,29 @@
         g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.08+(LEVEL-5)*0.01,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.14); o.connect(g).connect(bus.arp); o.start(t); o.stop(t+0.16);}
       function leadEv(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type='sine'; o.frequency.value=660+LEVEL*8;
         g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.12+(LEVEL-5)*0.01,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.28); o.connect(g).connect(bus.lead); o.start(t); o.stop(t+0.3);}
+      function brassEv(t,f=784){ // ブラスは鋭い立ち上がりの三角波
+        const o=audioCtx.createOscillator(), g=audioCtx.createGain(), fz=audioCtx.createBiquadFilter();
+        o.type='triangle'; o.frequency.value=f;
+        fz.type='highpass'; fz.frequency.value=400;
+        g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.22, t+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t+0.35);
+        o.connect(fz).connect(g).connect(bus.brass); o.start(t); o.stop(t+0.38);
+      }
+      function chantEv(t){ // 掛け声：短いバンドパスノイズ
+        const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.12, audioCtx.sampleRate); const d=n.getChannelData(0);
+        for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.015)); }
+        const s=audioCtx.createBufferSource(), bp=audioCtx.createBiquadFilter(), g=audioCtx.createGain();
+        bp.type='bandpass'; bp.frequency.value=1000; bp.Q.value=1.2;
+        g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.18, t+0.015); g.gain.exponentialRampToValueAtTime(0.0001, t+0.14);
+        s.buffer=n; s.connect(bp).connect(g).connect(bus.chant); s.start(t);
+      }
+      function crowdClapEv(t){ // 群衆クラップ：低Q帯域強めのノイズ
+        const n=audioCtx.createBuffer(1, audioCtx.sampleRate*0.08, audioCtx.sampleRate); const d=n.getChannelData(0);
+        for(let i=0;i<d.length;i++){ d[i]=(Math.random()*2-1)*Math.exp(-i/(audioCtx.sampleRate*0.01)); }
+        const s=audioCtx.createBufferSource(), bp=audioCtx.createBiquadFilter(), g=audioCtx.createGain();
+        bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=0.8;
+        g.gain.setValueAtTime(0.0008,t); g.gain.exponentialRampToValueAtTime(0.12, t+0.012); g.gain.exponentialRampToValueAtTime(0.0001, t+0.09);
+        s.buffer=n; s.connect(bp).connect(g).connect(bus.crowdClap); s.start(t);
+      }
 
       // ---- Wa subs ----
       function taiko(t){ taikoLow(t); }
@@ -531,8 +636,79 @@
   function addFireworks(x,y,colors){ const rings=3+Math.min(LEVEL,3); for(let r=0;r<rings;r++){ const c=colors[r%colors.length]; addBurst(x,y,c,28+r*10,2.5+r*0.8); } }
   function addConfetti(n=20){ const W=canvas.width,H=canvas.height, cols=unlockedColors();
     for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff'; particles.push({x:Math.random()*W,y:-20,vx:(Math.random()*2-1)*1.5,vy:Math.random()*2+1,life:1.2,color:c,type:'confetti',rot:Math.random()*Math.PI*2}); } }
-  function unlockedColors(){ const arr=[]; for(let i=0;i<=unlockedIndex;i++) arr.push(colorOf(COLOR_ORDER[i])); return arr.length?arr:['#ffffff']; }
+  function emitConfettiBeat(n=8){ const W=canvas.width, cols=unlockedColors(); for(let i=0;i<n;i++){ const c=cols[i%cols.length]||'#fff';
+      particles.push({x:W*(0.25+0.5*Math.random()), y:0, vx:(Math.random()*2-1)*1.2, vy:1.8+Math.random()*1.5, life:1.2, color:c, type:'confetti'}); } }
+  function unlockedColors(){ const arr=[]; for(let i=0;i<=unlockedIndex;i++) arr.push(colorOfSafe(COLOR_ORDER[i])); return arr.length?arr:['#ffffff']; }
   function spawnWind(){ const W=canvas.width,H=canvas.height,n=2+LEVEL; for(let i=0;i<n;i++){ windStreaks.push({x:-50,y:Math.random()*H*0.8,vx:3+LEVEL*0.8+combo*0.01,vy:(Math.random()*2-1)*0.2,alpha:0.03+0.02*LEVEL,life:1}); } }
+
+  // --- 祝祭：リボン（紙テープ）
+  function spawnRibbons(k=2){
+    const W=canvas.width, H=canvas.height;
+    for(let i=0;i<k;i++){
+      const dir = (Math.random()<0.5?-1:1);
+      const col = (unlockedColors()[i%unlockedColors().length]||'#ffd166');
+      ribbons.push({
+        x: (dir<0? W*0.9: W*0.1), y: H*(0.2+Math.random()*0.2),
+        vx: dir*(2.0+Math.random()*1.2), vy: 1.2+Math.random()*0.6,
+        life: 1.8, color: col, w: 6*DPR, tail: []
+      });
+    }
+  }
+  function drawRibbons(){
+    const drag=0.98;
+    for(const r of ribbons){
+      r.x += r.vx; r.y += r.vy; r.vy += 0.03;
+      r.vx *= drag; r.vy *= drag;
+      r.life -= 0.01;
+      r.tail.unshift({x:r.x,y:r.y}); if(r.tail.length>24) r.tail.pop();
+      ctx.lineWidth = r.w; ctx.strokeStyle = addAlpha(r.color, 0.85);
+      ctx.beginPath();
+      for(let i=0;i<r.tail.length;i++){
+        const p=r.tail[i];
+        if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x + Math.sin(i*0.7)*4*DPR, p.y + Math.cos(i*0.5)*2*DPR);
+      }
+      ctx.stroke();
+    }
+    ribbons = ribbons.filter(r=> r.life>0 && r.y<canvas.height+60);
+  }
+
+  // --- 彩の竜（Color Serpent）左右から渦巻く彩帯
+  function spawnSerpent(side='L'){
+    const W=canvas.width, H=canvas.height;
+    serpents.push({
+      t:0, life:1.6,
+      side, x0: (side==='L'? -60: W+60), y0: H*0.35 + (Math.random()*0.2-0.1)*H,
+      amp: 60*DPR, speed: 3.2, colorA: unlockedColors()[0]||'#ffd166', colorB: unlockedColors()[1]||'#6ab8ff'
+    });
+  }
+  function drawSerpents(){
+    for(const s of serpents){
+      s.t += 0.016; s.life -= 0.008;
+      const W=canvas.width, H=canvas.height;
+      const dir = (s.side==='L'? 1:-1);
+      const x = s.x0 + dir * s.speed * 60 * s.t;
+      const y = s.y0 + Math.sin(s.t*2.2)*s.amp;
+      const w = 18*DPR*(0.7 + 0.3*Math.sin(s.t*3));
+      const grad = ctx.createLinearGradient(x-40*dir, y-20, x+40*dir, y+20);
+      grad.addColorStop(0, addAlpha(s.colorA, 0.75));
+      grad.addColorStop(1, addAlpha(s.colorB, 0.75));
+      ctx.strokeStyle = grad; ctx.lineWidth = w; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(x - 60*dir, y - 18); ctx.quadraticCurveTo(x, y, x + 60*dir, y + 18); ctx.stroke();
+    }
+    serpents = serpents.filter(s=> s.life>0);
+  }
+
+  // --- パルス（拍同期の光リング）
+  function drawPulses(){
+    for(const p of pulses){
+      p.t += 0.016; p.life -= 0.02;
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.strokeStyle = p.color; ctx.lineWidth = p.w;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r + p.t*160*DPR, 0, Math.PI*2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    pulses = pulses.filter(p=> p.life>0);
+  }
 
   // 和風追加：桜と提灯
   function spawnSakura(count=6){
@@ -602,9 +778,9 @@
   // ====== Game control ======
   function startGame(){
     endingMode=false; creditsWrap.style.display='none';
-    applyLevelParams(); buildChart();
+    applyLevelParams(); buildChart(); resetBeatSync();
     running=true; score=0; combo=0; hits=0; judgedCount=0; unlockedIndex=-1; goodHitsForColor=0; updateStats();
-    ov.style.display='none'; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0;
+    ov.style.display='none'; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0; ribbons.length=0; serpents.length=0; pulses.length=0;
     const now=audioCtx.currentTime; Object.values(layers).forEach(g=>{ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(0,now); }); melodyBus.gain.setValueAtTime(0.8, now);
     songStartTime = now + 0.10; applyWorldVisuals();
     if(bgm){ /*noop*/ } if(LEVEL>=2){ bgm.start(songStartTime); }
@@ -622,6 +798,18 @@
   }
 
   // ====== Input / Swipe support ======
+  const SWIPE_Y_TOL = 48;
+  let isSwiping=false;
+  let swipeLastLane=-1;
+  let swipeHitCooldownMs=70;
+  const swipeLaneLastHit = new Map();
+
+  function pointerPosToCanvas(e){
+    const r=canvas.getBoundingClientRect();
+    const cx=(e.clientX - r.left) * DPR;
+    const cy=(e.clientY - r.top)  * DPR;
+    return {cx,cy};
+  }
   function withinHitY(cy){
     const r=canvas.getBoundingClientRect();
     const hitY = r.height * HIT_LINE_RATIO; // 物理px
@@ -651,7 +839,7 @@
     const lane = laneFromCanvasX(cx);
     if(lane===swipeLastLane) return;
 
-    // スワイプ方向の全レーンを一気にヒット（一直線でなぞる要件）
+    // 一直線スワイプ：通過したすべてのレーンを拾う
     const step = lane>swipeLastLane ? 1 : -1;
     for(let l=swipeLastLane+step; l!==lane+step; l+=step){
       if(!withinHitY(cy)) break;
@@ -672,9 +860,11 @@
   tapBtn.addEventListener('click', onTapButton);
   startBtn.addEventListener('click', () => { showStartOverlay(); });
 
-  // ====== Hit / Stats & Combo演出 ======
+  // ====== 判定 / スコア ======
   function judgeTap(lane, fromSwipe){
     const t=audioCtx.currentTime - songStartTime;
+    runBeatSync(t); // ← BPM同期の拍イベント
+
     let best=null,bestAdt=1e9,bestIdx=-1;
     for(let i=0;i<chart.length;i++){
       const n=chart[i];
@@ -693,12 +883,10 @@
 
   function applyHit(noteIndex,lane,grade, fromSwipe){
     const n=chart[noteIndex]; const part=n.notes.find(nt=>nt.lane===lane && !nt.hit); if(!part) return;
-    // 通常ヒット
     doHit(n, part, grade);
 
-    // スワイプ時：同時刻の同一ノート内の残りレーンも、なぞれば個別に判定されるが、
-    // 「一直線なぞり」で通過した瞬間にまとめて拾えるよう、近接レーンを補助的にヒット
     if(fromSwipe){
+      // 近接レーン補助（スワイプで同時押し感）
       const neighbors = n.notes.filter(nt=>!nt.hit && Math.abs(nt.lane-lane)<=1);
       for(const nb of neighbors){ doHit(n, nb, grade==='PERFECT'?'GOOD':grade); }
     }
@@ -736,6 +924,8 @@
       addFireworks(canvas.width*0.7, canvas.height*0.28, isWaMode?['#ffd166','#ff8fab','#c0ffaa','#88ccff']:unlockedColors());
       flashOnce(0.36);
       spawnLanterns();
+    }else if(combo===150){
+      spawnRibbons(3); spawnSerpent(Math.random()<0.5?'L':'R'); flashOnce(0.4);
     }
   }
 
@@ -814,7 +1004,7 @@
         waveTime += 0.016 + p*0.008;
         const amp=8*DPR+16*DPR*p, layers=3+LEVEL;
         for(let li=0; li<layers; li++){
-          const yy=H*(0.62+0.03*li); ctx.globalAlpha=0.05+0.05*p; ctx.fillStyle=colorOf('blue'); ctx.beginPath(); ctx.moveTo(0,H);
+          const yy=H*(0.62+0.03*li); ctx.globalAlpha=0.05+0.05*p; ctx.fillStyle=colorOfSafe('blue'); ctx.beginPath(); ctx.moveTo(0,H);
           for(let x=0;x<=W;x+=12*DPR){ const y=yy + Math.sin((x/(80*DPR))+waveTime*(0.6+li*0.1))*amp*(0.5+li*0.2); ctx.lineTo(x,y); }
           ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
         }
@@ -832,6 +1022,11 @@
         usedVfx.push('Aurora');
       }
     }
+
+    // 祝祭追加：リボン／彩の竜／拍パルス
+    drawRibbons(); if(ribbons.length) usedVfx.push('Ribbons');
+    drawSerpents(); if(serpents.length) usedVfx.push('Serpent');
+    drawPulses(); if(pulses.length) usedVfx.push('Pulse');
 
     // 判定ライン
     const lineY=H*HIT_LINE_RATIO; ctx.globalAlpha=0.28; ctx.fillStyle=isWaMode?'rgba(255,230,170,0.9)':'#ffffff'; ctx.fillRect(W*0.1,lineY-2*DPR, W*0.8,4*DPR); ctx.globalAlpha=1;
@@ -879,8 +1074,17 @@
 
     requestAnimationFrame(loop);
   }
-  function drawLanes(alpha=0.05){ const W=canvas.width,H=canvas.height, cs=laneCenters(); const laneW=(cs[1]-cs[0])||(W*0.6/LANE_COUNT), w=laneW*0.9;
-    cs.forEach(cx=>{ const grad=ctx.createLinearGradient(cx-w/2,0,cx+w/2,0); grad.addColorStop(0,`rgba(255,255,255,${alpha})`); grad.addColorStop(0.5,`rgba(255,255,255,${alpha*1.8})`); grad.addColorStop(1,`rgba(255,255,255,${alpha})`); ctx.fillStyle=grad; ctx.fillRect(cx-w/2,0,w,H); });
+
+  function drawLanes(alpha=0.05){
+    const W=canvas.width,H=canvas.height, cs=laneCenters();
+    const laneW=(cs[1]-cs[0])||(W*0.6/LANE_COUNT), w=laneW*0.9;
+    cs.forEach(cx=>{
+      const grad=ctx.createLinearGradient(cx-w/2,0,cx+w/2,0);
+      grad.addColorStop(0,`rgba(255,255,255,${alpha})`);
+      grad.addColorStop(0.5,`rgba(255,255,255,${alpha*1.8})`);
+      grad.addColorStop(1,`rgba(255,255,255,${alpha})`);
+      ctx.fillStyle=grad; ctx.fillRect(cx-w/2,0,w,H);
+    });
   }
 
   // ====== Results / Ending ======
@@ -889,8 +1093,8 @@
     const acc = judgedCount?(hits/judgedCount):1; const worldPct=Math.round(worldProgress()*100);
     if(LEVEL>=MAX_LEVEL){
       showResultCard(true, acc, worldPct);
-      // ★Lv5：結果表示を少し長め（従来300ms → 1600ms）
-      setTimeout(()=> playEnding(score, acc, worldPct), 1600);
+      // Lv5：結果表示を少し長め（2.2秒待ってからエンディング）
+      setTimeout(()=> playEnding(score, acc, worldPct), 2200);
     }else{
       showResultCard(false, acc, worldPct);
     }
@@ -922,9 +1126,9 @@
     document.getElementById('closeBtn').onclick = ()=> ov.style.display='none';
   }
 
-  // ====== Ending（同時：背景アニメ＋即時エンドロール） ======
+  // ====== Ending（背景アニメ＋同時エンドロール） ======
   function playEnding(finalScore, acc, worldPct){
-    endingMode=true; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0;
+    endingMode=true; particles.length=0; windStreaks.length=0; petals.length=0; lanterns.length=0; ribbons.length=0; serpents.length=0; pulses.length=0;
     ov.style.display='none';
 
     // クレジット本文
@@ -960,14 +1164,14 @@ MONOCHROME REBIRTH
     creditsText.textContent = body;
     creditsWrap.style.display='flex';
 
-    // 背景アニメ & BGM
+    // 背景アニメ & BGM（スコア/精度で段階）
     const accPct = acc*100;
     const tier = (finalScore>30000 && accPct>95 && worldPct>90) ? 'AURORA'
                : (finalScore>22000 && accPct>90) ? 'WAVE'
                : 'BLOOM';
     startEndingBgm(isWaMode?('WA_'+tier):tier);
 
-    const duration = 30000;
+    const duration = 30000; // 30s
     const startMs = performance.now();
     const colsAll = isWaMode ? ['#ffcd6b','#ff8fab','#c6ffb2','#9dd6ff'] : ['#ffd166','#5af38f','#6ab8ff','#ff6b6b'];
 
@@ -977,10 +1181,13 @@ MONOCHROME REBIRTH
       const t = (nowMs - startMs)/1000;
 
       if(isWaMode){
+        // 和：金雲＋海＋桜／提灯、祭りの余韻
         const g0=ctx.createLinearGradient(0,0,0,H);
         g0.addColorStop(0, hsl(35, 0.85, 0.35, 0.9));
         g0.addColorStop(1, hsl(210, 0.6, 0.35, 0.9));
         ctx.fillStyle=g0; ctx.fillRect(0,0,W,H);
+
+        // 穏やかな波
         for(let li=0; li<5; li++){
           const yy = H*(0.65 + 0.03*li);
           ctx.globalAlpha = 0.08 + 0.04*Math.sin(t*0.8+li);
@@ -992,12 +1199,15 @@ MONOCHROME REBIRTH
           }
           ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
         }
+        // 余韻の桜・提灯
         drawSakura(); drawLanterns();
       }else{
+        // 洋：色帯の筆致で祝祭を描く
         const hueBase = 45 + Math.sin(t*0.15)*25;
         const top = hsl(hueBase, 0.8, 0.35, 0.6);
         const bot = hsl(hueBase+120, 0.85, 0.45, 0.85);
         const gbg = ctx.createLinearGradient(0,0,0,H); gbg.addColorStop(0, top); gbg.addColorStop(1, bot); ctx.fillStyle=gbg; ctx.fillRect(0,0,W,H);
+
         const bands = tier==='AURORA'? 6 : (tier==='WAVE'?4:3);
         for(let i=0;i<bands;i++){
           const c = colsAll[i%colsAll.length];
@@ -1015,6 +1225,9 @@ MONOCHROME REBIRTH
         }
         ctx.globalAlpha = 1;
       }
+
+      // 祝祭の紙吹雪を控えめに
+      if(Math.random()<0.08) emitConfettiBeat(6);
 
       if(nowMs - startMs < duration){ requestAnimationFrame(renderEnding); }
       else{
@@ -1069,7 +1282,7 @@ MONOCHROME REBIRTH
     bell.gain.linearRampToValueAtTime(0.55, now+1.2);
   }
 
-  // ====== Minimal Start overlay（iOS解放順：ensure → init → start） ======
+  // ====== Start Overlay（iOS解放順：ensure → init → start） ======
   function showStartOverlay(){
     card.innerHTML = `
       <div class="logo"><span class="dot"></span><span class="word">MONOCHROME REBIRTH</span><span class="dot"></span></div>
@@ -1088,7 +1301,7 @@ MONOCHROME REBIRTH
     document.getElementById('ovLvUp').onclick = ()=>{ if(LEVEL<MAX_LEVEL){ LEVEL++; lvEl.textContent=LEVEL; } };
   }
 
-  // “どこでも解放”保険（iOS）
+  // “どこでも解放”保険（iOS Safariなど）
   ['touchstart','mousedown','keydown'].forEach(ev=>{
     document.addEventListener(ev, async ()=>{
       if(!audioCtx || audioCtx.state!=='running'){
