@@ -208,24 +208,49 @@ function s_goal(){ for(let i=0;i<5;i++) setTimeout(()=>beep(500+ i*200,0.08,'saw
 function s_pen(){ beep(220,0.1,'sawtooth',0.3); }
 
 // --------------------------------------------------------
-// Input (Multi-touch paddles: tap to create, drag to move)
+// Input (Multi-touch paddles + Finger Flick)
 // --------------------------------------------------------
+let flickCooldown = 0; // seconds cooldown between flicks
+const flick = { prox: ()=>70*DPR, minDist: ()=>12*DPR, maxDur: 0.22, minSpeed: ()=>480*DPR, gain: 0.65 };
+const touches = new Map(); // id -> {sx,sy,st,lx,ly,lt,near}
+
 function isYouSide(py){ return py >= MID; }
-function onTouchStart(ev){ initAudio(); if(actx?.state==='suspended') actx.resume(); for(const t of ev.changedTouches){ const rect=canvas.getBoundingClientRect(); const x=(t.clientX-rect.left)*DPR; const y=(t.clientY-rect.top)*DPR; if(state.mode==='1P'){ if(isYouSide(y)){ you.active=true; you.touchId=t.identifier; you.x=x; you.y=y; } }
-  else{ // 2P
-    if(isYouSide(y)){ you.active=true; you.touchId=t.identifier; you.x=x; you.y=y; }
-    else{ ai.active=true; ai.touchId=t.identifier; ai.x=x; ai.y=y; }
+function nearPuck(x,y){ const dx=x-puck.x, dy=y-puck.y; return Math.hypot(dx,dy) <= flick.prox(); }
+
+function tryFlick(sx,sy,ex,ey,dt){
+  if(flickCooldown>0) return false;
+  if(!isYouSide(sx) || puck.y < MID + puck.r*0.2) return false; // only when starting on your half & puck mostly on your half
+  const dx = ex-sx, dy = ey-sy; const dist = Math.hypot(dx,dy); if(dist < flick.minDist()) return false;
+  if(dt<=0 || dt>flick.maxDur) return false; const speed = dist/dt; if(speed < flick.minSpeed()) return false;
+  // direction & impulse
+  const nx = dx/dist, ny = dy/dist; const imp = Math.min(1800*DPR, speed * flick.gain);
+  puck.vx += nx * imp; puck.vy += ny * imp; clampPuckSpeed(); s_hit(); state.flash = 0.18; flickCooldown = 0.12; return true;
+}
+
+function onTouchStart(ev){ initAudio(); if(actx?.state==='suspended') actx.resume();
+  for(const t of ev.changedTouches){ const rect=canvas.getBoundingClientRect(); const x=(t.clientX-rect.left)*DPR; const y=(t.clientY-rect.top)*DPR; const st=performance.now()/1000;
+    touches.set(t.identifier,{sx:x,sy:y,st,lx:x,ly:y,lt:st,near:nearPuck(x,y)});
+    if(state.mode==='1P'){
+      if(isYouSide(y)){ you.active=true; you.touchId=t.identifier; you.x=x; you.y=y; }
+    } else { // 2P
+      if(isYouSide(y)){ you.active=true; you.touchId=t.identifier; you.x=x; you.y=y; }
+      else{ ai.active=true; ai.touchId=t.identifier; ai.x=x; ai.y=y; }
+    }
   }
- }
- ev.preventDefault(); }
-function onTouchMove(ev){ for(const t of ev.changedTouches){ const rect=canvas.getBoundingClientRect(); const x=(t.clientX-rect.left)*DPR; const y=(t.clientY-rect.top)*DPR; if(t.identifier===you.touchId){ you.vx = x-you.x; you.vy = y-you.y; you.x=x; you.y=y; you.clampToSide(); }
+  ev.preventDefault(); }
+
+function onTouchMove(ev){ for(const t of ev.changedTouches){ const rect=canvas.getBoundingClientRect(); const x=(t.clientX-rect.left)*DPR; const y=(t.clientY-rect.top)*DPR; const lt=performance.now()/1000; const tr=touches.get(t.identifier); if(tr){ tr.lx=x; tr.ly=y; tr.lt=lt; }
+   if(t.identifier===you.touchId){ you.vx = x-you.x; you.vy = y-you.y; you.x=x; you.y=y; you.clampToSide(); }
    if(state.mode==='2P' && t.identifier===ai.touchId){ ai.vx = x-ai.x; ai.vy = y-ai.y; ai.x=x; ai.y=y; ai.clampToSide(); }
  }
  ev.preventDefault(); }
-function onTouchEnd(ev){ for(const t of ev.changedTouches){ if(t.identifier===you.touchId){ you.active=false; you.touchId=null; }
+
+function onTouchEnd(ev){ for(const t of ev.changedTouches){ const tr=touches.get(t.identifier); if(tr){ const dt=Math.max(0.0001, (tr.lt - tr.st)); if(tr.near){ tryFlick(tr.sx,tr.sy,tr.lx,tr.ly,dt); } touches.delete(t.identifier); }
+   if(t.identifier===you.touchId){ you.active=false; you.touchId=null; }
    if(t.identifier===ai.touchId){ ai.active=false; ai.touchId=null; }
  }
  ev.preventDefault(); }
+
 canvas.addEventListener('touchstart', onTouchStart, {passive:false});
 canvas.addEventListener('touchmove', onTouchMove, {passive:false});
 canvas.addEventListener('touchend', onTouchEnd, {passive:false});
@@ -499,6 +524,7 @@ let warnFlash=0; function flashWarn(){ warnFlash=0.55; }
 // Loop & HUD
 // --------------------------------------------------------
 function loop(ts){ if(!state.running){ state.lastTs = ts; return requestAnimationFrame(loop);} const dt = Math.min(0.033, (ts - state.lastTs)/1000); state.lastTs = ts;
+  if(flickCooldown>0) flickCooldown -= dt;
   physics(dt); draw();
   if(state.flash>0) state.flash -= dt; if(warnFlash>0) warnFlash -= dt*2.5;
   // timer
@@ -632,7 +658,20 @@ function testGrazingSave(){
   // restore
   puck.x=was.x; puck.y=was.y; puck.vx=was.vx; puck.vy=was.vy; ai.x=was.ax; ai.y=was.ay;
 }
-setTimeout(()=>{ runSelfTests(); testGoalLineSave(); testGrazingSave(); }, 0);
+// Flick test to ensure finger swipe imparts velocity
+function testFlick(){
+  const was = {px:puck.x,py:puck.y,vx:puck.vx,vy:puck.vy};
+  // place puck on player's half
+  puck.x=W*0.6; puck.y=MID+80*DPR; puck.vx=0; puck.vy=0;
+  const sx=puck.x-30*DPR, sy=puck.y+30*DPR, ex=sx, ey=sy-120*DPR; // quick upward flick
+  const vyBefore = puck.vy;
+  const ok1 = tryFlick(sx,sy,ex,ey,0.12);
+  const passed = ok1 && (puck.vx!==0 || puck.vy!==0);
+  console[passed?'log':'error']('[TEST '+(passed?'PASS':'FAIL')+'] Finger flick adds velocity', {vx:puck.vx, vy:puck.vy, ok1});
+  // restore
+  puck.x=was.px; puck.y=was.py; puck.vx=was.vx; puck.vy=was.vy;
+}
+setTimeout(()=>{ runSelfTests(); testGoalLineSave(); testGrazingSave(); testFlick(); }, 0);
 
 </script>
 </body>
