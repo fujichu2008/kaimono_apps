@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Wire Runner — 白×黒 2色アクション</title>
+<style>
+  /* ===== 2色（白背景／黒線）ミニマル ===== */
+  :root{
+    --bg:#ffffff;  /* 白 */
+    --ink:#000000; /* 黒 */
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+  canvas{display:block;touch-action:none}
+  .overlay{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:transparent;color:var(--ink);pointer-events:none;
+  }
+  .panel{
+    pointer-events:auto;border:2px solid var(--ink);padding:16px 18px;background:var(--bg);
+    max-width:min(90vw,520px);
+  }
+  .title{font-weight:700;font-size:24px;letter-spacing:.02em;margin-bottom:8px}
+  .mono{font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .btn{
+    display:inline-block;border:2px solid var(--ink);padding:10px 16px;margin-top:10px;
+    background:var(--bg);color:var(--ink);text-decoration:none;cursor:pointer;user-select:none;
+  }
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .muted{opacity:.7}
+  .hide{display:none}
+  /* Safe area padding for iPhone notch/Dynamic Island */
+  .safe{
+    padding-left:calc(env(safe-area-inset-left) + 8px);
+    padding-right:calc(env(safe-area-inset-right) + 8px);
+    padding-top:calc(env(safe-area-inset-top) + 8px);
+    padding-bottom:calc(env(safe-area-inset-bottom) + 8px);
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- UI (2色内で最小限) -->
+<div class="overlay safe" id="hud">
+  <div class="panel">
+    <div class="row">
+      <div><span class="mono">距離</span> <span id="dist" class="mono">0m</span></div>
+      <div><span class="mono">倍率</span> <span id="mult" class="mono">x1.0</span></div>
+      <div><span class="mono">速度</span> <span id="spd" class="mono">0.0</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay safe" id="menu">
+  <div class="panel">
+    <div class="title">Wire Runner</div>
+    <div class="muted">白背景×黒線のみ。一本の線を読み解き、飛ぶ・切り替える・生き抜く。</div>
+    <ul style="margin:10px 0 0 16px;line-height:1.6">
+      <li>タップ：小ジャンプ</li>
+      <li>上スワイプ：大ジャンプ</li>
+      <li>長押し：ふわっと減重</li>
+      <li>左右スワイプ：上下ワイヤー切替（2本区間のみ）</li>
+    </ul>
+    <div class="row">
+      <a class="btn" id="startBtn">スタート</a>
+      <a class="btn" id="practiceBtn" title="速度ゆっくり＆落下しても戻る">トレーニング</a>
+    </div>
+  </div>
+</div>
+
+<div class="overlay safe hide" id="result">
+  <div class="panel">
+    <div class="title">リザルト</div>
+    <div class="mono" id="scoreLine">距離 0m / 最大倍率 x1.0 / 平均速度 0.0</div>
+    <div class="row">
+      <a class="btn" id="retryBtn">もう一度</a>
+      <a class="btn" id="menuBtn">タイトルへ</a>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  /** ===== Canvas & DPR setup ===== */
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
+  const DPR = Math.max(1, Math.min(window.devicePixelRatio || 1, 3)); // 2x〜3xで十分
+  let vw=0, vh=0;
+
+  function resize() {
+    vw = window.innerWidth;
+    vh = window.innerHeight;
+    canvas.width  = Math.floor(vw * DPR);
+    canvas.height = Math.floor(vh * DPR);
+    canvas.style.width  = vw + 'px';
+    canvas.style.height = vh + 'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize, { passive:true });
+  resize();
+
+  /** ===== UI elements ===== */
+  const hudEl = document.getElementById('hud');
+  const menuEl = document.getElementById('menu');
+  const resultEl = document.getElementById('result');
+  const distEl = document.getElementById('dist');
+  const multEl = document.getElementById('mult');
+  const spdEl = document.getElementById('spd');
+  const startBtn = document.getElementById('startBtn');
+  const practiceBtn = document.getElementById('practiceBtn');
+  const retryBtn = document.getElementById('retryBtn');
+  const menuBtn = document.getElementById('menuBtn');
+  const scoreLine = document.getElementById('scoreLine');
+
+  /** ===== Haptics (graceful no-op on iOS Safari) ===== */
+  function haptic(light=true){
+    try {
+      if (navigator.vibrate) navigator.vibrate(light ? 5 : [10,30,10]);
+    } catch(e){}
+  }
+
+  /** ===== Game State ===== */
+  const STATE = { MENU:0, PLAY:1, DEAD:2, RESULT:3 };
+  let state = STATE.MENU;
+  let training = false;
+
+  // Player physics
+  const G = 2400;          // gravity px/s^2
+  const G_HOLD = 900;      // gravity while holding
+  const JUMP_V = 900;      // small jump
+  const BIG_JUMP_V = 1200; // big jump
+  const MAX_VY = 2400;
+  const PLAYER_R = 10;     // radius for drawing & contact
+
+  // Speed
+  let speed = 260;       // px/s initial
+  let accel = 22;        // px/s^2 (ramps up gradually)
+  let maxSpeedSeen = 0;
+
+  // Score
+  let worldX = 0;        // traveled distance in px
+  let combo = 0;         // no-miss counter
+  let mult = 1;          // 1.0〜2.5
+  let bestAvgSpd = 0;
+
+  // Player
+  const player = {
+    x: 0, y: 0, vy: 0,
+    wire: 0,      // 0: lower / 1: upper
+    onWire: false,
+    alive: true,
+  };
+
+  // Gesture tracking
+  let pointerDown = false;
+  let downX=0, downY=0, downT=0, moved=false;
+
+  // Wire world (procedural)
+  // We maintain segments ahead of camera. Each segment describes two possible wires (0/1).
+  // A wire can be: solid line at height y, or gap (null), for [startX, endX).
+  const segments = []; // {x1,x2, lower:{y,kind}, upper:{y,kind}, twoWires:boolean}
+  let genX = 0;        // last generated world x
+  const LOOKAHEAD = 3000; // px
+
+  // Heights
+  const H_LOWER = () => vh * 0.72;
+  const H_UPPER = () => vh * 0.40;
+
+  // Random helper
+  const rng = (min,max) => Math.random()*(max-min)+min;
+  const rint = (min,max) => Math.floor(rng(min,max+1));
+
+  function addFlat(lenPx, two=false){
+    const s = {
+      x1: genX,
+      x2: genX + lenPx,
+      lower: { y: H_LOWER(), kind:'solid' },
+      upper: two ? { y: H_UPPER(), kind:'solid' } : { y: null, kind:'gap' },
+      twoWires: two
+    };
+    segments.push(s);
+    genX = s.x2;
+  }
+  function addGap(lenPx, which='lower'){
+    const s = {
+      x1: genX,
+      x2: genX + lenPx,
+      lower: which==='lower' ? { y:null, kind:'gap' } : { y:H_LOWER(), kind:'solid' },
+      upper: which==='upper' ? { y:null, kind:'gap' } : { y:H_UPPER(), kind:'solid' },
+      twoWires: true
+    };
+    segments.push(s);
+    genX = s.x2;
+  }
+  function addStep(lenPx, deltaY= -vh*0.1, which='lower'){
+    // step up (negative deltaY) or down (positive)
+    const baseY = (which==='lower') ? H_LOWER() : H_UPPER();
+    const s1 = {
+      x1: genX, x2: genX + Math.max(80, lenPx*0.4),
+      lower: { y: which==='lower'? baseY : H_LOWER(), kind:'solid' },
+      upper: { y: which==='upper'? baseY : H_UPPER(), kind:'solid' },
+      twoWires: true
+    };
+    segments.push(s1);
+    genX = s1.x2;
+
+    const s2 = {
+      x1: genX, x2: genX + Math.max(120, lenPx*0.6),
+      lower: { y: which==='lower'? baseY+deltaY : H_LOWER(), kind:'solid' },
+      upper: { y: which==='upper'? baseY+deltaY : H_UPPER(), kind:'solid' },
+      twoWires: true
+    };
+    segments.push(s2);
+    genX = s2.x2;
+  }
+
+  function generateAhead(targetX){
+    while(genX < targetX){
+      // Pattern lottery: flat / double-flat / gap / step
+      const roll = Math.random();
+      if (roll < 0.35){
+        addFlat(rng(260,520), false);
+      } else if (roll < 0.60){
+        addFlat(rng(300,700), true); // two wires section
+      } else if (roll < 0.80){
+        // gap appears on random wire
+        const which = Math.random()<0.5 ? 'lower' : 'upper';
+        addGap(rng(160,260), which);
+      } else {
+        const which = Math.random()<0.6 ? 'lower' : 'upper';
+        const dy = (Math.random()<0.5 ? -1 : 1) * vh * rng(0.06,0.12);
+        addStep(rng(260,520), dy, which);
+      }
+      // Occasionally enforce a safe flat after a tricky bit
+      if (Math.random()<0.25) addFlat(rng(200,420), Math.random()<0.4);
+    }
+  }
+
+  function currentWireY(x, wireIndex){
+    // Find segment containing x; return y or null if gap
+    for (let i=0;i<segments.length;i++){
+      const s = segments[i];
+      if (x >= s.x1 && x < s.x2){
+        const def = wireIndex===0 ? s.lower : s.upper;
+        return def.y; // may be null
+      }
+    }
+    return H_LOWER(); // fallback (should not happen if generated)
+  }
+
+  function segmentAt(x){
+    for (let i=0;i<segments.length;i++){
+      const s = segments[i];
+      if (x >= s.x1 && x < s.x2) return s;
+    }
+    return null;
+  }
+
+  function pruneOld(beforeX){
+    // Remove segments entirely left of beforeX
+    while(segments.length && segments[0].x2 < beforeX){
+      segments.shift();
+    }
+  }
+
+  /** ===== Game control ===== */
+  function resetGame(){
+    state = STATE.PLAY;
+    training = false; // may be set true by start handlers
+    speed = 260; accel = 22;
+    worldX = 0; combo = 0; mult = 1; maxSpeedSeen = 0; bestAvgSpd = 0;
+    segments.length = 0; genX = 0;
+    player.x = 0; player.y = H_LOWER() - PLAYER_R; player.vy = 0;
+    player.wire = 0; player.onWire = true; player.alive = true;
+
+    generateAhead(LOOKAHEAD);
+    menuEl.classList.add('hide');
+    resultEl.classList.add('hide');
+    hudEl.classList.remove('hide');
+    tryUnlockAudio(); // (無音のままでもOK)
+    lastTime = performance.now(); acc = 0;
+    requestAnimationFrame(loop);
+  }
+
+  startBtn.addEventListener('click', () => { training=false; resetGame(); });
+  practiceBtn.addEventListener('click', () => { training=true; resetGame(); });
+  retryBtn.addEventListener('click', () => { training=false; resetGame(); });
+  menuBtn.addEventListener('click', () => {
+    state = STATE.MENU;
+    menuEl.classList.remove('hide');
+    resultEl.classList.add('hide');
+    hudEl.classList.remove('hide');
+  });
+
+  /** ===== Input (tap / swipe / hold) ===== */
+  canvas.addEventListener('pointerdown', e=>{
+    pointerDown = true; moved = false;
+    downX = e.clientX; downY = e.clientY; downT = performance.now();
+  }, { passive:true });
+  canvas.addEventListener('pointermove', e=>{
+    if (!pointerDown) return;
+    const dx = e.clientX - downX, dy = e.clientY - downY;
+    if (Math.hypot(dx,dy) > 6) moved = true;
+  }, { passive:true });
+  canvas.addEventListener('pointerup', e=>{
+    const upT = performance.now();
+    const dx = e.clientX - downX, dy = e.clientY - downY;
+    const dt = upT - downT;
+    pointerDown = false;
+
+    if (state !== STATE.PLAY) return;
+
+    // Classify gesture
+    const absX = Math.abs(dx), absY = Math.abs(dy);
+    const SWIPE_TH = 42;
+
+    if (absY > absX && absY > SWIPE_TH){
+      if (dy < 0){
+        // Up swipe -> big jump
+        doJump(true);
+      } else {
+        // Down swipe -> slide (optional: brief faster fall)
+        player.vy = Math.min(player.vy + 420, MAX_VY);
+      }
+      return;
+    }
+    if (absX > absY && absX > SWIPE_TH){
+      // Horizontal swipe -> lane change (only if two wires in current segment)
+      const seg = segmentAt(worldX + player.x);
+      if (seg && seg.twoWires){
+        player.wire = (player.wire === 0) ? 1 : 0;
+        // align to other wire if standing
+        const yTarget = currentWireY(worldX + player.x, player.wire);
+        if (yTarget != null){
+          if (player.onWire) player.y = yTarget - PLAYER_R;
+          haptic();
+        }
+      }
+      return;
+    }
+
+    // Tap / short press
+    if (!moved){
+      if (dt > 300){
+        // Long press already handled by reduced gravity in loop; give a small hop
+        if (player.onWire) doJump(false);
+      } else {
+        // Small jump
+        doJump(false);
+      }
+    }
+  }, { passive:true });
+  canvas.addEventListener('pointercancel', ()=>{ pointerDown=false; }, { passive:true });
+
+  function doJump(big=false){
+    // Only allow jump if on wire (coyote-time optional)
+    if (player.onWire){
+      player.vy = -(big ? BIG_JUMP_V : JUMP_V);
+      player.onWire = false;
+      haptic();
+    }
+  }
+
+  /** ===== Minimal AudioContext unlock (silent) ===== */
+  let audioCtx = null, audioUnlocked = false;
+  function tryUnlockAudio(){
+    if (audioUnlocked) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      g.gain.value = 0.00001;
+      o.connect(g).connect(audioCtx.destination);
+      o.start();
+      o.stop(audioCtx.currentTime + 0.01);
+      audioUnlocked = true;
+    } catch(e){ /* fine */ }
+  }
+
+  /** ===== Game Loop (fixed timestep physics) ===== */
+  const FIXED_DT = 1/120; // s
+  let lastTime = performance.now();
+  let acc = 0;
+
+  function loop(now){
+    if (state !== STATE.PLAY) return;
+    const dtMs = now - lastTime; lastTime = now;
+    // Clamp to avoid spiral of death on tab switch
+    const dtClamp = Math.min(0.1, Math.max(0, dtMs/1000));
+    acc += dtClamp;
+
+    // Update physics at fixed dt
+    while(acc >= FIXED_DT){
+      step(FIXED_DT);
+      acc -= FIXED_DT;
+    }
+
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  function step(dt){
+    // Speed ramp
+    speed += accel * dt;
+    maxSpeedSeen = Math.max(maxSpeedSeen, speed);
+
+    // Generate world ahead of camera
+    const camX = worldX; // camera origin on world x
+    generateAhead(camX + LOOKAHEAD);
+    pruneOld(camX - 200);
+
+    // Gravity (reduced when holding)
+    const g = pointerDown ? G_HOLD : G;
+    player.vy = Math.min(player.vy + g*dt, MAX_VY);
+    player.y += player.vy * dt;
+
+    // Forward movement
+    const moveX = speed * dt;
+    worldX += moveX;
+
+    // Collision with current wire
+    const pxWorld = worldX + player.x;
+    const yWire = currentWireY(pxWorld, player.wire);
+    if (yWire != null){
+      // Contact if below line
+      if (player.y + PLAYER_R >= yWire){
+        player.y = yWire - PLAYER_R;
+        player.vy = Math.min(player.vy, 0);
+        if (!player.onWire){
+          player.onWire = true;
+          combo++;
+          mult = Math.min(2.5, 1 + combo*0.02);
+        }
+      } else {
+        player.onWire = false;
+      }
+    } else {
+      player.onWire = false;
+    }
+
+    // Death conditions
+    const fell = (player.y - PLAYER_R) > vh + 40;
+    if (fell && !training){
+      // Game over
+      player.alive = false;
+      state = STATE.DEAD;
+      haptic(false);
+      setTimeout(showResult, 120);
+    } else if (fell && training){
+      // Soft fail: teleport back to nearest safe wire
+      const seg = segmentAt(pxWorld);
+      const fallbackWire = (seg && seg.lower.y!=null) ? 0 : 1;
+      player.wire = fallbackWire;
+      const yBack = currentWireY(pxWorld, player.wire) ?? H_LOWER();
+      player.y = yBack - PLAYER_R;
+      player.vy = 0;
+      combo = 0; mult = 1;
+    }
+
+    // HUD
+    distEl.textContent = `${Math.max(0, Math.floor(worldX/10))}m`;
+    multEl.textContent = `x${mult.toFixed(1)}`;
+    spdEl.textContent  = (speed/60).toFixed(1);
+    bestAvgSpd = (bestAvgSpd*0.98 + speed*0.02); // lazy EMA
+  }
+
+  /** ===== Rendering (black lines only) ===== */
+  function render(){
+    // Clear to white
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,vw,vh);
+
+    // Camera transform: scroll world to screen
+    const camX = worldX;
+
+    // Background speed lines (pure black, low alpha simulated via stipple)
+    drawSpeedParallax(camX);
+
+    // Draw wires
+    ctx.strokeStyle = '#000000';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Merge continuous ranges to reduce draw calls
+    drawWire(0, camX);
+    drawWire(1, camX);
+
+    // Draw player (stick-figure by lines)
+    drawPlayer();
+    // Tiny success sparks when on wire & moving fast
+    if (player.onWire && speed > 500) drawSparks();
+  }
+
+  function drawSpeedParallax(camX){
+    // Simple evenly spaced vertical lines, moving with speed for a sense of motion (monochrome)
+    const spacing = 48;
+    const offset = - (camX % spacing);
+    ctx.beginPath();
+    for (let x = offset; x < vw; x += spacing){
+      ctx.moveTo(x, 0); ctx.lineTo(x, vh);
+    }
+    ctx.lineWidth = 0.6;
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+  }
+
+  function drawWire(index, camX){
+    ctx.beginPath();
+    let drawing = false;
+    let lastScreenX = -9999;
+
+    // Collect segments within screen range
+    const startX = camX - 60;
+    const endX   = camX + vw + 60;
+    for (let i=0;i<segments.length;i++){
+      const s = segments[i];
+      if (s.x2 < startX || s.x1 > endX) continue;
+      const def = index===0 ? s.lower : s.upper;
+      if (def.y == null){ drawing = false; continue; }
+      const x1 = Math.max(s.x1, startX);
+      const x2 = Math.min(s.x2, endX);
+      const sx1 = Math.floor(x1 - camX), sx2 = Math.floor(x2 - camX);
+      const y   = def.y;
+
+      // If the previous line ends very near, connect to keep line visually continuous
+      if (!drawing){
+        ctx.moveTo(sx1, y);
+        drawing = true;
+      } else {
+        if (Math.abs(sx1 - lastScreenX) > 2) ctx.moveTo(sx1, y);
+      }
+      ctx.lineTo(sx2, y);
+      lastScreenX = sx2;
+    }
+    ctx.lineWidth = (index===0? 4 : 3); // lower slightly thicker
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+  }
+
+  function drawPlayer(){
+    const x = Math.floor(vw * 0.28); // player screen x (slightly left)
+    const y = player.y;
+
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 3;
+
+    // Head (circle as line outline): keep strokes only (monochrome)
+    ctx.beginPath();
+    ctx.arc(x, y-16, 8, 0, Math.PI*2);
+    ctx.stroke();
+
+    // Body
+    ctx.beginPath();
+    ctx.moveTo(x, y-8);
+    ctx.lineTo(x, y-2);
+    ctx.lineTo(x, y+PLAYER_R);
+    ctx.stroke();
+
+    // Arms
+    ctx.beginPath();
+    ctx.moveTo(x-10, y-4);
+    ctx.lineTo(x+10, y-4);
+    ctx.stroke();
+
+    // Legs (slight stride by vy)
+    const stride = Math.max(-8, Math.min(8, player.vy*0.02));
+    ctx.beginPath();
+    ctx.moveTo(x, y+PLAYER_R);
+    ctx.lineTo(x-8, y+PLAYER_R+12 + stride);
+    ctx.moveTo(x, y+PLAYER_R);
+    ctx.lineTo(x+8, y+PLAYER_R+12 - stride);
+    ctx.stroke();
+  }
+
+  function drawSparks(){
+    const x = Math.floor(vw * 0.28);
+    const y = player.y + PLAYER_R + 1;
+    ctx.beginPath();
+    ctx.moveTo(x-8, y); ctx.lineTo(x-18, y-6);
+    ctx.moveTo(x+8, y); ctx.lineTo(x+18, y-6);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+  }
+
+  /** ===== Result ===== */
+  function showResult(){
+    state = STATE.RESULT;
+    hudEl.classList.remove('hide');
+    resultEl.classList.remove('hide');
+    const meters = Math.max(0, Math.floor(worldX/10));
+    scoreLine.textContent =
+      `距離 ${meters}m / 最大倍率 x${mult.toFixed(1)} / 平均速度 ${(bestAvgSpd/60).toFixed(1)}`
+  }
+
+  /** ===== Quick start on load (menu visible) ===== */
+  // (Nothing else; user taps start)
+
+  // Accessibility: Space/Enter to start
+  window.addEventListener('keydown', (e)=>{
+    if (state===STATE.MENU && (e.key===' '||e.key==='Enter')) { training=false; resetGame(); }
+    else if (state===STATE.RESULT && (e.key===' '||e.key==='Enter')) { training=false; resetGame(); }
+  });
+
+})();
+</script>
+</body>
+</html>
