@@ -268,7 +268,6 @@
 <dialog id="dlg-help" aria-labelledby="help-title">
   <h3 id="help-title" style="margin:0 0 8px">使い方（How to）</h3>
   <div class="help-body" id="help-body">
-    <!-- 省略せず全文（元と同一） -->
     <h3>このアプリについて</h3>
     <p>SpeakNoteは、英語スピーキング練習のために、場面（Scene）を起点に例文を作成・管理・再生できるツールです。<br>
     データはすべてブラウザ内に保持され、外部にアップロードされることはありません。<br>
@@ -382,6 +381,13 @@ const now = ()=>Date.now();
 const sleep = ms=>new Promise(r=>setTimeout(r,ms));
 function escapeHTML(s=''){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+/* ★追加：ローカル/ホーム画面PWAなどを検知してAPI呼び出しを避ける */
+function isLocalLikeOrigin(){
+  try{
+    const o = location.origin;
+    return o === 'null' || o === 'file://' || o === null || o === undefined;
+  }catch(e){ return true; }
+}
 
 /* === 再生キルスイッチ（画面遷移/閉じるで完全停止） === */
 let playSession = 0;
@@ -821,16 +827,45 @@ async function speakFlow(row, opts={}){
 }
 
 /* =========================
-   シャドーイング 状態管理（修正の肝）
+   設定（標準設定ボタン＋保存＋スリープ防止）
+========================= */
+function applyStandardSettings(){
+  settings = { ...defaultSettings, voiceName: '' }; // OS推奨に自動
+  saveSettings();
+  loadVoices();
+  fillSettingsFields();
+  alert('標準設定を適用しました（音声はOS推奨に自動設定）。');
+}
+function fillSettingsFields(){
+  $('#lang').value = settings.ttsLang||'';
+  $('#rate').value = settings.rate; $('#pitch').value = settings.pitch;
+  $('#volume').value = settings.volume; $('#gap').value = settings.gapSec;
+  $('#repeat').value = settings.repeat; $('#speak-target').value = settings.speakTarget;
+  $('#keep-awake').checked = !!settings.keepAwake;
+}
+function openSettingsFields(){
+  loadVoices();
+  fillSettingsFields();
+  $('#lang').onchange = ()=>{ settings.ttsLang = $('#lang').value || settings.ttsLang; saveSettings(); renderVoiceList(); };
+}
+$('#reset-standard').onclick = (ev)=>{ ev.preventDefault(); applyStandardSettings(); };
+$('#save-settings').onclick = (ev)=>{
+  ev.preventDefault();
+  settings.ttsLang=$('#lang').value; settings.voiceName=$('#voice').value || settings.voiceName || '';
+  settings.rate=Number($('#rate').value)||1.0; settings.pitch=Number($('#pitch').value)||1.0; settings.volume=Number($('#volume').value)||1.0;
+  settings.gapSec=Number($('#gap').value)||0; settings.repeat=Math.max(1, parseInt($('#repeat').value||'1',10)); settings.speakTarget=$('#speak-target').value||'en';
+  settings.keepAwake = !!$('#keep-awake').checked;
+  const chosen=voices.find(v=>v.name===settings.voiceName); if(chosen&&chosen.lang&&chosen.lang!==settings.ttsLang){ settings.ttsLang=chosen.lang; }
+  saveSettings(); renderVoiceList(); $('#dlg-settings').close(); alert('設定を保存しました');
+};
+
+/* =========================
+   シャドーイング（セクション：速度引き継ぎ／WakeLock対応）
 ========================= */
 const sh = {
   list: [], index: 0, rate: 1.0,
   container: null, tokens: [], startCharOffset: 0, lastCharIndex: 0,
-  restarting:false, glitchRetry:false, opened:false,
-  state:'idle',            // 'idle' | 'playing' | 'paused'
-  userPaused:false,
-  lastAction:null,         // 'start'|'pause'|'resume'|'next'|'rateChange'|null
-  glitchRetryCount:0
+  restarting:false, glitchRetry:false, opened:false
 };
 
 async function prepareShadow(){
@@ -845,15 +880,10 @@ async function prepareShadow(){
   const row = sh.list[0];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   sh.opened = true;
-  sh.state = 'idle';
-  sh.userPaused = false;
-  sh.lastAction = null;
-  sh.glitchRetryCount = 0;
 }
 
 $('#sh-back').onclick = ()=>{
   sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
-  sh.state='idle'; sh.userPaused=false; sh.lastAction=null; sh.glitchRetryCount=0;
   stopAllPlayback();
   KeepAwake.disable();
   clearHighlight($('#sh-text'));
@@ -862,35 +892,23 @@ $('#sh-back').onclick = ()=>{
 };
 
 function updateRateBadge(){ $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×'; }
-function requestRestartFromCurrentPos(){ sh.restarting = true; sh.lastAction='rateChange'; try{ speechSynthesis.cancel(); }catch(e){} }
+function requestRestartFromCurrentPos(){ sh.restarting = true; try{ speechSynthesis.cancel(); }catch(e){} }
 
 function handleEnded(natural=true){
   if (!sh.opened) return;
-
-  // ユーザー一時停止・手動操作中は onend を無視
-  if (sh.userPaused || sh.state==='paused') return;
-
   if (sh.restarting){
     sh.restarting = false;
     const base = sh.startCharOffset||0;
     const nextIdx = findTokenIndexAtChar(sh.tokens, base + (sh.lastCharIndex||0));
-    sh.lastAction=null; // ここからは自然進行
     speakFromToken(nextIdx, /*forceCancel*/false);
     return;
   }
-
-  // 直前がユーザー操作（start/next/rateChange/resume）の場合はグリッチ扱いをしない
-  const userOperated = !!sh.lastAction;
-
-  if (natural === 'glitch' && !userOperated && sh.glitchRetryCount < 1){
-    sh.glitchRetryCount++;
+  if (natural === 'glitch' && !sh.glitchRetry){
+    sh.glitchRetry = true;
     speakFromToken(0, /*forceCancel*/true);
     return;
   }
-
-  // 次文へ
-  sh.glitchRetryCount = 0;
-  sh.lastAction=null;
+  sh.glitchRetry = false;
   sh.index = (sh.index+1) % sh.list.length;
   const row = sh.list[sh.index];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
@@ -920,10 +938,8 @@ function speakFromToken(startTokenIdx, forceCancel){
   u.lang = settings.ttsLang || 'en-US';
   u.rate = sh.rate; u.pitch = settings.pitch; u.volume = settings.volume;
 
-  sh.state='playing';
   let fbTimer=null, usedBoundary=false, startedAt=0;
   u.onstart=()=>{ startedAt = performance.now(); };
-
   if(/[A-Za-z]/.test(tail)){
     u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; sh.lastCharIndex=e.charIndex; highlightAtCharIndex(sh.container, sh.startCharOffset + e.charIndex); } };
     const remain=sh.tokens.filter(t=>t.end>startChar); if(remain.length>0){
@@ -931,12 +947,9 @@ function speakFromToken(startTokenIdx, forceCancel){
       fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} const absIdx=startTokenIdx+idx; if(absIdx>=sh.tokens.length){clearInterval(fbTimer);return;} highlightAtCharIndex(sh.container, sh.tokens[absIdx].start); idx++; }, msPerWord);
     }
   }
-  u.onend=()=>{
-    if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container);
+  u.onend=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container);
     const dur = performance.now() - startedAt;
-    // グリッチ判定は playing かつ ユーザー操作なしのときのみ
-    const asGlitch = (dur<300 && sh.state==='playing' && !sh.userPaused && !sh.lastAction);
-    handleEnded(asGlitch ? 'glitch' : true);
+    handleEnded(dur<300 ? 'glitch' : true);
   };
   u.onerror=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container); handleEnded(true); };
 
@@ -954,63 +967,14 @@ async function playCurrent(){
   const row = sh.list[sh.index]; const text = (row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0; sh.tokens = sh.container._tokens || tokenizeWords(text);
-  sh.userPaused=false; sh.glitchRetryCount=0; sh.lastAction=null;
   speakFromToken(0, /*forceCancel*/true);
 }
 
-/* ==== ボタン（修正） ==== */
-$('#sh-start').onclick = ()=>{
-  // 一時停止中は再開に切替（先頭に戻らない）
-  if (sh.state==='paused' || sh.userPaused){
-    sh.lastAction='resume';
-    try{
-      if (speechSynthesis.paused){ speechSynthesis.resume(); sh.state='playing'; sh.userPaused=false; return; }
-    }catch(e){}
-    // resumeできない環境 → 直前位置から再開
-    const idx = findTokenIndexAtChar(sh.tokens, sh.startCharOffset + sh.lastCharIndex);
-    speakFromToken(idx, /*forceCancel*/true);
-    sh.state='playing'; sh.userPaused=false;
-    return;
-  }
-  // 新規開始
-  sh.lastAction='start';
-  sh.rate = settings.rate || 1.0; updateRateBadge();
-  sh.restarting=false; sh.glitchRetry=false; sh.glitchRetryCount=0;
-  playCurrent(); sh.state='playing'; sh.userPaused=false;
-};
-
-$('#sh-pause').onclick = ()=>{
-  if (sh.state==='playing' && !sh.userPaused){
-    sh.lastAction='pause';
-    sh.userPaused=true; sh.state='paused';
-    try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } }catch(e){}
-  }else{
-    // 再開
-    sh.lastAction='resume';
-    sh.userPaused=false;
-    try{
-      if (speechSynthesis.paused){ speechSynthesis.resume(); sh.state='playing'; return; }
-    }catch(e){}
-    // resumeできない場合は直前位置から再生を再構成
-    const idx = findTokenIndexAtChar(sh.tokens, sh.startCharOffset + sh.lastCharIndex);
-    speakFromToken(idx, /*forceCancel*/true);
-    sh.state='playing';
-  }
-};
-
-$('#sh-next').onclick = ()=>{
-  sh.lastAction='next';
-  try{ speechSynthesis.cancel(); }catch(e){}
-  sh.restarting=false; sh.glitchRetry=false; sh.glitchRetryCount=0;
-  handleEnded(true);
-};
-
-$('#sh-slower').onclick = ()=>{
-  sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos();
-};
-$('#sh-faster').onclick = ()=>{
-  sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos();
-};
+$('#sh-start').onclick = ()=>{ sh.rate = settings.rate || 1.0; updateRateBadge(); sh.restarting=false; sh.glitchRetry=false; playCurrent(); };
+$('#sh-pause').onclick = ()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } else { speechSynthesis.resume(); } }catch(e){} };
+$('#sh-next').onclick = ()=>{ try{ speechSynthesis.cancel(); }catch(e){} sh.restarting=false; sh.glitchRetry=false; handleEnded(true); };
+$('#sh-slower').onclick = ()=>{ sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
+$('#sh-faster').onclick = ()=>{ sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
 
 /* =========================
    単語タップ→辞書モーダル
@@ -1024,12 +988,17 @@ function setLookupLinks(word){
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
+/* ★改修：失敗時すぐリンク表示、iOS/ローカルは最初からリンクのみ */
 function renderLookupContent(word, data){
   const body = $('#lk-body');
+  const failNote = (isIOS || isLocalLikeOrigin())
+    ? '（iOSやローカル起動では外部辞書APIが使えない場合があります。下のリンクから確認してください。）'
+    : '（外部辞書APIの取得に失敗しました。ネットワーク/CORSの可能性があります。下のリンクをご利用ください。）';
+
   if(!data || !Array.isArray(data) || data.length===0){
     body.innerHTML =
       `<div><span class="lookup-word">${escapeHTML(word)}</span><span class="lookup-phon"></span></div>
-       <div class="tiny" style="margin-top:6px">定義の取得に失敗しました。下のリンクから辞書サイトで確認できます。</div>`;
+       <div class="tiny" style="margin-top:6px">${failNote}</div>`;
     return;
   }
   const entry = data[0] || {};
@@ -1048,7 +1017,7 @@ function renderLookupContent(word, data){
     `<div><span class="lookup-word">${escapeHTML(word)}</span>
       ${phon?`<span class="lookup-phon">${escapeHTML(phon)}</span>`:''}
      </div>`;
-  $('#lk-body').innerHTML = top + (senses.length? senses.join('') :
+  body.innerHTML = top + (senses.length? senses.join('') :
     `<div class="tiny" style="margin-top:6px">定義が見つかりませんでした。下のリンクをご利用ください。</div>`);
 }
 async function openLookup(word){
@@ -1056,12 +1025,26 @@ async function openLookup(word){
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
+
+  // iOS or ローカルっぽいオリジンは最初からフォールバック（リンクのみ）
+  if (isIOS || isLocalLikeOrigin()){
+    renderLookupContent(word, null);
+    return;
+  }
+
+  // それ以外：通常fetch、3秒で諦めてリンクのみ表示
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort('timeout'), 3000);
   try{
-    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, {mode:'cors'});
+    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, {
+      mode:'cors', signal: ctrl.signal
+    });
+    clearTimeout(timer);
     if(!res.ok) throw new Error('fetch failed');
     const json = await res.json();
     renderLookupContent(word, json);
   }catch(e){
+    clearTimeout(timer);
     renderLookupContent(word, null);
   }
 }
