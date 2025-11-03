@@ -59,8 +59,10 @@
   /* 発話テキスト（プレビュー/詳細/シャドーイング兼用） */
   .speak-text{white-space:pre-wrap;line-height:1.9;max-height:36vh;overflow:auto;padding:6px 8px;border:1px dashed rgba(255,255,255,.08);border-radius:8px}
   .speak-text .w{padding:0 .03em;border-radius:.15em}
-  .speak-text .w.hl{color:#ff4d4f;} /* 赤字ハイライト */
+  .speak-text .w.hl{color:#ff4d4f;}
+  /* シャドーイング枠は少し大きめ＋場面フォント少し大きく */
   .shadow-box .speak-text{max-height:52vh;padding:10px}
+  #sh-scene{font-size:15px}
   .badge{font-variant-numeric:tabular-nums;background:#0e1525;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
 
   /* 使い方ダイアログ */
@@ -174,12 +176,11 @@
   </div>
 </dialog>
 
-<!-- シャドーイング（同画面ダイアログ） -->
+<!-- シャドーイング -->
 <dialog id="dlg-shadowing" class="shadow-box">
   <h3 style="margin:0 0 6px">シャドーイング</h3>
   <div class="tiny" style="margin-bottom:6px">登録済みの英文からランダムに読み上げます。</div>
-  <div class="meta" id="sh-scene" style="margin-top:2px;margin-bottom:8px;color:#c2cad8;font-size:15px"></div>
-
+  <div class="meta" id="sh-scene" style="margin-top:2px;margin-bottom:8px;color:#c2cad8"></div>
   <div class="actions" style="align-items:center">
     <button class="btn ok" id="sh-start">▶︎ 開始</button>
     <button class="btn" id="sh-pause">⏸ 一時停止/再開</button>
@@ -192,7 +193,7 @@
   <div id="sh-text" class="speak-text" style="margin-top:8px">(ここにランダムな英文が表示されます)</div>
 </dialog>
 
-<!-- 設定モーダル -->
+<!-- 設定 -->
 <dialog id="dlg-settings">
   <form method="dialog">
     <h3 style="margin:0 0 8px">音声・再生設定</h3>
@@ -200,7 +201,7 @@
       <div>
         <label>Voice</label>
         <select id="voice"></select>
-        <div class="tiny">※ iOSは既定で “Samantha (en-US)”、PCは “Microsoft Eric Online (Natural) (en-US)” を優先します。</div>
+        <div class="tiny">※ iOSは“Samantha (en-US)”、PCは“Microsoft Eric Online (Natural) (en-US)”を優先します。</div>
       </div>
       <div>
         <label>Language hint</label>
@@ -267,7 +268,7 @@
         必須項目は「場面」と「英文」です。<br>
         「場面（Scene）」には、いつ・どんな状況で使う英文かを簡潔に書きます（例：「会議で自己紹介するとき」）。<br>
         「英語例文（English）」に本文を入力し、「保存」。<br>
-        「▶︎プレビュー再生」で音声確認できます。 ただし、iOSでは発話がややぎこちなくなります。
+        「▶︎プレビュー再生」で音声確認できます。
       </li>
       <li><strong>一覧</strong><br>
         検索やカテゴリ・タグで絞り込み可能。<br>
@@ -328,7 +329,9 @@
   <div class="actions">
     <button class="btn right" id="help-close">閉じる</button>
   </div>
-</dialog><footer>(C)Hisashi Fujinaka All Rights Recived</footer>
+</dialog>
+
+<footer>(C)Hisashi Fujinaka All Rights Recived</footer>
 
 <script>
 /* =========================
@@ -341,6 +344,13 @@ const now = ()=>Date.now();
 const sleep = ms=>new Promise(r=>setTimeout(r,ms));
 function escapeHTML(s=''){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+/* === 再生キルスイッチ（閉じる後の再始動を防止） === */
+let playSession = 0;
+function stopAllPlayback(){
+  playSession++;
+  try{ speechSynthesis.cancel(); }catch(e){}
+}
 
 /* =========================
    State & Settings
@@ -421,7 +431,7 @@ function collectFormToItem(base={}){
 function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value=''); Array.from($('#cats').options).forEach(o=>o.selected=false); const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML=''; }
 $('#btn-clear').onclick = ()=> clearForm();
 
-/* ====== 単語トークナイズ & ハイライト ====== */
+/* ====== 単語トークナイズ & ハイライト（改行追従のため<wbr>挿入） ====== */
 function tokenizeWords(text){ const tokens=[]; if(!text) return tokens; const re=/\S+/g; let m; while((m=re.exec(text))!==null){ tokens.push({text:m[0], start:m.index, end:m.index+m[0].length}); } return tokens; }
 function renderSpeakText(container, text){
   container.innerHTML = ''; container.classList.add('speak-text');
@@ -430,7 +440,8 @@ function renderSpeakText(container, text){
   let html='', cursor=0;
   for(const t of tokens){
     if(cursor<t.start) html += escapeHTML(text.slice(cursor, t.start));
-    html += `<span class="w" data-start="${t.start}" data-end="${t.end}">${escapeHTML(t.text)}</span>`;
+    // 改行追従用の任意改行を単語ごとに入れる
+    html += `<span class="w" data-start="${t.start}" data-end="${t.end}">${escapeHTML(t.text)}</span><wbr>`;
     cursor=t.end;
   }
   if(cursor<text.length) html += escapeHTML(text.slice(cursor));
@@ -461,14 +472,15 @@ function highlightAtCharIndex(container, charIndex){
   if(idx<0) idx=0; highlightToken(container, tokens[idx]);
 }
 
-/* プレビュー再生（登録画面） */
+/* ===== プレビュー再生（登録画面） ===== */
 $('#btn-preview').onclick = async ()=>{
+  const mySession = ++playSession;
   const en = ($('#en').value.trim() || '').substring(0,400);
   const ja = $('#ja').value.trim();
   if(!en && !ja){ alert('英語例文か和訳を入力してください'); return; }
   const cont = $('#preview-en');
   renderSpeakText(cont, en); cont.classList.remove('hidden'); cont.scrollTop = 0;
-  await speakFlow({english: en, japanese: ja}, {targetEl: cont});
+  await speakFlow({english: en, japanese: ja}, {targetEl: cont, session: mySession});
 };
 $('#btn-pause-preview').onclick = ()=> togglePause();
 defaultSaveHandler();
@@ -533,12 +545,15 @@ async function openDetail(id){
   $('#dlg-detail').showModal();
 
   $('#d-play').onclick = async ()=>{
-    await speakFlow(row, {targetEl: $('#d-en')});
+    const mySession = ++playSession;
+    await speakFlow(row, {targetEl: $('#d-en'), session: mySession});
+    if (mySession!==playSession) return;
     row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
     $('#d-meta').innerHTML = meta.slice(0,-1).join(' ') + ` <span class="flag">再生 ${row.playCount}</span>`;
   };
   $('#d-pause').onclick = ()=> togglePause();
   $('#d-edit').onclick = ()=>{
+    stopAllPlayback(); // ★ 閉じると同様に強制停止
     $('#dlg-detail').close();
     setActiveNav('nav-create'); show('create');
     $('#scene').value=row.scene||''; $('#en').value=row.english||''; $('#ja').value=row.japanese||'';
@@ -550,11 +565,11 @@ async function openDetail(id){
       alert('更新しました'); defaultSaveHandler(); clearForm(); setActiveNav('nav-list'); show('list'); refreshList(); fillCategoryFilter();
     };
   };
-  $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
-  $('#d-close').onclick = ()=> $('#dlg-detail').close();
+  $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ stopAllPlayback(); await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
+  $('#d-close').onclick = ()=>{ stopAllPlayback(); $('#dlg-detail').close(); };
 }
 $('#dlg-detail').addEventListener('close', ()=>{
-  try{ speechSynthesis.cancel(); }catch(e){}
+  stopAllPlayback();              // ★ 詳細を閉じたら必ず停止
   clearHighlight($('#d-en'));
 });
 
@@ -660,24 +675,43 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
   });
 }
 async function speakFlow(row, opts={}){
+  const mySession = opts.session ?? playSession;
   try{ speechSynthesis.resume(); }catch(e){}
   await ensureTtsUnlocked();
+  if (mySession!==playSession) return; // キャンセル後なら抜ける
+
   const en=(row.english||'').trim(); const ja=(row.japanese||'').trim();
   const gap=Math.max(0, Number(settings.gapSec||0))*1000; const rep=Math.max(1, parseInt(settings.repeat||1,10)); const tgt=settings.speakTarget||'en';
   const targetEl=opts.targetEl||null;
-  if(tgt==='en'){ if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; } for(let i=0;i<rep;i++){ await speak(en,{targetEl}); if(i<rep-1 && gap) await sleep(gap);} }
-  else if(tgt==='ja'){ await speak(ja); }
-  else{ if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; } for(let i=0;i<rep;i++){ await speak(en,{targetEl}); if(gap) await sleep(gap);} if(ja){ await speak(ja); } }
+
+  if(tgt==='en'){
+    if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
+    for(let i=0;i<rep;i++){
+      if (mySession!==playSession) return;
+      await speak(en,{targetEl});
+      if (i<rep-1 && gap){ if (mySession!==playSession) return; await sleep(gap); }
+    }
+  }else if(tgt==='ja'){
+    if (mySession!==playSession) return;
+    await speak(ja);
+  }else{
+    if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
+    for(let i=0;i<rep;i++){
+      if (mySession!==playSession) return;
+      await speak(en,{targetEl});
+      if (gap){ if (mySession!==playSession) return; await sleep(gap); }
+    }
+    if(ja){ if (mySession!==playSession) return; await speak(ja); }
+  }
 }
 
 /* =========================
-   設定（標準設定ボタン対応）
+   設定（標準設定ボタン）
 ========================= */
 function applyStandardSettings(){
-  settings = { ...defaultSettings, voiceName: '' }; // OS推奨に委譲
+  settings = { ...defaultSettings, voiceName: '' }; // OS推奨へ委譲
   saveSettings();
-  loadVoices(); // 再選択
-  // UI反映
+  loadVoices();
   $('#lang').value = settings.ttsLang||'';
   $('#rate').value = settings.rate; $('#pitch').value = settings.pitch;
   $('#volume').value = settings.volume; $('#gap').value = settings.gapSec;
@@ -704,40 +738,39 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング（速度引き継ぎ）
+   シャドーイング（速度引き継ぎ＋改行追従）
 ========================= */
 const sh = {
   list: [], index: 0, rate: 1.0,
   container: null, tokens: [], startCharOffset: 0, lastCharIndex: 0,
   restarting:false, glitchRetry:false, opened:false
 };
+
 $('#nav-shadow').onclick = async ()=>{
   const rows = await getAll();
   const pool = rows.filter(r=> (r.english||'').trim().length>0 );
   if(pool.length===0){ alert('英語例文がありません。登録してください。'); return; }
   sh.list = pool.sort(()=>Math.random()-0.5);
-  sh.index = 0; sh.rate = settings.rate || 1.0; // セッション中は sh.rate を維持
+  sh.index = 0; sh.rate = settings.rate || 1.0;
   sh.container = $('#sh-text'); sh.tokens=[]; sh.startCharOffset=0; sh.lastCharIndex=0;
   $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×';
   $('#dlg-shadowing').showModal(); sh.opened = true;
   const row = sh.list[sh.index]; $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
 };
-$('#sh-close').onclick = ()=>{
-  try{ speechSynthesis.cancel(); }catch(e){}
-  sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
+
+$('#sh-close').onclick = ()=>{ sh.opened=false; sh.restarting=false; sh.glitchRetry=false; stopAllPlayback();
   clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent='';
   $('#dlg-shadowing').close();
 };
+/* ダイアログcloseでも強制終了 */
 $('#dlg-shadowing').addEventListener('close', ()=>{
-  try{ speechSynthesis.cancel(); }catch(e){}
-  sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
+  sh.opened=false; sh.restarting=false; sh.glitchRetry=false; stopAllPlayback();
   clearHighlight($('#sh-text')); $('#sh-scene').textContent='';
 });
+
 function updateRateBadge(){ $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×'; }
-function requestRestartFromCurrentPos(){
-  sh.restarting = true;
-  try{ speechSynthesis.cancel(); }catch(e){}
-}
+function requestRestartFromCurrentPos(){ sh.restarting = true; try{ speechSynthesis.cancel(); }catch(e){} }
+
 function handleEnded(natural=true){
   if (!sh.opened) return;
   if (sh.restarting){
@@ -754,9 +787,11 @@ function handleEnded(natural=true){
   }
   sh.glitchRetry = false;
   sh.index = (sh.index+1) % sh.list.length;
-  const row = sh.list[sh.index]; $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
+  const row = sh.list[sh.index];
+  $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   setTimeout(()=> playCurrent(), Math.max(0, Math.round((settings.gapSec||0)*1000)));
 }
+
 function findTokenIndexAtChar(tokens, absChar){
   if(!tokens||tokens.length===0) return 0; let idx=0;
   for(let i=0;i<tokens.length;i++){ const t=tokens[i];
@@ -766,8 +801,9 @@ function findTokenIndexAtChar(tokens, absChar){
   }
   return idx;
 }
+
 function speakFromToken(startTokenIdx, forceCancel){
-  const row = sh.list[sh.index]; const text = (row.english||'').trim(); if(!text) return;
+  const row = sh.list[sh.index]; const text = (row.english||'').trim(); if(!text || !sh.opened) return;
   if(sh.tokens.length===0){ renderSpeakText(sh.container, text); sh.tokens = sh.container._tokens||[]; }
   const startChar = sh.tokens[startTokenIdx]?.start || 0;
   sh.startCharOffset = startChar; sh.lastCharIndex = 0;
@@ -776,8 +812,7 @@ function speakFromToken(startTokenIdx, forceCancel){
   const u = new SpeechSynthesisUtterance(tail);
   const v = pickVoice(); if(v) u.voice=v;
   u.lang = settings.ttsLang || 'en-US';
-  u.rate = sh.rate; // セッション内速度を常に適用
-  u.pitch = settings.pitch; u.volume = settings.volume;
+  u.rate = sh.rate; u.pitch = settings.pitch; u.volume = settings.volume;
 
   let fbTimer=null, usedBoundary=false, startedAt=0;
   u.onstart=()=>{ startedAt = performance.now(); };
@@ -796,16 +831,20 @@ function speakFromToken(startTokenIdx, forceCancel){
 
   try{
     if (forceCancel || speechSynthesis.speaking){ try { speechSynthesis.cancel(); } catch(e){} }
-    setTimeout(()=> speechSynthesis.speak(u), 0);
+    setTimeout(()=>{ if(sh.opened) speechSynthesis.speak(u); }, 0);
   }catch(e){ handleEnded(true); }
 }
+
 async function playCurrent(){
+  const mySession = ++playSession; // 新規セッション
   await ensureTtsUnlocked();
+  if (!sh.opened || mySession!==playSession) return;
   const row = sh.list[sh.index]; const text = (row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0; sh.tokens = sh.container._tokens || tokenizeWords(text);
   speakFromToken(0, /*forceCancel*/true);
 }
+
 $('#sh-start').onclick = ()=>{ sh.rate = settings.rate || 1.0; updateRateBadge(); sh.restarting=false; sh.glitchRetry=false; playCurrent(); };
 $('#sh-pause').onclick = ()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } else { speechSynthesis.resume(); } }catch(e){} };
 $('#sh-next').onclick = ()=>{ try{ speechSynthesis.cancel(); }catch(e){} sh.restarting=false; sh.glitchRetry=false; handleEnded(true); };
@@ -820,6 +859,3 @@ window.addEventListener('pageshow', ()=> loadVoices());
 </script>
 </body>
 </html>
-
-
-
