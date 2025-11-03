@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="ja">
 <head>
@@ -57,6 +58,11 @@
   .hidden{display:none}
   .divider{height:1px;background:var(--line);margin:8px 0}
   footer{position:fixed;left:0;right:0;bottom:6px;text-align:center;font-size:11px;color:#8591a6;pointer-events:none}
+
+  /* === 発話ハイライト === */
+  .speak-text{white-space:pre-wrap;line-height:1.9}
+  .speak-text .w{padding:0 .03em;border-radius:.15em}
+  .speak-text .w.hl{color:#ff4d4f;font-weight:700;background:rgba(255,77,79,.08)}
 </style>
 </head>
 <body>
@@ -83,6 +89,7 @@
       <div>
         <label>英語例文（English）</label>
         <textarea id="en" placeholder="例：Given our tight schedule, I suggest outsourcing the inspection to meet the deadline."></textarea>
+        <div id="preview-en" class="speak-text tiny hidden" style="margin-top:6px;"></div>
       </div>
       <div>
         <label>和訳（Japanese／手入力）</label>
@@ -154,7 +161,7 @@
   <div class="meta" id="d-meta"></div>
   <div class="divider"></div>
   <div class="tiny">English</div>
-  <div id="d-en" style="white-space:pre-wrap;margin-bottom:8px"></div>
+  <div id="d-en" class="speak-text" style="margin-bottom:8px"></div>
   <div class="tiny">Japanese</div>
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
   <div class="divider"></div>
@@ -331,13 +338,19 @@ function collectFormToItem(base={}){
 function clearForm(){
   ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value='');
   Array.from($('#cats').options).forEach(o=>o.selected=false);
+  $('#preview-en').classList.add('hidden');
+  $('#preview-en').innerHTML = '';
 }
 $('#btn-clear').onclick = ()=> clearForm();
 $('#btn-preview').onclick = async ()=>{
   const en = ($('#en').value.trim() || '').substring(0,400);
   const ja = $('#ja').value.trim();
   if(!en && !ja){ alert('英語例文か和訳を入力してください'); return; }
-  await speakFlow({english: en, japanese: ja});
+  // プレビュー領域にトークン描画してから再生
+  const cont = $('#preview-en');
+  renderSpeakText(cont, en);
+  cont.classList.remove('hidden');
+  await speakFlow({english: en, japanese: ja}, {targetEl: cont});
 };
 $('#btn-pause-preview').onclick = ()=> togglePause();
 defaultSaveHandler();
@@ -416,12 +429,14 @@ async function openDetail(id){
   if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
   meta.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
   $('#d-meta').innerHTML = meta.join(' ');
-  $('#d-en').textContent = row.english || '';
+
+  // 英文をトークン描画
+  renderSpeakText($('#d-en'), row.english||'');
   $('#d-ja').textContent = row.japanese || '';
   $('#dlg-detail').showModal();
 
   $('#d-play').onclick = async ()=>{
-    await speakFlow(row);
+    await speakFlow(row, {targetEl: $('#d-en')});
     row.playCount = (row.playCount||0)+1;
     row.updatedAt = now();
     await updateSentence(row);
@@ -431,7 +446,7 @@ async function openDetail(id){
   $('#d-edit').onclick = ()=>{
     $('#dlg-detail').close();
     setActiveNav('nav-create'); show('create');
-    $('#scene').value = row.scene||'';   /* ← ここを修正 */
+    $('#scene').value = row.scene||'';
     $('#en').value = row.english||'';
     $('#ja').value = row.japanese||'';
     Array.from($('#cats').options).forEach(o=>o.selected=(row.categories||[]).includes(o.value));
@@ -495,18 +510,89 @@ $('#file-import').onchange = async (e)=>{
   finally{ e.target.value=''; }
 };
 
+/* =========================================================
+   発話ハイライト：トークン化 / 描画 / ハイライト更新
+========================================================= */
+function tokenizeWords(text){
+  // 空白で区切る（\S+ = 非空白の連続）→ charIndex に対応する start/end を持つ
+  const tokens = [];
+  if(!text){ return tokens; }
+  const re = /\S+/g;
+  let m;
+  while((m = re.exec(text)) !== null){
+    tokens.push({text:m[0], start:m.index, end:m.index + m[0].length});
+  }
+  return tokens;
+}
+
+function renderSpeakText(container, text){
+  container.innerHTML = '';
+  container.classList.add('speak-text');
+  const tokens = tokenizeWords(text);
+  if(tokens.length === 0){
+    container.textContent = text || '';
+    container._tokens = [];
+    return;
+  }
+  // テキスト全体を走査して、トークン以外（空白・改行）も再現
+  let html = '';
+  let cursor = 0;
+  for(const t of tokens){
+    if(cursor < t.start){
+      html += escapeHTML(text.slice(cursor, t.start));
+    }
+    html += `<span class="w" data-start="${t.start}" data-end="${t.end}">${escapeHTML(t.text)}</span>`;
+    cursor = t.end;
+  }
+  if(cursor < text.length){
+    html += escapeHTML(text.slice(cursor));
+  }
+  container.innerHTML = html;
+  container._tokens = tokens;
+}
+
+function clearHighlight(container){
+  container?.querySelectorAll('.w.hl').forEach(el=>el.classList.remove('hl'));
+}
+
+function highlightAtCharIndex(container, charIndex){
+  if(!container || !container._tokens) return;
+  const tokens = container._tokens;
+  // 該当トークンを二分探索でもOKだが短文想定なので線形で十分
+  let idx = -1;
+  for(let i=0;i<tokens.length;i++){
+    const t = tokens[i];
+    if(charIndex >= t.start && charIndex < t.end){ idx = i; break; }
+    if(charIndex < t.start){ idx = i-1; break; }
+  }
+  if(idx < 0) idx = 0;
+  // ハイライト適用
+  clearHighlight(container);
+  const t = tokens[idx];
+  const el = container.querySelector(`.w[data-start="${t.start}"][data-end="${t.end}"]`);
+  if(el){ el.classList.add('hl'); }
+}
+
+function highlightByTokenIndex(container, tokenIndex){
+  if(!container || !container._tokens) return;
+  const tokens = container._tokens;
+  if(tokens.length === 0) return;
+  const i = Math.max(0, Math.min(tokenIndex, tokens.length-1));
+  clearHighlight(container);
+  const t = tokens[i];
+  const el = container.querySelector(`.w[data-start="${t.start}"][data-end="${t.end}"]`);
+  if(el){ el.classList.add('hl'); }
+}
+
 /* =========================
-   TTS（再生ボタンにiPhone解錠を自動統合／ユーザー選択を最優先）
+   TTS（自動解錠＋ユーザー選択を最優先）
 ========================= */
 let voices = [];
 let ttsWarmed = false;
-
 speechSynthesis.onvoiceschanged = ()=> loadVoices();
 
 function loadVoices(){
   voices = speechSynthesis.getVoices() || [];
-
-  // 初回のみ端末推奨で自動設定（ユーザー選択が未設定のとき）
   if(!settings.voiceName){
     if(isIOS){
       const samantha = voices.find(v=>/Samantha/i.test(v.name) && /^en-US/i.test(v.lang));
@@ -528,7 +614,6 @@ function loadVoices(){
       if(picked){ settings.voiceName = picked.name; settings.ttsLang = picked.lang || 'en-US'; saveSettings(); }
     }
   }
-
   renderVoiceList();
 }
 
@@ -552,7 +637,6 @@ function renderVoiceList(){
   }
 }
 
-// ユーザー選択を最優先する pickVoice
 function pickVoice(){
   if (settings.voiceName){
     const chosen = voices.find(v => v.name === settings.voiceName);
@@ -602,10 +686,13 @@ async function ensureTtsUnlocked(){
   }
 }
 
-// speak
-function speak(text,{voice,rate,pitch,volume}={}){
+/* =========================================================
+   speak / speakFlow（onboundary連動ハイライト＋フォールバック）
+========================================================= */
+function speak(text,{voice,rate,pitch,volume,targetEl}={}){
   return new Promise((res)=>{
     if(!text){ res(); return; }
+
     if(!voices || voices.length === 0){ voices = speechSynthesis.getVoices() || []; }
     const u = new SpeechSynthesisUtterance(text);
     const v = voice || pickVoice();
@@ -614,14 +701,52 @@ function speak(text,{voice,rate,pitch,volume}={}){
     u.rate   = rate  ?? settings.rate;
     u.pitch  = pitch ?? settings.pitch;
     u.volume = volume?? settings.volume;
-    u.onend   = res;
-    u.onerror = (e)=>{ console.warn('TTS error', e); res(); };
+
+    // ====== ハイライト連動（onboundary） ======
+    let fbTimer = null; // フォールバック用
+    let usedBoundary = false;
+
+    if(targetEl && /[A-Za-z]/.test(text)){
+      // boundaryが来たら確実にその位置でハイライト
+      u.onboundary = (e)=>{
+        if(typeof e.charIndex === 'number'){
+          usedBoundary = true;
+          highlightAtCharIndex(targetEl, e.charIndex);
+        }
+      };
+      // フォールバック（boundary未対応端末向け）：推定WPMで等間隔にトークンを進める
+      const tokens = (targetEl._tokens || tokenizeWords(text));
+      if(tokens.length > 0){
+        let idx = 0;
+        // 推定WPM（英語平均 170wpm を基準に rate を掛け算）
+        const wpm = 170 * (settings.rate || 1.0);
+        const msPerWord = Math.max(120, Math.round(60000 / wpm)); // 下限120ms
+        fbTimer = setInterval(()=>{
+          if(usedBoundary){ clearInterval(fbTimer); return; } // boundaryが有効ならフォールバック停止
+          if(idx >= tokens.length){ clearInterval(fbTimer); return; }
+          highlightByTokenIndex(targetEl, idx++);
+        }, msPerWord);
+      }
+    }
+
+    u.onend = ()=>{
+      if(fbTimer) clearInterval(fbTimer);
+      if(targetEl) clearHighlight(targetEl);
+      res();
+    };
+    u.onerror = (e)=>{
+      console.warn('TTS error', e);
+      if(fbTimer) clearInterval(fbTimer);
+      if(targetEl) clearHighlight(targetEl);
+      res();
+    };
+
     if (speechSynthesis.speaking) { try { speechSynthesis.cancel(); } catch(e){} }
     if (isIOS) { setTimeout(()=> speechSynthesis.speak(u), 0); } else { speechSynthesis.speak(u); }
   });
 }
 
-async function speakFlow(row){
+async function speakFlow(row, opts={}){
   try { speechSynthesis.resume(); } catch(e){}
   await ensureTtsUnlocked();
 
@@ -630,12 +755,20 @@ async function speakFlow(row){
   const gap = Math.max(0, Number(settings.gapSec||0))*1000;
   const rep = Math.max(1, parseInt(settings.repeat||1,10));
   const tgt = settings.speakTarget || 'en';
+
+  const targetEl = opts.targetEl || null;
+
   if(tgt==='en'){
-    for(let i=0;i<rep;i++){ await speak(en); if(i<rep-1 && gap) await sleep(gap); }
+    // 英語のみ（ハイライト対象）
+    if(targetEl) renderSpeakText(targetEl, en);
+    for(let i=0;i<rep;i++){ await speak(en, {targetEl}); if(i<rep-1 && gap) await sleep(gap); }
   }else if(tgt==='ja'){
+    // 和訳のみ（ハイライトなし）
     await speak(ja);
   }else{
-    for(let i=0;i<rep;i++){ await speak(en); if(gap) await sleep(gap); }
+    // 英→間→和
+    if(targetEl) renderSpeakText(targetEl, en);
+    for(let i=0;i<rep;i++){ await speak(en, {targetEl}); if(gap) await sleep(gap); }
     if(ja){ await speak(ja); }
   }
 }
@@ -690,5 +823,3 @@ window.addEventListener('pageshow', ()=> loadVoices());
 </script>
 </body>
 </html>
-
-
