@@ -6,7 +6,7 @@
 <title>SpeakNote（英語例文・場面学習）</title>
 <style>
   :root{
-    /* —— 黒基調（元のトーン） —— */
+    /* —— 黒基調 —— */
     --bg:#0c0f14; --bg2:#0c1220;
     --card:#121826; --ink:#e8eefc; --muted:#a7b0c2; --line:#243047;
     --pri:#4da3ff; --ok:#17c964; --warn:#ffb020; --danger:#ff4d4f; --star:#ffd166;
@@ -76,7 +76,7 @@
   /* —— シャドーイングをセクション化 —— */
   #view-shadow .speak-text{max-height:52vh;padding:10px}
   #sh-scene{font-size:15px;color:#c2cad8;margin:2px 0 8px}
-  
+
   /* 使い方（ヘルプ）本文 */
   .help-body{max-height:64vh;overflow:auto;padding:4px 2px}
   .help-body h3{margin:10px 0 6px 0;font-size:16px}
@@ -85,6 +85,14 @@
   .help-body li{margin:4px 0}
   .help-callout{background:#0e1525;border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0}
   .kbd{display:inline-block;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:0 6px;font-size:12px;background:#0e1525}
+
+  /* 単語検索モーダル */
+  .lookup-body{max-height:50vh;overflow:auto;background:#0e1525;border:1px solid var(--line);
+    border-radius:10px;padding:10px;margin:8px 0;font-size:14px;line-height:1.8}
+  .lookup-word{font-weight:700;font-size:16px;margin-right:6px}
+  .lookup-phon{opacity:.9}
+  .lookup-sense{margin:6px 0;padding-left:1em;text-indent:-1em}
+  .lookup-ex{opacity:.9;margin-left:1em}
 </style>
 </head>
 <body>
@@ -168,7 +176,7 @@
     <div class="grid" id="cards"></div>
   </section>
 
-  <!-- 新：シャドーイング（フル画面セクション） -->
+  <!-- シャドーイング（フル画面セクション） -->
   <section id="view-shadow">
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
@@ -243,6 +251,11 @@
         </select>
       </div>
     </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:8px">
+        <input id="keep-awake" type="checkbox"> シャドーイング中に画面を自動スリープさせない（バッテリー消費に注意）
+      </label>
+    </div>
     <div class="actions">
       <button class="btn warn" id="reset-standard">標準設定</button>
       <button class="btn ok" id="save-settings">保存</button>
@@ -255,6 +268,7 @@
 <dialog id="dlg-help" aria-labelledby="help-title">
   <h3 id="help-title" style="margin:0 0 8px">使い方（How to）</h3>
   <div class="help-body" id="help-body">
+    <!-- 省略せず全文（元と同一） -->
     <h3>このアプリについて</h3>
     <p>SpeakNoteは、英語スピーキング練習のために、場面（Scene）を起点に例文を作成・管理・再生できるツールです。<br>
     データはすべてブラウザ内に保持され、外部にアップロードされることはありません。<br>
@@ -343,6 +357,18 @@
   </div>
 </dialog>
 
+<!-- 単語検索モーダル -->
+<dialog id="dlg-lookup" aria-labelledby="lk-title">
+  <h3 id="lk-title" style="margin:0 0 6px">単語検索</h3>
+  <div id="lk-body" class="lookup-body">単語を読み込み中…</div>
+  <div class="actions">
+    <a id="lk-google" class="btn" target="_blank" rel="noopener">Google</a>
+    <a id="lk-cambridge" class="btn" target="_blank" rel="noopener">Cambridge</a>
+    <a id="lk-longman" class="btn" target="_blank" rel="noopener">Longman</a>
+    <button class="btn right" id="lk-close">閉じる</button>
+  </div>
+</dialog>
+
 <footer>(C)Hisashi Fujinaka All Rights Recived</footer>
 
 <script>
@@ -365,10 +391,80 @@ function stopAllPlayback(){
 }
 
 /* =========================
+   Wake Lock / KeepAwake（正式API + フォールバック）
+========================= */
+const KeepAwake = (()=>{
+  let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
+
+  async function requestWakeLock(){
+    if(!('wakeLock' in navigator)) throw new Error('no_wakelock');
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', ()=>{ /* released */ });
+  }
+
+  function ensureVideoNode(){
+    if(videoEl) return;
+    videoEl = document.createElement('video');
+    videoEl.muted = true; videoEl.loop = true; videoEl.playsInline = true;
+    videoEl.setAttribute('aria-hidden','true');
+    Object.assign(videoEl.style,{ position:'fixed', width:'1px', height:'1px', left:'-9999px', top:'-9999px' });
+    document.body.appendChild(videoEl);
+  }
+  function ensureCanvasStream(){
+    if(canvas && stream) return;
+    canvas = document.createElement('canvas'); canvas.width=1; canvas.height=1;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle='#000'; ctx.fillRect(0,0,1,1);
+    stream = canvas.captureStream(1); // 1fpsで十分
+  }
+
+  async function startVideoFallback(){
+    ensureVideoNode(); ensureCanvasStream();
+    try{
+      if(videoEl.srcObject !== stream) videoEl.srcObject = stream;
+      await videoEl.play();
+    }catch(e){ /* ユーザー操作不足など */ }
+  }
+
+  async function enable(){
+    if(enabled) return; enabled=true;
+    try{
+      await requestWakeLock();
+      document.addEventListener('visibilitychange', reAcquire, false);
+    }catch(e){
+      // Wake Lock不可 → 動画フォールバック
+      await startVideoFallback();
+      document.addEventListener('visibilitychange', ensureVideoResume, false);
+    }
+  }
+  async function reAcquire(){
+    if(document.visibilityState==='visible' && enabled){
+      try{
+        if(wakeLock?.released) await requestWakeLock();
+      }catch(e){ /* 失敗は無視（フォールバックが動作中） */ }
+    }
+  }
+  async function ensureVideoResume(){
+    if(document.visibilityState==='visible' && enabled && videoEl && videoEl.paused){
+      try{ await videoEl.play(); }catch(e){}
+    }
+  }
+  async function disable(){
+    enabled=false;
+    document.removeEventListener('visibilitychange', reAcquire, false);
+    document.removeEventListener('visibilitychange', ensureVideoResume, false);
+    try{ await wakeLock?.release(); }catch(e){}
+    wakeLock=null;
+    if(videoEl){ try{ videoEl.pause(); }catch(e){} }
+  }
+  return { enable, disable };
+})();
+
+/* =========================
    State & Settings
 ========================= */
 const LS_SETTINGS = 'speakscene_settings_v1';
-const defaultSettings = { ttsLang: 'en-US', voiceName: '', rate: 1.0, pitch: 1.0, volume: 1.0, gapSec: 1.0, repeat: 1, speakTarget: 'en' };
+const defaultSettings = { ttsLang: 'en-US', voiceName: '', rate: 1.0, pitch: 1.0, volume: 1.0, gapSec: 1.0, repeat: 1, speakTarget: 'en', keepAwake: false };
 let settings = loadSettings();
 function loadSettings(){ try{ return Object.assign({}, defaultSettings, JSON.parse(localStorage.getItem(LS_SETTINGS)||'{}')); }catch(e){ return {...defaultSettings}; } }
 function saveSettings(){ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); }
@@ -404,8 +500,9 @@ const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsucce
 ========================= */
 const views = { create: $('#view-create'), list: $('#view-list'), shadow: $('#view-shadow') };
 function show(view){
-  // 画面遷移時は音声を必ず止める
+  // 画面遷移時は音声と画面保持を必ず止める
   stopAllPlayback();
+  KeepAwake.disable();
   Object.values(views).forEach(v=>v.classList.remove('active'));
   views[view].classList.add('active');
 }
@@ -450,7 +547,7 @@ function collectFormToItem(base={}){
 function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value=''); Array.from($('#cats').options).forEach(o=>o.selected=false); const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML=''; }
 $('#btn-clear').onclick = ()=> clearForm();
 
-/* ====== 単語トークナイズ & ハイライト（改行追従用<wbr>） ====== */
+/* ====== 単語トークナイズ & ハイライト（改行追従<wbr>） ====== */
 function tokenizeWords(text){ const tokens=[]; if(!text) return tokens; const re=/\S+/g; let m; while((m=re.exec(text))!==null){ tokens.push({text:m[0], start:m.index, end:m.index+m[0].length}); } return tokens; }
 function renderSpeakText(container, text){
   container.innerHTML = ''; container.classList.add('speak-text');
@@ -724,43 +821,16 @@ async function speakFlow(row, opts={}){
 }
 
 /* =========================
-   設定（標準設定ボタン＋保存）
-========================= */
-function applyStandardSettings(){
-  settings = { ...defaultSettings, voiceName: '' }; // OS推奨に自動
-  saveSettings();
-  loadVoices();
-  fillSettingsFields();
-  alert('標準設定を適用しました（音声はOS推奨に自動設定）。');
-}
-function fillSettingsFields(){
-  $('#lang').value = settings.ttsLang||'';
-  $('#rate').value = settings.rate; $('#pitch').value = settings.pitch;
-  $('#volume').value = settings.volume; $('#gap').value = settings.gapSec;
-  $('#repeat').value = settings.repeat; $('#speak-target').value = settings.speakTarget;
-}
-function openSettingsFields(){
-  loadVoices();
-  fillSettingsFields();
-  $('#lang').onchange = ()=>{ settings.ttsLang = $('#lang').value || settings.ttsLang; saveSettings(); renderVoiceList(); };
-}
-$('#reset-standard').onclick = (ev)=>{ ev.preventDefault(); applyStandardSettings(); };
-$('#save-settings').onclick = (ev)=>{
-  ev.preventDefault();
-  settings.ttsLang=$('#lang').value; settings.voiceName=$('#voice').value || settings.voiceName || '';
-  settings.rate=Number($('#rate').value)||1.0; settings.pitch=Number($('#pitch').value)||1.0; settings.volume=Number($('#volume').value)||1.0;
-  settings.gapSec=Number($('#gap').value)||0; settings.repeat=Math.max(1, parseInt($('#repeat').value||'1',10)); settings.speakTarget=$('#speak-target').value||'en';
-  const chosen=voices.find(v=>v.name===settings.voiceName); if(chosen&&chosen.lang&&chosen.lang!==settings.ttsLang){ settings.ttsLang=chosen.lang; }
-  saveSettings(); renderVoiceList(); $('#dlg-settings').close(); alert('設定を保存しました');
-};
-
-/* =========================
-   シャドーイング（セクション版：速度引き継ぎ・改行追従・戻るで停止）
+   シャドーイング 状態管理（修正の肝）
 ========================= */
 const sh = {
   list: [], index: 0, rate: 1.0,
   container: null, tokens: [], startCharOffset: 0, lastCharIndex: 0,
-  restarting:false, glitchRetry:false, opened:false
+  restarting:false, glitchRetry:false, opened:false,
+  state:'idle',            // 'idle' | 'playing' | 'paused'
+  userPaused:false,
+  lastAction:null,         // 'start'|'pause'|'resume'|'next'|'rateChange'|null
+  glitchRetryCount:0
 };
 
 async function prepareShadow(){
@@ -775,34 +845,52 @@ async function prepareShadow(){
   const row = sh.list[0];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   sh.opened = true;
+  sh.state = 'idle';
+  sh.userPaused = false;
+  sh.lastAction = null;
+  sh.glitchRetryCount = 0;
 }
 
 $('#sh-back').onclick = ()=>{
   sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
+  sh.state='idle'; sh.userPaused=false; sh.lastAction=null; sh.glitchRetryCount=0;
   stopAllPlayback();
+  KeepAwake.disable();
   clearHighlight($('#sh-text'));
   $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent='';
   setActiveNav('nav-list'); show('list'); refreshList();
 };
 
 function updateRateBadge(){ $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×'; }
-function requestRestartFromCurrentPos(){ sh.restarting = true; try{ speechSynthesis.cancel(); }catch(e){} }
+function requestRestartFromCurrentPos(){ sh.restarting = true; sh.lastAction='rateChange'; try{ speechSynthesis.cancel(); }catch(e){} }
 
 function handleEnded(natural=true){
   if (!sh.opened) return;
+
+  // ユーザー一時停止・手動操作中は onend を無視
+  if (sh.userPaused || sh.state==='paused') return;
+
   if (sh.restarting){
     sh.restarting = false;
     const base = sh.startCharOffset||0;
     const nextIdx = findTokenIndexAtChar(sh.tokens, base + (sh.lastCharIndex||0));
+    sh.lastAction=null; // ここからは自然進行
     speakFromToken(nextIdx, /*forceCancel*/false);
     return;
   }
-  if (natural === 'glitch' && !sh.glitchRetry){
-    sh.glitchRetry = true;
+
+  // 直前がユーザー操作（start/next/rateChange/resume）の場合はグリッチ扱いをしない
+  const userOperated = !!sh.lastAction;
+
+  if (natural === 'glitch' && !userOperated && sh.glitchRetryCount < 1){
+    sh.glitchRetryCount++;
     speakFromToken(0, /*forceCancel*/true);
     return;
   }
-  sh.glitchRetry = false;
+
+  // 次文へ
+  sh.glitchRetryCount = 0;
+  sh.lastAction=null;
   sh.index = (sh.index+1) % sh.list.length;
   const row = sh.list[sh.index];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
@@ -832,8 +920,10 @@ function speakFromToken(startTokenIdx, forceCancel){
   u.lang = settings.ttsLang || 'en-US';
   u.rate = sh.rate; u.pitch = settings.pitch; u.volume = settings.volume;
 
+  sh.state='playing';
   let fbTimer=null, usedBoundary=false, startedAt=0;
   u.onstart=()=>{ startedAt = performance.now(); };
+
   if(/[A-Za-z]/.test(tail)){
     u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; sh.lastCharIndex=e.charIndex; highlightAtCharIndex(sh.container, sh.startCharOffset + e.charIndex); } };
     const remain=sh.tokens.filter(t=>t.end>startChar); if(remain.length>0){
@@ -841,9 +931,12 @@ function speakFromToken(startTokenIdx, forceCancel){
       fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} const absIdx=startTokenIdx+idx; if(absIdx>=sh.tokens.length){clearInterval(fbTimer);return;} highlightAtCharIndex(sh.container, sh.tokens[absIdx].start); idx++; }, msPerWord);
     }
   }
-  u.onend=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container);
+  u.onend=()=>{
+    if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container);
     const dur = performance.now() - startedAt;
-    handleEnded(dur<300 ? 'glitch' : true);
+    // グリッチ判定は playing かつ ユーザー操作なしのときのみ
+    const asGlitch = (dur<300 && sh.state==='playing' && !sh.userPaused && !sh.lastAction);
+    handleEnded(asGlitch ? 'glitch' : true);
   };
   u.onerror=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container); handleEnded(true); };
 
@@ -857,17 +950,130 @@ async function playCurrent(){
   const mySession = ++playSession;
   await ensureTtsUnlocked();
   if (!sh.opened || mySession!==playSession) return;
+  if (settings.keepAwake) { try{ await KeepAwake.enable(); }catch(e){} }
   const row = sh.list[sh.index]; const text = (row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0; sh.tokens = sh.container._tokens || tokenizeWords(text);
+  sh.userPaused=false; sh.glitchRetryCount=0; sh.lastAction=null;
   speakFromToken(0, /*forceCancel*/true);
 }
 
-$('#sh-start').onclick = ()=>{ sh.rate = settings.rate || 1.0; updateRateBadge(); sh.restarting=false; sh.glitchRetry=false; playCurrent(); };
-$('#sh-pause').onclick = ()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } else { speechSynthesis.resume(); } }catch(e){} };
-$('#sh-next').onclick = ()=>{ try{ speechSynthesis.cancel(); }catch(e){} sh.restarting=false; sh.glitchRetry=false; handleEnded(true); };
-$('#sh-slower').onclick = ()=>{ sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
-$('#sh-faster').onclick = ()=>{ sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
+/* ==== ボタン（修正） ==== */
+$('#sh-start').onclick = ()=>{
+  // 一時停止中は再開に切替（先頭に戻らない）
+  if (sh.state==='paused' || sh.userPaused){
+    sh.lastAction='resume';
+    try{
+      if (speechSynthesis.paused){ speechSynthesis.resume(); sh.state='playing'; sh.userPaused=false; return; }
+    }catch(e){}
+    // resumeできない環境 → 直前位置から再開
+    const idx = findTokenIndexAtChar(sh.tokens, sh.startCharOffset + sh.lastCharIndex);
+    speakFromToken(idx, /*forceCancel*/true);
+    sh.state='playing'; sh.userPaused=false;
+    return;
+  }
+  // 新規開始
+  sh.lastAction='start';
+  sh.rate = settings.rate || 1.0; updateRateBadge();
+  sh.restarting=false; sh.glitchRetry=false; sh.glitchRetryCount=0;
+  playCurrent(); sh.state='playing'; sh.userPaused=false;
+};
+
+$('#sh-pause').onclick = ()=>{
+  if (sh.state==='playing' && !sh.userPaused){
+    sh.lastAction='pause';
+    sh.userPaused=true; sh.state='paused';
+    try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } }catch(e){}
+  }else{
+    // 再開
+    sh.lastAction='resume';
+    sh.userPaused=false;
+    try{
+      if (speechSynthesis.paused){ speechSynthesis.resume(); sh.state='playing'; return; }
+    }catch(e){}
+    // resumeできない場合は直前位置から再生を再構成
+    const idx = findTokenIndexAtChar(sh.tokens, sh.startCharOffset + sh.lastCharIndex);
+    speakFromToken(idx, /*forceCancel*/true);
+    sh.state='playing';
+  }
+};
+
+$('#sh-next').onclick = ()=>{
+  sh.lastAction='next';
+  try{ speechSynthesis.cancel(); }catch(e){}
+  sh.restarting=false; sh.glitchRetry=false; sh.glitchRetryCount=0;
+  handleEnded(true);
+};
+
+$('#sh-slower').onclick = ()=>{
+  sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos();
+};
+$('#sh-faster').onclick = ()=>{
+  sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos();
+};
+
+/* =========================
+   単語タップ→辞書モーダル
+========================= */
+function sanitizeWord(s){
+  return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'");
+}
+function setLookupLinks(word){
+  const q = encodeURIComponent(word);
+  $('#lk-google').href   = `https://www.google.com/search?q=${q}+meaning`;
+  $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
+  $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
+}
+function renderLookupContent(word, data){
+  const body = $('#lk-body');
+  if(!data || !Array.isArray(data) || data.length===0){
+    body.innerHTML =
+      `<div><span class="lookup-word">${escapeHTML(word)}</span><span class="lookup-phon"></span></div>
+       <div class="tiny" style="margin-top:6px">定義の取得に失敗しました。下のリンクから辞書サイトで確認できます。</div>`;
+    return;
+  }
+  const entry = data[0] || {};
+  const phon = (entry.phonetics?.find(p=>p.text)?.text) || '';
+  const senses = [];
+  (entry.meanings||[]).forEach(m=>{
+    (m.definitions||[]).slice(0,3).forEach((d)=>{
+      senses.push(
+        `<div class="lookup-sense">• ${escapeHTML(d.definition||'')}
+           ${d.example ? `<div class="lookup-ex">e.g. ${escapeHTML(d.example)}</div>`:''}
+         </div>`
+      );
+    });
+  });
+  const top =
+    `<div><span class="lookup-word">${escapeHTML(word)}</span>
+      ${phon?`<span class="lookup-phon">${escapeHTML(phon)}</span>`:''}
+     </div>`;
+  $('#lk-body').innerHTML = top + (senses.length? senses.join('') :
+    `<div class="tiny" style="margin-top:6px">定義が見つかりませんでした。下のリンクをご利用ください。</div>`);
+}
+async function openLookup(word){
+  if(!word) return;
+  setLookupLinks(word);
+  $('#lk-body').innerHTML = '単語を読み込み中…';
+  $('#dlg-lookup').showModal();
+  try{
+    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, {mode:'cors'});
+    if(!res.ok) throw new Error('fetch failed');
+    const json = await res.json();
+    renderLookupContent(word, json);
+  }catch(e){
+    renderLookupContent(word, null);
+  }
+}
+$('#lk-close').onclick = ()=> $('#dlg-lookup').close();
+
+document.addEventListener('click', (e)=>{
+  const wEl = e.target.closest('.speak-text .w');
+  if(!wEl) return;
+  const word = sanitizeWord(wEl.textContent);
+  if(!word) return;
+  openLookup(word.toLowerCase());
+});
 
 /* =========================
    Boot
@@ -877,5 +1083,3 @@ window.addEventListener('pageshow', ()=> loadVoices());
 </script>
 </body>
 </html>
-
-
