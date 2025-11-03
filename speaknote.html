@@ -64,7 +64,6 @@
   .shadow-box .speak-text{max-height:52vh;padding:10px}
   #sh-scene{font-size:15px}
   .badge{font-variant-numeric:tabular-nums;background:#0e1525;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
-
   /* 使い方ダイアログ */
   .help-body{max-height:64vh;overflow:auto;padding:4px 2px}
   .help-body h3{margin:10px 0 6px 0;font-size:16px}
@@ -350,7 +349,13 @@ let playSession = 0;
 function stopAllPlayback(){
   playSession++;
   try{ speechSynthesis.cancel(); }catch(e){}
+  // Safari/iOS での再始動防止に多段キャンセル
+  setTimeout(()=>{ try{ speechSynthesis.cancel(); }catch(e){} }, 0);
+  setTimeout(()=>{ try{ speechSynthesis.cancel(); }catch(e){} }, 50);
 }
+
+/* シャドーイング専用セッション（閉じても確実に止める） */
+let shadowSessionId = 0;   // ダイアログを開くたびに++ / 閉じると++ で旧処理を無効化
 
 /* =========================
    State & Settings
@@ -440,7 +445,6 @@ function renderSpeakText(container, text){
   let html='', cursor=0;
   for(const t of tokens){
     if(cursor<t.start) html += escapeHTML(text.slice(cursor, t.start));
-    // 改行追従用の任意改行を単語ごとに入れる
     html += `<span class="w" data-start="${t.start}" data-end="${t.end}">${escapeHTML(t.text)}</span><wbr>`;
     cursor=t.end;
   }
@@ -553,7 +557,7 @@ async function openDetail(id){
   };
   $('#d-pause').onclick = ()=> togglePause();
   $('#d-edit').onclick = ()=>{
-    stopAllPlayback(); // ★ 閉じると同様に強制停止
+    stopAllPlayback();
     $('#dlg-detail').close();
     setActiveNav('nav-create'); show('create');
     $('#scene').value=row.scene||''; $('#en').value=row.english||''; $('#ja').value=row.japanese||'';
@@ -569,7 +573,7 @@ async function openDetail(id){
   $('#d-close').onclick = ()=>{ stopAllPlayback(); $('#dlg-detail').close(); };
 }
 $('#dlg-detail').addEventListener('close', ()=>{
-  stopAllPlayback();              // ★ 詳細を閉じたら必ず停止
+  stopAllPlayback();
   clearHighlight($('#d-en'));
 });
 
@@ -655,7 +659,6 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
 
     let fbTimer=null, usedBoundary=false, startedAt=0;
     u.onstart=()=>{ startedAt = performance.now(); };
-
     if(targetEl && /[A-Za-z]/.test(text)){
       u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; highlightAtCharIndex(targetEl, e.charIndex); } };
       const tokens=(targetEl._tokens||tokenizeWords(text)); if(tokens.length>0){
@@ -664,11 +667,7 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
           const t=tokens[Math.min(idx++, tokens.length-1)]; highlightAtCharIndex(targetEl, t.start); }, msPerWord);
       }
     }
-    u.onend=()=>{ 
-      if(fbTimer) clearInterval(fbTimer);
-      if(targetEl) clearHighlight(targetEl);
-      res(); 
-    };
+    u.onend=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); res(); };
     u.onerror=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); res(); };
     if (speechSynthesis.speaking) { try { speechSynthesis.cancel(); } catch(e){} }
     speechSynthesis.speak(u);
@@ -678,7 +677,7 @@ async function speakFlow(row, opts={}){
   const mySession = opts.session ?? playSession;
   try{ speechSynthesis.resume(); }catch(e){}
   await ensureTtsUnlocked();
-  if (mySession!==playSession) return; // キャンセル後なら抜ける
+  if (mySession!==playSession) return;
 
   const en=(row.english||'').trim(); const ja=(row.japanese||'').trim();
   const gap=Math.max(0, Number(settings.gapSec||0))*1000; const rep=Math.max(1, parseInt(settings.repeat||1,10)); const tgt=settings.speakTarget||'en';
@@ -738,7 +737,7 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング（速度引き継ぎ＋改行追従）
+   シャドーイング（速度引き継ぎ＋改行追従＋グリッチ再試行）
 ========================= */
 const sh = {
   list: [], index: 0, rate: 1.0,
@@ -754,24 +753,29 @@ $('#nav-shadow').onclick = async ()=>{
   sh.index = 0; sh.rate = settings.rate || 1.0;
   sh.container = $('#sh-text'); sh.tokens=[]; sh.startCharOffset=0; sh.lastCharIndex=0;
   $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×';
+  shadowSessionId++;               // 新しいシャドーイングセッション開始
   $('#dlg-shadowing').showModal(); sh.opened = true;
   const row = sh.list[sh.index]; $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
 };
 
-$('#sh-close').onclick = ()=>{ sh.opened=false; sh.restarting=false; sh.glitchRetry=false; stopAllPlayback();
+$('#sh-close').onclick = ()=>{
+  sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
+  shadowSessionId++;               // ★ 旧処理を完全無効化
+  stopAllPlayback();
   clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent='';
   $('#dlg-shadowing').close();
 };
-/* ダイアログcloseでも強制終了 */
 $('#dlg-shadowing').addEventListener('close', ()=>{
-  sh.opened=false; sh.restarting=false; sh.glitchRetry=false; stopAllPlayback();
+  sh.opened=false; sh.restarting=false; sh.glitchRetry=false;
+  shadowSessionId++;               // ★ 閉じた時点で全タイマー/utterance無効化
+  stopAllPlayback();
   clearHighlight($('#sh-text')); $('#sh-scene').textContent='';
 });
 
 function updateRateBadge(){ $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×'; }
 function requestRestartFromCurrentPos(){ sh.restarting = true; try{ speechSynthesis.cancel(); }catch(e){} }
 
-function handleEnded(natural=true){
+function handleEnded(reason){
   if (!sh.opened) return;
   if (sh.restarting){
     sh.restarting = false;
@@ -780,7 +784,8 @@ function handleEnded(natural=true){
     speakFromToken(nextIdx, /*forceCancel*/false);
     return;
   }
-  if (natural === 'glitch' && !sh.glitchRetry){
+  // グリッチ（短すぎる再生 or boundaryが一度も来ていない）なら1回だけ同じ文の冒頭からリトライ
+  if (reason==='glitch' && !sh.glitchRetry){
     sh.glitchRetry = true;
     speakFromToken(0, /*forceCancel*/true);
     return;
@@ -803,7 +808,9 @@ function findTokenIndexAtChar(tokens, absChar){
 }
 
 function speakFromToken(startTokenIdx, forceCancel){
-  const row = sh.list[sh.index]; const text = (row.english||'').trim(); if(!text || !sh.opened) return;
+  const localShadowId = shadowSessionId;
+  if(!sh.opened) return;
+  const row = sh.list[sh.index]; const text = (row.english||'').trim(); if(!text) return;
   if(sh.tokens.length===0){ renderSpeakText(sh.container, text); sh.tokens = sh.container._tokens||[]; }
   const startChar = sh.tokens[startTokenIdx]?.start || 0;
   sh.startCharOffset = startChar; sh.lastCharIndex = 0;
@@ -817,28 +824,34 @@ function speakFromToken(startTokenIdx, forceCancel){
   let fbTimer=null, usedBoundary=false, startedAt=0;
   u.onstart=()=>{ startedAt = performance.now(); };
   if(/[A-Za-z]/.test(tail)){
-    u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; sh.lastCharIndex=e.charIndex; highlightAtCharIndex(sh.container, sh.startCharOffset + e.charIndex); } };
+    u.onboundary=(e)=>{ if(localShadowId!==shadowSessionId) return;
+      if(typeof e.charIndex==='number'){ usedBoundary=true; sh.lastCharIndex=e.charIndex; highlightAtCharIndex(sh.container, sh.startCharOffset + e.charIndex); } };
     const remain=sh.tokens.filter(t=>t.end>startChar); if(remain.length>0){
       let idx=0; const wpm=170*(u.rate||1.0); const msPerWord=Math.max(120, Math.round(60000/wpm));
-      fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} const absIdx=startTokenIdx+idx; if(absIdx>=sh.tokens.length){clearInterval(fbTimer);return;} highlightAtCharIndex(sh.container, sh.tokens[absIdx].start); idx++; }, msPerWord);
+      fbTimer=setInterval(()=>{ if(localShadowId!==shadowSessionId){ clearInterval(fbTimer);return;}
+        if(usedBoundary){clearInterval(fbTimer);return;} const absIdx=startTokenIdx+idx; if(absIdx>=sh.tokens.length){clearInterval(fbTimer);return;}
+        highlightAtCharIndex(sh.container, sh.tokens[absIdx].start); idx++; }, msPerWord);
     }
   }
-  u.onend=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container);
+  u.onend=()=>{ if(fbTimer) clearInterval(fbTimer); if(localShadowId!==shadowSessionId) return;
+    clearHighlight(sh.container);
     const dur = performance.now() - startedAt;
-    handleEnded(dur<300 ? 'glitch' : true);
+    const isGlitch = (dur<600) || !usedBoundary;   // ★ 3〜4語で終わるケースを検知
+    handleEnded(isGlitch ? 'glitch' : 'natural');
   };
-  u.onerror=()=>{ if(fbTimer) clearInterval(fbTimer); clearHighlight(sh.container); handleEnded(true); };
+  u.onerror=()=>{ if(fbTimer) clearInterval(fbTimer); if(localShadowId!==shadowSessionId) return;
+    clearHighlight(sh.container); handleEnded('error'); };
 
   try{
     if (forceCancel || speechSynthesis.speaking){ try { speechSynthesis.cancel(); } catch(e){} }
-    setTimeout(()=>{ if(sh.opened) speechSynthesis.speak(u); }, 0);
-  }catch(e){ handleEnded(true); }
+    setTimeout(()=>{ if(localShadowId===shadowSessionId && sh.opened) speechSynthesis.speak(u); }, 0);
+  }catch(e){ handleEnded('error'); }
 }
 
 async function playCurrent(){
-  const mySession = ++playSession; // 新規セッション
+  const localShadowId = ++shadowSessionId; // ★ 再生開始ごとに更新し、古い処理を無効化
   await ensureTtsUnlocked();
-  if (!sh.opened || mySession!==playSession) return;
+  if (!sh.opened || localShadowId!==shadowSessionId) return;
   const row = sh.list[sh.index]; const text = (row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0; sh.tokens = sh.container._tokens || tokenizeWords(text);
@@ -847,7 +860,7 @@ async function playCurrent(){
 
 $('#sh-start').onclick = ()=>{ sh.rate = settings.rate || 1.0; updateRateBadge(); sh.restarting=false; sh.glitchRetry=false; playCurrent(); };
 $('#sh-pause').onclick = ()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } else { speechSynthesis.resume(); } }catch(e){} };
-$('#sh-next').onclick = ()=>{ try{ speechSynthesis.cancel(); }catch(e){} sh.restarting=false; sh.glitchRetry=false; handleEnded(true); };
+$('#sh-next').onclick = ()=>{ try{ speechSynthesis.cancel(); }catch(e){} sh.restarting=false; sh.glitchRetry=false; handleEnded('manual'); };
 $('#sh-slower').onclick = ()=>{ sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
 $('#sh-faster').onclick = ()=>{ sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); updateRateBadge(); requestRestartFromCurrentPos(); };
 
