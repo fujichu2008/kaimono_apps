@@ -383,12 +383,35 @@ function escapeHTML(s=''){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&
 const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isAndroid = /Android/i.test(navigator.userAgent);
 
-/* === 再生キルスイッチ（画面遷移/閉じるで完全停止） === */
+/* === 再生キルスイッチ（画面遷移/閉じるで完全停止・iOS強化） === */
 let playSession = 0;
 function stopAllPlayback(){
+  // 再生セッションを進めて今後のspeakを無効化
   playSession++;
-  try{ speechSynthesis.cancel(); }catch(e){}
+
+  // iOSは cancel を無視することがあるので多段対策
+  try {
+    // 1) 即時キャンセル
+    speechSynthesis.cancel();
+  } catch(_) {}
+
+  try {
+    // 2) pause→resume→cancel の順で強制停止（Safari対策）
+    if (speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause();
+    if (speechSynthesis.paused) speechSynthesis.resume();
+    speechSynthesis.cancel();
+  } catch(_) {}
+
+  // 3) ダミーの極小音量Utteranceを短時間で投げてキューをリセット
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0.001; u.rate = 2.0; u.lang = 'en-US';
+    u.onend = ()=> { try { speechSynthesis.cancel(); } catch(_) {} };
+    // ほんの少し遅らせて投入（iOSのタイミング依存対策）
+    setTimeout(()=>{ try { speechSynthesis.speak(u); } catch(_) {} }, 30);
+  } catch(_) {}
 }
+
 
 /* =========================
    Wake Lock / KeepAwake（正式API + フォールバック）
@@ -499,19 +522,45 @@ const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsucce
    Navigation
 ========================= */
 const views = { create: $('#view-create'), list: $('#view-list'), shadow: $('#view-shadow') };
+
+function closeAllDialogs() {
+  try { $('#dlg-detail')?.open && $('#dlg-detail').close(); } catch(_) {}
+  try { $('#dlg-settings')?.open && $('#dlg-settings').close(); } catch(_) {}
+  try { $('#dlg-help')?.open && $('#dlg-help').close(); } catch(_) {}
+  try { $('#dlg-lookup')?.open && $('#dlg-lookup').close(); } catch(_) {}
+}
+
 function show(view){
-  // 画面遷移時は音声と画面保持を必ず止める
+  // 画面遷移時は音声と画面保持を必ず止める（iOS強制版）
   stopAllPlayback();
   KeepAwake.disable();
+  closeAllDialogs();
+
   Object.values(views).forEach(v=>v.classList.remove('active'));
   views[view].classList.add('active');
 }
-$('#nav-create').onclick=()=>{ setActiveNav('nav-create'); show('create'); };
-$('#nav-list').onclick=()=>{ setActiveNav('nav-list'); show('list'); refreshList(); };
-$('#nav-settings').onclick=()=>{ setActiveNav(); $('#dlg-settings').showModal(); openSettingsFields(); };
-$('#nav-help').onclick=()=>{ $('#dlg-help').showModal(); };
-$('#help-close').onclick=()=>{ $('#dlg-help').close(); };
-$('#nav-shadow').onclick=()=>{ setActiveNav('nav-shadow'); prepareShadow(); show('shadow'); };
+
+$('#nav-create').onclick = () => { setActiveNav('nav-create'); show('create'); };
+$('#nav-list').onclick   = () => { setActiveNav('nav-list');   show('list'); refreshList(); };
+$('#nav-settings').onclick = () => {
+  // ダイアログを開く前にも一応止める（ページャ切替想定）
+  stopAllPlayback();
+  setActiveNav();
+  $('#dlg-settings').showModal();
+  openSettingsFields();
+};
+$('#nav-help').onclick = () => {
+  stopAllPlayback();
+  $('#dlg-help').showModal();
+};
+$('#help-close').onclick = () => { stopAllPlayback(); $('#dlg-help').close(); };
+
+$('#nav-shadow').onclick = () => {
+  setActiveNav('nav-shadow');
+  prepareShadow();
+  show('shadow');
+};
+
 
 function setActiveNav(id){ $$('nav button').forEach(b=>b.classList.remove('active')); if(id) $('#'+id).classList.add('active'); }
 
@@ -595,9 +644,14 @@ $('#btn-preview').onclick = async ()=>{
   if(!en && !ja){ alert('英語例文か和訳を入力してください'); return; }
   const cont = $('#preview-en');
   renderSpeakText(cont, en); cont.classList.remove('hidden'); cont.scrollTop = 0;
-  await ensureTtsUnlocked();  // ★ Android/iOS 解除
-  await speakFlow({english: en, japanese: ja}, {targetEl: cont, session: mySession});
+
+  // iOS初回の無音対策：音声一覧→解除→短待機→再生（必要なら1回だけ再試行）
+  await loadVoices().catch(()=>{});
+  await ensureTtsUnlocked();
+  await new Promise(r=>setTimeout(r, 60));
+  await speakFlowWithRetry({english: en, japanese: ja}, {targetEl: cont, session: mySession});
 };
+
 $('#btn-pause-preview').onclick = ()=> togglePause();
 defaultSaveHandler();
 
@@ -660,14 +714,20 @@ async function openDetail(id){
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  $('#d-play').onclick = async ()=>{
-    const mySession = ++playSession;
-    await ensureTtsUnlocked();
-    await speakFlow(row, {targetEl: $('#d-en'), session: mySession});
-    if (mySession!==playSession) return;
-    row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
-    $('#d-meta').innerHTML = meta.slice(0,-1).join(' ') + ` <span class="flag">再生 ${row.playCount}</span>`;
-  };
+$('#d-play').onclick = async ()=>{
+  const mySession = ++playSession;
+  // iOSでの無音/voice未読込対策
+  await loadVoices().catch(()=>{});
+  await ensureTtsUnlocked();
+  await new Promise(r=>setTimeout(r, 60));
+
+  await speakFlowWithRetry(row, {targetEl: $('#d-en'), session: mySession});
+  if (mySession!==playSession) return;
+
+  row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
+  $('#d-meta').innerHTML = meta.slice(0,-1).join(' ') + ` <span class="flag">再生 ${row.playCount}</span>`;
+};
+
   $('#d-pause').onclick = ()=> togglePause();
   $('#d-edit').onclick = ()=>{
     stopAllPlayback();
@@ -869,6 +929,30 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
     }, isAndroid ? 140 : 40);
   });
 }
+// ==== 失敗時ワンショット再試行ユーティリティ（iOS無音対策） ====
+async function speakFlowWithRetry(row, opts = {}) {
+  const begin = performance.now();
+  let ended = false;
+  const sessionAtStart = playSession;
+
+  // 1) 通常実行
+  await speakFlow(row, opts);
+  ended = true;
+
+  // 2) もし開始〜終了までの見かけ時間が極端に短い/無音の疑い & セッション継続なら1回だけ再試行
+  const dur = performance.now() - begin;
+  if (sessionAtStart === playSession && dur < 150 && !speechSynthesis.speaking) {
+    try { await loadVoices(); } catch(_) {}
+    try { await ensureTtsUnlocked(); } catch(_) {}
+    await new Promise(r => setTimeout(r, 120));
+    if (sessionAtStart === playSession) {
+      await speakFlow(row, opts);
+    }
+  }
+}
+
+
+
 
 async function speakFlow(row, opts={}){
   const mySession = opts.session ?? playSession;
@@ -1110,6 +1194,13 @@ async function openLookup(word){
   }
 }
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
+
+// ==== Dialogs: どのダイアログが閉じても保険で停止（iOS残音対策） ====
+['dlg-lookup','dlg-settings','dlg-help','dlg-detail'].forEach(id=>{
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('close', ()=>{ stopAllPlayback(); }, {passive:true});
+});
+
 
 document.addEventListener('click', (e)=>{
   const wEl = e.target.closest('.speak-text .w');
