@@ -337,13 +337,6 @@
       <li>プライバシー：データはこの端末内にのみ保存され、サーバには送信されません。</li>
     </ul>
 
-    <h3>トラブル対処</h3>
-    <ul>
-      <li><strong>音が出ない：</strong>設定でVoiceを再選択 → 保存。端末の消音スイッチや音量設定を確認。iPhoneでは最初にボタンを一度押して音声を有効化。</li>
-      <li><strong>再生が途中で止まる／飛ぶ：</strong>自動再試行機能が働くので、再度▶︎再生で復帰します。</li>
-      <li><strong>スクロールしない／ハイライトされない：</strong>長文では遅延することがあります。⏸→再開で復帰。</li>
-    </ul>
-
     <h3>推奨活用例</h3>
     <ul>
       <li>平日：通勤中に「シャドーイング」を3件。</li>
@@ -390,19 +383,14 @@ function stopAllPlayback(){
   playSession++;
 
   // iOSは cancel を無視することがあるので多段対策
-  try {
-    // 1) 即時キャンセル
-    speechSynthesis.cancel();
-  } catch(_) {}
+  try { speechSynthesis.cancel(); } catch(_) {}
 
   try {
-    // 2) pause→resume→cancel の順で強制停止（Safari対策）
     if (speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause();
     if (speechSynthesis.paused) speechSynthesis.resume();
     speechSynthesis.cancel();
   } catch(_) {}
 
-  // 3) ダミーの極小音量Utteranceを短時間で投げてキューをリセット
   try {
     const u = new SpeechSynthesisUtterance(' ');
     u.volume = 0.001; u.rate = 2.0; u.lang = 'en-US';
@@ -437,7 +425,7 @@ const KeepAwake = (()=>{
     canvas = document.createElement('canvas'); canvas.width=1; canvas.height=1;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle='#000'; ctx.fillRect(0,0,1,1);
-    stream = canvas.captureStream(1); // 1fpsで十分
+    stream = canvas.captureStream(1);
   }
 
   async function startVideoFallback(){
@@ -454,7 +442,6 @@ const KeepAwake = (()=>{
       await requestWakeLock();
       document.addEventListener('visibilitychange', reAcquire, false);
     }catch(e){
-      // Wake Lock不可 → 動画フォールバック
       await startVideoFallback();
       document.addEventListener('visibilitychange', ensureVideoResume, false);
     }
@@ -463,7 +450,7 @@ const KeepAwake = (()=>{
     if(document.visibilityState==='visible' && enabled){
       try{
         if(wakeLock?.released) await requestWakeLock();
-      }catch(e){ /* 失敗は無視（フォールバックが動作中） */ }
+      }catch(e){ /* 失敗は無視 */ }
     }
   }
   async function ensureVideoResume(){
@@ -530,7 +517,6 @@ function closeAllDialogs() {
 }
 
 function show(view){
-  // 画面遷移時は音声と画面保持を必ず止める（iOS強制版）
   stopAllPlayback();
   KeepAwake.disable();
   closeAllDialogs();
@@ -542,7 +528,6 @@ function show(view){
 $('#nav-create').onclick = () => { setActiveNav('nav-create'); show('create'); };
 $('#nav-list').onclick   = () => { setActiveNav('nav-list');   show('list'); refreshList(); };
 $('#nav-settings').onclick = () => {
-  // ダイアログを開く前にも一応止める（ページャ切替想定）
   stopAllPlayback();
   setActiveNav();
   $('#dlg-settings').showModal();
@@ -559,7 +544,6 @@ $('#nav-shadow').onclick = () => {
   prepareShadow();
   show('shadow');
 };
-
 
 function setActiveNav(id){ $$('nav button').forEach(b=>b.classList.remove('active')); if(id) $('#'+id).classList.add('active'); }
 
@@ -644,7 +628,6 @@ $('#btn-preview').onclick = async ()=>{
   const cont = $('#preview-en');
   renderSpeakText(cont, en); cont.classList.remove('hidden'); cont.scrollTop = 0;
 
-  // iOS初回の無音対策：音声一覧→解除→短待機→再生（必要なら1回だけ再試行）
   await loadVoices().catch(()=>{});
   await ensureTtsUnlocked();
   await new Promise(r=>setTimeout(r, 60));
@@ -713,18 +696,64 @@ async function openDetail(id){
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  $('#d-play').onclick = async ()=>{
-    const mySession = ++playSession;
-    // iOSでの無音/voice未読込対策
-    await loadVoices().catch(()=>{});
-    await ensureTtsUnlocked();
-    await new Promise(r=>setTimeout(r, 60));
+  // ★★ Android専用：タップ直後の同一イベントで「短尺ウォームアップ→本発話」を連結
+  function speakFromAndroidGesture(row, opts){
+    try { speechSynthesis.cancel(); } catch(_){}
+    try { if (window.AudioContext || window.webkitAudioContext) {
+      if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume?.();
+    }} catch(_){}
 
-    await speakFlowWithRetry(row, {targetEl: $('#d-en'), session: mySession});
-    if (mySession!==playSession) return;
+    const warm = new SpeechSynthesisUtterance('ok');
+    // voiceは付けず（英語voice不在端末対策）。langは必ず英語系を指定。
+    warm.lang = settings.ttsLang || 'en-US';
+    warm.rate = 1.0; warm.pitch = 1.0; warm.volume = 0.01;
 
-    row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
-    $('#d-meta').innerHTML = meta.slice(0,-1).join(' ') + ` <span class="flag">再生 ${row.playCount}</span>`;
+    let chained = false;
+    warm.onend = async ()=>{
+      if (chained) return; chained = true;
+      const mySession = ++playSession;
+      await loadVoices().catch(()=>{});
+      // ここでは待ち時間を最小化
+      await speakFlowWithRetry(row, { ...opts, session: mySession });
+      // 再生回数更新
+      const fresh = await getOne(currentDetailId);
+      if (fresh) {
+        fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
+        const m=[]; if(fresh.categories?.length) m.push(...fresh.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+        m.push(`<span class="flag">再生 ${fresh.playCount}</span>`);
+        $('#d-meta').innerHTML=m.join(' ');
+      }
+    };
+    warm.onerror = warm.onend;
+
+    try { speechSynthesis.speak(warm); } catch(e) {
+      // 失敗時はフォールバックで本発話を直接
+      const mySession = ++playSession;
+      speakFlowWithRetry(row, { ...opts, session: mySession });
+    }
+  }
+
+  $('#d-play').onclick = ()=>{
+    const targetEl = $('#d-en');
+    // iOS/PCは従来ルート、Androidはジェスチャー連結ルート
+    if (isAndroid) {
+      renderSpeakText(targetEl, row.english||''); targetEl.scrollTop=0;
+      speakFromAndroidGesture(row, {targetEl});
+    } else {
+      (async ()=>{
+        const mySession = ++playSession;
+        await loadVoices().catch(()=>{});
+        await ensureTtsUnlocked();
+        await new Promise(r=>setTimeout(r, 60));
+        await speakFlowWithRetry(row, {targetEl, session: mySession});
+        if (mySession!==playSession) return;
+        row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
+        const m=[]; if(row.categories?.length) m.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+        m.push(`<span class="flag">再生 ${row.playCount}</span>`);
+        $('#d-meta').innerHTML=m.join(' ');
+      })();
+    }
   };
 
   $('#d-pause').onclick = ()=> togglePause();
@@ -782,13 +811,11 @@ $('#file-import').onchange = async (e)=>{
    TTS 基本（Android安定化込）
 ========================= */
 let voices=[]; let ttsWarmed=false; let audioCtx=null;
-let androidNoEnglishVoice = false;   // ★★★ ANDROID: 英語音声が未検出の場合のフラグ
+let androidNoEnglishVoice = false;
 speechSynthesis.onvoiceschanged = ()=> loadVoices();
 
-/* ---------- 使える英語音声を判定（Android用） ---------- */
 function findAndroidEnglishVoices(list){
   const enCandidates = (list||[]).filter(v=>/^en(-|_)?/i.test(v.lang||'') || /English/i.test(v.name||''));
-  // Google系があれば優先
   const google = enCandidates.filter(v=>/Google/i.test(v.name||''));
   return google.length ? google : enCandidates;
 }
@@ -808,25 +835,21 @@ async function loadVoices(){
     };
   }
 
-  /* ====== 初期voiceの自動選択（OS別） ====== */
   if(!settings.voiceName){
     if(isIOS){
       const samantha = voices.find(v=>/Samantha/i.test(v.name) && /^en-US/i.test(v.lang));
       if(samantha){ settings.voiceName=samantha.name; settings.ttsLang='en-US'; }
     }else if(isAndroid){
-      // ★★★ Android：英語音声の有無をチェックし、なければ voiceName を空のまま（＝voice未指定）＆langのみ指定でフォールバック
       const picks = findAndroidEnglishVoices(voices);
       if(picks.length){
-        // Google優先 or 何かしらのen系がある
         const pref = picks.find(v=>/Google\s+US\s+English/i.test(v.name||'')) || picks[0];
         settings.voiceName = pref?.name || '';
         settings.ttsLang   = pref?.lang || 'en-US';
         androidNoEnglishVoice = false;
       }else{
-        // 使えそうな英語音声が1件もない → voiceは未指定運用にする
         settings.voiceName = '';
         settings.ttsLang   = 'en-US';
-        androidNoEnglishVoice = true;   // ★ フォールバック動作ON
+        androidNoEnglishVoice = true;
       }
     }else{
       const pref=[/Microsoft\s+Eric\s+Online.*Natural/i,/Microsoft\s+Aria\s+Online.*Natural/i,/Microsoft\s+Guy\s+Online.*Natural/i,/Microsoft\s+Jenny\s+Online.*Natural/i];
@@ -836,7 +859,6 @@ async function loadVoices(){
     }
     saveSettings();
   }else{
-    // 既存設定がAndroidで存在しなくなっている場合にフォールバック
     if(isAndroid){
       const exists = voices.some(v=>v.name===settings.voiceName);
       if(!exists){
@@ -852,7 +874,6 @@ async function loadVoices(){
         }
         saveSettings();
       }else{
-        // 名称は存在するが英語じゃない可能性 → 言語ヒントを固定
         const v = voices.find(v=>v.name===settings.voiceName);
         if(v && !/^en(-|_)?/i.test(v.lang||'')){ settings.ttsLang='en-US'; saveSettings(); }
       }
@@ -864,22 +885,19 @@ async function loadVoices(){
 function renderVoiceList(){
   const sel=$('#voice'); if(!sel) return;
   const prev=settings.voiceName||''; sel.innerHTML='';
-  // Androidで英語voiceが無いときは「全voice」を表示して選び直せるようにする。それ以外は言語でフィルタ。
   const list = (isAndroid && androidNoEnglishVoice)
     ? (voices||[]).slice().sort((a,b)=>(a.lang||'').localeCompare(b.lang||'')||(a.name||'').localeCompare(b.name||''))
     : (voices||[]).filter(v=>!settings.ttsLang || (v.lang && v.lang.startsWith(settings.ttsLang)))
                   .sort((a,b)=>(a.lang||'').localeCompare(b.lang||'')||(a.name||'').localeCompare(b.name||''));
   for(const v of list){ const opt=document.createElement('option'); opt.value=v.name; opt.textContent=`${v.name} (${v.lang})${v.default?' ★':''}`; sel.appendChild(opt); }
-  // voiceNameが無い（＝Android fallback）のときは、選択欄は空にしておく
   sel.value = list.some(v=>v.name===prev) ? prev : (isAndroid && androidNoEnglishVoice ? '' : (list[0]?.name || ''));
 }
 
 function pickVoice(){
   if(!voices || !voices.length) voices = speechSynthesis.getVoices() || [];
 
-  // Androidで英語voiceが全滅 → voice未指定でシステム既定に委ねる
   if(isAndroid && androidNoEnglishVoice){
-    return null; // ★★★ ここが肝。speak()側でvoiceをセットしない
+    return null;
   }
 
   if(settings.voiceName){
@@ -908,7 +926,6 @@ function togglePause(){ try{ if(speechSynthesis.speaking && !speechSynthesis.pau
 async function ensureTtsUnlocked(){
   if(ttsWarmed) return;
 
-  // 1) AudioContext を使った無音パルスでメディアルートを解錠
   try{
     if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if(audioCtx.state === 'suspended'){
@@ -922,13 +939,11 @@ async function ensureTtsUnlocked(){
     setTimeout(()=>{ try{osc.stop();osc.disconnect();gain.disconnect();}catch(_){} }, 12);
   }catch(_){}
 
-  // 2) 短文でTTSをウォームアップ（Androidは空白NG対策）
   try {
     try{ speechSynthesis.cancel(); }catch(e){}
-    const v = pickVoice(); // Androidでnullになり得る
+    const v = pickVoice();
     const warm = new SpeechSynthesisUtterance('okay');
     if (v) warm.voice = v;
-    // ★★★ Android voice未検出でもlangは必ず指定
     warm.lang = v?.lang || settings.ttsLang || 'en-US';
     warm.rate = 1.0; warm.pitch = 1.0; warm.volume = 0.01;
 
@@ -949,11 +964,9 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
     if(!voices || voices.length===0){ await loadVoices(); }
 
     const u=new SpeechSynthesisUtterance(text);
-    const v=voice ?? pickVoice(); 
-    // ★★★ Androidフォールバック：voice未検出の場合は「voiceを設定しない」
+    const v=voice ?? pickVoice();
     if(v) u.voice=v;
 
-    // ★★★ ただし lang は必ず英語系を指定（Androidでvoice未指定時にも有効）
     if(!u.lang){ u.lang = v?.lang || settings.ttsLang || (/[a-zA-Z]/.test(text) ? 'en-US' : 'ja-JP'); }
     u.rate=rate??settings.rate; u.pitch=pitch??settings.pitch; u.volume=volume??settings.volume;
 
@@ -973,25 +986,18 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
 
     try { speechSynthesis.cancel(); } catch(e){}
     setTimeout(()=>{
-      try {
-        speechSynthesis.speak(u);
-      } catch(e) {
-        setTimeout(()=>{ try{ speechSynthesis.speak(u); }catch(_){ res(); } }, 150);
-      }
+      try { speechSynthesis.speak(u); }
+      catch(e) { setTimeout(()=>{ try{ speechSynthesis.speak(u); }catch(_){ res(); } }, 150); }
     }, isAndroid ? 140 : 40);
   });
 }
-// ==== 失敗時ワンショット再試行ユーティリティ（iOS/Android無音対策） ====
+
 async function speakFlowWithRetry(row, opts = {}) {
   const begin = performance.now();
-  let ended = false;
   const sessionAtStart = playSession;
 
-  // 1) 通常実行
   await speakFlow(row, opts);
-  ended = true;
 
-  // 2) もし開始〜終了までが極端に短い/無音疑い & セッション継続なら1回だけ再試行
   const dur = performance.now() - begin;
   if (sessionAtStart === playSession && dur < 150 && !speechSynthesis.speaking) {
     try { await loadVoices(); } catch(_) {}
@@ -1038,7 +1044,7 @@ async function speakFlow(row, opts={}){
    設定（標準設定ボタン＋保存＋スリープ防止）
 ========================= */
 function applyStandardSettings(){
-  settings = { ...defaultSettings, voiceName: '' }; // OS推奨に自動
+  settings = { ...defaultSettings, voiceName: '' };
   saveSettings();
   loadVoices();
   fillSettingsFields();
@@ -1052,13 +1058,13 @@ function fillSettingsFields(){
   $('#keep-awake').checked = !!settings.keepAwake;
 }
 async function openSettingsFields(){
-  await loadVoices();         // ★ 取得を確実化
+  await loadVoices();
   renderVoiceList();
   fillSettingsFields();
   $('#lang').onchange = ()=>{
     settings.ttsLang = $('#lang').value || settings.ttsLang;
     saveSettings();
-    loadVoices();             // ★ 言語ヒント変更時はvoiceの候補再抽出
+    loadVoices();
     renderVoiceList();
   };
 }
@@ -1070,7 +1076,6 @@ $('#save-settings').onclick = (ev)=>{
   settings.gapSec=Number($('#gap').value)||0; settings.repeat=Math.max(1, parseInt($('#repeat').value||'1',10)); settings.speakTarget=$('#speak-target').value||'en';
   settings.keepAwake = !!$('#keep-awake').checked;
   const chosen=voices.find(v=>v.name===settings.voiceName); if(chosen&&chosen.lang&&chosen.lang!==settings.ttsLang){ settings.ttsLang=chosen.lang; }
-  // Androidで英語音声がないのにvoiceNameが選ばれた場合の再判定
   if(isAndroid){
     const picks = findAndroidEnglishVoices(voices);
     androidNoEnglishVoice = picks.length===0;
@@ -1094,7 +1099,7 @@ async function prepareShadow(){
   if(pool.length===0){ alert('英語例文がありません。登録してください。'); setActiveNav('nav-create'); show('create'); return; }
   sh.list = pool.sort(()=>Math.random()-0.5);
   sh.index = 0;
-  sh.rate = settings.rate || 1.0;     // 初期は設定値。セッション内で引き継ぐ
+  sh.rate = settings.rate || 1.0;
   sh.container = $('#sh-text'); sh.tokens=[]; sh.startCharOffset=0; sh.lastCharIndex=0;
   $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×';
   const row = sh.list[0];
@@ -1154,9 +1159,9 @@ function speakFromToken(startTokenIdx, forceCancel){
   const tail = text.slice(startChar);
 
   const u = new SpeechSynthesisUtterance(tail);
-  const v = pickVoice(); 
-  if(v) u.voice=v;                          // ★ Androidで英語voiceなし → voiceは付けない
-  u.lang = settings.ttsLang || 'en-US';     // ★ langは必ず指定
+  const v = pickVoice();
+  if(v) u.voice=v;
+  u.lang = settings.ttsLang || 'en-US';
 
   u.rate = sh.rate; u.pitch = settings.pitch; u.volume = settings.volume;
 
@@ -1193,7 +1198,7 @@ async function playCurrent(){
 }
 
 $('#sh-start').onclick = async ()=>{
-  await ensureTtsUnlocked();         // ★ 解除を先頭で実行
+  await ensureTtsUnlocked();
   sh.rate = settings.rate || 1.0; updateRateBadge();
   sh.restarting=false; sh.glitchRetry=false; playCurrent();
 };
@@ -1262,7 +1267,6 @@ $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
   const el = document.getElementById(id);
   if (el) el.addEventListener('close', ()=>{ stopAllPlayback(); }, {passive:true});
 });
-
 
 document.addEventListener('click', (e)=>{
   const wEl = e.target.closest('.speak-text .w');
