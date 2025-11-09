@@ -78,7 +78,6 @@
   .lookup-body{max-height:50vh;overflow:auto;background:#0e1525;border:1px solid var(--line);
     border-radius:10px;padding:10px;margin:8px 0;font-size:14px;line-height:1.8}
 
-  /* RECの視覚強調 */
   .recording{
     border-color:#ff4d4f !important;
     box-shadow:0 0 0 2px rgba(255,77,79,.18) inset !important;
@@ -168,15 +167,20 @@
   <section id="view-shadow">
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
-    <div class="actions">
-      <!-- 発話エンジン共通トグル -->
+
+    <!-- 1行目：再生・次・（右端）一覧へ戻る -->
+    <div class="actions" id="sh-row-1">
       <button class="btn ok" id="sh-toggle">▶︎ 再生</button>
       <button class="btn warn" id="sh-next">⏩ 次の英文</button>
-      <span class="badge" id="rate-badge">1.0×</span>
-      <button class="btn" id="sh-slower">− 速度</button>
-      <button class="btn" id="sh-faster">＋ 速度</button>
       <button class="btn right" id="sh-back">一覧へ戻る</button>
     </div>
+    <!-- 2行目：速度系（左に集約） -->
+    <div class="actions" id="sh-row-2">
+      <button class="btn" id="sh-slower">− 速度</button>
+      <span class="badge" id="rate-badge">1.0×</span>
+      <button class="btn" id="sh-faster">＋ 速度</button>
+    </div>
+
     <div id="sh-text" class="speak-text" style="margin-top:8px">(ここにランダムな英文が表示されます)</div>
   </section>
 </main>
@@ -193,7 +197,7 @@
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
 
   <div class="divider"></div>
-  <!-- 上段：再生とRECの行（RECは単一ボタン化：REC→STOP→REC再生、長押しでやり直し） -->
+  <!-- 上段：再生とREC（統合ボタン） -->
   <div class="actions" id="row-play-rec">
     <button class="btn" id="d-toggle">▶︎ 再生</button>
 
@@ -201,8 +205,6 @@
     <span class="tiny" id="d-rec-timer" style="margin-left:6px;min-width:72px;display:inline-block"></span>
 
     <button class="btn danger hidden" id="d-rec-delete">REC削除</button>
-
-    <button class="btn right" id="d-open-editor">✎ 編集フォームへ</button>
   </div>
   <!-- 下段：編集／削除（左）と閉じる（右） -->
   <div class="actions" id="row-edit-close" style="justify-content:space-between">
@@ -213,7 +215,6 @@
     <button class="btn" id="d-close">閉じる</button>
   </div>
 
-  <!-- 録音の再生用（非表示） -->
   <audio id="d-rec-audio" class="hidden"></audio>
 </dialog>
 
@@ -593,7 +594,7 @@ async function ensureTtsUnlocked(){
     if(audioCtx.state === 'suspended'){ await audioCtx.resume().catch(()=>{}); }
     const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
     gain.gain.value = 0.0001; osc.connect(gain).connect(audioCtx.destination); osc.start();
-    setTimeout(()=>{ try{osc.stop();osc.disconnect();gain.disconnect();}catch(_){} }, 12);
+    setTimeout(()=>{ try{osc.stop();osc.disconnect();gain.disconnect();}catch(_){ } }, 12);
   }catch(_){}
   try {
     try{ speechSynthesis.cancel(); }catch(e){}
@@ -611,18 +612,22 @@ async function ensureTtsUnlocked(){
   } finally { ttsWarmed = true; }
 }
 
-/* ---- 単一TTSエンジン ---- */
+/* ---- 単一TTSエンジン（途中再開に対応） ---- */
 class SpeakEngine {
-  constructor(){ this.state='idle'; this.session=0; }
-  async play(script, {targetEl, rate}={}){
-    // script: {en, ja, order:'en'|'ja'|'both', repeat, gapSec}
+  constructor(){
+    this.state='idle';
+    this.session=0;
+    this._lastBoundary=0;   // 直近の絶対charIndex
+    this._ev={};
+  }
+  async play(script, {targetEl, rate, startCharIndex=0}={}){
     if(this.state==='playing'){ await this.stop(); }
     this.session++; const my = this.session;
     this.state='playing'; this._emit('state','playing');
     await ensureTtsUnlocked(); await loadVoices();
     const v = pickVoice();
 
-    const speakOne = (text,langHint)=>{
+    const speakOne = (text,langHint, {baseOffset=0} = {})=>{
       return new Promise(resolve=>{
         if(my!==this.session) return resolve();
         if(!text){ return resolve(); }
@@ -633,43 +638,77 @@ class SpeakEngine {
 
         let fbTimer=null, usedBoundary=false;
         if(targetEl && /[A-Za-z]/.test(text)){
-          u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; highlightAtCharIndex(targetEl, e.charIndex); this._emit('boundary', e.charIndex); } };
-          const tokens=(targetEl._tokens||tokenizeWords(text));
+          u.onboundary=(e)=>{
+            if(typeof e.charIndex==='number'){
+              usedBoundary=true;
+              const abs = baseOffset + e.charIndex;
+              this._lastBoundary = abs;
+              highlightAtCharIndex(targetEl, abs);
+              this._emit('boundary', abs);
+            }
+          };
+          const tokens = tokenizeWords(text);
           if(tokens.length>0){
             let idx=0; const wpm=170*(u.rate||1.0); const msPerWord=Math.max(120, Math.round(60000/wpm));
             fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} if(idx>=tokens.length){clearInterval(fbTimer);return;}
-              const t=tokens[Math.min(idx++, tokens.length-1)]; highlightAtCharIndex(targetEl, t.start); }, msPerWord);
+              const t=tokens[Math.min(idx++, tokens.length-1)];
+              highlightAtCharIndex(targetEl, baseOffset + t.start);
+            }, msPerWord);
           }
         }
         const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
 
-        let startedAt=0;
-        u.onstart=()=>{ startedAt=performance.now(); };
         u.onend = ()=>{ cleanup(); resolve(); };
         u.onerror=()=>{ cleanup(); resolve(); };
 
         try { speechSynthesis.cancel(); } catch(e){}
-        setTimeout(()=>{ try { if(my===this.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, isAndroid ? 120 : 40);
+        const delay = isIOS ? 120 : 40;
+        setTimeout(()=>{ try { if(my===this.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, delay);
       });
     };
+
+    // 文字インデックスを含む単語の開始に寄せてスライス
+    function sliceFromChar(text, charIndex){
+      if(!text) return {slice:text, base:0};
+      const toks = tokenizeWords(text);
+      if(toks.length===0) return {slice:text, base:0};
+      let base=0;
+      for(let i=0;i<toks.length;i++){
+        const t=toks[i];
+        if(charIndex <= t.end){ base=t.start; break; }
+      }
+      return {slice: text.slice(base), base};
+    }
 
     const doFlow = async ()=>{
       const en=(script.en||'').trim(), ja=(script.ja||'').trim();
       const rep=Math.max(1, parseInt(script.repeat||1,10));
       const gap=Math.max(0, Number(script.gapSec||0))*1000;
+
       if(script.order==='en'){
         if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
-        for(let i=0;i<rep;i++){ if(my!==this.session) return; await speakOne(en,'en-US'); if(i<rep-1 && gap){ await sleep(gap);} }
+        const startAt = Number(startCharIndex||script.startCharIndex||0);
+        const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
+        for(let i=0;i<rep;i++){
+          if(my!==this.session) return;
+          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
+          if(i<rep-1 && gap){ await sleep(gap);}
+        }
       }else if(script.order==='ja'){
         await speakOne(ja,'ja-JP');
-      }else{
+      }else{ // both
         if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
-        for(let i=0;i<rep;i++){ if(my!==this.session) return; await speakOne(en,'en-US'); if(gap){ await sleep(gap);} }
+        const startAt = Number(startCharIndex||script.startCharIndex||0);
+        const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
+        for(let i=0;i<rep;i++){
+          if(my!==this.session) return;
+          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
+          if(gap){ await sleep(gap);}
+        }
         if(ja){ await speakOne(ja,'ja-JP'); }
       }
     };
 
-    // 実行 + グリッチ再試行
     const begin=performance.now();
     await doFlow();
     const dur=performance.now()-begin;
@@ -686,6 +725,19 @@ class SpeakEngine {
   _emit(ev,...a){ (this._ev?.[ev]||[]).forEach(f=>{ try{ f(...a);}catch(_){}}); }
 }
 const speakEngine = new SpeakEngine();
+
+/* =========================
+   iOS初回タップで必ずウォームアップ（一覧→詳細の無音対策）
+========================= */
+let firstUserGestureDone = false;
+function oneTimeWarmup(){
+  if(firstUserGestureDone) return;
+  firstUserGestureDone = true;
+  ensureTtsUnlocked();
+  loadVoices();
+}
+window.addEventListener('pointerdown', oneTimeWarmup, {once:true, passive:true});
+window.addEventListener('touchend', oneTimeWarmup, {once:true, passive:true});
 
 /* =========================
    プレビュー（登録画面）
@@ -793,7 +845,6 @@ class RecEngine {
           blob = new Blob(this.chunks, { type });
         }catch(_){}
         this.chunks=[];
-        // Safari/iOS対策：停止直後に小さすぎる場合は数百ms待ってもう一度組み直す
         const finalize = ()=>{
           if(blob && blob.size>0){
             if(this.url){ try{ URL.revokeObjectURL(this.url); }catch(_){ } }
@@ -802,7 +853,7 @@ class RecEngine {
             resolve({blob, url:this.url, durationMs: Math.max(0, performance.now()-this.startedAt)});
           }else{
             this.state='idle';
-            resolve(null); // 失敗
+            resolve(null);
           }
         };
         if(isIOS){ setTimeout(finalize, 300); } else { finalize(); }
@@ -829,7 +880,6 @@ const recEngine = new RecEngine();
    詳細ダイアログ
 ========================= */
 let currentDetailId=null;
-let detailRowCache=null;
 
 function setPlayToggleLabel(btn, state){
   if(!btn) return;
@@ -867,6 +917,7 @@ async function openDetail(id){
 
   // 再生トグル
   $('#d-toggle').onclick = async ()=>{
+    oneTimeWarmup();
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
     if(speakEngine.state==='idle'){
@@ -899,10 +950,9 @@ async function openDetail(id){
     recBtn.onpointerdown = (e)=>{ longPressed=false; longPressTimer=setTimeout(()=>{ longPressed=true; handleRecLongPress(); }, 700); };
     recBtn.onpointerup = (e)=>{ if(longPressTimer) clearTimeout(longPressTimer); if(!longPressed){ handleRecShortPress(); } };
     recBtn.onpointerleave = ()=>{ if(longPressTimer) clearTimeout(longPressTimer); };
-    recBtn.oncontextmenu = (e)=>{ e.preventDefault(); }; // モバイルでの長押しメニュー抑止
+    recBtn.oncontextmenu = (e)=>{ e.preventDefault(); };
   }
   async function handleRecShortPress(){
-    // 状態に応じて：idle→start / recording→stop / ready→play
     if(recEngine.state==='idle'){
       try{
         stopAllPlayback(); speakEngine.stop?.();
@@ -929,7 +979,6 @@ async function openDetail(id){
     }
   }
   function handleRecLongPress(){
-    // やり直し：録音データがある時のみ
     if(recEngine.state==='ready' || recEngine.url){
       recEngine.dispose();
       $('#d-rec-audio').src=''; setRecButtonMode('idle'); toggleRecDeleteVis(false);
@@ -938,7 +987,6 @@ async function openDetail(id){
   }
   bindRecHandlers();
 
-  // REC削除ボタン（可視は録音時のみ）
   $('#d-rec-delete').onclick = ()=> handleRecLongPress();
 
   // 編集/削除/閉じる
@@ -958,7 +1006,6 @@ async function openDetail(id){
       };
     });
   };
-  $('#d-open-editor').onclick = ()=> $('#d-edit').click();
   $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ speakEngine.stop(); stopAllPlayback(); recEngine.dispose(); await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
   $('#d-close').onclick = ()=>{ speakEngine.stop(); stopAllPlayback(); recEngine.dispose(); $('#dlg-detail').close(); };
 }
@@ -1020,9 +1067,9 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング（単一エンジン利用）
+   シャドーイング（途中から継続できる速度変更）
 ========================= */
-const sh = { list: [], index: 0, rate: 1.0, container: null, opened:false };
+const sh = { list: [], index: 0, rate: 1.0, container: null, opened:false, _lastAbs:0, _boundHook:false };
 async function prepareShadow(){
   const rows = await getAll();
   const pool = rows.filter(r=> (r.english||'').trim().length>0 );
@@ -1033,24 +1080,35 @@ async function prepareShadow(){
   const row = sh.list[0];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   sh.opened = true; setPlayToggleLabel($('#sh-toggle'),'idle');
+
+  // 再生境界の絶対位置を保持（速度変更時の切り戻しに使用）
+  if(!sh._boundHook){
+    speakEngine.on('boundary', (abs)=>{ sh._lastAbs = abs||0; });
+    sh._boundHook = true;
+  }
 }
 $('#sh-back').onclick = ()=>{ sh.opened=false; speakEngine.stop(); stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent=''; setActiveNav('nav-list'); show('list'); refreshList(); };
-async function playCurrentShadow(){
-  const row = sh.list[sh.index]; const text=(row.english||'').trim();
+async function playCurrentShadow(opts={}){
+  const { noAdvance=false, startCharIndex=0 } = opts; // ★速度変更時は startCharIndex を渡す
+  const row = sh.list[sh.index];
+  const text=(row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0;
   if (settings.keepAwake) { try{ await KeepAwake.enable(); }catch(e){} }
   await speakEngine.play(
-    { en: row.english||'', ja: row.japanese||'', order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec },
+    { en: row.english||'', ja: row.japanese||'', order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec, startCharIndex },
     { targetEl: sh.container, rate: sh.rate }
   );
   if(!sh.opened) return;
-  // 次へ
-  sh.index = (sh.index+1) % sh.list.length;
+  if(!noAdvance){
+    sh.index = (sh.index+1) % sh.list.length;
+  }
   if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#sh-toggle'),'idle'); }
 }
+
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
+  oneTimeWarmup();
   if(speakEngine.state==='idle'){
     setPlayToggleLabel(btn,'playing');
     await playCurrentShadow();
@@ -1062,11 +1120,29 @@ $('#sh-toggle').onclick = async ()=>{
   }
 };
 $('#sh-next').onclick = ()=>{ try{ speakEngine.stop(); }catch(_){} setPlayToggleLabel($('#sh-toggle'),'idle'); if(sh.opened){ playCurrentShadow(); } };
-$('#sh-slower').onclick = ()=>{ sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10); $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×'; if(speakEngine.state==='playing') { speakEngine.stop(); playCurrentShadow(); } };
-$('#sh-faster').onclick = ()=>{ sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10); $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×'; if(speakEngine.state==='playing') { speakEngine.stop(); playCurrentShadow(); } };
+$('#sh-slower').onclick = ()=>{
+  sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10);
+  $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×';
+  if(speakEngine.state==='playing' || speakEngine.state==='paused'){
+    const resumeAt = Math.max(0, sh._lastAbs||0);
+    speakEngine.stop();
+    setPlayToggleLabel($('#sh-toggle'),'playing');
+    playCurrentShadow({ noAdvance:true, startCharIndex: resumeAt });
+  }
+};
+$('#sh-faster').onclick = ()=>{
+  sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10);
+  $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×';
+  if(speakEngine.state==='playing' || speakEngine.state==='paused'){
+    const resumeAt = Math.max(0, sh._lastAbs||0);
+    speakEngine.stop();
+    setPlayToggleLabel($('#sh-toggle'),'playing');
+    playCurrentShadow({ noAdvance:true, startCharIndex: resumeAt });
+  }
+};
 
 /* =========================
-   ルックアップ
+   ルックアップ（日本語＋英英の多義）
 ========================= */
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
@@ -1075,45 +1151,86 @@ function setLookupLinks(word){
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
+
+async function fetchJaGloss(word){
+  try{
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|ja`;
+    const res = await fetch(url, {mode:'cors'});
+    if(!res.ok) throw new Error('bad');
+    const json = await res.json();
+    const txt = json?.responseData?.translatedText || '';
+    return (txt || '').replace(/\s+/g,' ').trim();
+  }catch(e){
+    return '';
+  }
+}
+async function fetchEnSenses(word){
+  try{
+    const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`;
+    const res = await fetch(url, {mode:'cors'});
+    if(!res.ok) throw new Error('bad');
+    const json = await res.json();
+    const out = [];
+    const head = Array.isArray(json)? json[0] : null;
+    const meanings = head?.meanings || [];
+    for(const m of meanings){
+      const pos = m.partOfSpeech || '';
+      const defs = (m.definitions||[]).slice(0,3).map(d=>d.definition).filter(Boolean);
+      if(defs.length){
+        out.push({pos, defs});
+      }
+    }
+    return out.slice(0,5);
+  }catch(e){
+    return [];
+  }
+}
+
 async function openLookup(word){
   if(!word) return;
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
   try{
-    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, {mode:'cors'});
-    if(!res.ok) throw new Error('fetch failed');
-    const json = await res.json();
-    renderLookupContent(word, json);
-  }catch(e){ renderLookupContent(word, null); }
+    const [ja, senses] = await Promise.all([
+      fetchJaGloss(word),
+      fetchEnSenses(word)
+    ]);
+    renderLookupContent(word, ja, senses);
+  }catch(e){
+    renderLookupContent(word, '', []);
+  }
 }
-async function renderLookupContent(word, data){
+
+function renderLookupContent(word, jaText, senses=[]){
   const body = $('#lk-body');
   const safeWord = escapeHTML(word);
-  if(!data || !Array.isArray(data) || data.length===0){
-    body.innerHTML =
-      `<div><span class="lookup-word">${safeWord}</span></div>
-       <div class="tiny" style="margin-top:6px">
-         定義の取得に失敗しました。下のリンク（Cambridge/Longman/Googleなど）で意味を確認してください。
-       </div>`;
-    return;
-  }
-  const entry = data[0] || {};
-  const phon = (entry.phonetics?.find(p=>p.text)?.text) || '';
-  const defs = [];
-  (entry.meanings||[]).forEach(m=>{
-    (m.definitions||[]).slice(0,2).forEach(d=>{
-      if(d?.definition) defs.push(d.definition);
-    });
-  });
-  const joined = defs.slice(0,6).map((t,i)=>`${i+1}. ${t}`).join('\n');
-  const lines = (joined||'').split(/\n+/).map(x=>escapeHTML(x));
-  const senseHtml = lines.length
-    ? lines.map(x=>`<div class="lookup-sense">${x}</div>`).join('')
-    : `<div class="tiny" style="margin-top:6px">定義が見つかりませんでした。</div>`;
-  const top = `<div><span class="lookup-word">${safeWord}</span>${phon?`<span class="lookup-phon">${escapeHTML(phon)}</span>`:''}</div>`;
-  body.innerHTML = top + senseHtml;
+  const ja = escapeHTML(jaText||'');
+  const top = `
+    <div style="font-size:16px;margin-bottom:6px">
+      <strong>${safeWord}</strong>
+    </div>
+  `;
+  const jaBlock = ja
+    ? `<div style="font-size:15px;line-height:1.9;margin:6px 0"><strong>日本語：</strong>${ja}</div>`
+    : `<div class="tiny" style="margin:6px 0">日本語の取得に失敗しました。下のリンクから確認してください。</div>`;
+
+  const enBlock = (senses&&senses.length)
+    ? `<div style="margin-top:8px">
+         <div class="tiny" style="margin-bottom:4px"><strong>英英（主な定義）</strong></div>
+         <ul style="margin:0 0 6px 18px; line-height:1.7">
+           ${senses.map(s=>{
+             const pos = s.pos ? `<em>[${escapeHTML(s.pos)}]</em> ` : '';
+             const defs = s.defs.map(d=>`<li>${escapeHTML(d)}</li>`).join('');
+             return `<li>${pos}<ul>${defs}</ul></li>`;
+           }).join('')}
+         </ul>
+       </div>`
+    : `<div class="tiny" style="margin-top:6px">英英定義の取得に失敗しました。</div>`;
+
+  body.innerHTML = top + jaBlock + enBlock;
 }
+
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
 
