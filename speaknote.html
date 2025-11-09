@@ -194,9 +194,10 @@
     <!-- 再生/一時停止の統合トグル -->
     <button class="btn" id="d-toggle">▶︎ 再生</button>
 
-    <!-- 録音/再生 -->
+    <!-- 録音/再生（セッション限定） -->
     <button class="btn" id="d-rec">● REC</button>
     <button class="btn" id="d-rec-play" disabled>▶︎ REC再生</button>
+    <button class="btn danger" id="d-rec-delete" disabled>REC削除</button>
     <span class="tiny" id="d-rec-timer" style="margin-left:6px;min-width:72px;display:inline-block"></span>
 
     <button class="btn" id="d-edit">✎ 編集</button>
@@ -393,7 +394,7 @@ function stopAllPlayback(){
   } catch(_) {}
 }
 
-/* ====== Wake Lock（省略せず実装） ====== */
+/* ====== Wake Lock ====== */
 const KeepAwake = (()=>{
   let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
   async function requestWakeLock(){ if(!('wakeLock' in navigator)) throw new Error('no_wakelock'); wakeLock = await navigator.wakeLock.request('screen'); }
@@ -578,8 +579,8 @@ function renderCards(list){
   }
 }
 
-/* ====== 録音（詳細画面のみ） ====== */
-const recState = { mediaRecorder:null, chunks:[], stream:null, url:null, startedAt:0, timerId:null, durationMs:0, mime:'' };
+/* ====== 録音（詳細画面のみ｜セッション限定） ====== */
+const recState = { mediaRecorder:null, chunks:[], stream:null, url:null, startedAt:0, timerId:null, mime:'' };
 function formatMs(ms){ const s = Math.floor(ms/1000); const m = Math.floor(s/60); const ss = String(s%60).padStart(2,'0'); return `${m}:${ss}`; }
 function pickAudioMime(){
   try{
@@ -595,12 +596,14 @@ function stopRecTimer(){ if(recState.timerId){ clearInterval(recState.timerId); 
 function updateRecUI({recording=false, hasBlob=false}={}){
   const bRec = $('#d-rec');
   const bPlay = $('#d-rec-play');
+  const bDel = $('#d-rec-delete');
   const t = $('#d-rec-timer');
   if(!bRec || !bPlay || !t) return;
   bRec.textContent = recording ? '■ STOP' : '● REC';
   bRec.classList.toggle('recording', recording);
   bPlay.disabled = !hasBlob;
-  t.textContent = recording ? formatMs(performance.now() - recState.startedAt) : (hasBlob ? `録音あり` : ``);
+  if(bDel) bDel.disabled = !hasBlob;
+  t.textContent = recording ? formatMs(performance.now() - recState.startedAt) : (hasBlob ? `録音あり（セッション）` : ``);
 }
 
 /* ====== 再生トグル（共通UIヘルパ） ====== */
@@ -619,18 +622,20 @@ async function openDetail(id){
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
   $('#d-scene').textContent=row.scene||'(場面未設定)';
-  const meta=[]; if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+  const meta=[];
+  if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
   meta.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
-  if(row.recBlob) meta.push(`<span class="flag">録音あり</span>`);
+  // セッション録音はダイアログ毎に生成されるため、ここでは表示しない
   $('#d-meta').innerHTML=meta.join(' ');
+
   renderSpeakText($('#d-en'), row.english||''); $('#d-en').scrollTop=0;
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  // 録音UI初期化
+  // セッション録音UI初期化
   if (recState.url) { try{ URL.revokeObjectURL(recState.url); }catch(_){} recState.url=null; }
   stopRecTimer();
-  updateRecUI({recording:false, hasBlob: !!row.recBlob});
+  updateRecUI({recording:false, hasBlob:false});
   setToggleLabel($('#d-toggle'),'idle');
   detailPlayState='idle';
 
@@ -639,17 +644,15 @@ async function openDetail(id){
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
 
-    // 状態判定
     if(detailPlayState==='idle'){
-      // 再生開始
       renderSpeakText(targetEl, row.english||''); targetEl.scrollTop=0;
       if (isAndroid){
-        androidGestureSpeak(row, targetEl, async ()=>{ // 再生終了後
+        androidGestureSpeak(row, targetEl, async ()=>{
           if(detailPlayState!=='paused'){ detailPlayState='idle'; setToggleLabel(btn,'idle'); }
-          // 再生回数カウント
-          const fresh = await getOne(currentDetailId); if(fresh){ fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
+          const fresh = await getOne(currentDetailId); if(fresh){
+            fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
             const m=[]; if(fresh.categories?.length) m.push(...fresh.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-            m.push(`<span class="flag">再生 ${fresh.playCount}</span>`); if(fresh.recBlob) m.push(`<span class="flag">録音あり</span>`); $('#d-meta').innerHTML=m.join(' ');
+            m.push(`<span class="flag">再生 ${fresh.playCount}</span>`); $('#d-meta').innerHTML=m.join(' ');
           }
         });
         detailPlayState='playing'; setToggleLabel(btn,'playing');
@@ -661,27 +664,23 @@ async function openDetail(id){
           await new Promise(r=>setTimeout(r, 60));
           detailPlayState='playing'; setToggleLabel(btn,'playing');
           await speakFlowWithRetry(row, {targetEl, session: mySession});
-          if (mySession!==playSession) return; // 中断
+          if (mySession!==playSession) return;
           if(detailPlayState!=='paused'){ detailPlayState='idle'; setToggleLabel(btn,'idle'); }
-          // 再生回数
           row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
           const m=[]; if(row.categories?.length) m.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-          m.push(`<span class="flag">再生 ${row.playCount}</span>`); if(row.recBlob) m.push(`<span class="flag">録音あり</span>`);
-          $('#d-meta').innerHTML=m.join(' ');
+          m.push(`<span class="flag">再生 ${row.playCount}</span>`); $('#d-meta').innerHTML=m.join(' ');
         })();
       }
     }else if(detailPlayState==='playing'){
-      // 一時停止
       try{ speechSynthesis.pause(); }catch(_){}
       detailPlayState='paused'; setToggleLabel(btn,'paused');
     }else{
-      // 再開
       try{ speechSynthesis.resume(); }catch(_){}
       detailPlayState='playing'; setToggleLabel(btn,'playing');
     }
   };
 
-  // 録音開始/停止
+  // 録音開始/停止（セッション限定：DB保存なし）
   $('#d-rec').onclick = async ()=>{
     if (recState.mediaRecorder && recState.mediaRecorder.state === 'recording'){
       try{ recState.mediaRecorder.stop(); }catch(_){}
@@ -700,7 +699,6 @@ async function openDetail(id){
       alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定を確認してください。');
       return;
     }
-    const row = await getOne(currentDetailId);
     const mime = pickAudioMime();
     const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
     recState.mediaRecorder = mr;
@@ -709,26 +707,24 @@ async function openDetail(id){
     recState.mime = mime;
     recState.startedAt = performance.now();
     $('#d-rec-timer').textContent = '0:00';
-    updateRecUI({recording:true, hasBlob:!!row?.recBlob});
+    updateRecUI({recording:true, hasBlob:!!recState.url});
 
     mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) recState.chunks.push(ev.data); };
     mr.onstop = async ()=>{
       stopRecTimer();
       try{
         const blob = new Blob(recState.chunks, { type: recState.mime || (mr.mimeType || 'audio/webm') });
-        const row2 = await getOne(currentDetailId); if(!row2) return;
-        row2.recBlob = blob;
-        row2.recType = blob.type || '';
-        row2.recUpdatedAt = now();
-        row2.recDurationMs = Math.max(0, Math.round(performance.now() - recState.startedAt));
-        await updateSentence(row2);
-        updateRecUI({recording:false, hasBlob:true});
+        // ★ セッション限定：DB保存なし。Object URLのみ生成
         if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } }
         recState.url = URL.createObjectURL(blob);
         $('#d-rec-audio').src = recState.url;
-        const m=[]; if(row2.categories?.length) m.push(...row2.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-        m.push(`<span class="flag">再生 ${row2.playCount||0}</span>`);
-        m.push(`<span class="flag">録音あり</span>`);
+        updateRecUI({recording:false, hasBlob:true});
+
+        // メタに「セッション録音」表示
+        const cur = await getOne(currentDetailId);
+        const m=[]; if(cur?.categories?.length) m.push(...cur.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+        m.push(`<span class="flag">再生 ${cur?.playCount||0}</span>`);
+        m.push(`<span class="flag">セッション録音</span>`);
         $('#d-meta').innerHTML=m.join(' ');
       }finally{
         try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
@@ -742,17 +738,27 @@ async function openDetail(id){
     }, 250);
   };
 
-  // 録音の再生
+  // 録音の再生（セッション限定）
   $('#d-rec-play').onclick = async ()=>{
     stopAllPlayback();
     const audio = $('#d-rec-audio');
     try{ audio.pause(); }catch(_){}
     if(!recState.url){
-      const row = await getOne(currentDetailId);
-      if(row?.recBlob){ try{ recState.url = URL.createObjectURL(row.recBlob); }catch(_){ } }
+      alert('この録音はセッション限定です。録音後に同じ画面内でのみ再生可能です。');
+      return;
     }
-    if(!recState.url){ alert('録音が見つかりません。まずRECで録音してください。'); return; }
     try{ audio.src = recState.url; await audio.play(); }catch(e){ alert('再生に失敗しました。'); }
+  };
+
+  // 録音の破棄（セッション限定）
+  $('#d-rec-delete').onclick = async ()=>{
+    try{ $('#d-rec-audio').pause(); }catch(_){}
+    if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } recState.url=null; }
+    updateRecUI({recording:false, hasBlob:false});
+    const cur = await getOne(currentDetailId);
+    const m=[]; if(cur?.categories?.length) m.push(...cur.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+    m.push(`<span class="flag">再生 ${cur?.playCount||0}</span>`);
+    $('#d-meta').innerHTML=m.join(' ');
   };
 
   // 編集/削除/閉じる
@@ -789,7 +795,8 @@ $('#dlg-detail').addEventListener('close', ()=>{
 /* ====== Export/Import ====== */
 $('#btn-export').onclick = async ()=>{
   const data = await getAll();
-  const safe = data.map(({recBlob, ...rest})=>rest);
+  // 念のため録音系は常に除外（方針Aでは保存していないが互換のため）
+  const safe = data.map(({recBlob,recType,recDurationMs,recUpdatedAt,recExpiresAt, ...rest})=>rest);
   const blob = new Blob([JSON.stringify({sentences:safe},null,2)],{type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `speaknote_backup_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(a.href);
 };
@@ -798,7 +805,7 @@ $('#file-import').onchange = async (e)=>{
   const text = await f.text();
   try{
     const json = JSON.parse(text);
-    if(!json.sentences || !Array.isArray(json.sentences)) throw new Error('format');
+    if(!json.sentences || Array.isArray(json.sentences)===false) throw new Error('format');
     if(!confirm(`インポートしますか？既存と重複する場合は新規IDで追加します。`)) return;
     for(const r of json.sentences){
       const item = {
@@ -868,7 +875,7 @@ function renderVoiceList(){
   sel.value = list.some(v=>v.name===prev) ? prev : (list[0]?.name || '');
 }
 function pickVoice(){
-  if(!voices || !voices.length) voices = speechSynthesis.getVoices() || [];
+  if(!voices || voices.length===0) voices = speechSynthesis.getVoices() || [];
   if(isAndroid){ if(settings.voiceName){ const byName = voices.find(v=>v.name===settings.voiceName); if(byName) return byName; else return null; } return null; }
   if(settings.voiceName){ const byName = voices.find(v=>v.name===settings.voiceName); if(byName) return byName; }
   if(isIOS){ const s=voices.find(v=>/Samantha/i.test(v.name) && /^en-US/i.test(v.lang)); if(s) return s; }
@@ -1029,8 +1036,7 @@ function speakFlowAndroid(row, opts={}, onEnded){
         u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; highlightAtCharIndex(targetEl, e.charIndex); } };
         const tokens=(targetEl._tokens||tokenizeWords(text)); if(tokens.length>0){
           let idx=0; const wpm=170*(u.rate||1.0); const msPerWord=Math.max(120, Math.round(60000/wpm));
-          fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} if(idx>=tokens.length){clearInterval(fbTimer);return;}
-            const t=tokens[Math.min(idx++, tokens.length-1)]; highlightAtCharIndex(targetEl, t.start); }, msPerWord);
+          fbTimer=setInterval(()=>{ if(usedBoundary){clearInterval(fbTimer);return;} const absIdx=idx; if(absIdx>=tokens.length){clearInterval(fbTimer);return;} highlightAtCharIndex(targetEl, tokens[absIdx].start); idx++; }, msPerWord);
         }
       }
       const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
@@ -1140,7 +1146,6 @@ async function playCurrent(){
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
   if(sh.state==='idle'){
-    // 再生開始
     sh.restarting=false; sh.glitchRetry=false; sh.state='playing'; setToggleLabel(btn,'playing');
     await ensureTtsUnlocked();
     playCurrent();
