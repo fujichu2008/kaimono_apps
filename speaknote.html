@@ -169,7 +169,6 @@
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
     <div class="actions">
-      <!-- 再生/一時停止 統合 -->
       <button class="btn ok" id="sh-toggle">▶︎ 再生</button>
       <button class="btn warn" id="sh-next">⏩ 次の英文</button>
       <span class="badge" id="rate-badge">1.0×</span>
@@ -206,7 +205,6 @@
     <button class="btn right" id="d-close">閉じる</button>
   </div>
 
-  <!-- 録音の再生用（非表示） -->
   <audio id="d-rec-audio" class="hidden"></audio>
 </dialog>
 
@@ -352,6 +350,7 @@
     <button class="btn right" id="help-close">閉じる</button>
   </div>
 </dialog>
+
 
 <dialog id="dlg-lookup" aria-labelledby="lk-title">
   <h3 id="lk-title" style="margin:0 0 6px">単語検索</h3>
@@ -579,13 +578,13 @@ function renderCards(list){
   }
 }
 
-/* ====== 録音（詳細画面｜セッション限定、統合トグル） ====== */
+/* ====== 録音（詳細画面｜iOS timeslice対応） ====== */
 const recState = { mediaRecorder:null, chunks:[], stream:null, url:null, startedAt:0, timerId:null, mime:'' , mode:'idle', longPressTimer:null};
 function formatMs(ms){ const s = Math.floor(ms/1000); const m = Math.floor(s/60); const ss = String(s%60).padStart(2,'0'); return `${m}:${ss}`; }
 function pickAudioMime(){
   try{
     if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function'){
-      // Safari優先：mp4
+      // Safari優先：mp4（Chromeはwebmを再生できるので後方でOK）
       if (MediaRecorder.isTypeSupported('audio/mp4'))  return 'audio/mp4';
       if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
       if (MediaRecorder.isTypeSupported('audio/ogg'))  return 'audio/ogg';
@@ -595,9 +594,7 @@ function pickAudioMime(){
 }
 function stopRecTimer(){ if(recState.timerId){ clearInterval(recState.timerId); recState.timerId = null; } }
 function setRecDeleteVisible(v){ $('#d-rec-delete').classList.toggle('hidden', !v); }
-function setRecToggleLabel({mode}){
-  recState.mode = mode; const b=$('#d-rec-toggle');
-  b.classList.remove('recording');
+function setRecToggleLabel({mode}){ recState.mode = mode; const b=$('#d-rec-toggle'); b.classList.remove('recording');
   if(mode==='recording'){ b.textContent='■ STOP'; b.classList.add('recording'); }
   else if(mode==='playable'){ b.textContent='▶︎ REC再生'; }
   else { b.textContent='● REC'; }
@@ -608,9 +605,8 @@ function clearRecBlob(){
   setRecDeleteVisible(false);
 }
 
-/* ====== 再生トグル（共通UIヘルパ） ====== */
+/* 再生トグル表示のヘルパ */
 function setToggleLabel(btn, state){
-  // state: 'idle'|'playing'|'paused'
   if(!btn) return;
   if(state==='playing'){ btn.textContent='⏸ 一時停止'; btn.classList.add('ok'); }
   else if(state==='paused'){ btn.textContent='▶︎ 再開'; btn.classList.remove('ok'); }
@@ -642,7 +638,7 @@ async function openDetail(id){
   detailPlayState='idle';
   setToggleLabel($('#d-toggle'),'idle');
 
-  // 再生/一時停止トグル（本文）
+  // 本文の再生トグル
   $('#d-toggle').onclick = async ()=>{
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
@@ -691,7 +687,7 @@ async function openDetail(id){
     const start = (e)=>{
       if(recState.mode!=='playable') return;
       if(recState.longPressTimer) clearTimeout(recState.longPressTimer);
-      recState.longPressTimer = setTimeout(()=>{ // 長押し確定 → やり直し
+      recState.longPressTimer = setTimeout(()=>{ // 長押しでやり直し
         try{ $('#d-rec-audio').pause(); }catch(_){}
         clearRecBlob();
         startRecording();
@@ -707,18 +703,22 @@ async function openDetail(id){
     stopAllPlayback();
     try{ $('#d-rec-audio').pause(); }catch(_){}
     if(!('MediaRecorder' in window)){
-      alert('このブラウザは録音に対応していません。最新のChrome/Edge/Safariをご利用ください。');
+      alert('このブラウザは録音に対応していません。最新のSafari/Chrome/Edgeをご利用ください。');
       return;
     }
     let stream=null;
     try{
-      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } });
     }catch(e){
       alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定を確認してください。');
       return;
     }
     const mime = pickAudioMime();
     const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
+
+    // ★ iOS対策：1sごとに確実にチャンクが届くようtimesliceを使う
+    const timeSliceMs = isIOS ? 1000 : 0;
+
     recState.mediaRecorder = mr;
     recState.stream = stream;
     recState.chunks = [];
@@ -730,19 +730,42 @@ async function openDetail(id){
     setRecToggleLabel({mode:'recording'});
 
     mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) recState.chunks.push(ev.data); };
+
     mr.onstop = async ()=>{
-      // 最終チャンク待ち（安全に60〜120ms）
-      await new Promise(r=>setTimeout(r, 100));
+      // ★ iOSで最後のデータが遅れて到着することがあるため、待機＋requestData
+      try{ mr.requestData?.(); }catch(_){}
+      const waitMs = isIOS ? 500 : 120;
+      await sleep(waitMs);
+
+      // さらに安全側：最大1秒、チャンク増加をポーリング
+      const startCount = recState.chunks.length;
+      let tries = 5;
+      while(tries-- > 0){
+        await sleep(200);
+        if(recState.chunks.length > startCount) break;
+      }
+
       stopRecTimer();
       const type = recState.mime || (mr.mimeType || 'audio/webm');
       const blob = new Blob(recState.chunks, { type });
+
       if(!blob.size){
-        alert('録音に失敗しました。もう一度お試しください。（録音時間が短すぎる可能性があります）');
+        // まれにデータが空のことがある。iOSではtimesliceでも発生するケースがあるため、短時間の再試行を一度だけ行う。
+        if (isIOS && startCount===0){
+          console.warn('iOS MediaRecorder zero-blob → auto-retry once');
+          try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
+          recState.mediaRecorder=null; recState.stream=null;
+          // 自動リトライ
+          await sleep(150);
+          return startRecording();
+        }
+        alert('録音に失敗しました。もう一度お試しください。');
         try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
         recState.mediaRecorder=null; recState.stream=null; recState.chunks=[];
         setRecToggleLabel({mode:'idle'}); setRecDeleteVisible(false); $('#d-rec-timer').textContent='';
         return;
       }
+
       // 既存URLの破棄→発行
       clearRecBlob();
       recState.url = URL.createObjectURL(blob);
@@ -754,16 +777,16 @@ async function openDetail(id){
       recState.mediaRecorder=null; recState.stream=null; recState.chunks=[];
     };
 
-    // タイムスライス無しで開始（stop時に1回dataavailable）
-    mr.start();
+    // ★ timesliceありで開始（iOSバグ回避）。他OSは従来通り。
+    if(timeSliceMs>0) mr.start(timeSliceMs); else mr.start();
   }
 
   function stopRecording(){
     const mr = recState.mediaRecorder;
     if(!mr || mr.state!=='recording') return;
-    // 短すぎる停止は無視（誤タップ防止）
+    // 誤タップ防止（400ms未満は無視）
     if (performance.now() - recState.startedAt < 400) return;
-    try{ mr.requestData(); }catch(_){}
+    try{ mr.requestData && mr.requestData(); }catch(_){}
     try{ mr.stop(); }catch(_){}
   }
 
