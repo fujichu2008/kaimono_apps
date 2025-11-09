@@ -1141,8 +1141,9 @@ $('#sh-faster').onclick = ()=>{
   }
 };
 
+
 /* =========================
-   ルックアップ（日本語＋英英の多義）
+   ルックアップ（日本語たっぷり：要約＋定義＋例文）
 ========================= */
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
@@ -1152,38 +1153,131 @@ function setLookupLinks(word){
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
 
-async function fetchJaGloss(word){
+// --- 基本翻訳（短文向け） ---
+async function translateJa(text){
+  if(!text) return '';
   try{
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|ja`;
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|ja`;
     const res = await fetch(url, {mode:'cors'});
     if(!res.ok) throw new Error('bad');
     const json = await res.json();
-    const txt = json?.responseData?.translatedText || '';
-    return (txt || '').replace(/\s+/g,' ').trim();
-  }catch(e){
-    return '';
-  }
+    return (json?.responseData?.translatedText || '').replace(/\s+/g,' ').trim();
+  }catch(e){ return ''; }
 }
-async function fetchEnSenses(word){
+
+// --- バルク翻訳（定義を一気に訳して情報量アップ） ---
+async function translateBulkToJa(lines){
+  // 行ごとに翻訳：API制限を考慮して最大5〜6件ずつ
+  const chunks=[]; const size=5;
+  for(let i=0;i<lines.length;i+=size){ chunks.push(lines.slice(i,i+size)); }
+  const out=[];
+  for(const ch of chunks){
+    // 1件ずつ（精度優先）
+    // ※MyMemoryは改行分割より1件ずつのほうが失敗しにくい
+    //   速度より確実性を優先
+    /* eslint-disable no-await-in-loop */
+    for(const s of ch){ out.push(await translateJa(s)); }
+    /* eslint-enable no-await-in-loop */
+  }
+  return out;
+}
+
+// --- 英英定義・例文の取得 ---
+async function fetchEnDict(word){
   try{
     const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`;
     const res = await fetch(url, {mode:'cors'});
     if(!res.ok) throw new Error('bad');
     const json = await res.json();
-    const out = [];
-    const head = Array.isArray(json)? json[0] : null;
+    const head = Array.isArray(json) ? json[0] : null;
+    const phon = head?.phonetic || '';
     const meanings = head?.meanings || [];
+    const defs=[];
     for(const m of meanings){
-      const pos = m.partOfSpeech || '';
-      const defs = (m.definitions||[]).slice(0,3).map(d=>d.definition).filter(Boolean);
-      if(defs.length){
-        out.push({pos, defs});
+      const pos = m.partOfSpeech||'';
+      for(const d of (m.definitions||[])){
+        if(d?.definition){
+          defs.push({
+            pos,
+            def: d.definition,
+            ex: d.example || ''
+          });
+        }
       }
     }
-    return out.slice(0,5);
-  }catch(e){
-    return [];
-  }
+    return { phonetic: phon, defs };
+  }catch(e){ return { phonetic:'', defs:[] }; }
+}
+
+// --- Wiktionary(ja) の簡易要約（取れたときだけ＋追加情報） ---
+async function fetchJaWiktionarySnippet(word){
+  try{
+    const api = `https://ja.wiktionary.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&format=json&origin=*&titles=${encodeURIComponent(word)}`;
+    const res = await fetch(api, {mode:'cors'});
+    if(!res.ok) throw new Error('bad');
+    const json = await res.json();
+    const pages = json?.query?.pages||{};
+    const first = Object.values(pages)[0];
+    const ex = (first?.extract||'').trim();
+    // 英単語の項目が存在しない場合は空
+    if(!ex) return '';
+    // 長すぎる場合は最初の300字程度
+    return ex.length>360 ? ex.slice(0,340)+'…' : ex;
+  }catch(e){ return ''; }
+}
+
+function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, phonetic, jaWiki}){
+  const body = $('#lk-body');
+  const safeWord = escapeHTML(word);
+  const hasDefs = enDefs.length>0;
+
+  // 上部：見出し＋発音
+  const head = `
+    <div style="font-size:16px;margin-bottom:6px">
+      <strong style="font-size:18px">${safeWord}</strong>
+      ${phonetic ? `<span class="tiny" style="margin-left:8px">/${escapeHTML(phonetic)}/</span>` : ''}
+    </div>
+  `;
+
+  // 日本語サマリー（MyMemory）＋ Wiktionary 補足
+  const summary = `
+    <div style="font-size:15px;line-height:1.9;margin:6px 0">
+      <strong>日本語まとめ：</strong>
+      ${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}
+      ${jaWiki ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>` : ''}
+    </div>
+  `;
+
+  // 日本語の定義（英英→和訳）
+  const defsJa = hasDefs
+    ? `<div style="margin-top:8px">
+         <div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div>
+         <ol style="margin:0 0 6px 20px; line-height:1.85">
+           ${jaDefs.map((d,i)=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
+         </ol>
+       </div>`
+    : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
+
+  // 例文（日本語訳付き）
+  const exJa = jaExamples.length
+    ? `<div style="margin-top:10px">
+         <div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div>
+         <ul style="margin:0 0 6px 18px; line-height:1.85">
+           ${jaExamples.map((item)=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
+         </ul>
+       </div>` : '';
+
+  // 英英原文（確認用に折りたたみ）
+  const defsEn = hasDefs
+    ? `<details style="margin-top:8px">
+         <summary class="tiny">英英の原文を表示</summary>
+         <ol style="margin:6px 0 6px 20px; line-height:1.8">
+           ${enDefs.map(d=>`<li>${escapeHTML(d.pos ? `[${d.pos}] ` : '')}${escapeHTML(d.def)}</li>`).join('')}
+         </ol>
+       </details>`
+    : '';
+
+  body.innerHTML = head + summary + defsJa + exJa + defsEn;
 }
 
 async function openLookup(word){
@@ -1191,48 +1285,54 @@ async function openLookup(word){
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
+
   try{
-    const [ja, senses] = await Promise.all([
-      fetchJaGloss(word),
-      fetchEnSenses(word)
-    ]);
-    renderLookupContent(word, ja, senses);
+    // 1) 英英辞書（定義・例文）
+    const dict = await fetchEnDict(word);
+
+    // 2) 日本語サマリー（短文直訳）
+    const jaSummary = await translateJa(word + ': ' + (dict.defs[0]?.def || ''));
+
+    // 3) 定義を日本語に「大量に」変換（最大12件）
+    const topDefs = dict.defs.slice(0, 12);
+    const enDefLines = topDefs.map(d => (d.pos?`[${d.pos}] `:'') + d.def);
+    const jaDefs = await translateBulkToJa(enDefLines);
+
+    // 4) 例文（最大5件）を和訳付きで
+    const exPairs = [];
+    for(const d of topDefs){
+      if(d.ex) exPairs.push(d.ex);
+      if(exPairs.length>=5) break;
+    }
+    const jaExList = await translateBulkToJa(exPairs);
+    const jaExamples = exPairs.map((en, i)=>({ en, ja: jaExList[i]||'' }));
+
+    // 5) Wiktionary(ja) の短い補足
+    const jaWiki = await fetchJaWiktionarySnippet(word);
+
+    renderLookupContentRich({
+      word,
+      jaSummary,
+      enDefs: topDefs,
+      jaDefs,
+      jaExamples,
+      phonetic: dict.phonetic,
+      jaWiki
+    });
   }catch(e){
-    renderLookupContent(word, '', []);
+    // フォールバック（最低限）
+    const ja = await translateJa(word);
+    $('#lk-body').innerHTML =
+      `<div style="font-size:16px;margin-bottom:6px"><strong>${escapeHTML(word)}</strong></div>
+       <div class="tiny" style="margin-top:6px">詳細の取得に失敗しました。下のリンクから確認してください。</div>
+       <div style="margin-top:8px"><strong>日本語：</strong>${escapeHTML(ja||'')}</div>`;
   }
-}
-
-function renderLookupContent(word, jaText, senses=[]){
-  const body = $('#lk-body');
-  const safeWord = escapeHTML(word);
-  const ja = escapeHTML(jaText||'');
-  const top = `
-    <div style="font-size:16px;margin-bottom:6px">
-      <strong>${safeWord}</strong>
-    </div>
-  `;
-  const jaBlock = ja
-    ? `<div style="font-size:15px;line-height:1.9;margin:6px 0"><strong>日本語：</strong>${ja}</div>`
-    : `<div class="tiny" style="margin:6px 0">日本語の取得に失敗しました。下のリンクから確認してください。</div>`;
-
-  const enBlock = (senses&&senses.length)
-    ? `<div style="margin-top:8px">
-         <div class="tiny" style="margin-bottom:4px"><strong>英英（主な定義）</strong></div>
-         <ul style="margin:0 0 6px 18px; line-height:1.7">
-           ${senses.map(s=>{
-             const pos = s.pos ? `<em>[${escapeHTML(s.pos)}]</em> ` : '';
-             const defs = s.defs.map(d=>`<li>${escapeHTML(d)}</li>`).join('');
-             return `<li>${pos}<ul>${defs}</ul></li>`;
-           }).join('')}
-         </ul>
-       </div>`
-    : `<div class="tiny" style="margin-top:6px">英英定義の取得に失敗しました。</div>`;
-
-  body.innerHTML = top + jaBlock + enBlock;
 }
 
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
+
+
 
 /* =========================
    ブート
