@@ -168,13 +168,11 @@
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
 
-    <!-- 1行目：再生・次・（右端）一覧へ戻る -->
     <div class="actions" id="sh-row-1">
       <button class="btn ok" id="sh-toggle">▶︎ 再生</button>
       <button class="btn warn" id="sh-next">⏩ 次の英文</button>
       <button class="btn right" id="sh-back">一覧へ戻る</button>
     </div>
-    <!-- 2行目：速度系（左に集約） -->
     <div class="actions" id="sh-row-2">
       <button class="btn" id="sh-slower">− 速度</button>
       <span class="badge" id="rate-badge">1.0×</span>
@@ -197,7 +195,6 @@
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
 
   <div class="divider"></div>
-  <!-- 上段：再生とREC（統合ボタン） -->
   <div class="actions" id="row-play-rec">
     <button class="btn" id="d-toggle">▶︎ 再生</button>
 
@@ -206,7 +203,6 @@
 
     <button class="btn danger hidden" id="d-rec-delete">REC削除</button>
   </div>
-  <!-- 下段：編集／削除（左）と閉じる（右） -->
   <div class="actions" id="row-edit-close" style="justify-content:space-between">
     <div>
       <button class="btn" id="d-edit">✎ 編集</button>
@@ -394,8 +390,7 @@ const isAndroid = /Android/i.test(UA);
 /* =========================
    Wake Lock（フォールバック付）
 ========================= */
-const KeepAwake = (()=>{
-  let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
+const KeepAwake = (()=>{ let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
   async function requestWakeLock(){ if(!('wakeLock' in navigator)) throw new Error('no_wakelock'); wakeLock = await navigator.wakeLock.request('screen'); }
   function ensureVideoNode(){ if(videoEl) return; videoEl=document.createElement('video'); videoEl.muted=true; videoEl.loop=true; videoEl.playsInline=true; Object.assign(videoEl.style,{position:'fixed',width:'1px',height:'1px',left:'-9999px',top:'-9999px'}); document.body.appendChild(videoEl); }
   function ensureCanvasStream(){ if(canvas&&stream) return; canvas=document.createElement('canvas'); canvas.width=1; canvas.height=1; const ctx=canvas.getContext('2d'); ctx.fillStyle='#000'; ctx.fillRect(0,0,1,1); stream=canvas.captureStream(1); }
@@ -445,9 +440,7 @@ const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsucce
 /* =========================
    画面遷移/ナビ
 ========================= */
-function stopAllPlayback(){
-  try { speechSynthesis.cancel(); } catch(_) {}
-}
+function stopAllPlayback(){ try { speechSynthesis.cancel(); } catch(_) {} }
 const views = { create: $('#view-create'), list: $('#view-list'), shadow: $('#view-shadow') };
 function closeAllDialogs(){ for(const id of ['#dlg-detail','#dlg-settings','#dlg-help','#dlg-lookup']){ try{ const d=$(id); if(d?.open) d.close(); }catch(_){} } }
 function show(view){ stopAllPlayback(); KeepAwake.disable(); closeAllDialogs(); Object.values(views).forEach(v=>v.classList.remove('active')); views[view].classList.add('active'); }
@@ -606,20 +599,15 @@ async function ensureTtsUnlocked(){
     await new Promise(res=>{
       let done=false; const finish=()=>{ if(!done){ done=true; res(); } };
       warm.onend = finish; warm.onerror = finish;
-      setTimeout(()=>{ try{ speechSynthesis.speak(warm); }catch(_){ finish(); } }, 80);
-      setTimeout(finish, 1200);
+      setTimeout(()=>{ try{ speechSynthesis.speak(warm); }catch(_){ finish(); } }, 50);
+      setTimeout(finish, 900);
     });
   } finally { ttsWarmed = true; }
 }
 
-/* ---- 単一TTSエンジン（途中再開に対応） ---- */
+/* ---- 単一TTSエンジン ---- */
 class SpeakEngine {
-  constructor(){
-    this.state='idle';
-    this.session=0;
-    this._lastBoundary=0;   // 直近の絶対charIndex
-    this._ev={};
-  }
+  constructor(){ this.state='idle'; this.session=0; this._lastBoundary=0; this._ev={}; }
   async play(script, {targetEl, rate, startCharIndex=0}={}){
     if(this.state==='playing'){ await this.stop(); }
     this.session++; const my = this.session;
@@ -627,8 +615,8 @@ class SpeakEngine {
     await ensureTtsUnlocked(); await loadVoices();
     const v = pickVoice();
 
-    const speakOne = (text,langHint, {baseOffset=0} = {})=>{
-      return new Promise(resolve=>{
+    const speakOne = (text,langHint,{baseOffset=0}={})=>{
+      return new Promise(async resolve=>{
         if(my!==this.session) return resolve();
         if(!text){ return resolve(); }
         const u=new SpeechSynthesisUtterance(text);
@@ -662,12 +650,25 @@ class SpeakEngine {
         u.onerror=()=>{ cleanup(); resolve(); };
 
         try { speechSynthesis.cancel(); } catch(e){}
-        const delay = isIOS ? 120 : 40;
-        setTimeout(()=>{ try { if(my===this.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, delay);
+        const delay = isIOS ? 140 : 40; // iOSでわずかに余裕
+        setTimeout(async ()=>{
+          try {
+            if(my!==this.session) return resolve();
+            speechSynthesis.speak(u);
+            // 発話開始確認の軽いリトライ（iOS不発対策）
+            setTimeout(()=>{
+              if(my===this.session && !speechSynthesis.speaking){
+                try{ speechSynthesis.cancel(); }catch(_){}
+                try{ speechSynthesis.speak(u); }catch(_){}
+              }
+            }, isIOS?180:100);
+          } catch(e) {
+            setTimeout(()=>resolve(), 160);
+          }
+        }, delay);
       });
     };
 
-    // 文字インデックスを含む単語の開始に寄せてスライス
     function sliceFromChar(text, charIndex){
       if(!text) return {slice:text, base:0};
       const toks = tokenizeWords(text);
@@ -691,19 +692,19 @@ class SpeakEngine {
         const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
         for(let i=0;i<rep;i++){
           if(my!==this.session) return;
-          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
-          if(i<rep-1 && gap){ await sleep(gap);}
+          await speakOne(i===0?slice:en,'en-US',{baseOffset:i===0?base:0});
+          if(i<rep-1 && gap){ await sleep(gap); }
         }
       }else if(script.order==='ja'){
         await speakOne(ja,'ja-JP');
-      }else{ // both
+      }else{
         if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
         const startAt = Number(startCharIndex||script.startCharIndex||0);
         const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
         for(let i=0;i<rep;i++){
           if(my!==this.session) return;
-          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
-          if(gap){ await sleep(gap);}
+          await speakOne(i===0?slice:en,'en-US',{baseOffset:i===0?base:0});
+          if(gap){ await sleep(gap); }
         }
         if(ja){ await speakOne(ja,'ja-JP'); }
       }
@@ -727,7 +728,7 @@ class SpeakEngine {
 const speakEngine = new SpeakEngine();
 
 /* =========================
-   iOS初回タップで必ずウォームアップ（一覧→詳細の無音対策）
+   iOS初回タップで必ずウォームアップ
 ========================= */
 let firstUserGestureDone = false;
 function oneTimeWarmup(){
@@ -794,7 +795,13 @@ function renderCards(list){
     const cats=(r.categories||[]).map(c=>`<span class="chip">${escapeHTML(c)}</span>`).join(' ');
     const tags=(r.tags||[]).map(t=>`<span class="chip">#${escapeHTML(t)}</span>`).join(' ');
     card.innerHTML = `<h3>${escapeHTML(r.scene || '(場面未設定)')}</h3><div class="chips">${cats}</div><div class="chips" style="margin-top:4px">${tags}</div>`;
-    card.onclick = ()=> openDetail(r.id);
+    card.onclick = async ()=>{
+      // ★ iOS対策：カードタップのユーザー操作中に解錠してから詳細へ
+      oneTimeWarmup();
+      await ensureTtsUnlocked();
+      await loadVoices();
+      openDetail(r.id);
+    };
     root.appendChild(card);
   }
 }
@@ -823,7 +830,7 @@ class RecEngine {
     const mime = this.pickAudioMime();
     const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
     this.mediaRecorder = mr; this.stream=stream; this.chunks=[]; this.mime=mime; this.startedAt=performance.now(); this.state='recording';
-    const slice = isIOS ? 1000 : 250; // iOSは長時間chunk化で安定しやすい
+    const slice = isIOS ? 1000 : 250;
     mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) this.chunks.push(ev.data); };
     return new Promise((resolve)=>{
       mr.onstart = ()=>{ this._tickStart(); resolve(); };
@@ -877,7 +884,7 @@ class RecEngine {
 const recEngine = new RecEngine();
 
 /* =========================
-   詳細ダイアログ
+   詳細ダイアログ（iOS再生の確実化を強化）
 ========================= */
 let currentDetailId=null;
 
@@ -888,7 +895,6 @@ function setPlayToggleLabel(btn, state){
   else { btn.textContent='▶︎ 再生'; btn.classList.remove('ok'); }
 }
 function setRecButtonMode(mode){
-  // mode: 'idle' (● REC) | 'recording' (■ STOP) | 'ready' (▶︎ REC再生)
   const b=$('#d-rec-main'); if(!b) return;
   if(mode==='recording'){ b.textContent='■ STOP'; b.classList.add('recording'); }
   else if(mode==='ready'){ b.textContent='▶︎ REC再生'; b.classList.remove('recording'); }
@@ -897,6 +903,11 @@ function setRecButtonMode(mode){
 function toggleRecDeleteVis(show){ $('#d-rec-delete').classList.toggle('hidden', !show); }
 
 async function openDetail(id){
+  // ★ iOS: ダイアログ表示直前にも解錠＆音声読み込みを再確認
+  oneTimeWarmup();
+  await ensureTtsUnlocked();
+  await loadVoices();
+
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
   $('#d-scene').textContent=row.scene||'(場面未設定)';
@@ -917,9 +928,17 @@ async function openDetail(id){
 
   // 再生トグル
   $('#d-toggle').onclick = async ()=>{
+    // ★ 再生ボタン押下直前にも念押しで解錠＋voiceロード
     oneTimeWarmup();
+    await ensureTtsUnlocked();
+    await loadVoices();
+
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
+
+    // iOS: ダイアログ直後はごく短いディレイを置くと安定
+    if(isIOS) await sleep(60);
+
     if(speakEngine.state==='idle'){
       renderSpeakText(targetEl, row.english||''); targetEl.scrollTop=0;
       setPlayToggleLabel(btn,'playing');
@@ -928,7 +947,6 @@ async function openDetail(id){
         { targetEl }
       );
       if(speakEngine.state!=='paused'){ setPlayToggleLabel(btn,'idle'); }
-      // 再生回数加算
       const fresh = await getOne(currentDetailId);
       if(fresh){
         fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
@@ -938,6 +956,8 @@ async function openDetail(id){
     }else if(speakEngine.state==='playing'){
       speakEngine.pause(); setPlayToggleLabel(btn,'paused');
     }else{
+      // resume前にも念のためensure
+      await ensureTtsUnlocked(); await loadVoices();
       speakEngine.resume(); setPlayToggleLabel(btn,'playing');
     }
   };
@@ -945,10 +965,9 @@ async function openDetail(id){
   // REC単一ボタン（短押し：REC/STOP/再生、長押し：やり直し）
   const recBtn = $('#d-rec-main');
   let longPressTimer=null, longPressed=false;
-
   function bindRecHandlers(){
-    recBtn.onpointerdown = (e)=>{ longPressed=false; longPressTimer=setTimeout(()=>{ longPressed=true; handleRecLongPress(); }, 700); };
-    recBtn.onpointerup = (e)=>{ if(longPressTimer) clearTimeout(longPressTimer); if(!longPressed){ handleRecShortPress(); } };
+    recBtn.onpointerdown = ()=>{ longPressed=false; longPressTimer=setTimeout(()=>{ longPressed=true; handleRecLongPress(); }, 700); };
+    recBtn.onpointerup = ()=>{ if(longPressTimer) clearTimeout(longPressTimer); if(!longPressed){ handleRecShortPress(); } };
     recBtn.onpointerleave = ()=>{ if(longPressTimer) clearTimeout(longPressTimer); };
     recBtn.oncontextmenu = (e)=>{ e.preventDefault(); };
   }
@@ -1067,7 +1086,7 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング（途中から継続できる速度変更）
+   シャドーイング
 ========================= */
 const sh = { list: [], index: 0, rate: 1.0, container: null, opened:false, _lastAbs:0, _boundHook:false };
 async function prepareShadow(){
@@ -1081,7 +1100,6 @@ async function prepareShadow(){
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   sh.opened = true; setPlayToggleLabel($('#sh-toggle'),'idle');
 
-  // 再生境界の絶対位置を保持（速度変更時の切り戻しに使用）
   if(!sh._boundHook){
     speakEngine.on('boundary', (abs)=>{ sh._lastAbs = abs||0; });
     sh._boundHook = true;
@@ -1089,7 +1107,7 @@ async function prepareShadow(){
 }
 $('#sh-back').onclick = ()=>{ sh.opened=false; speakEngine.stop(); stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent=''; setActiveNav('nav-list'); show('list'); refreshList(); };
 async function playCurrentShadow(opts={}){
-  const { noAdvance=false, startCharIndex=0 } = opts; // ★速度変更時は startCharIndex を渡す
+  const { noAdvance=false, startCharIndex=0 } = opts;
   const row = sh.list[sh.index];
   const text=(row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
@@ -1100,15 +1118,13 @@ async function playCurrentShadow(opts={}){
     { targetEl: sh.container, rate: sh.rate }
   );
   if(!sh.opened) return;
-  if(!noAdvance){
-    sh.index = (sh.index+1) % sh.list.length;
-  }
+  if(!noAdvance){ sh.index = (sh.index+1) % sh.list.length; }
   if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#sh-toggle'),'idle'); }
 }
 
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
-  oneTimeWarmup();
+  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices();
   if(speakEngine.state==='idle'){
     setPlayToggleLabel(btn,'playing');
     await playCurrentShadow();
@@ -1116,6 +1132,7 @@ $('#sh-toggle').onclick = async ()=>{
   }else if(speakEngine.state==='playing'){
     speakEngine.pause(); setPlayToggleLabel(btn,'paused');
   }else{
+    await ensureTtsUnlocked(); await loadVoices();
     speakEngine.resume(); setPlayToggleLabel(btn,'playing');
   }
 };
@@ -1141,9 +1158,8 @@ $('#sh-faster').onclick = ()=>{
   }
 };
 
-
 /* =========================
-   ルックアップ（日本語たっぷり：要約＋定義＋例文）
+   ルックアップ（日本語たっぷり）
 ========================= */
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
@@ -1152,8 +1168,6 @@ function setLookupLinks(word){
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
-
-// --- 基本翻訳（短文向け） ---
 async function translateJa(text){
   if(!text) return '';
   try{
@@ -1164,25 +1178,15 @@ async function translateJa(text){
     return (json?.responseData?.translatedText || '').replace(/\s+/g,' ').trim();
   }catch(e){ return ''; }
 }
-
-// --- バルク翻訳（定義を一気に訳して情報量アップ） ---
 async function translateBulkToJa(lines){
-  // 行ごとに翻訳：API制限を考慮して最大5〜6件ずつ
   const chunks=[]; const size=5;
   for(let i=0;i<lines.length;i+=size){ chunks.push(lines.slice(i,i+size)); }
   const out=[];
   for(const ch of chunks){
-    // 1件ずつ（精度優先）
-    // ※MyMemoryは改行分割より1件ずつのほうが失敗しにくい
-    //   速度より確実性を優先
-    /* eslint-disable no-await-in-loop */
     for(const s of ch){ out.push(await translateJa(s)); }
-    /* eslint-enable no-await-in-loop */
   }
   return out;
 }
-
-// --- 英英定義・例文の取得 ---
 async function fetchEnDict(word){
   try{
     const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`;
@@ -1197,19 +1201,13 @@ async function fetchEnDict(word){
       const pos = m.partOfSpeech||'';
       for(const d of (m.definitions||[])){
         if(d?.definition){
-          defs.push({
-            pos,
-            def: d.definition,
-            ex: d.example || ''
-          });
+          defs.push({ pos, def: d.definition, ex: d.example || '' });
         }
       }
     }
     return { phonetic: phon, defs };
   }catch(e){ return { phonetic:'', defs:[] }; }
 }
-
-// --- Wiktionary(ja) の簡易要約（取れたときだけ＋追加情報） ---
 async function fetchJaWiktionarySnippet(word){
   try{
     const api = `https://ja.wiktionary.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&format=json&origin=*&titles=${encodeURIComponent(word)}`;
@@ -1219,46 +1217,33 @@ async function fetchJaWiktionarySnippet(word){
     const pages = json?.query?.pages||{};
     const first = Object.values(pages)[0];
     const ex = (first?.extract||'').trim();
-    // 英単語の項目が存在しない場合は空
     if(!ex) return '';
-    // 長すぎる場合は最初の300字程度
     return ex.length>360 ? ex.slice(0,340)+'…' : ex;
   }catch(e){ return ''; }
 }
-
 function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, phonetic, jaWiki}){
   const body = $('#lk-body');
   const safeWord = escapeHTML(word);
   const hasDefs = enDefs.length>0;
-
-  // 上部：見出し＋発音
   const head = `
     <div style="font-size:16px;margin-bottom:6px">
       <strong style="font-size:18px">${safeWord}</strong>
       ${phonetic ? `<span class="tiny" style="margin-left:8px">/${escapeHTML(phonetic)}/</span>` : ''}
-    </div>
-  `;
-
-  // 日本語サマリー（MyMemory）＋ Wiktionary 補足
+    </div>`;
   const summary = `
     <div style="font-size:15px;line-height:1.9;margin:6px 0">
       <strong>日本語まとめ：</strong>
       ${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}
       ${jaWiki ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>` : ''}
-    </div>
-  `;
-
-  // 日本語の定義（英英→和訳）
+    </div>`;
   const defsJa = hasDefs
     ? `<div style="margin-top:8px">
          <div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div>
          <ol style="margin:0 0 6px 20px; line-height:1.85">
-           ${jaDefs.map((d,i)=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
+           ${jaDefs.map((d)=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
          </ol>
        </div>`
     : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
-
-  // 例文（日本語訳付き）
   const exJa = jaExamples.length
     ? `<div style="margin-top:10px">
          <div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div>
@@ -1266,61 +1251,33 @@ function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, p
            ${jaExamples.map((item)=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
          </ul>
        </div>` : '';
-
-  // 英英原文（確認用に折りたたみ）
   const defsEn = hasDefs
     ? `<details style="margin-top:8px">
          <summary class="tiny">英英の原文を表示</summary>
          <ol style="margin:6px 0 6px 20px; line-height:1.8">
            ${enDefs.map(d=>`<li>${escapeHTML(d.pos ? `[${d.pos}] ` : '')}${escapeHTML(d.def)}</li>`).join('')}
          </ol>
-       </details>`
-    : '';
-
+       </details>` : '';
   body.innerHTML = head + summary + defsJa + exJa + defsEn;
 }
-
 async function openLookup(word){
   if(!word) return;
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
-
   try{
-    // 1) 英英辞書（定義・例文）
     const dict = await fetchEnDict(word);
-
-    // 2) 日本語サマリー（短文直訳）
     const jaSummary = await translateJa(word + ': ' + (dict.defs[0]?.def || ''));
-
-    // 3) 定義を日本語に「大量に」変換（最大12件）
     const topDefs = dict.defs.slice(0, 12);
     const enDefLines = topDefs.map(d => (d.pos?`[${d.pos}] `:'') + d.def);
     const jaDefs = await translateBulkToJa(enDefLines);
-
-    // 4) 例文（最大5件）を和訳付きで
     const exPairs = [];
-    for(const d of topDefs){
-      if(d.ex) exPairs.push(d.ex);
-      if(exPairs.length>=5) break;
-    }
+    for(const d of topDefs){ if(d.ex) exPairs.push(d.ex); if(exPairs.length>=5) break; }
     const jaExList = await translateBulkToJa(exPairs);
     const jaExamples = exPairs.map((en, i)=>({ en, ja: jaExList[i]||'' }));
-
-    // 5) Wiktionary(ja) の短い補足
     const jaWiki = await fetchJaWiktionarySnippet(word);
-
-    renderLookupContentRich({
-      word,
-      jaSummary,
-      enDefs: topDefs,
-      jaDefs,
-      jaExamples,
-      phonetic: dict.phonetic,
-      jaWiki
-    });
+    renderLookupContentRich({ word, jaSummary, enDefs: topDefs, jaDefs, jaExamples, phonetic: dict.phonetic, jaWiki });
   }catch(e){
-    // フォールバック（最低限）
     const ja = await translateJa(word);
     $('#lk-body').innerHTML =
       `<div style="font-size:16px;margin-bottom:6px"><strong>${escapeHTML(word)}</strong></div>
@@ -1328,11 +1285,8 @@ async function openLookup(word){
        <div style="margin-top:8px"><strong>日本語：</strong>${escapeHTML(ja||'')}</div>`;
   }
 }
-
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
-
-
 
 /* =========================
    ブート
