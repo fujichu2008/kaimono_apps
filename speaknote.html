@@ -88,6 +88,13 @@
   .lookup-phon{opacity:.9}
   .lookup-sense{margin:6px 0;padding-left:1em;text-indent:-1em}
   .lookup-ex{opacity:.9;margin-left:1em}
+
+  /* RECボタンの視覚強調 */
+  #d-rec.recording{
+    border-color:#ff4d4f;
+    box-shadow:0 0 0 2px rgba(255,77,79,.15) inset;
+    background:linear-gradient(180deg,#5a1313,#2b0f0f);
+  }
 </style>
 </head>
 <body>
@@ -197,10 +204,19 @@
   <div class="actions">
     <button class="btn" id="d-play">▶︎ 再生</button>
     <button class="btn" id="d-pause">⏸ 一時停止/再開</button>
+
+    <!-- 追加：録音/再生 -->
+    <button class="btn" id="d-rec">● REC</button>
+    <button class="btn" id="d-rec-play" disabled>▶︎ REC再生</button>
+    <span class="tiny" id="d-rec-timer" style="margin-left:6px;min-width:72px;display:inline-block"></span>
+
     <button class="btn" id="d-edit">✎ 編集</button>
     <button class="btn danger" id="d-del">🗑 削除</button>
     <button class="btn right" id="d-close">閉じる</button>
   </div>
+
+  <!-- 追加：録音の再生用（非表示） -->
+  <audio id="d-rec-audio" class="hidden"></audio>
 </dialog>
 
 <dialog id="dlg-settings">
@@ -439,7 +455,7 @@ $('#nav-create').onclick = () => { setActiveNav('nav-create'); show('create'); }
 $('#nav-list').onclick   = () => { setActiveNav('nav-list');   show('list'); refreshList(); };
 $('#nav-settings').onclick = () => { stopAllPlayback(); setActiveNav(); $('#dlg-settings').showModal(); openSettingsFields(); };
 $('#nav-help').onclick = () => { stopAllPlayback(); $('#dlg-help').showModal(); };
-$('#help-close').onclick = () => { stopAllPlayback(); $('#dlg-help').close(); };
+$('#help-close')?.addEventListener('click', ()=>{ stopAllPlayback(); $('#dlg-help').close(); });
 $('#nav-shadow').onclick = () => { setActiveNav('nav-shadow'); prepareShadow(); show('shadow'); };
 function setActiveNav(id){ $$('nav button').forEach(b=>b.classList.remove('active')); if(id) $('#'+id).classList.add('active'); }
 
@@ -570,6 +586,40 @@ function renderCards(list){
   }
 }
 
+/* ====== Recording (Detail dialog only) ====== */
+const recState = {
+  mediaRecorder: null,
+  chunks: [],
+  stream: null,
+  url: null,
+  startedAt: 0,
+  timerId: null,
+  durationMs: 0,
+  mime: ''
+};
+function formatMs(ms){ const s = Math.floor(ms/1000); const m = Math.floor(s/60); const ss = String(s%60).padStart(2,'0'); return `${m}:${ss}`; }
+function pickAudioMime(){
+  try{
+    if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function'){
+      if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+      if (MediaRecorder.isTypeSupported('audio/mp4'))  return 'audio/mp4';
+      if (MediaRecorder.isTypeSupported('audio/ogg'))  return 'audio/ogg';
+    }
+  }catch(_){}
+  return '';
+}
+function stopRecTimer(){ if(recState.timerId){ clearInterval(recState.timerId); recState.timerId = null; } }
+function updateRecUI({recording=false, hasBlob=false}={}){
+  const bRec = $('#d-rec');
+  const bPlay = $('#d-rec-play');
+  const t = $('#d-rec-timer');
+  if(!bRec || !bPlay || !t) return;
+  bRec.textContent = recording ? '■ STOP' : '● REC';
+  bRec.classList.toggle('recording', recording);
+  bPlay.disabled = !hasBlob;
+  t.textContent = recording ? formatMs(performance.now() - recState.startedAt) : (hasBlob ? `録音あり` : ``);
+}
+
 /* Detail dialog */
 let currentDetailId=null;
 async function openDetail(id){
@@ -578,38 +628,120 @@ async function openDetail(id){
   $('#d-scene').textContent=row.scene||'(場面未設定)';
   const meta=[]; if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
   meta.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
+  if(row.recBlob) meta.push(`<span class="flag">録音あり</span>`);
   $('#d-meta').innerHTML=meta.join(' ');
   renderSpeakText($('#d-en'), row.english||''); $('#d-en').scrollTop=0;
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  // ====== ANDROID: 完全同期の三段プライミング ======
+  /* --- 録音UIの初期化と配線 --- */
+  const recBtn = $('#d-rec');
+  const recPlayBtn = $('#d-rec-play');
+  const recTimer = $('#d-rec-timer');
+  const recAudio = $('#d-rec-audio');
+  // 既存URLの掃除
+  if (recState.url) { try{ URL.revokeObjectURL(recState.url); }catch(_){} recState.url=null; }
+  stopRecTimer();
+  updateRecUI({recording:false, hasBlob: !!row.recBlob});
+
+  // 録音開始/停止
+  recBtn.onclick = async ()=>{
+    if (recState.mediaRecorder && recState.mediaRecorder.state === 'recording'){
+      try{ recState.mediaRecorder.stop(); }catch(_){}
+      return;
+    }
+    stopAllPlayback();
+    try{ recAudio.pause(); }catch(_){}
+    if(!('MediaRecorder' in window)){
+      alert('このブラウザは録音に対応していません。最新のChrome/Edge/Safariをご利用ください。');
+      return;
+    }
+    let stream=null;
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    }catch(e){
+      alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定を確認してください。');
+      return;
+    }
+    const mime = pickAudioMime();
+    const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
+    recState.mediaRecorder = mr;
+    recState.stream = stream;
+    recState.chunks = [];
+    recState.mime = mime;
+    recState.startedAt = performance.now();
+    recTimer.textContent = '0:00';
+    updateRecUI({recording:true, hasBlob:!!row.recBlob});
+
+    mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) recState.chunks.push(ev.data); };
+    mr.onstop = async ()=>{
+      stopRecTimer();
+      try{
+        const blob = new Blob(recState.chunks, { type: recState.mime || (mr.mimeType || 'audio/webm') });
+        row.recBlob = blob;
+        row.recType = blob.type || '';
+        row.recUpdatedAt = now();
+        row.recDurationMs = Math.max(0, Math.round(performance.now() - recState.startedAt));
+        await updateSentence(row);
+        updateRecUI({recording:false, hasBlob:true});
+        if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } }
+        recState.url = URL.createObjectURL(blob);
+        recAudio.src = recState.url;
+        const m=[]; if(row.categories?.length) m.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+        m.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
+        m.push(`<span class="flag">録音あり</span>`);
+        $('#d-meta').innerHTML=m.join(' ');
+      }finally{
+        try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
+        recState.mediaRecorder=null; recState.stream=null; recState.chunks=[];
+      }
+    };
+    mr.start(250);
+    recState.timerId = setInterval(()=>{
+      const ms = performance.now() - recState.startedAt;
+      recTimer.textContent = formatMs(ms);
+    }, 250);
+  };
+
+  // 録音の再生
+  recPlayBtn.onclick = async ()=>{
+    stopAllPlayback();
+    try{ recAudio.pause(); }catch(_){}
+    if(!recState.url){
+      if(row.recBlob){
+        try{ recState.url = URL.createObjectURL(row.recBlob); }catch(_){}
+      }
+    }
+    if(!recState.url){
+      alert('録音が見つかりません。まずRECで録音してください。');
+      return;
+    }
+    try{
+      recAudio.src = recState.url;
+      await recAudio.play();
+    }catch(e){
+      alert('再生に失敗しました。');
+    }
+  };
+
+  /* ====== ANDROID: 完全同期の三段プライミング（既存） ====== */
   function androidGestureSpeak(row, targetEl){
-    // ① キュー初期化（同期）
     try{ speechSynthesis.cancel(); }catch(_){}
-    // ② AudioContext resume（同期）
     try{
       if (window.AudioContext||window.webkitAudioContext){
         if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
         audioCtx.resume?.();
       }
     }catch(_){}
-    // ③ 超短尺ダミー発話（同期：await禁止）
     const warm = new SpeechSynthesisUtterance('ok');
-    // Androidはvoice未指定の方が成功率が高いケース多い
-    // warm.voice = null;
     const langHint = settings.ttsLang || 'en-US';
     warm.lang = langHint || navigator.language || 'en-GB';
     warm.rate = 1.0; warm.pitch = 1.0; warm.volume = 0.01;
-
     let handed=false;
     warm.onend = function(){
       if(handed) return; handed=true;
-      // 本発話：ここはユーザー操作系列内のonend（同期トリガ）
       const mySession = ++playSession;
-      // voice指定はAndroidでは極力避ける（設定で指定があるときのみ適用）
       speakFlowAndroid(row, {targetEl, session: mySession});
-      // 再生回数更新は非同期でOK（ユーザー操作外）
       getOne(currentDetailId).then(fresh=>{
         if(!fresh) return;
         fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); updateSentence(fresh).then(()=>{
@@ -619,36 +751,27 @@ async function openDetail(id){
       });
     };
     warm.onerror = warm.onend;
-
-    try{
-      speechSynthesis.speak(warm);
-    }catch(e){
-      // 失敗時はダイレクトに本発話へ
+    try{ speechSynthesis.speak(warm); }catch(e){
       const mySession = ++playSession;
       speakFlowAndroid(row, {targetEl, session: mySession});
     }
   }
 
-  // Android本発話：voice未指定優先（設定があれば適用）
   function speakFlowAndroid(row, opts={}){
     const mySession = opts.session ?? playSession;
     const en=(row.english||'').trim(); const ja=(row.japanese||'').trim();
     const gap=Math.max(0, Number(settings.gapSec||0))*1000; const rep=Math.max(1, parseInt(settings.repeat||1,10)); const tgt=settings.speakTarget||'en';
     const targetEl=opts.targetEl||null;
-
     function speakOne(text){
       return new Promise((resolve)=>{
         if(!text){ resolve(); return; }
         const u=new SpeechSynthesisUtterance(text);
-        // Androidはvoiceを指定しない（端末既定に任せる）
         if (settings.voiceName) {
           const v = voices.find(vv=>vv.name===settings.voiceName);
           if (v) u.voice=v;
         }
-        // 言語は英語優先→ユーザー設定
         u.lang = settings.ttsLang || 'en-US';
         u.rate=settings.rate; u.pitch=settings.pitch; u.volume=settings.volume;
-
         let fbTimer=null, usedBoundary=false;
         if(targetEl && /[A-Za-z]/.test(text)){
           u.onboundary=(e)=>{ if(typeof e.charIndex==='number'){ usedBoundary=true; highlightAtCharIndex(targetEl, e.charIndex); } };
@@ -661,11 +784,9 @@ async function openDetail(id){
         const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
         u.onend = ()=>{ cleanup(); resolve(); };
         u.onerror=()=>{ cleanup(); resolve(); };
-
         try{ speechSynthesis.speak(u); }catch(e){ resolve(); }
       });
     }
-
     if (tgt==='en'){
       if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
       (async ()=>{
@@ -689,9 +810,7 @@ async function openDetail(id){
   $('#d-play').onclick = ()=>{
     const targetEl = $('#d-en');
     renderSpeakText(targetEl, row.english||''); targetEl.scrollTop=0;
-
     if (isAndroid){
-      // ▼ Androidは完全同期のプライミングを実施（await禁止）
       androidGestureSpeak(row, targetEl);
     } else {
       (async ()=>{
@@ -704,17 +823,18 @@ async function openDetail(id){
         row.playCount=(row.playCount||0)+1; row.updatedAt=now(); await updateSentence(row);
         const m=[]; if(row.categories?.length) m.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
         m.push(`<span class="flag">再生 ${row.playCount}</span>`);
+        if(row.recBlob) m.push(`<span class="flag">録音あり</span>`);
         $('#d-meta').innerHTML=m.join(' ');
       })();
     }
   };
-
   $('#d-pause').onclick = ()=> togglePause();
+
   $('#d-edit').onclick = ()=>{
     stopAllPlayback();
     $('#dlg-detail').close();
     setActiveNav('nav-create'); show('create');
-    $('#scene').value=row.scene||''; $('#en').value=row.english||''; $('#ja').value=row.japanese||'';
+    $('#scene').value=row.scene||''; $('#en').value=row.english||''; $('#ja').value=row.japanese||''; 
     Array.from($('#cats').options).forEach(o=>o.selected=(row.categories||[]).includes(o.value));
     $('#tags').value=(row.tags||[]).join(', '); $('#notes').value=row.notes||'';
     $('#btn-save').onclick = async ()=>{
@@ -726,12 +846,22 @@ async function openDetail(id){
   $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ stopAllPlayback(); await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
   $('#d-close').onclick = ()=>{ stopAllPlayback(); $('#dlg-detail').close(); };
 }
-$('#dlg-detail').addEventListener('close', ()=>{ stopAllPlayback(); clearHighlight($('#d-en')); });
+$('#dlg-detail').addEventListener('close', ()=>{
+  stopAllPlayback();
+  clearHighlight($('#d-en'));
+  try{ const a=$('#d-rec-audio'); if(a){ a.pause(); a.src=''; } }catch(_){}
+  stopRecTimer();
+  try{ if(recState.stream){ recState.stream.getTracks().forEach(t=>t.stop()); } }catch(_){}
+  if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } recState.url=null; }
+  recState.mediaRecorder=null; recState.chunks=[]; recState.stream=null;
+});
 
 /* Export / Import */
 $('#btn-export').onclick = async ()=>{
   const data = await getAll();
-  const blob = new Blob([JSON.stringify({sentences:data},null,2)],{type:'application/json'});
+  // BlobはJSON化できないため、録音は含めません
+  const safe = data.map(({recBlob, ...rest})=>rest);
+  const blob = new Blob([JSON.stringify({sentences:safe},null,2)],{type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `speaknote_backup_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(a.href);
 };
 $('#file-import').onchange = async (e)=>{
@@ -801,15 +931,13 @@ async function loadVoices(){
   }
   renderVoiceList();
 }
-
 function renderVoiceList(){
   const sel=$('#voice'); if(!sel) return;
   const prev=settings.voiceName||''; sel.innerHTML='';
-  const list=(voices||[]).slice().sort((a,b)=>(a.lang||'').localeCompare(b.lang||'')||(a.name||'').localeCompare(b.name||''));
+  const list=(voices||[]).slice().sort((a,b)=>(a.lang||'').localeCompare(b.lang||'')||(a.name||'').localeCompare(b.name||'')); 
   for(const v of list){ const opt=document.createElement('option'); opt.value=v.name; opt.textContent=`${v.name} (${v.lang})${v.default?' ★':''}`; sel.appendChild(opt); }
   sel.value = list.some(v=>v.name===prev) ? prev : (list[0]?.name || '');
 }
-
 function pickVoice(){
   if(!voices || !voices.length) voices = speechSynthesis.getVoices() || [];
   if(isAndroid){ if(settings.voiceName){ const byName = voices.find(v=>v.name===settings.voiceName); if(byName) return byName; else return null; } return null; }
@@ -820,11 +948,9 @@ function pickVoice(){
   if(settings.ttsLang){ const byLang = voices.find(v=>v.lang && v.lang.startsWith(settings.ttsLang)); if(byLang) return byLang; }
   return voices.find(v=>v.default) || voices[0] || null;
 }
-
 function togglePause(){ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); } else { speechSynthesis.resume(); } }catch(e){} }
 
 // --- 英→日 簡易翻訳ヘルパー（MyMemory）---
-// 短文向け・無料API。失敗時は原文を返すフェイルセーフ。
 async function translateToJa(text){
   const src = (text||'').trim();
   if(!src) return '';
@@ -836,10 +962,9 @@ async function translateToJa(text){
     const out = json?.responseData?.translatedText || '';
     return (out || src);
   }catch(e){
-    return src; // 失敗時は英語定義そのまま
+    return src;
   }
 }
-
 
 async function ensureTtsUnlocked(){
   if(ttsWarmed) return;
@@ -865,7 +990,6 @@ async function ensureTtsUnlocked(){
     });
   } finally { ttsWarmed = true; }
 }
-
 function speak(text,{voice,rate,pitch,volume,targetEl}={}){
   return new Promise(async (res)=>{
     if(!text){ res(); return; }
@@ -891,7 +1015,6 @@ function speak(text,{voice,rate,pitch,volume,targetEl}={}){
     setTimeout(()=>{ try { speechSynthesis.speak(u); } catch(e) { setTimeout(()=>{ try{ speechSynthesis.speak(u); }catch(_){ res(); } }, 120); } }, isAndroid ? 120 : 40);
   });
 }
-
 async function speakFlowWithRetry(row, opts = {}) {
   const begin = performance.now();
   const sessionAtStart = playSession;
@@ -904,7 +1027,6 @@ async function speakFlowWithRetry(row, opts = {}) {
     if (sessionAtStart === playSession) { await speakFlow(row, opts); }
   }
 }
-
 async function speakFlow(row, opts={}){
   const mySession = opts.session ?? playSession;
   try{ speechSynthesis.resume(); }catch(e){}
@@ -972,7 +1094,6 @@ async function prepareShadow(){
   sh.opened = true;
 }
 $('#sh-back').onclick = ()=>{ sh.opened=false; sh.restarting=false; sh.glitchRetry=false; stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent=''; setActiveNav('nav-list'); show('list'); refreshList(); };
-function updateRateBadge(){ $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×'; }
 function requestRestartFromCurrentPos(){ sh.restarting = true; try{ speechSynthesis.cancel(); }catch(e){} }
 function handleEnded(natural=true){
   if (!sh.opened) return;
@@ -1018,22 +1139,13 @@ $('#sh-faster').onclick = ()=>{ sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
   const q = encodeURIComponent(word);
-  // 日本語の意味も調べやすいリンク群
   $('#lk-google').href   = `https://www.google.com/search?q=${q}+意味`;
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
-  // 追加（日本語辞書）
-  // Weblio/ALC はCORS不要の外部ページリンクなので安全
-  // ※ もしボタンを増やしたければ、dlg-lookup下部にボタンを追加してください
-  // 例： <a class="btn" target="_blank" rel="noopener" href="https://ejje.weblio.jp/content/${q}">Weblio</a>
-  //      <a class="btn" target="_blank" rel="noopener" href="https://eow.alc.co.jp/search?q=${q}">ALC</a>
 }
-
 async function renderLookupContent(word, data){
   const body = $('#lk-body');
   const safeWord = escapeHTML(word);
-
-  // ヒットなし時（日本語案内）
   if(!data || !Array.isArray(data) || data.length===0){
     body.innerHTML =
       `<div><span class="lookup-word">${safeWord}</span><span class="lookup-phon"></span></div>
@@ -1042,37 +1154,28 @@ async function renderLookupContent(word, data){
        </div>`;
     return;
   }
-
-  // Free Dictionary API から上位の定義を抽出 → まとめて日本語に翻訳
   const entry = data[0] || {};
   const phon = (entry.phonetics?.find(p=>p.text)?.text) || '';
-
-  // 上位3定義程度をまとめて翻訳
   const defs = [];
   (entry.meanings||[]).forEach(m=>{
     (m.definitions||[]).slice(0,2).forEach(d=>{
       if(d?.definition) defs.push(d.definition);
     });
   });
-
   const joined = defs.slice(0,6).map((t,i)=>`${i+1}. ${t}`).join('\n');
-
   let jaText = '';
   try{
     jaText = await translateToJa(joined || '');
   }catch(_){
-    jaText = joined; // フェイルセーフ
+    jaText = joined;
   }
-
   const lines = (jaText||'').split(/\n+/).map(x=>escapeHTML(x));
   const senseHtml = lines.length
     ? lines.map(x=>`<div class="lookup-sense">${x}</div>`).join('')
     : `<div class="tiny" style="margin-top:6px">日本語の定義が見つかりませんでした。</div>`;
-
   const top = `<div><span class="lookup-word">${safeWord}</span>${phon?`<span class="lookup-phon">${escapeHTML(phon)}</span>`:''}</div>`;
   body.innerHTML = top + senseHtml;
 }
-
 async function openLookup(word){
   if(!word) return;
   setLookupLinks(word);
@@ -1086,16 +1189,12 @@ async function openLookup(word){
   }catch(e){ renderLookupContent(word, null); }
 }
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
-// 設定/ヘルプ/詳細は閉じたら停止（誤再生防止）
 ['dlg-settings','dlg-help','dlg-detail'].forEach(id=>{
   const el = document.getElementById(id);
   if (el) el.addEventListener('close', ()=>{ stopAllPlayback(); }, {passive:true});
 });
-
-// 🔎 単語検索は閉じても再生を止めない（リスニング継続）
 const dlgLookup = document.getElementById('dlg-lookup');
 if (dlgLookup) dlgLookup.addEventListener('close', ()=>{/* keep playing */}, {passive:true});
-
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
 
 /* Boot */
