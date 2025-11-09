@@ -168,11 +168,13 @@
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
 
+    <!-- 1行目：再生・次・（右端）一覧へ戻る -->
     <div class="actions" id="sh-row-1">
       <button class="btn ok" id="sh-toggle">▶︎ 再生</button>
       <button class="btn warn" id="sh-next">⏩ 次の英文</button>
       <button class="btn right" id="sh-back">一覧へ戻る</button>
     </div>
+    <!-- 2行目：速度系（左に集約） -->
     <div class="actions" id="sh-row-2">
       <button class="btn" id="sh-slower">− 速度</button>
       <span class="badge" id="rate-badge">1.0×</span>
@@ -195,6 +197,7 @@
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
 
   <div class="divider"></div>
+  <!-- 上段：再生とREC（統合ボタン） -->
   <div class="actions" id="row-play-rec">
     <button class="btn" id="d-toggle">▶︎ 再生</button>
 
@@ -203,6 +206,7 @@
 
     <button class="btn danger hidden" id="d-rec-delete">REC削除</button>
   </div>
+  <!-- 下段：編集／削除（左）と閉じる（右） -->
   <div class="actions" id="row-edit-close" style="justify-content:space-between">
     <div>
       <button class="btn" id="d-edit">✎ 編集</button>
@@ -390,7 +394,8 @@ const isAndroid = /Android/i.test(UA);
 /* =========================
    Wake Lock（フォールバック付）
 ========================= */
-const KeepAwake = (()=>{ let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
+const KeepAwake = (()=>{
+  let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
   async function requestWakeLock(){ if(!('wakeLock' in navigator)) throw new Error('no_wakelock'); wakeLock = await navigator.wakeLock.request('screen'); }
   function ensureVideoNode(){ if(videoEl) return; videoEl=document.createElement('video'); videoEl.muted=true; videoEl.loop=true; videoEl.playsInline=true; Object.assign(videoEl.style,{position:'fixed',width:'1px',height:'1px',left:'-9999px',top:'-9999px'}); document.body.appendChild(videoEl); }
   function ensureCanvasStream(){ if(canvas&&stream) return; canvas=document.createElement('canvas'); canvas.width=1; canvas.height=1; const ctx=canvas.getContext('2d'); ctx.fillStyle='#000'; ctx.fillRect(0,0,1,1); stream=canvas.captureStream(1); }
@@ -440,7 +445,9 @@ const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsucce
 /* =========================
    画面遷移/ナビ
 ========================= */
-function stopAllPlayback(){ try { speechSynthesis.cancel(); } catch(_) {} }
+function stopAllPlayback(){
+  try { speechSynthesis.cancel(); } catch(_) {}
+}
 const views = { create: $('#view-create'), list: $('#view-list'), shadow: $('#view-shadow') };
 function closeAllDialogs(){ for(const id of ['#dlg-detail','#dlg-settings','#dlg-help','#dlg-lookup']){ try{ const d=$(id); if(d?.open) d.close(); }catch(_){} } }
 function show(view){ stopAllPlayback(); KeepAwake.disable(); closeAllDialogs(); Object.values(views).forEach(v=>v.classList.remove('active')); views[view].classList.add('active'); }
@@ -599,15 +606,20 @@ async function ensureTtsUnlocked(){
     await new Promise(res=>{
       let done=false; const finish=()=>{ if(!done){ done=true; res(); } };
       warm.onend = finish; warm.onerror = finish;
-      setTimeout(()=>{ try{ speechSynthesis.speak(warm); }catch(_){ finish(); } }, 50);
-      setTimeout(finish, 900);
+      setTimeout(()=>{ try{ speechSynthesis.speak(warm); }catch(_){ finish(); } }, 80);
+      setTimeout(finish, 1200);
     });
   } finally { ttsWarmed = true; }
 }
 
-/* ---- 単一TTSエンジン ---- */
+/* ---- 単一TTSエンジン（途中再開に対応） ---- */
 class SpeakEngine {
-  constructor(){ this.state='idle'; this.session=0; this._lastBoundary=0; this._ev={}; }
+  constructor(){
+    this.state='idle';
+    this.session=0;
+    this._lastBoundary=0;
+    this._ev={};
+  }
   async play(script, {targetEl, rate, startCharIndex=0}={}){
     if(this.state==='playing'){ await this.stop(); }
     this.session++; const my = this.session;
@@ -615,8 +627,8 @@ class SpeakEngine {
     await ensureTtsUnlocked(); await loadVoices();
     const v = pickVoice();
 
-    const speakOne = (text,langHint,{baseOffset=0}={})=>{
-      return new Promise(async resolve=>{
+    const speakOne = (text,langHint, {baseOffset=0} = {})=>{
+      return new Promise(resolve=>{
         if(my!==this.session) return resolve();
         if(!text){ return resolve(); }
         const u=new SpeechSynthesisUtterance(text);
@@ -650,22 +662,8 @@ class SpeakEngine {
         u.onerror=()=>{ cleanup(); resolve(); };
 
         try { speechSynthesis.cancel(); } catch(e){}
-        const delay = isIOS ? 140 : 40; // iOSでわずかに余裕
-        setTimeout(async ()=>{
-          try {
-            if(my!==this.session) return resolve();
-            speechSynthesis.speak(u);
-            // 発話開始確認の軽いリトライ（iOS不発対策）
-            setTimeout(()=>{
-              if(my===this.session && !speechSynthesis.speaking){
-                try{ speechSynthesis.cancel(); }catch(_){}
-                try{ speechSynthesis.speak(u); }catch(_){}
-              }
-            }, isIOS?180:100);
-          } catch(e) {
-            setTimeout(()=>resolve(), 160);
-          }
-        }, delay);
+        const delay = isIOS ? 120 : 40;
+        setTimeout(()=>{ try { if(my===this.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, delay);
       });
     };
 
@@ -692,18 +690,18 @@ class SpeakEngine {
         const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
         for(let i=0;i<rep;i++){
           if(my!==this.session) return;
-          await speakOne(i===0?slice:en,'en-US',{baseOffset:i===0?base:0});
+          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
           if(i<rep-1 && gap){ await sleep(gap); }
         }
       }else if(script.order==='ja'){
         await speakOne(ja,'ja-JP');
-      }else{
+      }else{ // both
         if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
         const startAt = Number(startCharIndex||script.startCharIndex||0);
         const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
         for(let i=0;i<rep;i++){
           if(my!==this.session) return;
-          await speakOne(i===0?slice:en,'en-US',{baseOffset:i===0?base:0});
+          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
           if(gap){ await sleep(gap); }
         }
         if(ja){ await speakOne(ja,'ja-JP'); }
@@ -795,13 +793,7 @@ function renderCards(list){
     const cats=(r.categories||[]).map(c=>`<span class="chip">${escapeHTML(c)}</span>`).join(' ');
     const tags=(r.tags||[]).map(t=>`<span class="chip">#${escapeHTML(t)}</span>`).join(' ');
     card.innerHTML = `<h3>${escapeHTML(r.scene || '(場面未設定)')}</h3><div class="chips">${cats}</div><div class="chips" style="margin-top:4px">${tags}</div>`;
-    card.onclick = async ()=>{
-      // ★ iOS対策：カードタップのユーザー操作中に解錠してから詳細へ
-      oneTimeWarmup();
-      await ensureTtsUnlocked();
-      await loadVoices();
-      openDetail(r.id);
-    };
+    card.onclick = ()=> openDetail(r.id);
     root.appendChild(card);
   }
 }
@@ -884,7 +876,7 @@ class RecEngine {
 const recEngine = new RecEngine();
 
 /* =========================
-   詳細ダイアログ（iOS再生の確実化を強化）
+   詳細ダイアログ（iOS対策を強化）
 ========================= */
 let currentDetailId=null;
 
@@ -903,13 +895,12 @@ function setRecButtonMode(mode){
 function toggleRecDeleteVis(show){ $('#d-rec-delete').classList.toggle('hidden', !show); }
 
 async function openDetail(id){
-  // ★ iOS: ダイアログ表示直前にも解錠＆音声読み込みを再確認
-  oneTimeWarmup();
-  await ensureTtsUnlocked();
-  await loadVoices();
-
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
+
+  // ★ iOSで一覧→詳細直後の無音対策：クリック（ユーザー操作）に連動して即ウォームアップ
+  try { await ensureTtsUnlocked(); await loadVoices(); } catch(_){}
+
   $('#d-scene').textContent=row.scene||'(場面未設定)';
   const meta=[];
   if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
@@ -920,7 +911,6 @@ async function openDetail(id){
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  // 初期状態
   setPlayToggleLabel($('#d-toggle'),'idle');
   setRecButtonMode('idle'); toggleRecDeleteVis(false);
   try{ $('#d-rec-audio').pause(); }catch(_){}
@@ -928,17 +918,12 @@ async function openDetail(id){
 
   // 再生トグル
   $('#d-toggle').onclick = async ()=>{
-    // ★ 再生ボタン押下直前にも念押しで解錠＋voiceロード
     oneTimeWarmup();
-    await ensureTtsUnlocked();
-    await loadVoices();
+    // ★ 念のため再度ウォームアップ（iOSの気難しさ対策）
+    await ensureTtsUnlocked(); await loadVoices();
 
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
-
-    // iOS: ダイアログ直後はごく短いディレイを置くと安定
-    if(isIOS) await sleep(60);
-
     if(speakEngine.state==='idle'){
       renderSpeakText(targetEl, row.english||''); targetEl.scrollTop=0;
       setPlayToggleLabel(btn,'playing');
@@ -947,6 +932,7 @@ async function openDetail(id){
         { targetEl }
       );
       if(speakEngine.state!=='paused'){ setPlayToggleLabel(btn,'idle'); }
+      // 再生回数加算
       const fresh = await getOne(currentDetailId);
       if(fresh){
         fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
@@ -956,13 +942,11 @@ async function openDetail(id){
     }else if(speakEngine.state==='playing'){
       speakEngine.pause(); setPlayToggleLabel(btn,'paused');
     }else{
-      // resume前にも念のためensure
-      await ensureTtsUnlocked(); await loadVoices();
       speakEngine.resume(); setPlayToggleLabel(btn,'playing');
     }
   };
 
-  // REC単一ボタン（短押し：REC/STOP/再生、長押し：やり直し）
+  // RECボタン（短押し：REC/STOP/再生、長押し：やり直し）
   const recBtn = $('#d-rec-main');
   let longPressTimer=null, longPressed=false;
   function bindRecHandlers(){
@@ -1086,28 +1070,54 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング
+   シャドーイング（自動継続・速度変更も継続）
 ========================= */
-const sh = { list: [], index: 0, rate: 1.0, container: null, opened:false, _lastAbs:0, _boundHook:false };
+const sh = {
+  list: [], index: 0, rate: 1.0, container: null,
+  opened:false, auto:false,
+  _lastAbs:0, _boundHook:false, _endedHook:false
+};
 async function prepareShadow(){
   const rows = await getAll();
   const pool = rows.filter(r=> (r.english||'').trim().length>0 );
   if(pool.length===0){ alert('英語例文がありません。登録してください。'); setActiveNav('nav-create'); show('create'); return; }
   sh.list = pool.sort(()=>Math.random()-0.5);
-  sh.index = 0; sh.rate = settings.rate || 1.0; sh.container = $('#sh-text');
+  sh.index = 0;
+  sh.rate = settings.rate || 1.0;
+  sh.container = $('#sh-text');
   $('#rate-badge').textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×';
+
   const row = sh.list[0];
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
-  sh.opened = true; setPlayToggleLabel($('#sh-toggle'),'idle');
+  sh.opened = true;
+  sh.auto = false;
+  setPlayToggleLabel($('#sh-toggle'),'idle');
 
   if(!sh._boundHook){
     speakEngine.on('boundary', (abs)=>{ sh._lastAbs = abs||0; });
     sh._boundHook = true;
   }
+  if(!sh._endedHook){
+    speakEngine.on('ended', ()=>{
+      if(!sh.opened || !sh.auto) return;
+      sh.index = (sh.index + 1) % sh.list.length;
+      setTimeout(()=>{
+        setPlayToggleLabel($('#sh-toggle'),'playing');
+        playCurrentShadow();
+      }, 20);
+    });
+    sh._endedHook = true;
+  }
 }
-$('#sh-back').onclick = ()=>{ sh.opened=false; speakEngine.stop(); stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text')); $('#sh-text').textContent='(ここにランダムな英文が表示されます)'; $('#sh-scene').textContent=''; setActiveNav('nav-list'); show('list'); refreshList(); };
-async function playCurrentShadow(opts={}){
-  const { noAdvance=false, startCharIndex=0 } = opts;
+$('#sh-back').onclick = ()=>{
+  sh.opened=false;
+  sh.auto=false;
+  speakEngine.stop(); stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text'));
+  $('#sh-text').textContent='(ここにランダムな英文が表示されます)';
+  $('#sh-scene').textContent='';
+  setActiveNav('nav-list'); show('list'); refreshList();
+};
+async function playCurrentShadow({ startCharIndex=0 } = {}){
   const row = sh.list[sh.index];
   const text=(row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
@@ -1117,34 +1127,40 @@ async function playCurrentShadow(opts={}){
     { en: row.english||'', ja: row.japanese||'', order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec, startCharIndex },
     { targetEl: sh.container, rate: sh.rate }
   );
-  if(!sh.opened) return;
-  if(!noAdvance){ sh.index = (sh.index+1) % sh.list.length; }
-  if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#sh-toggle'),'idle'); }
 }
-
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
   oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices();
   if(speakEngine.state==='idle'){
+    sh.auto = true;
     setPlayToggleLabel(btn,'playing');
     await playCurrentShadow();
-    if(speakEngine.state!=='paused'){ setPlayToggleLabel(btn,'idle'); }
   }else if(speakEngine.state==='playing'){
+    sh.auto = false;
     speakEngine.pause(); setPlayToggleLabel(btn,'paused');
   }else{
+    sh.auto = true;
     await ensureTtsUnlocked(); await loadVoices();
     speakEngine.resume(); setPlayToggleLabel(btn,'playing');
   }
 };
-$('#sh-next').onclick = ()=>{ try{ speakEngine.stop(); }catch(_){} setPlayToggleLabel($('#sh-toggle'),'idle'); if(sh.opened){ playCurrentShadow(); } };
+$('#sh-next').onclick = ()=>{
+  try{ speakEngine.stop(); }catch(_) {}
+  if(!sh.opened) return;
+  sh.index = (sh.index + 1) % sh.list.length;
+  sh.auto = true;
+  setPlayToggleLabel($('#sh-toggle'),'playing');
+  playCurrentShadow();
+};
 $('#sh-slower').onclick = ()=>{
   sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10);
   $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×';
   if(speakEngine.state==='playing' || speakEngine.state==='paused'){
     const resumeAt = Math.max(0, sh._lastAbs||0);
     speakEngine.stop();
+    sh.auto = true;
     setPlayToggleLabel($('#sh-toggle'),'playing');
-    playCurrentShadow({ noAdvance:true, startCharIndex: resumeAt });
+    playCurrentShadow({ startCharIndex: resumeAt });
   }
 };
 $('#sh-faster').onclick = ()=>{
@@ -1153,8 +1169,9 @@ $('#sh-faster').onclick = ()=>{
   if(speakEngine.state==='playing' || speakEngine.state==='paused'){
     const resumeAt = Math.max(0, sh._lastAbs||0);
     speakEngine.stop();
+    sh.auto = true;
     setPlayToggleLabel($('#sh-toggle'),'playing');
-    playCurrentShadow({ noAdvance:true, startCharIndex: resumeAt });
+    playCurrentShadow({ startCharIndex: resumeAt });
   }
 };
 
@@ -1200,9 +1217,7 @@ async function fetchEnDict(word){
     for(const m of meanings){
       const pos = m.partOfSpeech||'';
       for(const d of (m.definitions||[])){
-        if(d?.definition){
-          defs.push({ pos, def: d.definition, ex: d.example || '' });
-        }
+        if(d?.definition){ defs.push({ pos, def: d.definition, ex: d.example || '' }); }
       }
     }
     return { phonetic: phon, defs };
@@ -1240,15 +1255,14 @@ function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, p
     ? `<div style="margin-top:8px">
          <div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div>
          <ol style="margin:0 0 6px 20px; line-height:1.85">
-           ${jaDefs.map((d)=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
+           ${jaDefs.map(d=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
          </ol>
-       </div>`
-    : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
+       </div>` : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
   const exJa = jaExamples.length
     ? `<div style="margin-top:10px">
          <div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div>
          <ul style="margin:0 0 6px 18px; line-height:1.85">
-           ${jaExamples.map((item)=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
+           ${jaExamples.map(item=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
          </ul>
        </div>` : '';
   const defsEn = hasDefs
@@ -1271,8 +1285,7 @@ async function openLookup(word){
     const topDefs = dict.defs.slice(0, 12);
     const enDefLines = topDefs.map(d => (d.pos?`[${d.pos}] `:'') + d.def);
     const jaDefs = await translateBulkToJa(enDefLines);
-    const exPairs = [];
-    for(const d of topDefs){ if(d.ex) exPairs.push(d.ex); if(exPairs.length>=5) break; }
+    const exPairs = []; for(const d of topDefs){ if(d.ex) exPairs.push(d.ex); if(exPairs.length>=5) break; }
     const jaExList = await translateBulkToJa(exPairs);
     const jaExamples = exPairs.map((en, i)=>({ en, ja: jaExList[i]||'' }));
     const jaWiki = await fetchJaWiktionarySnippet(word);
