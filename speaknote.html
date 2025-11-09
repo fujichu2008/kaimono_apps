@@ -79,7 +79,7 @@
     border-radius:10px;padding:10px;margin:8px 0;font-size:14px;line-height:1.8}
 
   /* RECの視覚強調 */
-  #d-rec.recording{
+  #d-rec-toggle.recording{
     border-color:#ff4d4f;
     box-shadow:0 0 0 2px rgba(255,77,79,.15) inset;
     background:linear-gradient(180deg,#5a1313,#2b0f0f);
@@ -190,16 +190,20 @@
   <div class="tiny">Japanese</div>
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
   <div class="divider"></div>
+
+  <!-- 上段：再生／REC統合行 -->
   <div class="actions">
-    <!-- 再生/一時停止の統合トグル -->
+    <!-- 再生/一時停止の統合トグル（TTS） -->
     <button class="btn" id="d-toggle">▶︎ 再生</button>
 
-    <!-- 録音/再生（セッション限定） -->
-    <button class="btn" id="d-rec">● REC</button>
-    <button class="btn" id="d-rec-play" disabled>▶︎ REC再生</button>
-    <button class="btn danger" id="d-rec-delete" disabled>REC削除</button>
+    <!-- REC／REC再生 統合ボタン（短押し：録音↔停止↔再生、長押し：録り直し） -->
+    <button class="btn" id="d-rec-toggle">● REC</button>
+    <button class="btn danger hidden" id="d-rec-delete">録音を破棄</button>
     <span class="tiny" id="d-rec-timer" style="margin-left:6px;min-width:72px;display:inline-block"></span>
+  </div>
 
+  <!-- 下段：編集・削除／閉じる（分離行） -->
+  <div class="actions">
     <button class="btn" id="d-edit">✎ 編集</button>
     <button class="btn danger" id="d-del">🗑 削除</button>
     <button class="btn right" id="d-close">閉じる</button>
@@ -593,29 +597,97 @@ function pickAudioMime(){
   return '';
 }
 function stopRecTimer(){ if(recState.timerId){ clearInterval(recState.timerId); recState.timerId = null; } }
-function updateRecUI({recording=false, hasBlob=false}={}){
-  const bRec = $('#d-rec');
-  const bPlay = $('#d-rec-play');
-  const bDel = $('#d-rec-delete');
-  const t = $('#d-rec-timer');
-  if(!bRec || !bPlay || !t) return;
-  bRec.textContent = recording ? '■ STOP' : '● REC';
-  bRec.classList.toggle('recording', recording);
-  bPlay.disabled = !hasBlob;
-  if(bDel) bDel.disabled = !hasBlob;
-  t.textContent = recording ? formatMs(performance.now() - recState.startedAt) : (hasBlob ? `録音あり（セッション）` : ``);
+
+/* --- REC UI（統合ボタン） --- */
+function setRecToggleLabel({mode}){
+  // mode: 'idle' | 'recording' | 'playable'
+  const b = $('#d-rec-toggle');
+  if(!b) return;
+  if(mode==='recording'){ b.textContent='■ STOP'; b.classList.add('recording'); }
+  else if(mode==='playable'){ b.textContent='▶︎ REC再生'; b.classList.remove('recording'); }
+  else { b.textContent='● REC'; b.classList.remove('recording'); }
+}
+function setRecDeleteVisible(show){
+  const b=$('#d-rec-delete');
+  if(!b) return;
+  b.classList.toggle('hidden', !show);
+}
+function updateRecTimerUI(running){
+  const t=$('#d-rec-timer');
+  if(!t) return;
+  if(running) t.textContent = formatMs(performance.now() - recState.startedAt);
+  else t.textContent = '';
 }
 
-/* ====== 再生トグル（共通UIヘルパ） ====== */
-function setToggleLabel(btn, state){
-  // state: 'idle'|'playing'|'paused'
-  if(!btn) return;
-  if(state==='playing'){ btn.textContent='⏸ 一時停止'; btn.classList.add('ok'); }
-  else if(state==='paused'){ btn.textContent='▶︎ 再開'; btn.classList.remove('ok'); }
-  else { btn.textContent='▶︎ 再生'; btn.classList.remove('ok'); }
+/* 録音開始処理 */
+async function startRecording(){
+  stopAllPlayback();
+  try{ $('#d-rec-audio')?.pause(); }catch(_){}
+  if(!('MediaRecorder' in window)){
+    alert('このブラウザは録音に対応していません。最新のChrome/Edge/Safariをご利用ください。');
+    return false;
+  }
+  let stream=null;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+  }catch(e){
+    alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定を確認してください。');
+    return false;
+  }
+  const mime = pickAudioMime();
+  const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
+  recState.mediaRecorder = mr;
+  recState.stream = stream;
+  recState.chunks = [];
+  recState.mime = mime;
+  recState.startedAt = performance.now();
+  setRecToggleLabel({mode:'recording'});
+  setRecDeleteVisible(false);
+  updateRecTimerUI(true);
+
+  mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) recState.chunks.push(ev.data); };
+  mr.onstop = async ()=>{
+    stopRecTimer();
+    try{
+      const blob = new Blob(recState.chunks, { type: recState.mime || (mr.mimeType || 'audio/webm') });
+      if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } }
+      recState.url = URL.createObjectURL(blob);
+      $('#d-rec-audio').src = recState.url;
+      setRecToggleLabel({mode:'playable'});
+      setRecDeleteVisible(true);
+      updateRecTimerUI(false);
+    }finally{
+      try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
+      recState.mediaRecorder=null; recState.stream=null; recState.chunks=[];
+    }
+  };
+  mr.start(250);
+  recState.timerId = setInterval(()=> updateRecTimerUI(true), 250);
+  return true;
 }
 
-/* ====== 詳細ダイアログ ====== */
+/* 再生処理（録音済み） */
+async function playRecording(){
+  stopAllPlayback();
+  const audio = $('#d-rec-audio');
+  try{ audio.pause(); }catch(_){}
+  if(!recState.url){
+    alert('録音が見つかりません。');
+    return;
+  }
+  try{ audio.src = recState.url; await audio.play(); }catch(e){ alert('再生に失敗しました。'); }
+}
+
+/* 録音破棄（セッション限定） */
+async function discardRecording(){
+  try{ $('#d-rec-audio').pause(); }catch(_){}
+  if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } recState.url=null; }
+  setRecToggleLabel({mode:'idle'});
+  setRecDeleteVisible(false);
+  updateRecTimerUI(false);
+}
+
+/* 詳細ダイアログ ====== */
 let currentDetailId=null;
 let detailPlayState='idle'; // 'idle' | 'playing' | 'paused'
 async function openDetail(id){
@@ -625,21 +697,20 @@ async function openDetail(id){
   const meta=[];
   if(row.categories?.length) meta.push(...row.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
   meta.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
-  // セッション録音はダイアログ毎に生成されるため、ここでは表示しない
   $('#d-meta').innerHTML=meta.join(' ');
 
   renderSpeakText($('#d-en'), row.english||''); $('#d-en').scrollTop=0;
   $('#d-ja').textContent=row.japanese||'';
   $('#dlg-detail').showModal();
 
-  // セッション録音UI初期化
-  if (recState.url) { try{ URL.revokeObjectURL(recState.url); }catch(_){} recState.url=null; }
+  // REC UI 初期化
   stopRecTimer();
-  updateRecUI({recording:false, hasBlob:false});
-  setToggleLabel($('#d-toggle'),'idle');
-  detailPlayState='idle';
+  await discardRecording(); // 表示・状態を初期に戻す
+  setRecDeleteVisible(false);
+  setRecToggleLabel({mode:'idle'});
+  detailPlayState='idle'; setToggleLabel($('#d-toggle'),'idle');
 
-  // 再生/一時停止トグル
+  // TTS 再生/一時停止トグル
   $('#d-toggle').onclick = async ()=>{
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
@@ -680,86 +751,52 @@ async function openDetail(id){
     }
   };
 
-  // 録音開始/停止（セッション限定：DB保存なし）
-  $('#d-rec').onclick = async ()=>{
-    if (recState.mediaRecorder && recState.mediaRecorder.state === 'recording'){
+  /* --- REC／再生 統合ボタンの短押し・長押し --- */
+  const recBtn = $('#d-rec-toggle');
+  let longPressTimer=null, longPressed=false;
+  const LONG_MS=650;
+
+  function clearLongTimer(){ if(longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; } }
+
+  function onPressStart(e){
+    longPressed=false;
+    clearLongTimer();
+    longPressTimer=setTimeout(async ()=>{
+      longPressed=true;
+      // 長押し：録り直し（録音があるときのみ有効）
+      if(recState.url && !recState.mediaRecorder){
+        await discardRecording();
+        await startRecording();
+      }
+    }, LONG_MS);
+  }
+  function onPressEnd(e){
+    const wasLong=longPressed;
+    clearLongTimer();
+    if(wasLong) return;
+
+    // 短押し：状態に応じて REC開始 / STOP / 再生
+    if(recState.mediaRecorder && recState.mediaRecorder.state==='recording'){
       try{ recState.mediaRecorder.stop(); }catch(_){}
       return;
     }
-    stopAllPlayback();
-    try{ $('#d-rec-audio').pause(); }catch(_){}
-    if(!('MediaRecorder' in window)){
-      alert('このブラウザは録音に対応していません。最新のChrome/Edge/Safariをご利用ください。');
+    if(recState.url){
+      // 録音再生
+      playRecording();
       return;
     }
-    let stream=null;
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-    }catch(e){
-      alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定を確認してください。');
-      return;
-    }
-    const mime = pickAudioMime();
-    const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
-    recState.mediaRecorder = mr;
-    recState.stream = stream;
-    recState.chunks = [];
-    recState.mime = mime;
-    recState.startedAt = performance.now();
-    $('#d-rec-timer').textContent = '0:00';
-    updateRecUI({recording:true, hasBlob:!!recState.url});
+    // 新規REC開始
+    startRecording();
+  }
 
-    mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) recState.chunks.push(ev.data); };
-    mr.onstop = async ()=>{
-      stopRecTimer();
-      try{
-        const blob = new Blob(recState.chunks, { type: recState.mime || (mr.mimeType || 'audio/webm') });
-        // ★ セッション限定：DB保存なし。Object URLのみ生成
-        if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } }
-        recState.url = URL.createObjectURL(blob);
-        $('#d-rec-audio').src = recState.url;
-        updateRecUI({recording:false, hasBlob:true});
+  recBtn.addEventListener('pointerdown', onPressStart);
+  recBtn.addEventListener('pointerup', onPressEnd);
+  recBtn.addEventListener('pointerleave', ()=>{ clearLongTimer(); });
+  recBtn.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' '){ onPressStart(); } });
+  recBtn.addEventListener('keyup', (e)=>{ if(e.key==='Enter' || e.key===' '){ onPressEnd(); } });
 
-        // メタに「セッション録音」表示
-        const cur = await getOne(currentDetailId);
-        const m=[]; if(cur?.categories?.length) m.push(...cur.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-        m.push(`<span class="flag">再生 ${cur?.playCount||0}</span>`);
-        m.push(`<span class="flag">セッション録音</span>`);
-        $('#d-meta').innerHTML=m.join(' ');
-      }finally{
-        try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
-        recState.mediaRecorder=null; recState.stream=null; recState.chunks=[];
-      }
-    };
-    mr.start(250);
-    recState.timerId = setInterval(()=>{
-      const ms = performance.now() - recState.startedAt;
-      $('#d-rec-timer').textContent = formatMs(ms);
-    }, 250);
-  };
-
-  // 録音の再生（セッション限定）
-  $('#d-rec-play').onclick = async ()=>{
-    stopAllPlayback();
-    const audio = $('#d-rec-audio');
-    try{ audio.pause(); }catch(_){}
-    if(!recState.url){
-      alert('この録音はセッション限定です。録音後に同じ画面内でのみ再生可能です。');
-      return;
-    }
-    try{ audio.src = recState.url; await audio.play(); }catch(e){ alert('再生に失敗しました。'); }
-  };
-
-  // 録音の破棄（セッション限定）
-  $('#d-rec-delete').onclick = async ()=>{
-    try{ $('#d-rec-audio').pause(); }catch(_){}
-    if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } recState.url=null; }
-    updateRecUI({recording:false, hasBlob:false});
-    const cur = await getOne(currentDetailId);
-    const m=[]; if(cur?.categories?.length) m.push(...cur.categories.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-    m.push(`<span class="flag">再生 ${cur?.playCount||0}</span>`);
-    $('#d-meta').innerHTML=m.join(' ');
-  };
+  // 録音の破棄（存在時のみ表示）
+  $('#d-rec-delete').onclick = async ()=>{ await discardRecording(); };
 
   // 編集/削除/閉じる
   $('#d-edit').onclick = ()=>{
@@ -781,7 +818,8 @@ async function openDetail(id){
   $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ stopAllPlayback(); await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
   $('#d-close').onclick = ()=>{ stopAllPlayback(); $('#dlg-detail').close(); };
 }
-$('#dlg-detail').addEventListener('close', ()=>{
+
+$('#dlg-detail').addEventListener('close', async ()=>{
   stopAllPlayback();
   clearHighlight($('#d-en'));
   try{ const a=$('#d-rec-audio'); if(a){ a.pause(); a.src=''; } }catch(_){}
@@ -790,12 +828,12 @@ $('#dlg-detail').addEventListener('close', ()=>{
   if(recState.url){ try{ URL.revokeObjectURL(recState.url); }catch(_){ } recState.url=null; }
   recState.mediaRecorder=null; recState.chunks=[]; recState.stream=null;
   detailPlayState='idle'; setToggleLabel($('#d-toggle'),'idle');
+  setRecToggleLabel({mode:'idle'}); setRecDeleteVisible(false); updateRecTimerUI(false);
 });
 
 /* ====== Export/Import ====== */
 $('#btn-export').onclick = async ()=>{
   const data = await getAll();
-  // 念のため録音系は常に除外（方針Aでは保存していないが互換のため）
   const safe = data.map(({recBlob,recType,recDurationMs,recUpdatedAt,recExpiresAt, ...rest})=>rest);
   const blob = new Blob([JSON.stringify({sentences:safe},null,2)],{type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `speaknote_backup_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(a.href);
@@ -1212,6 +1250,15 @@ async function openLookup(word){
 }
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
+
+/* ====== 共通UIトグル（TTS） ====== */
+function setToggleLabel(btn, state){
+  // state: 'idle'|'playing'|'paused'
+  if(!btn) return;
+  if(state==='playing'){ btn.textContent='⏸ 一時停止'; btn.classList.add('ok'); }
+  else if(state==='paused'){ btn.textContent='▶︎ 再開'; btn.classList.remove('ok'); }
+  else { btn.textContent='▶︎ 再生'; btn.classList.remove('ok'); }
+}
 
 /* ====== ブート ====== */
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') loadVoices(); });
