@@ -167,16 +167,20 @@
   <section id="view-shadow">
     <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="meta" id="sh-scene"></div>
+
+    <!-- 1行目：再生・次・（右端）一覧へ戻る -->
     <div class="actions" id="sh-row-1">
       <button class="btn ok" id="sh-toggle">▶︎ 再生</button>
       <button class="btn warn" id="sh-next">⏩ 次の英文</button>
       <button class="btn right" id="sh-back">一覧へ戻る</button>
     </div>
+    <!-- 2行目：速度系（左に集約） -->
     <div class="actions" id="sh-row-2">
       <button class="btn" id="sh-slower">− 速度</button>
       <span class="badge" id="rate-badge">1.0×</span>
       <button class="btn" id="sh-faster">＋ 速度</button>
     </div>
+
     <div id="sh-text" class="speak-text" style="margin-top:8px">(ここにランダムな英文が表示されます)</div>
   </section>
 </main>
@@ -193,12 +197,16 @@
   <div id="d-ja" style="white-space:pre-wrap;margin-bottom:8px"></div>
 
   <div class="divider"></div>
+  <!-- 上段：再生とREC（統合ボタン） -->
   <div class="actions" id="row-play-rec">
     <button class="btn" id="d-toggle">▶︎ 再生</button>
+
     <button class="btn" id="d-rec-main">● REC</button>
     <span class="tiny" id="d-rec-timer" style="margin-left:6px;min-width:72px;display:inline-block"></span>
+
     <button class="btn danger hidden" id="d-rec-delete">REC削除</button>
   </div>
+  <!-- 下段：編集／削除（左）と閉じる（右） -->
   <div class="actions" id="row-edit-close" style="justify-content:space-between">
     <div>
       <button class="btn" id="d-edit">✎ 編集</button>
@@ -384,9 +392,25 @@ const isIOS = /iP(hone|od|ad)/.test(UA) || (navigator.platform === 'MacIntel' &&
 const isAndroid = /Android/i.test(UA);
 
 /* =========================
+   Android(AQUOS)向け 保険処理
+========================= */
+let _androidResumeTick = null;
+function startAndroidResumeTick(){
+  if(!isAndroid) return;
+  if(_androidResumeTick) clearInterval(_androidResumeTick);
+  _androidResumeTick = setInterval(()=>{ try{ speechSynthesis.resume(); }catch(_){} }, 250);
+}
+function stopAndroidResumeTick(){ if(_androidResumeTick){ clearInterval(_androidResumeTick); _androidResumeTick=null; } }
+// ユーザー操作での即時resume（AQUOSはtouchstartが効きやすい）
+['pointerdown','touchstart','click'].forEach(ev=>{
+  window.addEventListener(ev, ()=>{ try{ speechSynthesis.resume(); }catch(_){ } }, {passive:true});
+});
+
+/* =========================
    Wake Lock（フォールバック付）
 ========================= */
-const KeepAwake = (()=>{ let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
+const KeepAwake = (()=>{
+  let wakeLock=null, enabled=false, videoEl=null, canvas=null, stream=null;
   async function requestWakeLock(){ if(!('wakeLock' in navigator)) throw new Error('no_wakelock'); wakeLock = await navigator.wakeLock.request('screen'); }
   function ensureVideoNode(){ if(videoEl) return; videoEl=document.createElement('video'); videoEl.muted=true; videoEl.loop=true; videoEl.playsInline=true; Object.assign(videoEl.style,{position:'fixed',width:'1px',height:'1px',left:'-9999px',top:'-9999px'}); document.body.appendChild(videoEl); }
   function ensureCanvasStream(){ if(canvas&&stream) return; canvas=document.createElement('canvas'); canvas.width=1; canvas.height=1; const ctx=canvas.getContext('2d'); ctx.fillStyle='#000'; ctx.fillRect(0,0,1,1); stream=canvas.captureStream(1); }
@@ -436,9 +460,7 @@ const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsucce
 /* =========================
    画面遷移/ナビ
 ========================= */
-function stopAllPlayback(){
-  try { speechSynthesis.cancel(); } catch(_) {}
-}
+function stopAllPlayback(){ try { speechSynthesis.cancel(); } catch(_) {} }
 const views = { create: $('#view-create'), list: $('#view-list'), shadow: $('#view-shadow') };
 function closeAllDialogs(){ for(const id of ['#dlg-detail','#dlg-settings','#dlg-help','#dlg-lookup']){ try{ const d=$(id); if(d?.open) d.close(); }catch(_){} } }
 function show(view){ stopAllPlayback(); KeepAwake.disable(); closeAllDialogs(); Object.values(views).forEach(v=>v.classList.remove('active')); views[view].classList.add('active'); }
@@ -470,10 +492,13 @@ function defaultSaveHandler(){
     setActiveNav('nav-list'); show('list');
   };
 }
-function collectFormToItem(base={}){ const scene=$('#scene').value.trim(); const english=$('#en').value.trim(); const japanese=$('#ja').value.trim();
-  const categories=Array.from($('#cats').selectedOptions).map(o=>o.value);
-  const tags=$('#tags').value.split(',').map(s=>s.trim()).filter(Boolean);
-  const notes=$('#notes').value.trim();
+function collectFormToItem(base={}){
+  const scene = $('#scene').value.trim();
+  const english = $('#en').value.trim();
+  const japanese = $('#ja').value.trim();
+  const categories = Array.from($('#cats').selectedOptions).map(o=>o.value);
+  const tags = $('#tags').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const notes = $('#notes').value.trim();
   return Object.assign(base, { scene, english, japanese, categories, tags, notes });
 }
 function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value=''); Array.from($('#cats').options).forEach(o=>o.selected=false); const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML=''; }
@@ -523,25 +548,21 @@ function highlightAtCharIndex(container, charIndex){
 }
 
 /* =========================
-   TTS 単一エンジン + プラットフォーム適応（Android強化）
+   TTS 単一エンジン + プラットフォーム適応
 ========================= */
 let voices=[]; let ttsWarmed=false; let audioCtx=null;
 
 speechSynthesis.onvoiceschanged = ()=> loadVoices();
-
-/* Android向け：英語音声選択を強化（Google系優先） */
 function findAndroidEnglishVoices(list){
-  const arr=(list||[]);
-  const en = arr.filter(v=>/^en(-|_)?/i.test(v.lang||'') || /English/i.test(v.name||''));
-  const googlePreferred = en.filter(v=>/Google\s.*English/i.test(v.name||''));
-  return googlePreferred.length ? googlePreferred : en;
+  const enCandidates = (list||[]).filter(v=>/^en(-|_)?/i.test(v.lang||'') || /English/i.test(v.name||''));
+  const google = enCandidates.filter(v=>/Google/i.test(v.name||''));
+  return google.length ? google : enCandidates;
 }
-
 async function loadVoices(){
   voices = speechSynthesis.getVoices() || [];
   if (!voices.length) {
-    for (let i=0; i<12 && (!voices || voices.length===0); i++){
-      await sleep(120);
+    for (let i=0; i<10 && (!voices || voices.length===0); i++){
+      await new Promise(r=>setTimeout(r,100));
       voices = speechSynthesis.getVoices() || [];
     }
   }
@@ -551,7 +572,7 @@ async function loadVoices(){
       if(samantha){ settings.voiceName=samantha.name; settings.ttsLang='en-US'; }
     }else if(isAndroid){
       const picks = findAndroidEnglishVoices(voices);
-      if(picks.length){ settings.voiceName = picks[0].name || ''; settings.ttsLang = picks[0].lang || 'en-US'; }
+      if(picks.length){ settings.voiceName = ''; settings.ttsLang = picks[0].lang || 'en-US'; }
       else{ settings.voiceName=''; settings.ttsLang='en-US'; }
     }else{
       const pref=[/Microsoft\s+Eric\s+Online.*Natural/i,/Microsoft\s+Aria\s+Online.*Natural/i,/Microsoft\s+Guy\s+Online.*Natural/i,/Microsoft\s+Jenny\s+Online.*Natural/i];
@@ -563,7 +584,6 @@ async function loadVoices(){
   }
   renderVoiceList();
 }
-
 function renderVoiceList(){
   const sel=$('#voice'); if(!sel) return;
   const prev=settings.voiceName||''; sel.innerHTML='';
@@ -571,67 +591,17 @@ function renderVoiceList(){
   for(const v of list){ const opt=document.createElement('option'); opt.value=v.name; opt.textContent=`${v.name} (${v.lang})${v.default?' ★':''}`; sel.appendChild(opt); }
   sel.value = list.some(v=>v.name===prev) ? prev : (list[0]?.name || '');
 }
-
-function pickVoice(forcedLangHint){
+function pickVoice(){
   if(!voices || voices.length===0) voices = speechSynthesis.getVoices() || [];
-  const langHint = forcedLangHint || settings.ttsLang;
-  if(settings.voiceName){
-    const byName = voices.find(v=>v.name===settings.voiceName);
-    if(byName) return byName;
-  }
-  if(isIOS){
-    const s=voices.find(v=>/Samantha/i.test(v.name) && /^en-US/i.test(v.lang));
-    if(s) return s;
-  }
-  if(!isAndroid){
-    const e=voices.find(v=>/Microsoft\s+Eric\s+Online.*Natural/i.test(v.name) && /^en-US/i.test(v.lang));
-    if(e) return e;
-  }else{
-    const picks = findAndroidEnglishVoices(voices);
-    if(picks.length) return picks[0];
-  }
-  if(langHint){ const byLang = voices.find(v=>v.lang && v.lang.startsWith(langHint)); if(byLang) return byLang; }
+  if(settings.voiceName){ const byName = voices.find(v=>v.name===settings.voiceName); if(byName) return byName; }
+  if(isIOS){ const s=voices.find(v=>/Samantha/i.test(v.name) && /^en-US/i.test(v.lang)); if(s) return s; }
+  const e=voices.find(v=>/Microsoft\s+Eric\s+Online.*Natural/i.test(v.name) && /^en-US/i.test(v.lang));
+  if(e) return e;
+  if(settings.ttsLang){ const byLang = voices.find(v=>v.lang && v.lang.startsWith(settings.ttsLang)); if(byLang) return byLang; }
   return voices.find(v=>v.default) || voices[0] || null;
 }
 
-/* ---- Androidの「初回無音」や「発話拒否」対策 ---- */
-let firstUserGestureDone = false;
-function oneTimeWarmup(){
-  if(firstUserGestureDone) return;
-  firstUserGestureDone = true;
-  ensureTtsUnlocked();
-  loadVoices();
-}
-
-/* 追加：Android準備ルーチン（毎回の再生前に実行） */
-async function ensureAndroidReady(){
-  if(!isAndroid) return;
-  try{
-    // AudioContext解錠
-    await ensureTtsUnlocked();
-    // voicesの安定取得
-    await loadVoices();
-    // engineがPause状態で固まるケースに備え、明示resume
-    try{ speechSynthesis.resume(); }catch(_){}
-    // サイレント発話でTTSを起こす
-    await new Promise(res=>{
-      const v = pickVoice('en-US');
-      const u = new SpeechSynthesisUtterance(' ');
-      if(v) u.voice=v;
-      u.lang = v?.lang || 'en-US';
-      u.rate = 1.0; u.pitch=1.0; u.volume=0.0001;
-      let done=false; const finish=()=>{ if(!done){ done=true; res(); } };
-      u.onend = finish; u.onerror = finish;
-      try{
-        // 直前cancelでキューをクリア
-        try{ speechSynthesis.cancel(); }catch(_){}
-        setTimeout(()=>{ try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(_){ finish(); } }, 20);
-        setTimeout(finish, 700);
-      }catch(_){ finish(); }
-    });
-  }catch(_){}
-}
-
+/* ---- ウォームアップ強化（Android二重起こし） ---- */
 async function ensureTtsUnlocked(){
   if(ttsWarmed) return;
   try{
@@ -639,25 +609,52 @@ async function ensureTtsUnlocked(){
     if(audioCtx.state === 'suspended'){ await audioCtx.resume().catch(()=>{}); }
     const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
     gain.gain.value = 0.0001; osc.connect(gain).connect(audioCtx.destination); osc.start();
-    setTimeout(()=>{ try{osc.stop();osc.disconnect();gain.disconnect();}catch(_){ } }, 12);
+    setTimeout(()=>{ try{osc.stop();osc.disconnect();gain.disconnect();}catch(_){} }, 20);
   }catch(_){}
-  try {
-    try{ speechSynthesis.cancel(); }catch(e){}
-    const v = pickVoice();
-    const warm = new SpeechSynthesisUtterance('okay');
-    if (v) warm.voice = v;
-    warm.lang = v?.lang || settings.ttsLang || 'en-US';
-    warm.rate = 1.0; warm.pitch = 1.0; warm.volume = 0.01;
-    await new Promise(res=>{
+
+  const warmOnce = () => new Promise(res=>{
+    try{
+      const v = pickVoice('en-US');
+      const u = new SpeechSynthesisUtterance('okay ready');
+      if(v) u.voice=v;
+      u.lang = v?.lang || 'en-US';
+      u.rate = 1.0; u.pitch = 1.0; u.volume = 0.02;
       let done=false; const finish=()=>{ if(!done){ done=true; res(); } };
-      warm.onend = finish; warm.onerror = finish;
-      setTimeout(()=>{ try{ speechSynthesis.speak(warm); }catch(_){ finish(); } }, 80);
-      setTimeout(finish, 1200);
-    });
-  } finally { ttsWarmed = true; }
+      u.onend = finish; u.onerror = finish;
+      try{ speechSynthesis.cancel(); }catch(_){}
+      setTimeout(()=>{ try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(_){ finish(); } }, 60);
+      setTimeout(finish, 1500);
+    }catch(_){ res(); }
+  });
+
+  await warmOnce();
+  await warmOnce(); // Android(AQUOS)対策：二度起こす
+  ttsWarmed = true;
 }
 
-/* ---- 単一TTSエンジン（Androidリトライ付き） ---- */
+/* ---- Androidでの確実起動 ---- */
+async function ensureAndroidReady(){
+  if(!isAndroid) return;
+  try{
+    await ensureTtsUnlocked();
+    await loadVoices();
+    try{ speechSynthesis.resume(); }catch(_){}
+    await new Promise(res=>{
+      const v = pickVoice('en-US');
+      const u = new SpeechSynthesisUtterance('check');
+      if(v) u.voice=v;
+      u.lang = v?.lang || 'en-US';
+      u.rate = 1.0; u.pitch=1.0; u.volume=0.02;
+      let done=false; const finish=()=>{ if(!done){ done=true; res(); } };
+      u.onend = finish; u.onerror = finish;
+      try{ speechSynthesis.cancel(); }catch(_){}
+      setTimeout(()=>{ try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(_){ finish(); } }, 80);
+      setTimeout(finish, 1600);
+    });
+  }catch(_){}
+}
+
+/* ---- 単一TTSエンジン（途中再開に対応） ---- */
 class SpeakEngine {
   constructor(){
     this.state='idle';
@@ -665,29 +662,25 @@ class SpeakEngine {
     this._lastBoundary=0;
     this._ev={};
   }
-
   async play(script, {targetEl, rate, startCharIndex=0}={}){
     if(this.state==='playing'){ await this.stop(); }
     this.session++; const my = this.session;
     this.state='playing'; this._emit('state','playing');
 
     await ensureTtsUnlocked(); await loadVoices();
-    if(isAndroid){ await ensureAndroidReady(); } // ★ 追加
+    if(isAndroid) await ensureAndroidReady();
+    const v = pickVoice();
 
-    let lastResultDuration = 0;
-
-    const speakOne = (text,langHint, {baseOffset=0, attempt=0} = {})=>{
+    const speakOne = async (text,langHint, {baseOffset=0} = {})=>{
       return new Promise(async resolve=>{
         if(my!==this.session) return resolve();
         if(!text){ return resolve(); }
-
-        let v = pickVoice(langHint || (/[a-zA-Z]/.test(text)?'en-US':'ja-JP'));
         const u=new SpeechSynthesisUtterance(text);
-        if(v && !(isAndroid && attempt>=1)) u.voice=v; // 2回目以降は声の指定を外してOS任せ（相性回避）
-        u.lang = (v?.lang) || (langHint || (/[a-zA-Z]/.test(text)?'en-US':'ja-JP'));
+        if(v) u.voice=v;
+        u.lang = v?.lang || langHint || settings.ttsLang || (/[a-zA-Z]/.test(text)?'en-US':'ja-JP');
         u.rate = rate ?? settings.rate; u.pitch=settings.pitch; u.volume=settings.volume;
 
-        let fbTimer=null, usedBoundary=false, startTs=performance.now();
+        let fbTimer=null, usedBoundary=false;
         if(targetEl && /[A-Za-z]/.test(text)){
           u.onboundary=(e)=>{
             if(typeof e.charIndex==='number'){
@@ -707,40 +700,27 @@ class SpeakEngine {
             }, msPerWord);
           }
         }
-        const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
+        const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); stopAndroidResumeTick(); };
 
-        u.onend = async ()=>{
-          cleanup();
-          lastResultDuration = Math.max(0, performance.now()-startTs);
-          // 超短時間で終わったらAndroidでの失敗扱いとして再試行
-          if(isAndroid && lastResultDuration<140 && attempt<2 && my===this.session){
-            await ensureAndroidReady();
-            return resolve(await speakOne(text, langHint, {baseOffset, attempt:attempt+1}));
-          }
-          resolve();
-        };
-        u.onerror=async ()=>{
-          cleanup();
-          if(isAndroid && attempt<2 && my===this.session){
-            await ensureAndroidReady();
-            return resolve(await speakOne(text, langHint, {baseOffset, attempt:attempt+1}));
-          }
-          resolve();
-        };
+        u.onend = ()=>{ cleanup(); resolve(); };
+        u.onerror=()=>{ cleanup(); resolve(); };
 
         try {
-          // Androidは直前cancel→短待機→resume→speak が安定しやすい
           if(isAndroid){
             try{ speechSynthesis.cancel(); }catch(_){}
-            await sleep(20);
+            await sleep(60);
             try{ speechSynthesis.resume(); }catch(_){}
-            await sleep(20);
+            await sleep(60);
           }else{
             try{ speechSynthesis.cancel(); }catch(_){}
-            await sleep(10);
+            await sleep(20);
           }
-          const delay = isIOS ? 120 : (isAndroid ? 60 : 40);
-          setTimeout(()=>{ try { if(my===this.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, delay);
+          startAndroidResumeTick();
+          const delay = isIOS ? 140 : (isAndroid ? 120 : 50);
+          setTimeout(()=>{
+            try { if(my===this.session) speechSynthesis.speak(u); else resolve(); }
+            catch(e){ setTimeout(()=>resolve(), 160); }
+          }, delay);
         } catch(e) {
           resolve();
         }
@@ -792,14 +772,11 @@ class SpeakEngine {
     await doFlow();
     const dur=performance.now()-begin;
     if(my===this.session && dur<150 && !speechSynthesis.speaking){
-      await ensureTtsUnlocked(); await loadVoices();
-      if(isAndroid) await ensureAndroidReady();
-      await sleep(120);
+      await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); await sleep(120);
       if(my===this.session) await doFlow();
     }
     if(my===this.session){ this.state='idle'; this._emit('state','idle'); this._emit('ended'); }
   }
-
   pause(){ try{ if(this.state==='playing'){ speechSynthesis.pause(); this.state='paused'; this._emit('state','paused'); } }catch(_){} }
   resume(){ try{ if(this.state==='paused'){ speechSynthesis.resume(); this.state='playing'; this._emit('state','playing'); } }catch(_){} }
   async stop(){ try{ this.session++; speechSynthesis.cancel(); this.state='idle'; this._emit('state','idle'); }catch(_){} }
@@ -809,8 +786,16 @@ class SpeakEngine {
 const speakEngine = new SpeakEngine();
 
 /* =========================
-   iOS/Android 初回タップでウォームアップ
+   iOS/Android 初回タップで解錠
 ========================= */
+let firstUserGestureDone = false;
+function oneTimeWarmup(){
+  if(firstUserGestureDone) return;
+  firstUserGestureDone = true;
+  ensureTtsUnlocked();
+  loadVoices();
+  if(isAndroid) ensureAndroidReady();
+}
 window.addEventListener('pointerdown', oneTimeWarmup, {once:true, passive:true});
 window.addEventListener('touchend', oneTimeWarmup, {once:true, passive:true});
 
@@ -818,12 +803,14 @@ window.addEventListener('touchend', oneTimeWarmup, {once:true, passive:true});
    プレビュー（登録画面）
 ========================= */
 $('#btn-preview').onclick = async ()=>{
-  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady();
   const en = ($('#en').value.trim() || '').substring(0,800);
   const ja = $('#ja').value.trim();
   if(!en && !ja){ alert('英語例文か和訳を入力してください'); return; }
   const cont = $('#preview-en');
   renderSpeakText(cont, en); cont.classList.remove('hidden'); cont.scrollTop = 0;
+
+  oneTimeWarmup();
+  await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); try{ speechSynthesis.resume(); }catch(_){}
   await speakEngine.play({ en, ja, order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec }, { targetEl: cont });
 };
 $('#btn-pause-preview').onclick = ()=>{
@@ -876,7 +863,7 @@ function renderCards(list){
 }
 
 /* =========================
-   録音エンジン（単一ソース）
+   録音エンジン
 ========================= */
 class RecEngine {
   constructor(){ this.reset(); }
@@ -916,7 +903,10 @@ class RecEngine {
         try{ this.stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
         this.stream=null; this.mediaRecorder=null;
         let blob = null;
-        try{ const type = this.mime || (mr?.mimeType || 'audio/webm'); blob = new Blob(this.chunks, { type }); }catch(_){}
+        try{
+          const type = this.mime || (mr?.mimeType || 'audio/webm');
+          blob = new Blob(this.chunks, { type });
+        }catch(_){}
         this.chunks=[];
         const finalize = ()=>{
           if(blob && blob.size>0){
@@ -931,7 +921,10 @@ class RecEngine {
         };
         if(isIOS){ setTimeout(finalize, 300); } else { finalize(); }
       };
-      try{ mr.onstop = done; mr.stop(); }catch(_){ done(); }
+      try{
+        mr.onstop = done;
+        mr.stop();
+      }catch(_){ done(); }
     });
   }
   dispose(){
@@ -947,7 +940,7 @@ class RecEngine {
 const recEngine = new RecEngine();
 
 /* =========================
-   詳細ダイアログ（Android無音対策を追加）
+   詳細ダイアログ
 ========================= */
 let currentDetailId=null;
 
@@ -969,7 +962,7 @@ async function openDetail(id){
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
 
-  // iOS/Android：クリック直後に強制ウォームアップ
+  // iOS/Android：クリック直後に確実起動
   try { oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); } catch(_){}
 
   $('#d-scene').textContent=row.scene||'(場面未設定)';
@@ -990,7 +983,7 @@ async function openDetail(id){
   // 再生トグル
   $('#d-toggle').onclick = async ()=>{
     oneTimeWarmup();
-    await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady();
+    await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); try{ speechSynthesis.resume(); }catch(_){}
 
     const btn = $('#d-toggle');
     const targetEl = $('#d-en');
@@ -1140,7 +1133,7 @@ $('#save-settings').onclick = (ev)=>{
 };
 
 /* =========================
-   シャドーイング（Android準備を毎回実行）
+   シャドーイング（自動継続・速度変更も継続）
 ========================= */
 const sh = {
   list: [], index: 0, rate: 1.0, container: null,
@@ -1180,19 +1173,22 @@ async function prepareShadow(){
   }
 }
 $('#sh-back').onclick = ()=>{
-  sh.opened=false; sh.auto=false;
+  sh.opened=false;
+  sh.auto=false;
   speakEngine.stop(); stopAllPlayback(); KeepAwake.disable(); clearHighlight($('#sh-text'));
   $('#sh-text').textContent='(ここにランダムな英文が表示されます)';
   $('#sh-scene').textContent='';
   setActiveNav('nav-list'); show('list'); refreshList();
 };
 async function playCurrentShadow({ startCharIndex=0 } = {}){
-  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady();
   const row = sh.list[sh.index];
   const text=(row.english||'').trim();
   $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
   renderSpeakText(sh.container, text); sh.container.scrollTop=0;
   if (settings.keepAwake) { try{ await KeepAwake.enable(); }catch(e){} }
+
+  oneTimeWarmup();
+  await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); try{ speechSynthesis.resume(); }catch(_){}
   await speakEngine.play(
     { en: row.english||'', ja: row.japanese||'', order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec, startCharIndex },
     { targetEl: sh.container, rate: sh.rate }
@@ -1200,7 +1196,7 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
 }
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
-  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady();
+  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); try{ speechSynthesis.resume(); }catch(_){}
   if(speakEngine.state==='idle'){
     sh.auto = true;
     setPlayToggleLabel(btn,'playing');
@@ -1210,7 +1206,7 @@ $('#sh-toggle').onclick = async ()=>{
     speakEngine.pause(); setPlayToggleLabel(btn,'paused');
   }else{
     sh.auto = true;
-    await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady();
+    await ensureTtsUnlocked(); await loadVoices(); if(isAndroid) await ensureAndroidReady(); try{ speechSynthesis.resume(); }catch(_){}
     speakEngine.resume(); setPlayToggleLabel(btn,'playing');
   }
 };
@@ -1269,7 +1265,9 @@ async function translateBulkToJa(lines){
   const chunks=[]; const size=5;
   for(let i=0;i<lines.length;i+=size){ chunks.push(lines.slice(i,i+size)); }
   const out=[];
-  for(const ch of chunks){ for(const s of ch){ out.push(await translateJa(s)); } }
+  for(const ch of chunks){
+    for(const s of ch){ out.push(await translateJa(s)); }
+  }
   return out;
 }
 async function fetchEnDict(word){
@@ -1308,14 +1306,38 @@ function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, p
   const body = $('#lk-body');
   const safeWord = escapeHTML(word);
   const hasDefs = enDefs.length>0;
-  const head = `<div style="font-size:16px;margin-bottom:6px"><strong style="font-size:18px">${safeWord}</strong>${phonetic ? `<span class="tiny" style="margin-left:8px">/${escapeHTML(phonetic)}/</span>` : ''}</div>`;
-  const summary = `<div style="font-size:15px;line-height:1.9;margin:6px 0"><strong>日本語まとめ：</strong>${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}${jaWiki ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>` : ''}</div>`;
+  const head = `
+    <div style="font-size:16px;margin-bottom:6px">
+      <strong style="font-size:18px">${safeWord}</strong>
+      ${phonetic ? `<span class="tiny" style="margin-left:8px">/${escapeHTML(phonetic)}/</span>` : ''}
+    </div>`;
+  const summary = `
+    <div style="font-size:15px;line-height:1.9;margin:6px 0">
+      <strong>日本語まとめ：</strong>
+      ${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}
+      ${jaWiki ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>` : ''}
+    </div>`;
   const defsJa = hasDefs
-    ? `<div style="margin-top:8px"><div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div><ol style="margin:0 0 6px 20px; line-height:1.85">${jaDefs.map(d=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}</ol></div>` : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
+    ? `<div style="margin-top:8px">
+         <div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div>
+         <ol style="margin:0 0 6px 20px; line-height:1.85">
+           ${jaDefs.map(d=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
+         </ol>
+       </div>` : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
   const exJa = jaExamples.length
-    ? `<div style="margin-top:10px"><div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div><ul style="margin:0 0 6px 18px; line-height:1.85">${jaExamples.map(item=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}</ul></div>` : '';
+    ? `<div style="margin-top:10px">
+         <div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div>
+         <ul style="margin:0 0 6px 18px; line-height:1.85">
+           ${jaExamples.map(item=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
+         </ul>
+       </div>` : '';
   const defsEn = hasDefs
-    ? `<details style="margin-top:8px"><summary class="tiny">英英の原文を表示</summary><ol style="margin:6px 0 6px 20px; line-height:1.8">${enDefs.map(d=>`<li>${escapeHTML(d.pos ? `[${d.pos}] ` : '')}${escapeHTML(d.def)}</li>`).join('')}</ol></details>` : '';
+    ? `<details style="margin-top:8px">
+         <summary class="tiny">英英の原文を表示</summary>
+         <ol style="margin:6px 0 6px 20px; line-height:1.8">
+           ${enDefs.map(d=>`<li>${escapeHTML(d.pos ? `[${d.pos}] ` : '')}${escapeHTML(d.def)}</li>`).join('')}
+         </ol>
+       </details>` : '';
   body.innerHTML = head + summary + defsJa + exJa + defsEn;
 }
 async function openLookup(word){
@@ -1348,12 +1370,7 @@ document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-t
 /* =========================
    ブート
 ========================= */
-document.addEventListener('visibilitychange', async ()=>{
-  if(document.visibilityState==='visible'){
-    await loadVoices();
-    if(isAndroid){ try{ speechSynthesis.resume(); }catch(_){ } }
-  }
-});
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') loadVoices(); });
 window.addEventListener('pageshow', ()=> loadVoices());
 </script>
 </body>
