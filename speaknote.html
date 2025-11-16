@@ -50,9 +50,9 @@
   .btn.ok{background:linear-gradient(180deg,#115a2b,#0f2e1b);border-color:#1d7a44}
   .btn.warn{background:linear-gradient(180deg,#5d430f,#2f230a);border-color:#7d5a14}
   .btn.danger{background:linear-gradient(180deg,#5a1313,#2b0f0f);border-color:#7a1d1d}
-  .btn.small{
+  .btn.mini{
     padding:4px 8px;
-    font-size:12px;
+    font-size:11px;
     border-radius:999px;
   }
   .grid{display:grid;gap:10px}
@@ -88,11 +88,9 @@
     box-shadow:0 0 0 2px rgba(255,77,79,.18) inset !important;
     background:linear-gradient(180deg,#5a1313,#2b0f0f) !important;
   }
-
-  .tap-hint{
-    font-size:11px;
-    color:var(--muted);
-    margin-left:6px;
+  .copy-label{
+    cursor:pointer;
+    text-decoration:underline dotted 1px rgba(255,255,255,.25);
   }
 </style>
 </head>
@@ -120,15 +118,21 @@
     <div class="row two">
       <div>
         <!-- ラベルタップでクリップボード貼り付け -->
-        <label id="lbl-en">英語例文（English）<span class="tap-hint">タップで貼り付け</span></label>
+        <label id="lbl-en" class="copy-label" title="タップでクリップボードのテキストを貼り付け">
+          英語例文（English）
+        </label>
         <textarea id="en" placeholder="例：Given our tight schedule, I suggest outsourcing the inspection to meet the deadline."></textarea>
         <div id="preview-en" class="speak-text tiny hidden" style="margin-top:6px;"></div>
       </div>
       <div>
         <!-- 和訳ラベル＋自動和訳ボタン -->
-        <label style="display:flex;align-items:center;justify-content:space-between">
-          <span id="lbl-ja-text">和訳（Japanese／手入力）</span>
-          <button type="button" class="btn small" id="btn-auto-ja">自動和訳</button>
+        <label style="display:flex;justify-content:space-between;align-items:center">
+          <span id="lbl-ja" class="copy-label" title="タップでクリップボードのテキストを貼り付け">
+            和訳（Japanese／手入力）
+          </span>
+          <button type="button" class="btn mini" id="btn-auto-ja" title="英文から自動和訳（オンライン）">
+            自動和訳
+          </button>
         </label>
         <textarea id="ja" placeholder="例：工程が厳しいため、締切を守るには検査を外部委託することを提案します。"></textarea>
       </div>
@@ -409,34 +413,6 @@ const UA = navigator.userAgent||'';
 const isIOS = /iP(hone|od|ad)/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isAndroid = /Android/i.test(UA);
 
-/* クリップボードから貼り付け（ラベルタップ用） */
-async function pasteFromClipboardTo(selector){
-  const input = $(selector);
-  if(!input) return;
-  try{
-    if(navigator.clipboard && navigator.clipboard.readText){
-      const text = await navigator.clipboard.readText();
-      if(!text){
-        alert('クリップボードにテキストがありません。');
-        return;
-      }
-      input.value = text;
-      if(input.setSelectionRange){
-        const len = input.value.length;
-        input.focus();
-        input.setSelectionRange(len, len);
-      }
-    }else{
-      const manual = prompt('貼り付けたい文字列を入力してください：');
-      if(manual != null) input.value = manual;
-    }
-  }catch(e){
-    console.error(e);
-    const manual = prompt('クリップボードから読み取れませんでした。ここに貼り付けてください：');
-    if(manual != null) input.value = manual;
-  }
-}
-
 /* =========================
    Wake Lock（フォールバック付き）
 ========================= */
@@ -552,9 +528,29 @@ function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).v
 $('#btn-clear').onclick = ()=> clearForm();
 defaultSaveHandler();
 
-/* ラベルタップによる貼り付けイベント */
-$('#lbl-en')?.addEventListener('click', ()=>{ pasteFromClipboardTo('#en'); });
-$('#lbl-ja-text')?.addEventListener('click', ()=>{ pasteFromClipboardTo('#ja'); });
+/* --- クリップボード貼り付け（ラベルタップ） --- */
+async function pasteClipboardTo(targetId){
+  if(!navigator.clipboard || !navigator.clipboard.readText){
+    alert('このブラウザではクリップボードの読み取りに対応していません。');
+    return;
+  }
+  try{
+    const txt = await navigator.clipboard.readText();
+    if(!txt){
+      alert('クリップボードにテキストがありません。');
+      return;
+    }
+    const el = $('#'+targetId);
+    if(!el) return;
+    el.value = txt;
+    el.focus();
+  }catch(e){
+    console.error(e);
+    alert('クリップボードの読み取りに失敗しました。ブラウザの権限設定を確認してください。');
+  }
+}
+$('#lbl-en')?.addEventListener('click', ()=> pasteClipboardTo('en'));
+$('#lbl-ja')?.addEventListener('click', ()=> pasteClipboardTo('ja'));
 
 /* =========================
    ハイライト・トークン
@@ -732,11 +728,39 @@ class SpeakEngine {
         u.onend = ()=>{ cleanup(); resolve(); };
         u.onerror=()=>{ cleanup(); resolve(); };
 
+        // ここから下を差し替え
         try { speechSynthesis.cancel(); } catch(e){}
-        const delay = isIOS ? 120 : 40;
-        setTimeout(()=>{ try { if(my===self.session) speechSynthesis.speak(u); else resolve(); } catch(e) { setTimeout(()=>resolve(),120); } }, delay);
+
+        // ★ iOS だけは遅延なしで即 speak() する
+        const delay = isIOS ? 0 : 40;
+
+        if (delay === 0) {
+          try {
+            if (my === self.session) {
+              speechSynthesis.speak(u);
+            } else {
+              resolve();
+            }
+          } catch(e) {
+            // もし失敗しても固まらないようにリカバリ
+            setTimeout(()=>resolve(), 120);
+          }
+        } else {
+          setTimeout(()=>{
+            try {
+              if (my === self.session) {
+                speechSynthesis.speak(u);
+              } else {
+                resolve();
+              }
+            } catch(e) {
+              setTimeout(()=>resolve(), 120);
+            }
+          }, delay);
+        }
       });
     };
+
 
     function sliceFromChar(text, charIndex){
       if(!text) return {slice:text, base:0};
@@ -810,34 +834,16 @@ window.addEventListener('pointerdown', oneTimeWarmup, {once:true, passive:true})
 window.addEventListener('touchend', oneTimeWarmup, {once:true, passive:true});
 
 /* =========================
-   プレビュー（登録画面） ＊長文も全文再生＋起爆
+   プレビュー（登録画面）
 ========================= */
 $('#btn-preview').onclick = async ()=>{
-  oneTimeWarmup();
-  await ensureTtsUnlocked();
-  await loadVoices();
-
-  const en = ($('#en').value.trim() || '');
+  // ★ 長文もそのまま全文再生（文字数カットを撤廃）
+  const en = $('#en').value.trim() || '';
   const ja = $('#ja').value.trim();
-  if(!en && !ja){
-    alert('英語例文か和訳を入力してください');
-    return;
-  }
+  if(!en && !ja){ alert('英語例文か和訳を入力してください'); return; }
   const cont = $('#preview-en');
-  renderSpeakText(cont, en);
-  cont.classList.remove('hidden');
-  cont.scrollTop = 0;
-
-  await speakEngine.play(
-    {
-      en,
-      ja,
-      order: settings.speakTarget || 'en',
-      repeat: settings.repeat,
-      gapSec: settings.gapSec
-    },
-    { targetEl: cont }
-  );
+  renderSpeakText(cont, en); cont.classList.remove('hidden'); cont.scrollTop = 0;
+  await speakEngine.play({ en, ja, order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec }, { targetEl: cont });
 };
 $('#btn-pause-preview').onclick = ()=>{
   if(speakEngine.state==='playing') speakEngine.pause();
@@ -1389,7 +1395,7 @@ $('#sh-faster').onclick = ()=>{
 };
 
 /* =========================
-   ルックアップ（日本語たっぷり）＋和訳API
+   ルックアップ（日本語たっぷり）
 ========================= */
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
@@ -1512,34 +1518,50 @@ async function openLookup(word){
   }
 }
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
-document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
+document.addEventListener('click', (e)=>{
+  const wEl = e.target.closest('.speak-text .w');
+  if(!wEl) return;
+  const word = sanitizeWord(wEl.textContent);
+  if(!word) return;
+  openLookup(word.toLowerCase());
+});
 
-/* 登録画面：自動和訳ボタン（オンライン前提） */
-const btnAutoJa = $('#btn-auto-ja');
-if(btnAutoJa){
-  btnAutoJa.onclick = async ()=>{
-    const en = $('#en').value.trim();
-    if(!en){
-      alert('先に英語例文を入力してください。');
+/* =========================
+   「自動和訳」ボタン（登録画面）
+========================= */
+const autoBtn = $('#btn-auto-ja');
+if(autoBtn){
+  autoBtn.addEventListener('click', async (ev)=>{
+    ev.preventDefault();
+    ev.stopPropagation(); // ラベルのクリップボード貼り付けを抑止
+    const enText = $('#en').value.trim();
+    if(!enText){
+      alert('先に「英語例文」を入力してください。');
       return;
     }
-    const original = btnAutoJa.textContent;
-    btnAutoJa.disabled = true;
-    btnAutoJa.textContent = '翻訳中…';
+    const jaField = $('#ja');
+    if(jaField.value.trim()){
+      const ok = confirm('すでに和訳が入力されています。自動和訳で上書きしますか？');
+      if(!ok) return;
+    }
+    const oldLabel = autoBtn.textContent;
     try{
-      const ja = await translateJa(en);
+      autoBtn.disabled = true;
+      autoBtn.textContent = '翻訳中…';
+      const ja = await translateJa(enText);
       if(!ja){
-        alert('翻訳に失敗しました。ネットワーク接続を確認してください。');
+        alert('自動和訳の取得に失敗しました。ネットワーク状況をご確認ください。');
       }else{
-        $('#ja').value = ja;
+        jaField.value = ja;
       }
     }catch(e){
-      alert('翻訳中にエラーが発生しました。');
+      console.error(e);
+      alert('自動和訳中にエラーが発生しました。');
     }finally{
-      btnAutoJa.disabled = false;
-      btnAutoJa.textContent = original;
+      autoBtn.disabled = false;
+      autoBtn.textContent = oldLabel;
     }
-  };
+  });
 }
 
 /* =========================
