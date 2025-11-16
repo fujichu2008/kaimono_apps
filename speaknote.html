@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="ja">
 <head>
@@ -51,6 +50,11 @@
   .btn.ok{background:linear-gradient(180deg,#115a2b,#0f2e1b);border-color:#1d7a44}
   .btn.warn{background:linear-gradient(180deg,#5d430f,#2f230a);border-color:#7d5a14}
   .btn.danger{background:linear-gradient(180deg,#5a1313,#2b0f0f);border-color:#7a1d1d}
+  .btn.small{
+    padding:4px 8px;
+    font-size:12px;
+    border-radius:999px;
+  }
   .grid{display:grid;gap:10px}
   .filters{display:grid;gap:8px;margin-bottom:12px}
   @media(min-width:640px){ .filters{grid-template-columns:1fr 160px 1fr auto} }
@@ -84,6 +88,12 @@
     box-shadow:0 0 0 2px rgba(255,77,79,.18) inset !important;
     background:linear-gradient(180deg,#5a1313,#2b0f0f) !important;
   }
+
+  .tap-hint{
+    font-size:11px;
+    color:var(--muted);
+    margin-left:6px;
+  }
 </style>
 </head>
 <body>
@@ -109,17 +119,16 @@
     </div>
     <div class="row two">
       <div>
-        <label id="label-en" style="cursor:pointer">
-          英語例文（English）
-          <span class="tiny" style="margin-left:6px;opacity:.8">※タップでクリップボード貼り付け</span>
-        </label>
+        <!-- ラベルタップでクリップボード貼り付け -->
+        <label id="lbl-en">英語例文（English）<span class="tap-hint">タップで貼り付け</span></label>
         <textarea id="en" placeholder="例：Given our tight schedule, I suggest outsourcing the inspection to meet the deadline."></textarea>
         <div id="preview-en" class="speak-text tiny hidden" style="margin-top:6px;"></div>
       </div>
       <div>
-        <label id="label-ja" style="cursor:pointer">
-          和訳（Japanese／手入力）
-          <span class="tiny" style="margin-left:6px;opacity:.8">※タップでクリップボード貼り付け</span>
+        <!-- 和訳ラベル＋自動和訳ボタン -->
+        <label style="display:flex;align-items:center;justify-content:space-between">
+          <span id="lbl-ja-text">和訳（Japanese／手入力）</span>
+          <button type="button" class="btn small" id="btn-auto-ja">自動和訳</button>
         </label>
         <textarea id="ja" placeholder="例：工程が厳しいため、締切を守るには検査を外部委託することを提案します。"></textarea>
       </div>
@@ -400,25 +409,31 @@ const UA = navigator.userAgent||'';
 const isIOS = /iP(hone|od|ad)/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isAndroid = /Android/i.test(UA);
 
-/* クリップボード → テキストエリア貼り付け */
-async function pasteClipboardToTextArea(textareaId){
-  if(!navigator.clipboard || !navigator.clipboard.readText){
-    alert('クリップボードからの貼り付けに対応していません。手動で貼り付けてください。');
-    return;
-  }
+/* クリップボードから貼り付け（ラベルタップ用） */
+async function pasteFromClipboardTo(selector){
+  const input = $(selector);
+  if(!input) return;
   try{
-    const text = await navigator.clipboard.readText();
-    if(!text){
-      alert('クリップボードに文字列がありません。');
-      return;
+    if(navigator.clipboard && navigator.clipboard.readText){
+      const text = await navigator.clipboard.readText();
+      if(!text){
+        alert('クリップボードにテキストがありません。');
+        return;
+      }
+      input.value = text;
+      if(input.setSelectionRange){
+        const len = input.value.length;
+        input.focus();
+        input.setSelectionRange(len, len);
+      }
+    }else{
+      const manual = prompt('貼り付けたい文字列を入力してください：');
+      if(manual != null) input.value = manual;
     }
-    const el = document.getElementById(textareaId);
-    if(!el) return;
-    el.value = text;
-    el.focus();
   }catch(e){
     console.error(e);
-    alert('クリップボードの読み取りが許可されませんでした。ブラウザの設定やHTTPS接続をご確認ください。');
+    const manual = prompt('クリップボードから読み取れませんでした。ここに貼り付けてください：');
+    if(manual != null) input.value = manual;
   }
 }
 
@@ -536,6 +551,10 @@ function collectFormToItem(base={}){
 function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value=''); Array.from($('#cats').options).forEach(o=>o.selected=false); const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML=''; }
 $('#btn-clear').onclick = ()=> clearForm();
 defaultSaveHandler();
+
+/* ラベルタップによる貼り付けイベント */
+$('#lbl-en')?.addEventListener('click', ()=>{ pasteFromClipboardTo('#en'); });
+$('#lbl-ja-text')?.addEventListener('click', ()=>{ pasteFromClipboardTo('#ja'); });
 
 /* =========================
    ハイライト・トークン
@@ -791,9 +810,13 @@ window.addEventListener('pointerdown', oneTimeWarmup, {once:true, passive:true})
 window.addEventListener('touchend', oneTimeWarmup, {once:true, passive:true});
 
 /* =========================
-   プレビュー（登録画面）
+   プレビュー（登録画面） ＊長文も全文再生＋起爆
 ========================= */
 $('#btn-preview').onclick = async ()=>{
+  oneTimeWarmup();
+  await ensureTtsUnlocked();
+  await loadVoices();
+
   const en = ($('#en').value.trim() || '');
   const ja = $('#ja').value.trim();
   if(!en && !ja){
@@ -804,11 +827,12 @@ $('#btn-preview').onclick = async ()=>{
   renderSpeakText(cont, en);
   cont.classList.remove('hidden');
   cont.scrollTop = 0;
+
   await speakEngine.play(
     {
       en,
       ja,
-      order: settings.speakTarget||'en',
+      order: settings.speakTarget || 'en',
       repeat: settings.repeat,
       gapSec: settings.gapSec
     },
@@ -1365,7 +1389,7 @@ $('#sh-faster').onclick = ()=>{
 };
 
 /* =========================
-   ルックアップ（日本語たっぷり）
+   ルックアップ（日本語たっぷり）＋和訳API
 ========================= */
 function sanitizeWord(s){ return (s||'').replace(/^[^\w'-]+|[^\w'-]+$/g,'').replace(/’/g,"'"); }
 function setLookupLinks(word){
@@ -1490,20 +1514,39 @@ async function openLookup(word){
 $('#lk-close').onclick = ()=> $('#dlg-lookup').close();
 document.addEventListener('click', (e)=>{ const wEl = e.target.closest('.speak-text .w'); if(!wEl) return; const word = sanitizeWord(wEl.textContent); if(!word) return; openLookup(word.toLowerCase()); });
 
+/* 登録画面：自動和訳ボタン（オンライン前提） */
+const btnAutoJa = $('#btn-auto-ja');
+if(btnAutoJa){
+  btnAutoJa.onclick = async ()=>{
+    const en = $('#en').value.trim();
+    if(!en){
+      alert('先に英語例文を入力してください。');
+      return;
+    }
+    const original = btnAutoJa.textContent;
+    btnAutoJa.disabled = true;
+    btnAutoJa.textContent = '翻訳中…';
+    try{
+      const ja = await translateJa(en);
+      if(!ja){
+        alert('翻訳に失敗しました。ネットワーク接続を確認してください。');
+      }else{
+        $('#ja').value = ja;
+      }
+    }catch(e){
+      alert('翻訳中にエラーが発生しました。');
+    }finally{
+      btnAutoJa.disabled = false;
+      btnAutoJa.textContent = original;
+    }
+  };
+}
+
 /* =========================
    ブート
 ========================= */
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') loadVoices(); });
 window.addEventListener('pageshow', ()=> loadVoices());
-
-/* ラベルタップでクリップボード貼り付け */
-document.getElementById('label-en')?.addEventListener('click', ()=>{
-  pasteClipboardToTextArea('en');
-});
-document.getElementById('label-ja')?.addEventListener('click', ()=>{
-  pasteClipboardToTextArea('ja');
-});
 </script>
 </body>
 </html>
-
