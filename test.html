@@ -112,7 +112,7 @@
     <div class="row">
       <div>
         <label>具体的な場面（Scene）<span class="tiny">※必須</span></label>
-        <input id="scene" type="text" placeholder="例：設備据付の工程会議で外部検査を提案" />
+        <input id="scene" type="text" placeholder="例：ビオトープ作りの趣味を紹介" />
       </div>
     </div>
     <div class="row two">
@@ -121,7 +121,7 @@
         <label id="lbl-en" class="copy-label" title="タップでクリップボードのテキストを貼り付け">
           英語例文（English）
         </label>
-        <textarea id="en" placeholder="例：Given our tight schedule, I suggest outsourcing the inspection to meet the deadline."></textarea>
+        <textarea id="en" placeholder="例：My hobby is creating a biotope in my garden."></textarea>
         <div id="preview-en" class="speak-text tiny hidden" style="margin-top:6px;"></div>
       </div>
       <div>
@@ -134,7 +134,7 @@
             自動和訳
           </button>
         </label>
-        <textarea id="ja" placeholder="例：工程が厳しいため、締切を守るには検査を外部委託することを提案します。"></textarea>
+        <textarea id="ja" placeholder="例：私の趣味は庭でビオトープをつくることです。"></textarea>
       </div>
     </div>
     <div class="row two">
@@ -189,7 +189,6 @@
 
   <!-- シャドーイング設定画面（カテゴリ・タグ選択＋開始ボタン） -->
   <section id="view-shadow">
-    <h3 style="margin:0 0 6px">シャドーイング</h3>
     <div class="tiny" style="margin-bottom:8px">
       対象とする例文をカテゴリやタグで絞り込んでから、シャドーイングを開始できます。<br>
       何も指定しない場合は、登録済みのすべての英文が対象になります。
@@ -260,8 +259,7 @@
 
 <!-- シャドーイング再生ダイアログ（本文を広く表示） -->
 <dialog id="dlg-shadow">
-  <h3 style="margin:0 0 6px">シャドーイング</h3>
-  <div class="meta" id="sh-scene"></div>
+  <div id="sh-scene" style="margin:0 0 6px;font-size:15px;"></div>
   <div id="sh-text" class="speak-text" style="margin-top:8px;max-height:60vh;"></div>
   <div class="actions" style="margin-top:8px">
     <button class="btn ok" id="sh-toggle">⏸ 停止</button>
@@ -648,6 +646,38 @@ function highlightAtCharIndex(container, charIndex){
    TTS 単一エンジン + プラットフォーム適応
 ========================= */
 let voices=[]; let ttsWarmed=false; let audioCtx=null;
+
+
+// iOSで「シャドーイング開始」をタップした瞬間に、
+// 1回だけ同期的にごく小さい無音の発話を行い、音声出力を解錠する
+let iosShadowPrimed = false;
+function forceIOSShadowClickWarmup(){
+  if (!isIOS || iosShadowPrimed) return;
+  iosShadowPrimed = true;
+  try{
+    // 可能なら最新のvoice一覧を取得
+    const list = speechSynthesis.getVoices();
+    if (list && list.length) {
+      voices = list;
+    }
+    const v = pickVoice();
+    const u = new SpeechSynthesisUtterance(' ');
+    if (v) u.voice = v;
+    u.lang = v?.lang || settings.ttsLang || 'en-US';
+    u.rate = 1.0;
+    u.volume = 0.001; // ほぼ無音
+
+    // いったんキャンセルしてからごく短い発話 → すぐキャンセル
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+    setTimeout(()=>{ 
+      try{ speechSynthesis.cancel(); }catch(_){}
+    }, 300);
+  }catch(e){
+    console.warn('forceIOSShadowClickWarmup error', e);
+  }
+}
+
 
 speechSynthesis.onvoiceschanged = ()=> loadVoices();
 function findAndroidEnglishVoices(list){
@@ -1395,7 +1425,7 @@ async function prepareShadow(){
 async function playCurrentShadow({ startCharIndex=0 } = {}){
   const row = sh.list[sh.index];
   const text=(row.english||'').trim();
-  $('#sh-scene').textContent = '場面：' + (row.scene || '(未設定)');
+  $('#sh-scene').innerHTML = '🔊 <strong>' + escapeHTML(row.scene || '(未設定)') + '</strong>';
   renderSpeakText(sh.container, text); sh.container.scrollTop=0;
   if (settings.keepAwake) { try{ await KeepAwake.enable(); }catch(e){} }
   await speakEngine.play(
@@ -1407,7 +1437,11 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
 /* シャドーイング開始ボタン（カテゴリ・タグ適用） */
 $('#sh-start').onclick = async ()=>{
   oneTimeWarmup();
-  await ensureTtsUnlocked(); await loadVoices();
+  // ★ iOSではここで同期的に一度だけ「無音発話」を打つ
+  forceIOSShadowClickWarmup();
+
+  await ensureTtsUnlocked();
+  await loadVoices();
 
   const all = await getAll();
   let pool = all.filter(r=> (r.english||'').trim().length>0 );
@@ -1458,7 +1492,13 @@ $('#sh-start').onclick = async ()=>{
 /* 専用ダイアログ内のボタン */
 $('#sh-toggle').onclick = async ()=>{
   const btn = $('#sh-toggle');
-  oneTimeWarmup(); await ensureTtsUnlocked(); await loadVoices();
+  oneTimeWarmup();
+  // ★ ここでも、まだなら一度だけ無音発話で解錠
+  forceIOSShadowClickWarmup();
+
+  await ensureTtsUnlocked();
+  await loadVoices();
+
   if(speakEngine.state==='idle'){
     sh.auto = true;
     setPlayToggleLabel(btn,'playing');
