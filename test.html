@@ -997,7 +997,7 @@ async function renderHomeGraph(){
     return;
   }
 
-  // ② その他KPI：棒グラフ（直近N日）
+  // ② その他KPI：折れ線グラフ（直近N日）
   const days = getLastNDays(kpiCurrentRange);
   let selector, unit, label;
 
@@ -1023,19 +1023,96 @@ async function renderHomeGraph(){
     return;
   }
 
-  const rowsHtml = series.map(s=>{
-    const w = Math.max(6, (s.value / max) * 100);
-    return `
-      <div class="kpi-bar-row">
-        <div class="kpi-bar-label">${escapeHTML(s.label)}</div>
-        <div class="kpi-bar-track">
-          <div class="kpi-bar-fill" style="width:${w}%"></div>
-        </div>
-        <div class="kpi-bar-value">${s.value}${unit}</div>
-      </div>`;
-  }).join('');
-  body.innerHTML = rowsHtml;
+  // ---- ここから折れ線グラフSVG生成 ----
+  const width  = 360;
+  const height = 160;
+  const padL = 36;
+  const padR = 8;
+  const padT = 10;
+  const padB = 22;
+  const innerW = width  - padL - padR;
+  const innerH = height - padT - padB;
+
+  const minVal = 0;
+  const range  = Math.max(1, max - minVal);
+
+  const n = series.length;
+  const stepX = n > 1 ? innerW / (n - 1) : 0;
+  const points = series.map((s, i) => {
+    const x = padL + (n === 1 ? innerW / 2 : i * stepX);
+    const yNorm = (s.value - minVal) / range; // 0〜1
+    const y = padT + (1 - yNorm) * innerH;
+    return `${x},${y}`;
+  }).join(' ');
+
+  // Y軸目盛り（0, 1/3, 2/3, max の4本）
+  const ticks = [];
+  const tickCount = 3;
+  for(let i=0;i<=tickCount;i++){
+    const v = Math.round(max * (i / tickCount));
+    const frac = 1 - (v / range); // 上がmax, 下が0
+    const y = padT + frac * innerH;
+    ticks.push({ y, v });
+  }
+
+  // X軸ラベル（多いときは間引き）
+  const labelStep = Math.max(1, Math.ceil(n / 6));
+  const xLabels = series.map((s, i) => {
+    if(i % labelStep !== 0 && i !== n - 1) return null;
+    const x = padL + (n === 1 ? innerW / 2 : i * stepX);
+    return { x, text: s.label };
+  }).filter(Boolean);
+
+  const svg = `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" style="width:100%;height:auto;">
+      <!-- 背景 -->
+      <rect x="0" y="0" width="${width}" height="${height}" fill="none" />
+      <!-- 横グリッド & Y軸ラベル -->
+      <g>
+        ${ticks.map(t => `
+          <line x1="${padL}" y1="${t.y}" x2="${width-padR}" y2="${t.y}"
+                stroke="rgba(132,139,164,0.25)" stroke-width="0.5" />
+          <text x="${padL-4}" y="${t.y+3}" text-anchor="end"
+                fill="rgba(167,176,194,0.9)" font-size="9">
+            ${t.v}${unit}
+          </text>
+        `).join('')}
+      </g>
+      <!-- 折れ線 -->
+      <polyline
+        fill="none"
+        stroke="#4da3ff"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        points="${points}"
+      />
+      <!-- 各ポイント -->
+      <g>
+        ${series.map((s, i) => {
+          const x = padL + (n === 1 ? innerW / 2 : i * stepX);
+          const yNorm = (s.value - minVal) / range;
+          const y = padT + (1 - yNorm) * innerH;
+          return `
+            <circle cx="${x}" cy="${y}" r="3" fill="#7b5cff" />
+          `;
+        }).join('')}
+      </g>
+      <!-- X軸ラベル -->
+      <g>
+        ${xLabels.map(l => `
+          <text x="${l.x}" y="${height-4}" text-anchor="middle"
+                fill="rgba(167,176,194,0.9)" font-size="9">
+            ${escapeHTML(l.text)}
+          </text>
+        `).join('')}
+      </g>
+    </svg>
+  `;
+
+  body.innerHTML = svg;
 }
+
 
 function initHomeKpiEvents(){
   // タイルタップでメトリクス切替
