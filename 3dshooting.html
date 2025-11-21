@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>CYBER STRIKER: OCTO-X</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; touch-action: none; font-family: 'Courier New', sans-serif; }
+        canvas { display: block; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
+        #score-board { color: #0ff; font-size: 20px; text-shadow: 0 0 5px #0ff; }
+        #hp-bar-container { width: 200px; height: 20px; border: 2px solid #0ff; background: rgba(0,0,0,0.5); margin-top: 10px; }
+        #hp-bar { width: 100%; height: 100%; background: #0f0; transition: width 0.2s, background-color 0.2s; }
+        #boss-hp-container { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); width: 60%; height: 15px; border: 2px solid #f00; display: none; }
+        #boss-hp { width: 100%; height: 100%; background: #f00; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; z-index: 10; }
+        h1 { color: #0ff; font-size: 40px; margin: 0 0 20px 0; text-shadow: 0 0 10px #0ff; text-align: center; }
+        p { color: #fff; font-size: 18px; text-align: center; line-height: 1.5; }
+        .btn { border: 2px solid #0ff; color: #0ff; padding: 15px 40px; font-size: 24px; background: transparent; cursor: pointer; margin-top: 30px; text-shadow: 0 0 5px #0ff; box-shadow: 0 0 10px #0ff; }
+        .btn:active { background: #0ff; color: #000; }
+        #msg-area { position: absolute; top: 40%; width: 100%; text-align: center; font-size: 30px; color: #ff0; font-weight: bold; text-shadow: 0 0 10px #ff0; display: none; }
+    </style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div>
+        <div id="score-board">SCORE: 0</div>
+        <div id="hp-bar-container"><div id="hp-bar"></div></div>
+    </div>
+    <div id="boss-hp-container"><div id="boss-hp"></div></div>
+</div>
+
+<div id="msg-area">WARNING: BOSS APPROACHING</div>
+
+<div id="overlay">
+    <h1>CYBER STRIKER</h1>
+    <p>SWIPE to Move<br>Auto Fire<br>Avoid Buildings & Enemy Fire</p>
+    <button class="btn" id="start-btn">GAME START</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/**
+ * GAME CONFIGURATION & STATE
+ */
+const CONFIG = {
+    speed: 0.5,
+    playerSpeed: 0.03,
+    boundaryY: 12,
+    spawnRate: 100,
+    bossScoreThreshold: 1000
+};
+
+let state = {
+    isPlaying: false,
+    score: 0,
+    hp: 100,
+    isGameOver: false,
+    isBossActive: false,
+    level: 1,
+    frames: 0,
+    powerLevel: 1
+};
+
+// Audio Context
+let audioCtx;
+let bgmOscillators = [];
+let isBossMusic = false;
+
+/**
+ * THREE.JS SETUP
+ */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000020, 0.02);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+// Side view setup
+camera.position.set(0, 0, 30); 
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+// Lights
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 20, 10);
+scene.add(dirLight);
+const pointLight = new THREE.PointLight(0x00ffff, 1, 50);
+pointLight.position.set(-10, 0, 10);
+scene.add(pointLight);
+
+/**
+ * ASSETS / GEOMETRY GENERATORS
+ */
+// Materials
+const matPlayer = new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x0044ff, flatShading: true });
+const matEnemy = new THREE.MeshStandardMaterial({ color: 0xff00ff, emissive: 0x440044, flatShading: true });
+const matBoss = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0x550000, metalness: 0.8, roughness: 0.2 });
+const matBuilding = new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x001100, transparent: true, opacity: 0.9 });
+const matBulletP = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+const matBulletE = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+const matItemHP = new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00 });
+const matItemPow = new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffff00 });
+
+/**
+ * CLASSES
+ */
+class SoundManager {
+    constructor() {
+        this.enabled = false;
+    }
+
+    init() {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+        this.enabled = true;
+        this.playBgmNormal();
+    }
+
+    playTone(freq, type, duration, vol = 0.1) {
+        if (!this.enabled) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    playShoot() { this.playTone(880, 'square', 0.1, 0.05); }
+    playEnemyShoot() { this.playTone(200, 'sawtooth', 0.2, 0.05); }
+    playExplosion() { this.playTone(100, 'sawtooth', 0.4, 0.1); }
+    playPowerUp() { 
+        this.playTone(600, 'sine', 0.1, 0.1); 
+        setTimeout(() => this.playTone(1200, 'sine', 0.2, 0.1), 100);
+    }
+
+    stopBgm() {
+        bgmOscillators.forEach(o => o.stop());
+        bgmOscillators = [];
+    }
+
+    playBgmNormal() {
+        if (isBossMusic) return;
+        this.stopBgm();
+        // Simple procedural loop logic would go here, 
+        // but for stability in this snippet, we use a simple repeating interval logic outside
+        // or just let the ambient sound play.
+        // For this demo, we'll stick to FX to avoid browser autoplay policy headaches with continuous loops.
+    }
+    
+    playBgmBoss() {
+        if(isBossMusic) return;
+        isBossMusic = true;
+        // Boss music logic placeholder
+    }
+}
+const soundMgr = new SoundManager();
+
+class Player {
+    constructor() {
+        const geometry = new THREE.ConeGeometry(1, 3, 8);
+        geometry.rotateZ(-Math.PI / 2);
+        this.mesh = new THREE.Mesh(geometry, matPlayer);
+        this.mesh.position.set(-10, 0, 0);
+        scene.add(this.mesh);
+        this.targetY = 0;
+    }
+
+    update() {
+        // Smooth movement
+        this.mesh.position.y += (this.targetY - this.mesh.position.y) * 0.1;
+        // Tilt effect
+        this.mesh.rotation.x = (this.targetY - this.mesh.position.y) * 0.5;
+        
+        // Shoot
+        if (state.frames % (20 - state.powerLevel * 2) === 0) {
+            this.shoot();
+        }
+    }
+
+    shoot() {
+        const b = new Bullet(this.mesh.position.clone(), true);
+        bullets.push(b);
+        soundMgr.playShoot();
+        if(state.powerLevel > 2) {
+             // Spread shot
+             const b2 = new Bullet(this.mesh.position.clone(), true, 0.2);
+             const b3 = new Bullet(this.mesh.position.clone(), true, -0.2);
+             bullets.push(b2, b3);
+        }
+    }
+}
+
+class Bullet {
+    constructor(pos, isPlayer, dy = 0) {
+        this.mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 4, 4), isPlayer ? matBulletP : matBulletE);
+        this.mesh.position.copy(pos);
+        this.isPlayer = isPlayer;
+        this.dy = dy;
+        scene.add(this.mesh);
+    }
+    update() {
+        this.mesh.position.x += this.isPlayer ? 1 : -0.4;
+        this.mesh.position.y += this.dy;
+        if (this.mesh.position.x > 30 || this.mesh.position.x < -30) return false;
+        return true;
+    }
+    remove() {
+        scene.remove(this.mesh);
+    }
+}
+
+class Enemy {
+    constructor() {
+        const geo = new THREE.BoxGeometry(1.5, 1, 1.5);
+        this.mesh = new THREE.Mesh(geo, matEnemy);
+        this.mesh.position.set(30, (Math.random() * 20) - 10, 0);
+        scene.add(this.mesh);
+        this.hp = 3;
+        this.lastShot = 0;
+    }
+    update() {
+        this.mesh.position.x -= CONFIG.speed;
+        this.mesh.rotation.z += 0.05;
+        
+        // Shoot behavior
+        if (state.frames - this.lastShot > 100 && Math.random() < 0.02) {
+            const b = new Bullet(this.mesh.position.clone(), false);
+            bullets.push(b);
+            soundMgr.playEnemyShoot();
+            this.lastShot = state.frames;
+        }
+
+        if (this.mesh.position.x < -30) return false;
+        return true;
+    }
+    remove() {
+        scene.remove(this.mesh);
+    }
+}
+
+class Boss {
+    constructor() {
+        this.group = new THREE.Group();
+        
+        // Head
+        const headGeo = new THREE.SphereGeometry(3, 16, 16);
+        this.head = new THREE.Mesh(headGeo, matBoss);
+        this.group.add(this.head);
+        
+        // Tentacles (Visual only)
+        this.tentacles = [];
+        for(let i=0; i<4; i++) {
+            const limb = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.1, 6), matBoss);
+            limb.position.x = -2;
+            limb.rotation.z = Math.PI / 2 + (i * 0.5);
+            this.tentacles.push(limb);
+            this.group.add(limb);
+        }
+
+        this.group.position.set(40, 0, 0); // Start off screen
+        scene.add(this.group);
+        
+        this.hp = 200;
+        this.maxHp = 200;
+        this.phase = 1;
+        this.dirY = 0.1;
+        this.targetX = 15;
+    }
+
+    update() {
+        // Entrance
+        if (this.group.position.x > this.targetX) {
+            this.group.position.x -= 0.1;
+        } else {
+            // Movement Pattern
+            this.group.position.y += this.dirY;
+            if (this.group.position.y > 8 || this.group.position.y < -8) this.dirY *= -1;
+        }
+
+        // Rotate Tentacles
+        this.tentacles.forEach((t, i) => {
+            t.rotation.z += Math.sin(state.frames * 0.05 + i) * 0.02;
+        });
+
+        // Phase 2 Color Change
+        if (this.phase === 1 && this.hp < 100) {
+            this.phase = 2;
+            this.head.material.emissive.setHex(0xff0000);
+            showMessage("LIMIT BREAK");
+        }
+
+        // Attack
+        const fireRate = this.phase === 1 ? 60 : 30;
+        if (state.frames % fireRate === 0) {
+            const b = new Bullet(this.group.position.clone(), false);
+            b.mesh.scale.set(2,2,2);
+            bullets.push(b);
+            
+            if (this.phase === 2) {
+                // Spread shot
+                bullets.push(new Bullet(this.group.position.clone(), false, 0.2));
+                bullets.push(new Bullet(this.group.position.clone(), false, -0.2));
+            }
+            soundMgr.playEnemyShoot();
+        }
+    }
+
+    remove() {
+        scene.remove(this.group);
+    }
+}
+
+class Item {
+    constructor(pos, type) {
+        this.type = type; // 'hp' or 'power'
+        this.mesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.8, 8, 8), 
+            type === 'hp' ? matItemHP : matItemPow
+        );
+        this.mesh.position.copy(pos);
+        scene.add(this.mesh);
+    }
+    update() {
+        this.mesh.position.x -= 0.2;
+        if (this.mesh.position.x < -30) return false;
+        return true;
+    }
+    remove() { scene.remove(this.mesh); }
+}
+
+class Building {
+    constructor() {
+        const height = Math.random() * 10 + 5;
+        const geo = new THREE.BoxGeometry(4, height, 4);
+        this.mesh = new THREE.Mesh(geo, matBuilding);
+        // Spawn at top or bottom
+        const isTop = Math.random() > 0.5;
+        const yPos = isTop ? 15 : -15;
+        this.mesh.position.set(40, yPos + (isTop ? -height/4 : height/4), -5); 
+        scene.add(this.mesh);
+    }
+    update() {
+        this.mesh.position.x -= CONFIG.speed;
+        if (this.mesh.position.x < -40) return false;
+        return true;
+    }
+    remove() { scene.remove(this.mesh); }
+}
+
+/**
+ * GLOBAL VARIABLES
+ */
+let player;
+let bullets = [];
+let enemies = [];
+let items = [];
+let buildings = [];
+let boss = null;
+
+/**
+ * GAME LOGIC
+ */
+function initGame() {
+    // Reset State
+    state.score = 0;
+    state.hp = 100;
+    state.isGameOver = false;
+    state.isBossActive = false;
+    state.powerLevel = 1;
+    
+    updateUI();
+    
+    // Clear Scene Entities
+    bullets.forEach(b => b.remove()); bullets = [];
+    enemies.forEach(e => e.remove()); enemies = [];
+    items.forEach(i => i.remove()); items = [];
+    buildings.forEach(b => b.remove()); buildings = [];
+    if(boss) { boss.remove(); boss = null; }
+
+    // Create Player
+    if(player) scene.remove(player.mesh);
+    player = new Player();
+
+    // Start Loop
+    state.isPlaying = true;
+    document.getElementById('overlay').style.display = 'none';
+    document.getElementById('boss-hp-container').style.display = 'none';
+    soundMgr.init();
+}
+
+function spawnLogic() {
+    if (state.isBossActive) return;
+
+    // Buildings
+    if (state.frames % 60 === 0) {
+        buildings.push(new Building());
+    }
+
+    // Enemies
+    if (state.frames % CONFIG.spawnRate === 0) {
+        enemies.push(new Enemy());
+    }
+
+    // Boss Spawn Check
+    if (state.score >= CONFIG.bossScoreThreshold && !state.isBossActive) {
+        startBoss();
+    }
+}
+
+function startBoss() {
+    state.isBossActive = true;
+    showMessage("WARNING: BOSS DETECTED");
+    setTimeout(() => {
+        boss = new Boss();
+        document.getElementById('boss-hp-container').style.display = 'block';
+        // Simple simulated BGM change via variable
+        isBossMusic = true;
+    }, 3000);
+}
+
+function updateEntities() {
+    // Player
+    if (player) player.update();
+
+    // Bullets
+    bullets = bullets.filter(b => {
+        const active = b.update();
+        if (!active) b.remove();
+        return active;
+    });
+
+    // Enemies
+    enemies = enemies.filter(e => {
+        const active = e.update();
+        if (!active) e.remove();
+        return active;
+    });
+
+    // Items
+    items = items.filter(i => {
+        const active = i.update();
+        if (!active) i.remove();
+        return active;
+    });
+
+    // Buildings
+    buildings = buildings.filter(b => {
+        const active = b.update();
+        if (!active) b.remove();
+        return active;
+    });
+
+    // Boss
+    if (boss) {
+        boss.update();
+        document.getElementById('boss-hp').style.width = (boss.hp / boss.maxHp * 100) + "%";
+    }
+}
+
+function checkCollisions() {
+    if (!player) return;
+    const pBox = new THREE.Box3().setFromObject(player.mesh);
+
+    // 1. Player Bullets vs Enemies/Boss
+    bullets.forEach(b => {
+        if (!b.isPlayer) return;
+        const bBox = new THREE.Box3().setFromObject(b.mesh);
+
+        // Vs Enemy
+        enemies.forEach(e => {
+            const eBox = new THREE.Box3().setFromObject(e.mesh);
+            if (bBox.intersectsBox(eBox)) {
+                e.hp--;
+                b.remove(); b.mesh.position.y = 1000; // Hack to disable
+                soundMgr.playTone(100, 'square', 0.05); // Hit sound
+                if (e.hp <= 0) {
+                    createExplosion(e.mesh.position);
+                    // Drop Item Chance
+                    if(Math.random() < 0.3) {
+                        items.push(new Item(e.mesh.position.clone(), Math.random() > 0.5 ? 'hp' : 'power'));
+                    }
+                    e.remove(); e.mesh.position.x = -1000;
+                    state.score += 100;
+                    soundMgr.playExplosion();
+                }
+            }
+        });
+
+        // Vs Boss
+        if (boss) {
+            const bossBox = new THREE.Box3().setFromObject(boss.head);
+            if (bBox.intersectsBox(bossBox)) {
+                boss.hp--;
+                b.remove(); b.mesh.position.y = 1000;
+                if (boss.hp <= 0) {
+                    gameWin();
+                }
+            }
+        }
+    });
+
+    // 2. Enemy Bullets/Body vs Player
+    // Buildings vs Player
+    let hit = false;
+    
+    // Bullets
+    bullets.forEach(b => {
+        if (b.isPlayer) return;
+        if (new THREE.Box3().setFromObject(b.mesh).intersectsBox(pBox)) {
+            hit = true;
+            b.remove(); b.mesh.position.y = 1000;
+        }
+    });
+
+    // Enemies Body
+    enemies.forEach(e => {
+        if (new THREE.Box3().setFromObject(e.mesh).intersectsBox(pBox)) {
+            hit = true;
+            e.hp = 0; // Crash destroys enemy
+        }
+    });
+
+    // Buildings
+    buildings.forEach(b => {
+        if (new THREE.Box3().setFromObject(b.mesh).intersectsBox(pBox)) {
+            hit = true;
+        }
+    });
+
+    if (hit) {
+        damagePlayer(10);
+    }
+
+    // 3. Items vs Player
+    items.forEach(i => {
+        if (new THREE.Box3().setFromObject(i.mesh).intersectsBox(pBox)) {
+            if (i.type === 'hp') {
+                state.hp = Math.min(100, state.hp + 20);
+                showMessage("REPAIR");
+            } else {
+                state.powerLevel = Math.min(5, state.powerLevel + 1);
+                showMessage("POWER UP");
+            }
+            soundMgr.playPowerUp();
+            i.remove(); i.mesh.position.x = -1000;
+        }
+    });
+}
+
+function damagePlayer(amount) {
+    state.hp -= amount;
+    updateUI();
+    soundMgr.playTone(50, 'sawtooth', 0.3);
+    scene.fog.color.setHex(0x550000); // Red flash
+    setTimeout(() => scene.fog.color.setHex(0x000020), 100);
+    
+    if (state.hp <= 0) {
+        gameOver();
+    }
+}
+
+function createExplosion(pos) {
+    // Simple particle effect
+    // (Omitted for brevity, visual feedback provided by screen flash and sound)
+}
+
+function showMessage(text) {
+    const el = document.getElementById('msg-area');
+    el.innerText = text;
+    el.style.display = 'block';
+    setTimeout(() => el.style.display = 'none', 2000);
+}
+
+function updateUI() {
+    document.getElementById('score-board').innerText = `SCORE: ${state.score}`;
+    const hpBar = document.getElementById('hp-bar');
+    hpBar.style.width = state.hp + '%';
+    if(state.hp < 30) hpBar.style.background = '#f00';
+    else hpBar.style.background = '#0f0';
+}
+
+function gameOver() {
+    state.isPlaying = false;
+    document.getElementById('overlay').style.display = 'flex';
+    document.querySelector('#overlay h1').innerText = "GAME OVER";
+    document.querySelector('#overlay p').innerHTML = `Final Score: ${state.score}`;
+}
+
+function gameWin() {
+    state.isPlaying = false;
+    boss.remove();
+    soundMgr.playTone(400, 'sine', 0.1);
+    setTimeout(() => soundMgr.playTone(600, 'sine', 0.1), 150);
+    setTimeout(() => soundMgr.playTone(800, 'sine', 0.4), 300);
+    
+    document.getElementById('overlay').style.display = 'flex';
+    document.querySelector('#overlay h1').innerText = "MISSION COMPLETE";
+    document.querySelector('#overlay p').innerHTML = `Final Score: ${state.score + 5000}`;
+}
+
+/**
+ * MAIN LOOP
+ */
+function animate() {
+    requestAnimationFrame(animate);
+    
+    if (!state.isPlaying) return;
+    
+    state.frames++;
+    
+    spawnLogic();
+    updateEntities();
+    checkCollisions();
+    updateUI();
+
+    // Background scroll effect (Move stars/grid simulated by camera static vs objects moving)
+    // Actually we are moving objects left, so it looks like we fly right.
+    // Let's add some passing stars for speed sensation
+    if (Math.random() < 0.5) {
+        const star = new THREE.Mesh(new THREE.SphereGeometry(0.05), new THREE.MeshBasicMaterial({color: 0xffffff}));
+        star.position.set(40, (Math.random() * 40) - 20, (Math.random() * 20) - 10);
+        scene.add(star);
+        // quick hack to animate star
+        const updateStar = () => {
+            star.position.x -= 2;
+            if(star.position.x < -40) { scene.remove(star); }
+            else { requestAnimationFrame(updateStar); }
+        };
+        updateStar();
+    }
+}
+
+/**
+ * INPUT HANDLING
+ */
+let touchStartY = 0;
+document.addEventListener('touchstart', (e) => {
+    touchStartY = e.touches[0].clientY;
+}, {passive: false});
+
+document.addEventListener('touchmove', (e) => {
+    e.preventDefault(); // Stop scroll
+    if(!player) return;
+    
+    const touchY = e.touches[0].clientY;
+    const deltaY = touchY - touchStartY;
+    touchStartY = touchY;
+
+    // Invert control check? No, usually swipe up = move up.
+    // Screen coordinates: Y increases downwards. Three.js: Y increases upwards.
+    // So moving finger DOWN (positive delta) should decrease Three.js Y.
+    
+    player.targetY -= deltaY * 0.05;
+    // Clamp
+    player.targetY = Math.max(-12, Math.min(12, player.targetY));
+}, {passive: false});
+
+// PC Mouse support for testing
+let isMouseDown = false;
+document.addEventListener('mousedown', (e) => { isMouseDown = true; touchStartY = e.clientY; });
+document.addEventListener('mouseup', () => isMouseDown = false);
+document.addEventListener('mousemove', (e) => {
+    if(isMouseDown && player) {
+        const deltaY = e.clientY - touchStartY;
+        touchStartY = e.clientY;
+        player.targetY -= deltaY * 0.05;
+        player.targetY = Math.max(-12, Math.min(12, player.targetY));
+    }
+});
+
+document.getElementById('start-btn').addEventListener('click', initGame);
+
+// Window Resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+
+</script>
+</body>
+</html>
