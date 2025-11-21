@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="ja">
 <head>
@@ -1459,6 +1460,29 @@ function pickVoice(){
   if(settings.ttsLang){ const byLang = voices.find(v=>v.lang && v.lang.startsWith(settings.ttsLang)); if(byLang) return byLang; }
   return voices.find(v=>v.default) || voices[0] || null;
 }
+
+// ★追加：iOS用 会話ロールごとの声選択
+function pickRoleVoice(role){
+  // iOS以外では何もしない（標準の pickVoice を使う）
+  if (!isIOS || !role) return null;
+  if (!voices || !voices.length) {
+    voices = speechSynthesis.getVoices() || [];
+  }
+
+  if (role === 'W') {
+    // 女性：Samantha(en-US)
+    const s = voices.find(v => /Samantha/i.test(v.name) && /^en-US/i.test(v.lang || ''));
+    return s || null;
+  }
+  if (role === 'M') {
+    // 男性：Daniel(en-GB)
+    const d = voices.find(v => /Daniel/i.test(v.name) && /^en-GB/i.test(v.lang || ''));
+    return d || null;
+  }
+  return null;
+}
+
+
 async function ensureTtsUnlocked(){
   if(ttsWarmed) return;
   try{
@@ -1493,59 +1517,76 @@ class SpeakEngine {
     this._ev={};
   }
   getLastBoundary(){ return this._lastBoundary || 0; }
-  async play(script, {targetEl, rate, startCharIndex=0}={}){
-    if(this.state==='playing'){ await this.stop(); }
-    this.session++; const my=this.session;
-    this.state='playing'; this._emit('state','playing');
-    await ensureTtsUnlocked(); await loadVoices();
-    const v = pickVoice();
-    const self = this;
+async play(script, {targetEl, rate, startCharIndex=0}={}){
+  if(this.state==='playing'){ await this.stop(); }
+  this.session++; const my=this.session;
+  this.state='playing'; this._emit('state','playing');
+  await ensureTtsUnlocked(); await loadVoices();
+  const self = this;
 
-    const speakOne = (text,langHint, {baseOffset=0} = {})=>{
-      return new Promise(resolve=>{
-        if(my!==self.session) return resolve();
-        if(!text){ return resolve(); }
-        const u=new SpeechSynthesisUtterance(text);
-        if(v) u.voice=v;
-        u.lang = v?.lang || langHint || settings.ttsLang || (/[a-zA-Z]/.test(text)?'en-US':'ja-JP');
-        u.rate = rate ?? settings.rate; u.pitch=settings.pitch; u.volume=settings.volume;
+  // ★変更：voiceOverride（役割別の声指定）と baseOffset を受け取れるように
+  const speakOne = (text,langHint, {baseOffset=0, voiceOverride=null} = {})=>{
+    return new Promise(resolve=>{
+      if(my!==self.session) return resolve();
+      if(!text){ return resolve(); }
 
-        let fbTimer=null, usedBoundary=false;
-        if(targetEl && /[A-Za-z]/.test(text)){
-          u.onboundary=(e)=>{
-            if(typeof e.charIndex==='number'){
-              usedBoundary=true;
-              const abs = baseOffset + e.charIndex;
-              self._lastBoundary = abs;
-              highlightAtCharIndex(targetEl, abs);
-              self._emit('boundary', abs);
-            }
-          };
-          const tokens = tokenizeWords(text);
-          if(tokens.length>0){
-            let idx=0; const wpm=170*(u.rate||1.0); const msPerWord=Math.max(120, Math.round(60000/wpm));
-            fbTimer=setInterval(()=>{
-              if(usedBoundary){clearInterval(fbTimer);return;}
-              if(idx>=tokens.length){clearInterval(fbTimer);return;}
-              const t=tokens[Math.min(idx++, tokens.length-1)];
-              const abs = baseOffset + t.start;
-              self._lastBoundary = abs;
-              highlightAtCharIndex(targetEl, abs);
-              self._emit('boundary', abs);
-            }, msPerWord);
+      const u = new SpeechSynthesisUtterance(text);
+
+      // ここで声を決定：優先は voiceOverride → 通常の pickVoice()
+      const v = voiceOverride || pickVoice();
+      if(v) u.voice = v;
+
+      u.lang = v?.lang || langHint || settings.ttsLang || (/[a-zA-Z]/.test(text)?'en-US':'ja-JP');
+      u.rate = rate ?? settings.rate;
+      u.pitch = settings.pitch;
+      u.volume = settings.volume;
+
+      let fbTimer=null, usedBoundary=false;
+      if(targetEl && /[A-Za-z]/.test(text)){
+        u.onboundary=(e)=>{
+          if(typeof e.charIndex==='number'){
+            usedBoundary=true;
+            const abs = baseOffset + e.charIndex;
+            self._lastBoundary = abs;
+            highlightAtCharIndex(targetEl, abs);
+            self._emit('boundary', abs);
           }
+        };
+        const tokens = tokenizeWords(text);
+        if(tokens.length>0){
+          let idx=0; const wpm=170*(u.rate||1.0); const msPerWord=Math.max(120, Math.round(60000/wpm));
+          fbTimer=setInterval(()=>{
+            if(usedBoundary){clearInterval(fbTimer);return;}
+            if(idx>=tokens.length){clearInterval(fbTimer);return;}
+            const t=tokens[Math.min(idx++, tokens.length-1)];
+            const abs = baseOffset + t.start;
+            self._lastBoundary = abs;
+            highlightAtCharIndex(targetEl, abs);
+            self._emit('boundary', abs);
+          }, msPerWord);
         }
-        const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
+      }
+      const cleanup=()=>{ if(fbTimer) clearInterval(fbTimer); if(targetEl) clearHighlight(targetEl); };
 
-        u.onend = ()=>{ cleanup(); resolve(); };
-        u.onerror=()=>{ cleanup(); resolve(); };
+      u.onend = ()=>{ cleanup(); resolve(); };
+      u.onerror=()=>{ cleanup(); resolve(); };
 
-        try { speechSynthesis.cancel(); } catch(e){}
+      try { speechSynthesis.cancel(); } catch(e){}
 
-        // iOS では遅延なしで即 speak() する
-        const delay = isIOS ? 0 : 40;
+      const delay = isIOS ? 0 : 40;
 
-        if (delay === 0) {
+      if (delay === 0) {
+        try {
+          if (my === self.session) {
+            speechSynthesis.speak(u);
+          } else {
+            resolve();
+          }
+        } catch(e) {
+          setTimeout(()=>resolve(), 120);
+        }
+      } else {
+        setTimeout(()=>{
           try {
             if (my === self.session) {
               speechSynthesis.speak(u);
@@ -1555,21 +1596,77 @@ class SpeakEngine {
           } catch(e) {
             setTimeout(()=>resolve(), 120);
           }
-        } else {
-          setTimeout(()=>{
-            try {
-              if (my === self.session) {
-                speechSynthesis.speak(u);
-              } else {
-                resolve();
-              }
-            } catch(e) {
-              setTimeout(()=>resolve(), 120);
-            }
-          }, delay);
-        }
+        }, delay);
+      }
+    });
+  };
+
+
+
+  // ★追加：途中から再開する時のスライス（既存関数をそのまま残す）
+  function sliceFromChar(text, charIndex){
+    if(!text) return {slice:text, base:0};
+    const toks = tokenizeWords(text);
+    if(toks.length===0) return {slice:text, base:0};
+    let base=0;
+    for(let i=0;i<toks.length;i++){
+      const t=toks[i];
+      if(charIndex <= t.end){ base=t.start; break; }
+    }
+    return {slice: text.slice(base), base};
+  }
+
+  // ★追加：W:/M: を含む行ごとの会話セグメントを作る
+  //  - displayStart / displayEnd は「元の英文」中の位置
+  //  - displayBase は「W:/M: (＋スペース) を除いた先頭位置」
+  //  - spokenText は実際に読み上げる文字列（W:/M: をカット済み）
+  function buildRoleSegments(enText){
+    const segments = [];
+    if(!enText) return segments;
+
+    const len = enText.length;
+    let pos = 0;
+    while(pos < len){
+      const nl = enText.indexOf('\n', pos);
+      const lineEnd = (nl === -1) ? len : nl;
+      const line = enText.slice(pos, lineEnd);
+
+      const displayStart = pos;
+      const displayEnd   = lineEnd;
+
+      let role = null;
+      let prefixLen = 0;
+
+      if(line.startsWith('W:')){
+        role = 'W';
+        prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
+      }else if(line.startsWith('M:')){
+        role = 'M';
+        prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
+      }
+
+      if(prefixLen > line.length) prefixLen = line.length;
+
+      const spokenText  = line.slice(prefixLen);      // ★ W:/M: はここで削除
+      const displayBase = displayStart + prefixLen;   // ★ ハイライト用の基準位置
+
+      segments.push({
+        role,          // 'W' | 'M' | null
+        spokenText,    // 実際に読み上げるテキスト
+        displayStart,  // 元テキスト中の行の開始位置
+        displayEnd,    // 元テキスト中の行の終了位置（改行含まず）
+        displayBase    // W:/M: を除いた先頭位置
       });
-    };
+
+      if(nl === -1) break;
+      pos = nl + 1; // 改行の次から次行
+    }
+    return segments;
+  }
+
+
+
+
 
     function sliceFromChar(text, charIndex){
       if(!text) return {slice:text, base:0};
@@ -1584,33 +1681,148 @@ class SpeakEngine {
     }
 
     const doFlow = async ()=>{
-      const en=(script.en||'').trim(), ja=(script.ja||'').trim();
-      const rep=Math.max(1, parseInt(script.repeat||1,10));
-      const gap=Math.max(0, Number(script.gapSec||0))*1000;
+      const en = (script.en || '').trim();
+      const ja = (script.ja || '').trim();
+      const rep = Math.max(1, parseInt(script.repeat || 1, 10));
+      const gap = Math.max(0, Number(script.gapSec || 0)) * 1000;
 
-      if(script.order==='en'){
-        if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
-        const startAt = Number(startCharIndex||script.startCharIndex||0);
-        const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
-        for(let i=0;i<rep;i++){
-          if(my!==self.session) return;
-          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
-          if(i<rep-1 && gap){ await sleep(gap); }
+      // ★ iOS かつ、行頭に W: / M: を含む英文なら「会話モード」を有効にする
+      const hasRoleMarkers = /(^|\n)[WM]:/.test(en);
+      const useRoleVoices  = isIOS && hasRoleMarkers;
+      const roleSegments   = useRoleVoices ? buildRoleSegments(en) : null;
+
+      if(script.order === 'en'){
+        // 英語のみ再生
+        if(targetEl){
+          renderSpeakText(targetEl, en);
+          targetEl.scrollTop = 0;
         }
-      }else if(script.order==='ja'){
-        await speakOne(ja,'ja-JP');
-      }else{ // both
-        if(targetEl){ renderSpeakText(targetEl, en); targetEl.scrollTop=0; }
-        const startAt = Number(startCharIndex||script.startCharIndex||0);
-        const {slice, base} = startAt>0 ? sliceFromChar(en, startAt) : {slice:en, base:0};
-        for(let i=0;i<rep;i++){
-          if(my!==self.session) return;
-          await speakOne(i===0?slice:en,'en-US', {baseOffset: i===0?base:0});
-          if(gap){ await sleep(gap); }
+        const startAt = Number(startCharIndex || script.startCharIndex || 0);
+
+        if(useRoleVoices && roleSegments && roleSegments.length){
+          // ★ iOS限定：W:/M: 行ごとに声を切り替え、W:/M: は読まない
+          const startIndex = Math.max(0, startAt);
+
+          // 再開位置に対応するセグメントを探す
+          let startSeg = 0;
+          for(let i=0;i<roleSegments.length;i++){
+            if(roleSegments[i].displayEnd <= startIndex){
+              startSeg = i + 1;
+            }else{
+              break;
+            }
+          }
+
+          for(let r=0;r<rep;r++){
+            if(my!==self.session) return;
+            for(let i=0;i<roleSegments.length;i++){
+              const seg = roleSegments[i];
+
+              // 最初のループ＆再開位置がこの行の途中なら、その位置から開始
+              let localStart = 0;
+              if(r === 0 && i === startSeg && startIndex > seg.displayBase){
+                localStart = Math.max(0, startIndex - seg.displayBase);
+              }
+
+              const textForThis = localStart ? seg.spokenText.slice(localStart) : seg.spokenText;
+              if(textForThis.trim()){
+                const voiceOverride = pickRoleVoice(seg.role); // W → Samantha, M → Daniel（iOSのみ）
+
+                await speakOne(textForThis, 'en-US', {
+                  baseOffset: seg.displayBase + localStart,  // ハイライトは元テキスト基準
+                  voiceOverride
+                });
+                if(my!==self.session) return;
+              }
+
+              // セグメント間／リピート間の間合い
+              if(gap && (i < roleSegments.length - 1 || r < rep - 1)){
+                await sleep(gap);
+                if(my!==self.session) return;
+              }
+            }
+          }
+
+        }else{
+          // ★従来通り：1つの声で全文再生（Windows/Android もこちら）
+          const {slice, base} = startAt > 0 ? sliceFromChar(en, startAt) : {slice: en, base: 0};
+          for(let i=0;i<rep;i++){
+            if(my!==self.session) return;
+            await speakOne(i===0 ? slice : en, 'en-US', { baseOffset: i===0 ? base : 0 });
+            if(i<rep-1 && gap){ await sleep(gap); }
+          }
         }
-        if(ja){ await speakOne(ja,'ja-JP'); }
+
+      }else if(script.order === 'ja'){
+        // 日本語のみ
+        await speakOne(ja, 'ja-JP');
+
+      }else{
+        // both: 英 → 間 → 和
+        if(targetEl){
+          renderSpeakText(targetEl, en);
+          targetEl.scrollTop = 0;
+        }
+        const startAt = Number(startCharIndex || script.startCharIndex || 0);
+
+        if(useRoleVoices && roleSegments && roleSegments.length){
+          // ★ iOS限定：会話モードで英語 → そのあと和訳
+          const startIndex = Math.max(0, startAt);
+
+          let startSeg = 0;
+          for(let i=0;i<roleSegments.length;i++){
+            if(roleSegments[i].displayEnd <= startIndex){
+              startSeg = i + 1;
+            }else{
+              break;
+            }
+          }
+
+          for(let r=0;r<rep;r++){
+            if(my!==self.session) return;
+            for(let i=0;i<roleSegments.length;i++){
+              const seg = roleSegments[i];
+
+              let localStart = 0;
+              if(r === 0 && i === startSeg && startIndex > seg.displayBase){
+                localStart = Math.max(0, startIndex - seg.displayBase);
+              }
+
+              const textForThis = localStart ? seg.spokenText.slice(localStart) : seg.spokenText;
+              if(textForThis.trim()){
+                const voiceOverride = pickRoleVoice(seg.role);
+
+                await speakOne(textForThis, 'en-US', {
+                  baseOffset: seg.displayBase + localStart,
+                  voiceOverride
+                });
+                if(my!==self.session) return;
+              }
+
+              if(gap && (i < roleSegments.length - 1 || r < rep - 1)){
+                await sleep(gap);
+                if(my!==self.session) return;
+              }
+            }
+          }
+
+          if(ja){
+            await speakOne(ja, 'ja-JP');
+          }
+
+        }else{
+          // 従来通り：英語は単一の声で、その後に和訳
+          const {slice, base} = startAt > 0 ? sliceFromChar(en, startAt) : {slice: en, base: 0};
+          for(let i=0;i<rep;i++){
+            if(my!==self.session) return;
+            await speakOne(i===0 ? slice : en, 'en-US', { baseOffset: i===0 ? base : 0 });
+            if(gap){ await sleep(gap); }
+          }
+          if(ja){ await speakOne(ja, 'ja-JP'); }
+        }
       }
     };
+
 
 const t0 = performance.now();
 await doFlow();
