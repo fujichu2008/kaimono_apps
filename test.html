@@ -1255,7 +1255,18 @@ function closeAllDialogs(){
     }catch(_){}
   }
 }
-function show(view){ stopAllPlayback(); KeepAwake.disable(); closeAllDialogs(); Object.values(views).forEach(v=>v.classList.remove('active')); views[view].classList.add('active'); }
+function show(view){
+  stopAllPlayback();
+  KeepAwake.disable();
+  closeAllDialogs();
+
+  // ★ 画面切り替え時に発音評価の色をリセット
+  resetPronColors($('#d-en'));
+  resetPronColors($('#sh-text'));
+
+  Object.values(views).forEach(v=>v.classList.remove('active'));
+  views[view].classList.add('active');
+}
 
 $('#nav-home').onclick = () => {
   setActiveNav('nav-home');
@@ -1373,6 +1384,91 @@ function highlightAtCharIndex(container, charIndex){
   if(!container||!container._tokens) return; const tokens=container._tokens; if(tokens.length===0) return;
   let idx=-1; for(let i=0;i<tokens.length;i++){ const t=tokens[i]; if(charIndex>=t.start && charIndex<t.end){ idx=i; break; } if(charIndex<t.start){ idx=i-1; break; } }
   if(idx<0) idx=0; highlightToken(container, tokens[idx]);
+}
+/* =========================
+   発音評価（録音結果 → 単語色）
+========================= */
+
+// 単語色をリセット（style.color を元に戻す）
+function resetPronColors(container){
+  if(!container) return;
+  container.querySelectorAll('.speak-text .w, .w').forEach(span=>{
+    span.style.color = ''; // CSS デフォルトに戻す
+  });
+}
+
+// レベル配列をもとに色を当てる
+// level: 0=白, 1=黄, 2=赤
+function applyPronColors(container, levels){
+  if(!container) return;
+  const spans = Array.from(container.querySelectorAll('.w'));
+  spans.forEach((span, i)=>{
+    const level = levels[i] || 0;
+    if(level === 2){
+      span.style.color = '#ff4d4f';   // 明瞭（赤）
+    }else if(level === 1){
+      span.style.color = '#ffb020';   // なんとか聞き取れる（黄）
+    }else{
+      span.style.color = '';          // デフォルト（白）
+    }
+  });
+}
+
+// 録音 Blob から単語ごとの音量をざっくり評価
+async function evalPronFromBlob(container, blob){
+  try{
+    if(!container || !container._tokens || !container._tokens.length) return;
+    if(!blob) return;
+
+    // AudioContext を確保
+    if(!audioCtx){
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return; // 非対応環境
+      audioCtx = new AC();
+    }
+
+    const buf = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(buf);
+    const chData = audioBuffer.getChannelData(0);
+    if(!chData) return;
+
+    const tokens = container._tokens;
+    const n = tokens.length;
+    if(n === 0) return;
+
+    const totalSamples = chData.length;
+    const samplesPerToken = Math.max(1, Math.floor(totalSamples / n));
+    const levels = new Array(n).fill(0);
+
+    // しきい値（環境によって微調整するならここ）
+    const TH_RED    = 0.08; // これ以上なら「明瞭（赤）」
+    const TH_YELLOW = 0.03; // これ以上なら「黄」
+
+    for(let i=0;i<n;i++){
+      const start = i * samplesPerToken;
+      const end   = (i === n-1) ? totalSamples : (i+1)*samplesPerToken;
+      let sum = 0, count = 0;
+      for(let j=start;j<end && j<totalSamples;j++){
+        const v = chData[j];
+        sum += v*v;
+        count++;
+      }
+      if(!count) continue;
+      const rms = Math.sqrt(sum / count); // その区間の音量
+
+      if(rms >= TH_RED){
+        levels[i] = 2;
+      }else if(rms >= TH_YELLOW){
+        levels[i] = 1;
+      }else{
+        levels[i] = 0;
+      }
+    }
+
+    applyPronColors(container, levels);
+  }catch(e){
+    console.warn('evalPronFromBlob error', e);
+  }
 }
 
 /* =========================
@@ -2068,8 +2164,13 @@ async function openDetail(id){
   $('#d-meta').innerHTML=meta.join(' ');
 
   // 英文：これまで通りハイライト付き枠
-  renderSpeakText($('#d-en'), row.english||''); 
-  $('#d-en').scrollTop=0;
+  const dEn = $('#d-en');
+  renderSpeakText(dEn, row.english||''); 
+  dEn.scrollTop = 0;
+
+  // ★ 発音評価の色もリセット
+  resetPronColors(dEn);
+
 
   // 和文：折りたたみ＋スクロール枠
   const jaWrap = $('#d-ja-wrap');
@@ -2131,8 +2232,14 @@ async function openDetail(id){
   }
 
   $('#d-toggle').onclick = async ()=>{
+    const dEn = $('#d-en');
+
+    // ★ 通常再生するタイミングで色をリセット
+    resetPronColors(dEn);
+
     oneTimeWarmup();
     await ensureTtsUnlocked(); await loadVoices();
+
 
     const btn = $('#d-toggle');
     if(speakEngine.state==='idle'){
@@ -2198,39 +2305,50 @@ async function openDetail(id){
   }
 
   async function handleRecShortPress(){
+    const dEn = $('#d-en');
+
     if(recEngine.state==='idle'){
       try{
-        stopAllPlayback(); speakEngine.stop?.();
+        // ★ 新しい録音を始める前に発音色をリセット
+        resetPronColors(dEn);
+
+        stopAllPlayback();
+        speakEngine.stop?.();
         await recEngine.start();
         setRecButtonMode('recording');
       }catch(e){
         alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定をご確認ください。');
         setRecButtonMode('idle');
       }
-}else if(recEngine.state==='recording' || recEngine.state==='stopping'){
-  const result = await recEngine.stop();
-  if(!result || !result.blob || result.blob.size===0){
-    alert('録音に失敗しました'); setRecButtonMode('idle');
-  }else{
-    $('#d-rec-audio').src = result.url;
-    setRecButtonMode('ready');
 
-    // ★ KPI：録音時間（ms）を記録
-    if(result.durationMs){
-      trackKpiRec(result.durationMs);
-    }
-  }
-}
+    }else if(recEngine.state==='recording' || recEngine.state==='stopping'){
+      const result = await recEngine.stop();
+      if(!result || !result.blob || result.blob.size===0){
+        alert('録音に失敗しました');
+        setRecButtonMode('idle');
+      }else{
+        $('#d-rec-audio').src = result.url;
+        setRecButtonMode('ready');
 
+        // ★ KPI：録音時間（ms）を記録
+        if(result.durationMs){
+          trackKpiRec(result.durationMs);
+        }
 
+        // ★ 録音終了時に、録音結果から発音評価 → 単語色へ反映
+        if(result.blob){
+          await evalPronFromBlob(dEn, result.blob);
+        }
+      }
 
-else if(recEngine.state==='ready'){
+    }else if(recEngine.state==='ready'){
       // 再生は専用ボタンに任せる
     }else{
       setRecButtonMode('idle');
       recEngine.dispose();
     }
   }
+
 
   function handleRecLongPress(){
     if(recEngine.state==='ready' || recEngine.url){
@@ -2277,13 +2395,29 @@ else if(recEngine.state==='ready'){
     });
   };
   $('#d-del').onclick = async ()=>{ if(confirm('削除しますか？')){ speakEngine.stop(); stopAllPlayback(); recEngine.dispose(); await deleteSentence(id); $('#dlg-detail').close(); refreshList(); fillCategoryFilter(); } };
-  $('#d-close').onclick = ()=>{ speakEngine.stop(); stopAllPlayback(); recEngine.dispose(); $('#dlg-detail').close(); };
+  $('#d-close').onclick = ()=>{
+    speakEngine.stop();
+    stopAllPlayback();
+    recEngine.dispose();
+    resetPronColors($('#d-en'));   // ★ ここでリセット
+    $('#dlg-detail').close();
+  };
+
 }
 $('#dlg-detail').addEventListener('close', ()=>{
-  speakEngine.stop(); stopAllPlayback(); clearHighlight($('#d-en'));
-  try{ const a=$('#d-rec-audio'); if(a){ a.pause(); a.src=''; } }catch(_){}
+  speakEngine.stop();
+  stopAllPlayback();
+  clearHighlight($('#d-en'));
+  resetPronColors($('#d-en'));   // ★ 発音色もリセット
+
+  try{
+    const a=$('#d-rec-audio');
+    if(a){ a.pause(); a.src=''; }
+  }catch(_){}
+
   recEngine.dispose();
-  setPlayToggleLabel($('#d-toggle'),'idle'); setRecButtonMode('idle');
+  setPlayToggleLabel($('#d-toggle'),'idle');
+  setRecButtonMode('idle');
 });
 
 /* =========================
