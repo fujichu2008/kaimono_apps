@@ -1417,6 +1417,10 @@ function applyPronColors(container, levels){
 // 録音 Blob から単語ごとの音量をざっくり評価（相対スケール版）
 // evalPronFromBlob 関数を以下のように置き換え
 
+// evalPronFromBlob 関数を以下のように置き換え
+
+// evalPronFromBlob 関数を以下のように置き換え
+
 async function evalPronFromBlob(container, blob){
   try{
     if(!container || !container._tokens || !container._tokens.length) return;
@@ -1441,9 +1445,9 @@ async function evalPronFromBlob(container, blob){
     const totalSamples = chData.length;
     const totalDurationSec = totalSamples / sampleRate;
 
-    // ★改善1: 音声全体の実効的な長さを検出（後半の無音部分を除外）
+    // 音声全体の実効的な長さを検出（後半の無音部分を除外）
     const windowSize = Math.floor(sampleRate * 0.1); // 100msごとの窓
-    const energyThreshold = 0.001; // 無音判定の閾値
+    const energyThreshold = 0.0008;
     
     let lastActiveWindow = totalSamples;
     for(let i = totalSamples - windowSize; i >= 0; i -= windowSize){
@@ -1462,14 +1466,14 @@ async function evalPronFromBlob(container, blob){
     const activeSamples = Math.min(lastActiveWindow, totalSamples);
     const activeDurationSec = activeSamples / sampleRate;
 
-    // ★改善2: 最低限の発音時間を確保（1秒未満は評価しない）
-    if(activeDurationSec < 1.0){
+    // 最低限の発音時間を確保（0.5秒未満は評価しない）
+    if(activeDurationSec < 0.5){
       resetPronColors(container);
       return;
     }
 
-    // ★改善3: 単語あたりの平均時間を推定（WPM=120を基準）
-    const estimatedWPM = 120;
+    // 単語あたりの平均時間を推定（WPM=150を基準）
+    const estimatedWPM = 150;
     const secPerWord = 60.0 / estimatedWPM;
     const estimatedReadTime = n * secPerWord;
 
@@ -1477,7 +1481,7 @@ async function evalPronFromBlob(container, blob){
     const coverage = Math.min(1.0, activeDurationSec / estimatedReadTime);
     const evaluateTokens = Math.max(1, Math.floor(n * coverage));
 
-    // ★改善4: 評価対象の単語のみRMSを計算
+    // 評価対象の単語のみRMSを計算
     const samplesPerToken = activeSamples / evaluateTokens;
     const rmsList = new Array(n).fill(0);
 
@@ -1499,7 +1503,7 @@ async function evalPronFromBlob(container, blob){
 
     // 評価対象外の単語は0のまま（色なし）
 
-    // ★改善5: より精密なノイズフロア推定
+    // ノイズフロア推定
     const activeRMS = rmsList.slice(0, evaluateTokens).filter(v => v > 0);
     if(activeRMS.length === 0){
       resetPronColors(container);
@@ -1508,15 +1512,16 @@ async function evalPronFromBlob(container, blob){
 
     const sorted = [...activeRMS].sort((a, b) => a - b);
     
-    // 下位20%の中央値をノイズフロアとする
-    const noiseFloorIdx = Math.floor(sorted.length * 0.2);
+    // 下位10%の中央値をノイズフロアとする
+    const noiseFloorIdx = Math.floor(sorted.length * 0.1);
     let noiseFloor = sorted[Math.floor(noiseFloorIdx / 2)] || 0;
     
-    // 最大値の5%を下限とする
+    // 最大値の3%を下限とする
     const maxRms = Math.max(...sorted);
-    noiseFloor = Math.max(noiseFloor, maxRms * 0.05);
+    noiseFloor = Math.max(noiseFloor, maxRms * 0.03);
 
-    // ★改善6: 相対的な強さで3段階に分類
+    // ★調整: 赤40% / 黄30% / 白30% の配分
+    // → 赤を増やし、黄を減らす
     const spokenValues = activeRMS.filter(v => v > noiseFloor);
     
     if(spokenValues.length === 0){
@@ -1526,14 +1531,14 @@ async function evalPronFromBlob(container, blob){
 
     spokenValues.sort((a, b) => a - b);
     
-    // 上位30%を赤（明瞭）、中位40%を黄（普通）、下位30%を白（弱い）
-    const idxTop30 = Math.floor(spokenValues.length * 0.7);
-    const idxTop70 = Math.floor(spokenValues.length * 0.3);
+    // ★新配分: 上位40%を赤、中位30%を黄、下位30%を白
+    const idxTop40 = Math.floor(spokenValues.length * 0.6); // 上位40%の境界
+    const idxTop70 = Math.floor(spokenValues.length * 0.3); // 上位70%の境界（下から30%）
     
-    const thresholdRed = spokenValues[idxTop30] || maxRms * 0.8;
-    const thresholdYellow = spokenValues[idxTop70] || maxRms * 0.3;
+    const thresholdRed = spokenValues[idxTop40] || maxRms * 0.6;
+    const thresholdYellow = spokenValues[idxTop70] || maxRms * 0.35;
 
-    // ★改善7: レベル判定にヒステリシスを追加（境界のばたつき防止）
+    // ★調整: 黄色の判定を厳しく
     const levels = new Array(n).fill(0);
     
     for(let i = 0; i < evaluateTokens; i++){
@@ -1542,11 +1547,12 @@ async function evalPronFromBlob(container, blob){
       if(rms <= noiseFloor){
         levels[i] = 0; // ほぼ無音
       } else if(rms >= thresholdRed){
-        levels[i] = 2; // 明瞭
+        levels[i] = 2; // 明瞭（赤）
       } else if(rms >= thresholdYellow){
-        levels[i] = 1; // 普通
+        levels[i] = 1; // 普通（黄）
       } else {
-        levels[i] = 0; // 弱い
+        // ★変更: ノイズフロアより大きくても、閾値未満なら白
+        levels[i] = 0; // 弱い（白）
       }
     }
 
@@ -1555,11 +1561,15 @@ async function evalPronFromBlob(container, blob){
       levels[i] = 0;
     }
 
-    // ★改善8: 孤立したハイライトを除去（前後が0なら自分も0にする）
+    // 孤立したハイライトの除去（赤の孤立点は残す）
     const smoothedLevels = [...levels];
     for(let i = 1; i < evaluateTokens - 1; i++){
+      // 前後両方が0の場合のみ除去
       if(levels[i] > 0 && levels[i-1] === 0 && levels[i+1] === 0){
-        smoothedLevels[i] = 0;
+        // レベル2（赤）の孤立点は残す
+        if(levels[i] < 2){
+          smoothedLevels[i] = 0;
+        }
       }
     }
 
@@ -1570,6 +1580,7 @@ async function evalPronFromBlob(container, blob){
     resetPronColors(container);
   }
 }
+
 /* =========================
    TTS 単一エンジン + プラットフォーム適応
 ========================= */
