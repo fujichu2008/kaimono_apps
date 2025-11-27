@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Space Shooter v2</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #111; 
+            touch-action: none; /* スクロール禁止 */
+            font-family: 'Courier New', sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+        #score-board { position: absolute; top: 20px; left: 20px; color: #0ff; font-size: 18px; text-shadow: 0 0 5px #0ff; font-weight: bold; }
+        #life-bar { position: absolute; top: 50px; left: 20px; width: 150px; height: 10px; border: 1px solid #f00; background: rgba(50,0,0,0.5); }
+        #life-fill { width: 100%; height: 100%; background: #f00; transition: width 0.2s; }
+        
+        #overlay { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            background: rgba(0,0,0,0.6); 
+            display: flex; align-items: center; justify-content: center; flex-direction: column; 
+            color: white; pointer-events: auto; z-index: 10; 
+        }
+        h1 { font-size: 8vw; margin: 0; color: #ff0; text-shadow: 0 0 10px orange; text-align: center; }
+        p.sub { font-size: 4vw; color: #ccc; margin-top: 10px; animation: blink 1s infinite; }
+        
+        @keyframes blink { 50% { opacity: 0.3; } }
+        
+        /* デバッグ用エラーログ表示エリア */
+        #debug-log {
+            position: absolute; bottom: 0; left: 0; width: 100%; 
+            background: rgba(0,0,0,0.8); color: #ff5555; 
+            font-size: 10px; padding: 5px; pointer-events: none; 
+            z-index: 100; max-height: 100px; overflow: hidden;
+            display: none; /* エラー時のみ表示 */
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div id="score-board">LOADING...</div>
+    <div id="life-bar"><div id="life-fill"></div></div>
+</div>
+
+<div id="overlay">
+    <h1 id="title-txt">GALAXY<br>GLIDE</h1>
+    <p class="sub" id="start-txt">LOADING SYSTEM...</p>
+    <p style="font-size: 10px; margin-top: 20px; color: #888;">DRAG TO MOVE</p>
+</div>
+
+<div id="debug-log"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+// --- エラーハンドリング (スマホで動かない原因を探るため) ---
+window.onerror = function(msg, url, line, col, error) {
+    const d = document.getElementById('debug-log');
+    d.style.display = 'block';
+    d.innerHTML += `ERR: ${msg} (Line ${line})<br>`;
+    return false;
+};
+
+// --- グローバル変数 ---
+const App = {
+    scene: null, camera: null, renderer: null,
+    player: null, boss: null,
+    bullets: [], enemies: [], items: [], stars: null,
+    score: 0, stage: 1, isPlaying: false, isBoss: false,
+    width: window.innerWidth, height: window.innerHeight,
+    lastTime: 0, spawnTimer: 0,
+    ctx: null // AudioContext
+};
+
+// --- 初期化処理 (ページ読み込み完了時) ---
+window.addEventListener('load', () => {
+    try {
+        initThree();
+        animate(0);
+        document.getElementById('start-txt').innerText = "TAP TO START";
+        document.getElementById('score-board').innerText = "SCORE: 0";
+        
+        // タップイベント登録
+        const overlay = document.getElementById('overlay');
+        overlay.addEventListener('touchstart', handleStart, {passive: false});
+        overlay.addEventListener('click', handleStart);
+        
+        // ゲーム操作イベント
+        window.addEventListener('touchmove', handleInput, {passive: false});
+        window.addEventListener('mousemove', handleInput);
+        window.addEventListener('resize', handleResize);
+        
+    } catch (e) {
+        console.error(e);
+        document.getElementById('debug-log').style.display = 'block';
+        document.getElementById('debug-log').innerText = "INIT ERROR: " + e.message;
+    }
+});
+
+function initThree() {
+    App.scene = new THREE.Scene();
+    App.scene.fog = new THREE.FogExp2(0x000000, 0.03);
+
+    App.camera = new THREE.PerspectiveCamera(60, App.width / App.height, 0.1, 500);
+    App.camera.position.set(0, 15, 20);
+    App.camera.lookAt(0, 0, -5);
+
+    App.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    App.renderer.setSize(App.width, App.height);
+    App.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 負荷軽減
+    document.body.appendChild(App.renderer.domElement);
+
+    // 光源
+    const amb = new THREE.AmbientLight(0x606060);
+    App.scene.add(amb);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(10, 20, 10);
+    App.scene.add(dir);
+
+    // 星空
+    createStars();
+
+    // プレイヤー生成
+    createPlayer();
+}
+
+function createStars() {
+    const geo = new THREE.BufferGeometry();
+    const pos = [];
+    for(let i=0; i<800; i++) {
+        pos.push( (Math.random()-0.5)*100, (Math.random()-0.5)*50, (Math.random()-0.5)*200 );
+    }
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({color: 0xffffff, size: 0.3});
+    App.stars = new THREE.Points(geo, mat);
+    App.scene.add(App.stars);
+}
+
+function createPlayer() {
+    // 簡易的な自機モデル
+    const geo = new THREE.ConeGeometry(1, 3, 8);
+    geo.rotateX(Math.PI / 2);
+    const mat = new THREE.MeshLambertMaterial({color: 0x00aaff, emissive: 0x001133});
+    App.player = {
+        mesh: new THREE.Mesh(geo, mat),
+        hp: 100, maxHp: 100,
+        targetX: 0, targetZ: 0,
+        fireTimer: 0,
+        power: 1,
+        invincible: 0
+    };
+    // エンジン光
+    const engine = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5), new THREE.MeshBasicMaterial({color:0x00ffff}));
+    engine.position.z = -1.5;
+    App.player.mesh.add(engine);
+
+    App.scene.add(App.player.mesh);
+    resetPlayer();
+}
+
+function resetPlayer() {
+    App.player.hp = 100;
+    App.player.power = 1;
+    App.player.mesh.position.set(0, 0, 10);
+    App.player.targetX = 0;
+    App.player.targetZ = 0;
+    App.player.invincible = 0;
+    updateUI();
+}
+
+// --- ゲームループ ---
+function animate(time) {
+    requestAnimationFrame(animate);
+    const dt = (time - App.lastTime) / 1000 || 0;
+    App.lastTime = time;
+
+    // 星を動かす（待機画面でも動かす）
+    if(App.stars) {
+        App.stars.position.z += (App.isPlaying ? 20 : 5) * dt;
+        if(App.stars.position.z > 50) App.stars.position.z = 0;
+    }
+
+    if(App.isPlaying) {
+        updateGame(dt);
+    }
+    
+    if(App.renderer && App.scene && App.camera) {
+        App.renderer.render(App.scene, App.camera);
+    }
+}
+
+function updateGame(dt) {
+    const P = App.player;
+    
+    // プレイヤー移動
+    P.mesh.position.x += (P.targetX - P.mesh.position.x) * 10 * dt;
+    P.mesh.position.z += (P.targetZ - P.mesh.position.z + 10) * 5 * dt;
+    P.mesh.rotation.z = -(P.targetX - P.mesh.position.x) * 0.5; // 傾き
+
+    // 無敵点滅
+    if(P.invincible > 0) {
+        P.invincible -= dt;
+        P.mesh.visible = Math.floor(Date.now()/100)%2 === 0;
+    } else {
+        P.mesh.visible = true;
+    }
+
+    // 自動射撃
+    P.fireTimer += dt;
+    const rate = Math.max(0.1, 0.3 - (P.power * 0.05));
+    if(P.fireTimer > rate) {
+        P.fireTimer = 0;
+        fireBullet(false);
+    }
+
+    // 敵スポーン
+    if(!App.isBoss) {
+        App.spawnTimer += dt;
+        if(App.spawnTimer > Math.max(0.2, 1.5 - (App.stage * 0.3))) {
+            App.spawnTimer = 0;
+            spawnEnemy();
+        }
+        // ボス出現判定
+        const bossScore = App.stage === 1 ? 1500 : 4000;
+        if(App.score >= bossScore) startBoss();
+    } else if(App.boss) {
+        updateBoss(dt);
+    }
+
+    // 弾の更新
+    App.bullets.forEach((b, i) => {
+        b.mesh.position.z += (b.isEnemy ? 1 : -1) * b.speed * dt;
+        // 当たり判定
+        if(!b.isEnemy) { // 自機弾
+            // 対ザコ
+            App.enemies.forEach(e => {
+                if(b.mesh.position.distanceTo(e.mesh.position) < 2.5) {
+                    e.hp -= 10;
+                    b.remove = true;
+                    if(e.hp <= 0) { destroyEnemy(e); }
+                    else { playSound('hit', 200, 0.05); }
+                }
+            });
+            // 対ボス
+            if(App.boss && b.mesh.position.distanceTo(App.boss.mesh.position) < 6) {
+                App.boss.hp -= 10;
+                b.remove = true;
+                playSound('hit', 100, 0.05);
+                if(App.boss.hp <= 0) destroyBoss();
+            }
+        } else { // 敵弾
+            if(P.mesh.position.distanceTo(b.mesh.position) < 1.5) {
+                damagePlayer(10);
+                b.remove = true;
+            }
+        }
+
+        // 画面外削除
+        if(b.mesh.position.z < -100 || b.mesh.position.z > 30 || b.remove) {
+            App.scene.remove(b.mesh);
+            App.bullets[i] = null;
+        }
+    });
+    App.bullets = App.bullets.filter(b => b !== null);
+
+    // 敵の更新
+    App.enemies.forEach((e, i) => {
+        e.mesh.position.z += (10 + App.stage * 2) * dt;
+        e.mesh.rotation.x += dt;
+        
+        // 体当たり
+        if(e.mesh.position.distanceTo(P.mesh.position) < 2) {
+            damagePlayer(20);
+            e.hp = 0;
+            destroyEnemy(e);
+        }
+        
+        // 敵の弾発射
+        e.shootTimer += dt;
+        if(e.type === 1 && e.shootTimer > 1.5) {
+            e.shootTimer = 0;
+            fireBullet(true, e.mesh.position);
+        }
+
+        if(e.mesh.position.z > 20) { // 通過
+            App.scene.remove(e.mesh);
+            App.enemies[i] = null;
+        }
+    });
+    App.enemies = App.enemies.filter(e => e !== null);
+
+    // アイテム更新
+    App.items.forEach((it, i) => {
+        it.mesh.position.z += 10 * dt;
+        it.mesh.rotation.y += dt * 3;
+        if(it.mesh.position.distanceTo(P.mesh.position) < 2) {
+            applyItem(it.type);
+            App.scene.remove(it.mesh);
+            App.items[i] = null;
+        } else if(it.mesh.position.z > 20) {
+            App.scene.remove(it.mesh);
+            App.items[i] = null;
+        }
+    });
+    App.items = App.items.filter(it => it !== null);
+}
+
+// --- 入力ハンドラ ---
+function handleStart(e) {
+    if(App.isPlaying) return;
+    e.preventDefault();
+    
+    // AudioContextの初期化・再開 (iOS対応)
+    if(!App.ctx) {
+        App.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if(App.ctx.state === 'suspended') {
+        App.ctx.resume();
+    }
+
+    // ゲームリセット・開始
+    resetGame();
+    App.isPlaying = true;
+    document.getElementById('overlay').style.display = 'none';
+    playBGM(App.stage, false);
+}
+
+function handleInput(e) {
+    if(!App.isPlaying) return;
+    // e.preventDefault(); // これがあるとスクロールは防げるが、他の動作に影響する場合もあるのでCSSでtouch-action制御推奨
+    
+    let cx, cy;
+    if(e.touches && e.touches.length > 0) {
+        cx = e.touches[0].clientX;
+        cy = e.touches[0].clientY;
+    } else {
+        cx = e.clientX;
+        cy = e.clientY;
+    }
+    
+    // 画面中央を(0,0)とし、-1~1の範囲に正規化
+    const x = (cx / App.width) * 2 - 1;
+    const y = -(cy / App.height) * 2 + 1;
+    
+    App.player.targetX = x * 18;
+    App.player.targetZ = -y * 8;
+}
+
+function handleResize() {
+    App.width = window.innerWidth;
+    App.height = window.innerHeight;
+    App.camera.aspect = App.width / App.height;
+    App.camera.updateProjectionMatrix();
+    App.renderer.setSize(App.width, App.height);
+}
+
+// --- ゲームロジック詳細 ---
+
+function resetGame() {
+    // 画面上のオブジェクト全消去
+    App.enemies.forEach(e => App.scene.remove(e.mesh));
+    App.bullets.forEach(b => App.scene.remove(b.mesh));
+    App.items.forEach(i => App.scene.remove(i.mesh));
+    if(App.boss) { App.scene.remove(App.boss.mesh); App.boss = null; }
+    
+    App.enemies = [];
+    App.bullets = [];
+    App.items = [];
+    App.score = 0;
+    App.stage = 1;
+    App.isBoss = false;
+    resetPlayer();
+}
+
+function fireBullet(isEnemy, pos) {
+    const bGeo = new THREE.BoxGeometry(0.4, 0.4, 1.5);
+    const bMat = new THREE.MeshBasicMaterial({color: isEnemy ? 0xff0000 : 0xffff00});
+    const mesh = new THREE.Mesh(bGeo, bMat);
+    
+    let startPos = isEnemy ? pos : App.player.mesh.position;
+    mesh.position.copy(startPos);
+    
+    // 自機パワーアップ時の弾幕
+    if(!isEnemy) {
+        const p = App.player.power;
+        const count = p >= 3 ? 3 : 1;
+        for(let i=0; i<count; i++) {
+            const m = mesh.clone();
+            m.position.x += (i - Math.floor(count/2)) * 1.5;
+            App.bullets.push({ mesh: m, isEnemy: false, speed: 40, remove: false });
+            App.scene.add(m);
+        }
+        playSound('shoot', 880, 0.05);
+    } else {
+        App.bullets.push({ mesh: mesh, isEnemy: true, speed: 20, remove: false });
+        App.scene.add(mesh);
+    }
+}
+
+function spawnEnemy() {
+    const x = (Math.random() - 0.5) * 30;
+    const type = Math.random() < 0.3 ? 1 : 0; // 0:特攻, 1:射撃
+    const geo = type === 1 ? new THREE.BoxGeometry(2,2,2) : new THREE.OctahedronGeometry(1.5);
+    const mat = new THREE.MeshLambertMaterial({color: type === 1 ? 0xff00ff : 0xffaa00});
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, 0, -60);
+    
+    App.enemies.push({
+        mesh: mesh, hp: 30 * App.stage, type: type, shootTimer: 0
+    });
+    App.scene.add(mesh);
+}
+
+function destroyEnemy(e) {
+    App.score += 100;
+    updateUI();
+    playSound('explo', 100, 0.2);
+    
+    // アイテムドロップ
+    if(Math.random() < 0.25) {
+        const types = ['power','heal','invincible'];
+        const t = types[Math.floor(Math.random()*types.length)];
+        spawnItem(e.mesh.position.x, e.mesh.position.z, t);
+    }
+    
+    App.scene.remove(e.mesh);
+    // 配列からの削除はfilterで行うためここではフラグ不要（即座にremove済み）
+}
+
+function spawnItem(x, z, type) {
+    let col = 0xffffff;
+    if(type === 'power') col = 0x5555ff;
+    if(type === 'heal') col = 0x55ff55;
+    if(type === 'invincible') col = 0xffff55;
+    
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.5,1.5,1.5), new THREE.MeshBasicMaterial({color:col, wireframe:true}));
+    mesh.position.set(x, 0, z);
+    App.items.push({mesh: mesh, type: type});
+    App.scene.add(mesh);
+}
+
+function applyItem(type) {
+    playSound('powerup', 1200, 0.1);
+    if(type === 'power') { App.player.power = Math.min(5, App.player.power + 1); showMsg("POWER UP!"); }
+    if(type === 'heal') { App.player.hp = Math.min(App.player.maxHp, App.player.hp + 30); showMsg("REPAIRED"); }
+    if(type === 'invincible') { App.player.invincible = 5; showMsg("SHIELD ON!"); }
+    updateUI();
+}
+
+function damagePlayer(dmg) {
+    if(App.player.invincible > 0) return;
+    App.player.hp -= dmg;
+    playSound('damage', 150, 0.1);
+    updateUI();
+    if(App.player.hp <= 0) gameOver();
+}
+
+// --- ボス関連 ---
+function startBoss() {
+    App.isBoss = true;
+    showMsg("WARNING!! BOSS!!");
+    playBGM(App.stage, true);
+    
+    const grp = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(8,4,4), new THREE.MeshLambertMaterial({color:0xaa0000}));
+    const core = new THREE.Mesh(new THREE.SphereGeometry(1.5), new THREE.MeshBasicMaterial({color:0xff0000}));
+    grp.add(body); grp.add(core);
+    grp.position.set(0, 0, -80);
+    
+    App.boss = {
+        mesh: grp, hp: 1000 * App.stage, maxHp: 1000 * App.stage, phase: 1, timer: 0
+    };
+    App.scene.add(grp);
+}
+
+function updateBoss(dt) {
+    const B = App.boss;
+    // 登場
+    if(B.mesh.position.z < -25) {
+        B.mesh.position.z += 10 * dt;
+        return;
+    }
+    
+    B.timer += dt;
+    B.mesh.position.x = Math.sin(B.timer) * 15;
+    
+    // 第2形態
+    if(B.phase === 1 && B.hp < B.maxHp * 0.5) {
+        B.phase = 2;
+        B.mesh.children[0].material.color.setHex(0x550000); // 色変化
+        playSound('explo', 50, 0.5); // 咆哮
+    }
+    
+    // 攻撃
+    if(Math.random() < (B.phase === 1 ? 0.02 : 0.05)) {
+        const shots = B.phase === 1 ? 3 : 5;
+        for(let i=0; i<shots; i++) {
+            const bGeo = new THREE.SphereGeometry(0.5);
+            const bMat = new THREE.MeshBasicMaterial({color:0xffaa00});
+            const bm = new THREE.Mesh(bGeo, bMat);
+            bm.position.copy(B.mesh.position);
+            bm.position.x += (i - Math.floor(shots/2)) * 2;
+            App.bullets.push({ mesh: bm, isEnemy: true, speed: B.phase===1?15:25, remove: false });
+            App.scene.add(bm);
+        }
+    }
+}
+
+function destroyBoss() {
+    App.scene.remove(App.boss.mesh);
+    App.boss = null;
+    App.isBoss = false;
+    playSound('explo', 50, 1.0);
+    
+    if(App.stage === 1) {
+        App.stage++;
+        showMsg("STAGE 1 CLEAR!");
+        playBGM(App.stage, false);
+        // 回復
+        App.player.hp = 100;
+        updateUI();
+    } else {
+        gameClear();
+    }
+}
+
+// --- UI & システム ---
+function showMsg(txt) {
+    const el = document.getElementById('start-txt');
+    el.innerText = txt;
+    el.style.display = 'block';
+    setTimeout(() => { if(App.isPlaying) el.style.display = 'none'; }, 2000);
+}
+
+function updateUI() {
+    document.getElementById('score-board').innerText = `SC:${App.score} ST:${App.stage}`;
+    document.getElementById('life-fill').style.width = Math.max(0, App.player.hp) + '%';
+}
+
+function gameOver() {
+    App.isPlaying = false;
+    stopBGM();
+    document.getElementById('overlay').style.display = 'flex';
+    document.getElementById('title-txt').innerText = "GAME OVER";
+    document.getElementById('start-txt').innerText = "TAP TO RETRY";
+    document.getElementById('start-txt').style.display = 'block';
+}
+
+function gameClear() {
+    App.isPlaying = false;
+    stopBGM();
+    document.getElementById('overlay').style.display = 'flex';
+    document.getElementById('title-txt').innerText = "ALL CLEAR!";
+    document.getElementById('start-txt').innerText = `SCORE: ${App.score}`;
+    document.getElementById('start-txt').style.display = 'block';
+}
+
+// --- サウンドシステム (Oscillator) ---
+let bgmTimer = null;
+function playSound(type, freq, dur) {
+    if(!App.ctx) return;
+    const osc = App.ctx.createOscillator();
+    const gain = App.ctx.createGain();
+    
+    if(type === 'shoot') osc.type = 'square';
+    else if(type === 'hit') osc.type = 'sawtooth';
+    else if(type === 'explo') osc.type = 'sawtooth';
+    else osc.type = 'sine';
+
+    osc.frequency.setValueAtTime(freq, App.ctx.currentTime);
+    if(type === 'explo') {
+        osc.frequency.exponentialRampToValueAtTime(10, App.ctx.currentTime + dur);
+    }
+    
+    gain.gain.setValueAtTime(0.1, App.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, App.ctx.currentTime + dur);
+    
+    osc.connect(gain);
+    gain.connect(App.ctx.destination);
+    osc.start();
+    osc.stop(App.ctx.currentTime + dur);
+}
+
+function playBGM(stage, isBoss) {
+    stopBGM();
+    let noteIdx = 0;
+    // 簡易シーケンス
+    const pattern = isBoss 
+        ? [110, 110, 120, 110, 80, 0, 130, 0] // Boss
+        : (stage === 1 ? [220, 0, 261, 0, 196, 0, 220, 0] : [330, 330, 293, 293, 261, 261, 392, 0]); // Stg1 vs Stg2
+        
+    const speed = isBoss ? 100 : (stage === 1 ? 250 : 150);
+
+    bgmTimer = setInterval(() => {
+        if(!App.ctx) return;
+        const freq = pattern[noteIdx % pattern.length];
+        if(freq > 0) {
+            const osc = App.ctx.createOscillator();
+            const gain = App.ctx.createGain();
+            osc.type = isBoss ? 'sawtooth' : 'triangle';
+            osc.frequency.setValueAtTime(freq, App.ctx.currentTime);
+            gain.gain.setValueAtTime(0.05, App.ctx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, App.ctx.currentTime + 0.1);
+            osc.connect(gain);
+            gain.connect(App.ctx.destination);
+            osc.start();
+            osc.stop(App.ctx.currentTime + 0.1);
+        }
+        noteIdx++;
+    }, speed);
+}
+
+function stopBGM() {
+    if(bgmTimer) clearInterval(bgmTimer);
+}
+
+</script>
+</body>
+</html>
