@@ -1,3 +1,4 @@
+```html
 <!doctype html>
 <html lang="ja">
 <head>
@@ -252,6 +253,25 @@
           <div class="footnote" style="margin-top:10px;">
             ※このアプリは「文字起こし無し／手入力」を用意しません。SpeechRecognition非対応ブラウザでは動作しません。
           </div>
+
+          <!-- 追加：JSONコード直接取り込み -->
+          <div class="hr"></div>
+          <div class="qbox" style="text-align:left;">
+            <div class="qtitle">JSONコードをそのまま取り込み</div>
+            <div class="muted" style="font-size:12px; line-height:1.55; margin-bottom:8px;">
+              ChatGPTの出力JSONを貼り付けて、ファイル無しでImportできます（{sets:[...]} またはセット配列）。
+            </div>
+            <textarea class="textarea mono" id="jsonPaste" placeholder='ここにJSONを貼り付け（例：{"schema_version":"1.0", "sets":[ ... ]}）'></textarea>
+            <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap;">
+              <button class="btn pri small" id="btnImportJsonText" type="button">Paste JSONをImport</button>
+              <button class="btn small" id="btnClearJsonPaste" type="button">クリア</button>
+            </div>
+            <div class="footnote" style="margin-top:8px;">
+              ※貼り付け時に余計な説明文が混ざっているとJSON.parseで失敗します（JSONのみを貼り付けてください）。
+            </div>
+          </div>
+          <!-- /追加：JSONコード直接取り込み -->
+
         </div>
 
         <div class="hr"></div>
@@ -636,20 +656,130 @@ function normalizeImported(json){
    TTS
 ========================= */
 let TTS_ON = true;
+
+/* 追加：iOS向け TTS 安定化（SpeakNoteと同系の解錠・voice選択） */
+const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.userAgent.includes("Mac") && ("ontouchend" in document));
+let _ttsUnlocked = false;
+let _ttsVoicesCache = null;
+
 function stopTts(){
   try{ speechSynthesis.cancel(); }catch(e){}
 }
+
+async function _ttsWaitVoices(timeoutMs=1600){
+  if(!("speechSynthesis" in window)) return [];
+  try{
+    const v0 = speechSynthesis.getVoices();
+    if(v0 && v0.length) return v0;
+  }catch(e){}
+  return new Promise((resolve)=>{
+    let done = false;
+    const finish = ()=>{
+      if(done) return;
+      done = true;
+      try{ speechSynthesis.onvoiceschanged = null; }catch(e){}
+      let vv = [];
+      try{ vv = speechSynthesis.getVoices() || []; }catch(e){}
+      resolve(vv);
+    };
+    try{
+      speechSynthesis.onvoiceschanged = finish;
+    }catch(e){}
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+function _ttsPickVoice(voices, lang="en-US"){
+  if(!voices || !voices.length) return null;
+  const want = String(lang||"en-US").toLowerCase();
+  // まず完全一致
+  const exact = voices.filter(v=>String(v.lang||"").toLowerCase()===want);
+  // 次に en 系
+  const broad = voices.filter(v=>String(v.lang||"").toLowerCase().startsWith(want.slice(0,2)));
+  const pool = exact.length ? exact : (broad.length ? broad : voices);
+
+  if(isIOS){
+    // iOSは Samantha が安定しやすい（環境差あり）
+    const sam = pool.find(v=>/Samantha/i.test(v.name) && /en-US/i.test(v.lang));
+    if(sam) return sam;
+  }
+  const def = pool.find(v=>v.default);
+  return def || pool[0] || null;
+}
+
+async function ensureTtsUnlocked(){
+  if(_ttsUnlocked) return true;
+  if(!("speechSynthesis" in window)) return false;
+
+  // AudioContext を user gesture で resume（iOS対策）
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(AC && !ensureTtsUnlocked._ac){
+      ensureTtsUnlocked._ac = new AC();
+    }
+    if(ensureTtsUnlocked._ac && ensureTtsUnlocked._ac.state === "suspended"){
+      await ensureTtsUnlocked._ac.resume();
+    }
+  }catch(e){}
+
+  // voices ロード
+  try{
+    _ttsVoicesCache = await _ttsWaitVoices(1800);
+  }catch(e){}
+
+  // iOS: 1回無音発話して解錠
+  try{
+    const u = new SpeechSynthesisUtterance(" ");
+    u.lang = "en-US";
+    u.volume = 0;
+    const v = _ttsPickVoice(_ttsVoicesCache, "en-US");
+    if(v) u.voice = v;
+    speechSynthesis.speak(u);
+    await sleep(60);
+    speechSynthesis.cancel();
+    try{ speechSynthesis.resume(); }catch(e){}
+  }catch(e){}
+
+  _ttsUnlocked = true;
+  return true;
+}
+/* /追加：iOS向け TTS 安定化 */
+
 async function speak(text, rate=1.0){
   if(!TTS_ON) return;
   if(!("speechSynthesis" in window)) return;
+
+  // 追加：iOSでのTTS解錠（Run開始ボタン等のユーザージェスチャーで呼ばれる想定）
+  if(isIOS){
+    await ensureTtsUnlocked();
+  }
+
+  // voices 確保（iOS/その他でも空のことがある）
+  if(!_ttsVoicesCache || !_ttsVoicesCache.length){
+    _ttsVoicesCache = await _ttsWaitVoices(1600);
+  }
+
   stopTts();
+  // iOSは cancel 直後に speak すると落ちることがあるため少し待つ
+  await sleep(60);
+
   return new Promise((resolve)=>{
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "en-US";
     u.rate = Number(rate) || 1.0;
+
+    // 追加：voice指定（iOSで安定化）
+    const v = _ttsPickVoice(_ttsVoicesCache, "en-US");
+    if(v) u.voice = v;
+
     u.onend = ()=> resolve(true);
     u.onerror = ()=> resolve(false);
-    speechSynthesis.speak(u);
+    try{
+      speechSynthesis.speak(u);
+      try{ speechSynthesis.resume(); }catch(e){}
+    }catch(e){
+      resolve(false);
+    }
   });
 }
 
@@ -1229,6 +1359,12 @@ function renderReview(){
         toast("TTSがOFFです（Run画面のTTSボタンでONにしてください）");
         return;
       }
+
+      // 追加：iOS解錠（ボタン押下＝ユーザージェスチャー）
+      if(isIOS){
+        await ensureTtsUnlocked();
+      }
+
       const q = (lastReview && lastReview.set && lastReview.set.questions) ? lastReview.set.questions.find(x=>x.q_index===idx) : null;
       if(!q || !q.model_answer){
         toast("模範解答がありません");
@@ -1396,6 +1532,42 @@ async function importJsonFile(file){
   }
 }
 
+/* 追加：貼り付けJSON取り込み */
+async function importJsonText(rawText){
+  try{
+    const txt = String(rawText||"").trim();
+    const json = JSON.parse(txt);
+    const sets = normalizeImported(json);
+
+    await setsPutMany(sets);
+    await metaSet("last_import", nowISO());
+
+    bankSets = await setsGetAll();
+    renderBank();
+    toast(`取り込み完了：${sets.length}セット`);
+    return true;
+  }catch(e){
+    toast("取り込み失敗");
+    alert(`Import Error:\n${e.message || e}`);
+    return false;
+  }
+}
+
+$("#btnImportJsonText").onclick = async ()=>{
+  const txt = ($("#jsonPaste").value || "").trim();
+  if(!txt){
+    toast("貼り付けが空です");
+    return;
+  }
+  await importJsonText(txt);
+};
+
+$("#btnClearJsonPaste").onclick = ()=>{
+  $("#jsonPaste").value = "";
+  toast("クリアしました");
+};
+/* /追加：貼り付けJSON取り込み */
+
 $("#btnStartRandom").onclick = async ()=>{
   if(!bankSets.length){ toast("セットがありません"); return; }
   const s = bankSets[Math.floor(Math.random()*bankSets.length)];
@@ -1431,6 +1603,14 @@ $("#btnCopyGenPrompt").onclick = async ()=>{
 };
 
 $("#btnRunStart").onclick = async ()=>{
+  /* 追加：iOSでTTSが出ない問題対策（ユーザージェスチャー中に解錠） */
+  try{
+    if(TTS_ON && ("speechSynthesis" in window)){
+      await ensureTtsUnlocked();
+    }
+  }catch(e){}
+  /* /追加 */
+
   try{
     if(!isSecure){
       $("#micWarn").style.display = "";
@@ -1551,3 +1731,4 @@ function renderCapabilities(){
 </script>
 </body>
 </html>
+```
