@@ -1,4 +1,3 @@
-```html
 <!doctype html>
 <html lang="ja">
 <head>
@@ -287,7 +286,6 @@
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <button class="btn ok" id="btnStartRandom" type="button">🎲 Randomで開始</button>
           <button class="btn ghost" id="btnExportAll" type="button">Export（全セットJSON）</button>
-          <!-- DB削除ボタンは Settings に移動 -->
         </div>
         <div class="footnote" style="margin-top:10px;">
           Exportは、現在DBに入っているセットをJSONで書き出します（ChatGPT生成物の再利用用）。
@@ -421,7 +419,6 @@
                 <span class="muted" style="font-size:12px;">※基本は en-US 推奨</span>
               </div>
 
-              <!-- ここにDB削除ボタンを移動 -->
               <div class="hr"></div>
               <div style="font-weight:900; margin-bottom:6px;">DB管理</div>
               <div class="muted" style="font-size:12px; line-height:1.6; margin-bottom:10px;">
@@ -486,7 +483,6 @@ async function copyText(txt){
     toast("コピーしました");
     return true;
   }catch(e){
-    // fallback
     const ta = document.createElement("textarea");
     ta.value = txt;
     ta.style.position="fixed"; ta.style.left="-9999px";
@@ -513,6 +509,12 @@ const hasSpeechRecognition = !!SpeechRec;
 const hasMediaRecorder = !!window.MediaRecorder;
 const isSecure = window.isSecureContext;
 const isEdgeOrChrome = /Edg|Chrome/.test(navigator.userAgent);
+
+/* =========================
+   iOS detection (WebKit)
+========================= */
+const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.userAgent.includes("Mac") && ("ontouchend" in document));
+const isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/\d+/.test(navigator.userAgent);
 
 /* =========================
    IndexedDB
@@ -600,8 +602,6 @@ async function dbClearAll(){
    Schema / Import
 ========================= */
 function normalizeImported(json){
-  // Accept:
-  // { sets: [...] } OR directly [ ...sets ]
   const sets = Array.isArray(json) ? json : (json && Array.isArray(json.sets) ? json.sets : null);
   if(!sets) throw new Error("JSON形式が不正です。{sets:[...]} またはセット配列を期待しています。");
 
@@ -612,11 +612,9 @@ function normalizeImported(json){
     const set_id = String(s.set_id || "").trim();
     if(!set_id) throw new Error(`set_id がありません（index=${i}）`);
 
-    // Minimal validations
     if(!s.material || !s.material.body_markdown) throw new Error(`material.body_markdown がありません（set_id=${set_id}）`);
     if(!Array.isArray(s.questions) || s.questions.length !== 3) throw new Error(`questions は3つ必要です（set_id=${set_id}）`);
 
-    // Validate Q8/Q9/Q10
     const qs = s.questions.map(q=>({
       q_index: Number(q.q_index),
       prep_sec: Number(q.prep_sec ?? 3),
@@ -653,135 +651,286 @@ function normalizeImported(json){
 }
 
 /* =========================
-   TTS
+   TTS (FIXED: iOS freeze-proof)
 ========================= */
 let TTS_ON = true;
 
-/* 追加：iOS向け TTS 安定化（SpeakNoteと同系の解錠・voice選択） */
-const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.userAgent.includes("Mac") && ("ontouchend" in document));
-let _ttsUnlocked = false;
-let _ttsVoicesCache = null;
+/**
+ * iOSで起きがちな「onendが来ない / awaitが永遠に終わらない」を潰すためのTTSエンジン
+ * - user gestureで解錠（AudioContext resume + tiny utterance）
+ * - 長文分割（chunk）
+ * - watchdog timeout（必ずresolve）
+ * - cancel直後の待機を長めに
+ */
+const TTSEngine = (() => {
+  let _voices = [];
+  let _voicesReady = false;
+  let _unlocked = false;
+  let _token = 0;
+  let _queue = Promise.resolve();
+  let _ac = null;
 
-function stopTts(){
-  try{ speechSynthesis.cancel(); }catch(e){}
-}
+  function supported(){
+    return ("speechSynthesis" in window) && ("SpeechSynthesisUtterance" in window);
+  }
 
-async function _ttsWaitVoices(timeoutMs=1600){
-  if(!("speechSynthesis" in window)) return [];
-  try{
-    const v0 = speechSynthesis.getVoices();
-    if(v0 && v0.length) return v0;
-  }catch(e){}
-  return new Promise((resolve)=>{
-    let done = false;
-    const finish = ()=>{
-      if(done) return;
-      done = true;
-      try{ speechSynthesis.onvoiceschanged = null; }catch(e){}
-      let vv = [];
-      try{ vv = speechSynthesis.getVoices() || []; }catch(e){}
-      resolve(vv);
-    };
+  function cancel(){
+    _token++;
+    try{ speechSynthesis.cancel(); }catch(e){}
+    // iOSで cancel が効かないケースの保険
+    try{ speechSynthesis.pause(); speechSynthesis.resume(); }catch(e){}
+  }
+
+  function _estimateTimeoutMs(text, rate){
+    const r = Math.max(0.6, Number(rate)||1);
+    // 雑に：文字数に比例 + 固定オーバーヘッド（上限あり）
+    const ms = 600 + (String(text||"").length * (38 / r));
+    return Math.max(1400, Math.min(14000, Math.floor(ms)));
+  }
+
+  function _splitText(text){
+    const s = String(text||"").trim();
+    if(!s) return [];
+    // 句読点/終止で分割しつつ、長い塊はさらに切る
+    const rough = s
+      .replace(/\s+/g," ")
+      .split(/(?<=[\.\!\?\。\！\？])\s+/);
+
+    const out = [];
+    const MAX = 130; // iOSで長文が不安定なため小さめ
+    for(const part of rough){
+      let p = part.trim();
+      while(p.length > MAX){
+        // まずカンマで切れるなら切る
+        let cut = p.lastIndexOf(",", MAX);
+        if(cut < 40) cut = p.lastIndexOf(";", MAX);
+        if(cut < 40) cut = MAX;
+        out.push(p.slice(0, cut+1).trim());
+        p = p.slice(cut+1).trim();
+      }
+      if(p) out.push(p);
+    }
+    return out;
+  }
+
+  function _pickVoice(lang="en-US"){
+    if(!_voices || !_voices.length) return null;
+    const want = String(lang).toLowerCase();
+
+    const sameLang = _voices.filter(v => String(v.lang||"").toLowerCase() === want);
+    const enAny = _voices.filter(v => String(v.lang||"").toLowerCase().startsWith("en"));
+    const pool = sameLang.length ? sameLang : (enAny.length ? enAny : _voices);
+
+    // localService優先（ネットワーク音声っぽいものを避ける）
+    const local = pool.filter(v => v.localService);
+
+    if(isIOS){
+      // iOSは Samantha が比較的安定（無ければlocal default）
+      const sam = (sameLang.length ? sameLang : pool).find(v => /Samantha/i.test(v.name||"") && /en-us/i.test(v.lang||""));
+      if(sam) return sam;
+    }
+
+    const pickFrom = local.length ? local : pool;
+    const def = pickFrom.find(v => v.default);
+    return def || pickFrom[0] || null;
+  }
+
+  async function _waitVoices(timeoutMs=2200){
+    if(!supported()) return [];
     try{
-      speechSynthesis.onvoiceschanged = finish;
+      const v0 = speechSynthesis.getVoices();
+      if(v0 && v0.length) return v0;
     }catch(e){}
-    setTimeout(finish, timeoutMs);
-  });
-}
-
-function _ttsPickVoice(voices, lang="en-US"){
-  if(!voices || !voices.length) return null;
-  const want = String(lang||"en-US").toLowerCase();
-  // まず完全一致
-  const exact = voices.filter(v=>String(v.lang||"").toLowerCase()===want);
-  // 次に en 系
-  const broad = voices.filter(v=>String(v.lang||"").toLowerCase().startsWith(want.slice(0,2)));
-  const pool = exact.length ? exact : (broad.length ? broad : voices);
-
-  if(isIOS){
-    // iOSは Samantha が安定しやすい（環境差あり）
-    const sam = pool.find(v=>/Samantha/i.test(v.name) && /en-US/i.test(v.lang));
-    if(sam) return sam;
-  }
-  const def = pool.find(v=>v.default);
-  return def || pool[0] || null;
-}
-
-async function ensureTtsUnlocked(){
-  if(_ttsUnlocked) return true;
-  if(!("speechSynthesis" in window)) return false;
-
-  // AudioContext を user gesture で resume（iOS対策）
-  try{
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if(AC && !ensureTtsUnlocked._ac){
-      ensureTtsUnlocked._ac = new AC();
-    }
-    if(ensureTtsUnlocked._ac && ensureTtsUnlocked._ac.state === "suspended"){
-      await ensureTtsUnlocked._ac.resume();
-    }
-  }catch(e){}
-
-  // voices ロード
-  try{
-    _ttsVoicesCache = await _ttsWaitVoices(1800);
-  }catch(e){}
-
-  // iOS: 1回無音発話して解錠
-  try{
-    const u = new SpeechSynthesisUtterance(" ");
-    u.lang = "en-US";
-    u.volume = 0;
-    const v = _ttsPickVoice(_ttsVoicesCache, "en-US");
-    if(v) u.voice = v;
-    speechSynthesis.speak(u);
-    await sleep(60);
-    speechSynthesis.cancel();
-    try{ speechSynthesis.resume(); }catch(e){}
-  }catch(e){}
-
-  _ttsUnlocked = true;
-  return true;
-}
-/* /追加：iOS向け TTS 安定化 */
-
-async function speak(text, rate=1.0){
-  if(!TTS_ON) return;
-  if(!("speechSynthesis" in window)) return;
-
-  // 追加：iOSでのTTS解錠（Run開始ボタン等のユーザージェスチャーで呼ばれる想定）
-  if(isIOS){
-    await ensureTtsUnlocked();
+    return new Promise((resolve)=>{
+      let done = false;
+      const finish = ()=>{
+        if(done) return;
+        done = true;
+        try{ speechSynthesis.onvoiceschanged = null; }catch(e){}
+        let vv = [];
+        try{ vv = speechSynthesis.getVoices() || []; }catch(e){}
+        resolve(vv);
+      };
+      try{ speechSynthesis.onvoiceschanged = finish; }catch(e){}
+      setTimeout(finish, timeoutMs);
+    });
   }
 
-  // voices 確保（iOS/その他でも空のことがある）
-  if(!_ttsVoicesCache || !_ttsVoicesCache.length){
-    _ttsVoicesCache = await _ttsWaitVoices(1600);
+  async function _loadVoices(){
+    if(!supported()) return [];
+    _voices = await _waitVoices(2500);
+    _voicesReady = true;
+    return _voices;
   }
 
-  stopTts();
-  // iOSは cancel 直後に speak すると落ちることがあるため少し待つ
-  await sleep(60);
-
-  return new Promise((resolve)=>{
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "en-US";
-    u.rate = Number(rate) || 1.0;
-
-    // 追加：voice指定（iOSで安定化）
-    const v = _ttsPickVoice(_ttsVoicesCache, "en-US");
-    if(v) u.voice = v;
-
-    u.onend = ()=> resolve(true);
-    u.onerror = ()=> resolve(false);
+  async function _resumeAudioContext(){
     try{
-      speechSynthesis.speak(u);
-      try{ speechSynthesis.resume(); }catch(e){}
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return;
+      if(!_ac) _ac = new AC();
+      if(_ac.state === "suspended"){
+        await _ac.resume();
+      }
+    }catch(e){}
+  }
+
+  async function unlock(){
+    if(_unlocked) return true;
+    if(!supported()) return false;
+
+    await _resumeAudioContext();
+    await _loadVoices();
+
+    // iOSの「最初の発話」問題：ユーザージェスチャー中に極短い発話→即キャンセル
+    try{
+      cancel();
+      await sleep(50);
+
+      const u = new SpeechSynthesisUtterance("ok");
+      u.lang = "en-US";
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.volume = 0.01; // 0だと解錠にならない機種がある
+      const v = _pickVoice("en-US");
+      if(v) u.voice = v;
+
+      let settled = false;
+      await new Promise((resolve)=>{
+        const t = setTimeout(()=>{
+          if(settled) return;
+          settled = true;
+          try{ speechSynthesis.cancel(); }catch(e){}
+          resolve();
+        }, 700);
+        u.onend = ()=>{ if(settled) return; settled=true; clearTimeout(t); resolve(); };
+        u.onerror = ()=>{ if(settled) return; settled=true; clearTimeout(t); resolve(); };
+        try{
+          speechSynthesis.speak(u);
+          try{ speechSynthesis.resume(); }catch(e){}
+        }catch(e){
+          clearTimeout(t);
+          resolve();
+        }
+      });
+
+      cancel();
+      await sleep(80);
+      _unlocked = true;
+      return true;
     }catch(e){
-      resolve(false);
+      _unlocked = true; // 失敗しても「待たない」方が重要
+      return true;
     }
-  });
-}
+  }
+
+  async function _speakChunk(text, {rate=1.0, lang="en-US", timeoutMs=null, tokenAtStart=0}={}){
+    if(!supported()) return false;
+    const myToken = tokenAtStart;
+    if(myToken !== _token) return false;
+
+    if(!_voicesReady) await _loadVoices();
+    if(isIOS) await _resumeAudioContext();
+
+    const tmo = timeoutMs ?? _estimateTimeoutMs(text, rate);
+
+    return new Promise((resolve)=>{
+      let done = false;
+      const finish = (ok)=>{
+        if(done) return;
+        done = true;
+        clearTimeout(wd);
+        resolve(!!ok);
+      };
+
+      const u = new SpeechSynthesisUtterance(String(text));
+      u.lang = lang;
+      u.rate = Math.max(0.7, Math.min(1.2, Number(rate)||1.0));
+      u.pitch = 1.0;
+      u.volume = 1.0;
+
+      const v = _pickVoice(lang);
+      if(v) u.voice = v;
+
+      u.onend = ()=> finish(true);
+      u.onerror = ()=> finish(false);
+
+      // watchdog: onendが来なくても必ず抜ける
+      const wd = setTimeout(()=>{
+        try{ speechSynthesis.cancel(); }catch(e){}
+        try{ speechSynthesis.pause(); speechSynthesis.resume(); }catch(e){}
+        finish(false);
+      }, tmo);
+
+      try{
+        speechSynthesis.speak(u);
+        try{ speechSynthesis.resume(); }catch(e){}
+      }catch(e){
+        finish(false);
+      }
+    });
+  }
+
+  async function speak(text, {rate=1.0, lang="en-US", interrupt=true, timeoutMs=null}={}){
+    if(!TTS_ON) return true;
+    if(!supported()) return false;
+
+    // iOSは毎回「ユーザージェスチャーで解錠済み」前提が崩れうるので、ここでも一応unlock
+    if(isIOS && !_unlocked){
+      // ※ここで user gesture でないケースもあるが、unlockが失敗しても先へ進む
+      await unlock();
+    }else if(!_voicesReady){
+      await _loadVoices();
+    }
+
+    if(interrupt) cancel();
+
+    // cancel直後はiOSが落ち/固まりやすいので少し待つ
+    await sleep(isIOS ? 180 : 60);
+
+    const myToken = _token;
+    const chunks = _splitText(text);
+    if(!chunks.length) return true;
+
+    for(const c of chunks){
+      if(myToken !== _token) return false;
+      const ok = await _speakChunk(c, {
+        rate, lang,
+        timeoutMs: timeoutMs ?? _estimateTimeoutMs(c, rate),
+        tokenAtStart: myToken
+      });
+      // iOSは間隔を空けた方が安定
+      await sleep(isIOS ? 130 : 40);
+      // 失敗しても「固まらず」先へ進むのが目的
+      if(myToken !== _token) return false;
+      if(!ok){
+        // ここで止めず、続ける（長文の一部が失敗してもRunを止めない）
+      }
+    }
+    return true;
+  }
+
+  // 連打対策：内部キューで順番に流す（Review側のボタン連打など）
+  function speakQueued(text, opts){
+    _queue = _queue.then(()=> speak(text, opts)).catch(()=>false);
+    return _queue;
+  }
+
+  return { supported, unlock, cancel, speak, speakQueued };
+})();
+
+// 画面がバックグラウンドに行った時、iOSはTTSが詰まりやすいのでキャンセル
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden){
+    try{ TTSEngine.cancel(); }catch(e){}
+  }
+});
+
+// 最初のユーザージェスチャーでTTS解錠（Run開始より前でもOK）
+document.addEventListener("pointerdown", async ()=>{
+  if(TTS_ON && TTSEngine.supported()){
+    await TTSEngine.unlock();
+  }
+}, {once:true});
 
 /* =========================
    Recorder + SpeechRecognition (No fallback)
@@ -803,7 +952,6 @@ function pickMime(){
   return "";
 }
 
-// Robust recognition: restart on end while running
 function createRecognizer(lang="en-US"){
   const rec = new SpeechRec();
   rec.lang = lang;
@@ -841,7 +989,7 @@ async function recordWithASR({answerSec, asrLang}){
   };
 
   recog.onerror = (ev)=>{
-    // Do nothing here.
+    // ignore
   };
 
   recog.onend = ()=>{
@@ -858,14 +1006,11 @@ async function recordWithASR({answerSec, asrLang}){
     try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
   }
 
-  // Start
   mr.start(250);
-  try{ recog.start(); }catch(e){ /* might fail if not allowed */ }
+  try{ recog.start(); }catch(e){}
 
-  // Wait answer time
   await sleep(answerSec * 1000);
 
-  // Stop
   active = false;
   await new Promise((resolve)=>{
     mr.onstop = ()=> resolve(true);
@@ -885,7 +1030,7 @@ async function recordWithASR({answerSec, asrLang}){
 ========================= */
 let bankSets = [];
 let currentSet = null;
-let currentRun = null; // {run_id, set_id, started_at, answers: [{q_index, audioBlob, asrText}] }
+let currentRun = null;
 let lastReview = null;
 
 function runId(){
@@ -995,9 +1140,7 @@ function escapeAttr(s){
 }
 
 function mdToHtml(md){
-  // minimal markdown -> html (tables, line breaks)
   const lines = String(md||"").split(/\r?\n/);
-
   const out = [];
   let i=0;
   while(i<lines.length){
@@ -1096,7 +1239,7 @@ async function runSession(){
   $("#micWarn").style.display = "none";
   $("#micWarn").textContent = "";
 
-  stopTts();
+  TTSEngine.cancel();
 
   const asrLang = $("#asrLang").value || "en-US";
   const ttsRate = Number($("#ttsRate").value || 1.0);
@@ -1127,23 +1270,23 @@ async function runSession(){
       $("#qText").textContent = q.question_text;
       $("#recStatus").textContent = "録音：待機 / 文字起こし：待機";
 
-      if(qIndex === 10 && q.ask_twice){
-        if(TTS_ON){
-          $("#timerHint").textContent = "Q10の質問を2回読み上げ中";
-          setTimer("--", "TTS...");
-          await speak(q.question_text, ttsRate);
-          await sleep(200);
-          await speak(q.question_text, ttsRate);
+      // ---- FIX: iOS freeze-proof TTS ----
+      if(TTS_ON && TTSEngine.supported()){
+        $("#timerHint").textContent = (qIndex === 10 && q.ask_twice) ? "Q10の質問を2回読み上げ中" : `Q${qIndex} 質問読み上げ`;
+        setTimer("--", "TTS...");
+
+        // iOSで「awaitが帰ってこない」問題を、watchdog付きTTSEngineで回避
+        if(qIndex === 10 && q.ask_twice){
+          await TTSEngine.speak(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
+          await sleep(220);
+          await TTSEngine.speak(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
           await sleep(250);
-        }
-      }else{
-        if(TTS_ON){
-          $("#timerHint").textContent = `Q${qIndex} 質問読み上げ`;
-          setTimer("--", "TTS...");
-          await speak(q.question_text, ttsRate);
+        }else{
+          await TTSEngine.speak(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
           await sleep(200);
         }
       }
+      // ---- /FIX ----
 
       setPhase(`Q${qIndex} - Preparation (${q.prep_sec}s)`);
       $("#recStatus").textContent = "録音：待機 / 文字起こし：待機";
@@ -1201,7 +1344,7 @@ async function runSession(){
   }finally{
     isRunning = false;
     $("#btnRunStart").disabled = false;
-    stopTts();
+    TTSEngine.cancel();
   }
 }
 
@@ -1351,7 +1494,7 @@ function renderReview(){
     const ttsBtn = ev.target.closest("button[data-ttsmodel]");
     if(ttsBtn){
       const idx = Number(ttsBtn.getAttribute("data-ttsmodel"));
-      if(!("speechSynthesis" in window)){
+      if(!TTSEngine.supported()){
         toast("このブラウザはTTS非対応です");
         return;
       }
@@ -1360,10 +1503,8 @@ function renderReview(){
         return;
       }
 
-      // 追加：iOS解錠（ボタン押下＝ユーザージェスチャー）
-      if(isIOS){
-        await ensureTtsUnlocked();
-      }
+      // ボタン押下（ユーザージェスチャー）で確実に解錠
+      await TTSEngine.unlock();
 
       const q = (lastReview && lastReview.set && lastReview.set.questions) ? lastReview.set.questions.find(x=>x.q_index===idx) : null;
       if(!q || !q.model_answer){
@@ -1371,7 +1512,7 @@ function renderReview(){
         return;
       }
       const rate = Number($("#ttsRate").value || 1.0);
-      await speak(q.model_answer, rate);
+      await TTSEngine.speakQueued(q.model_answer, {rate, lang:"en-US", interrupt:true});
       return;
     }
 
@@ -1532,7 +1673,6 @@ async function importJsonFile(file){
   }
 }
 
-/* 追加：貼り付けJSON取り込み */
 async function importJsonText(rawText){
   try{
     const txt = String(rawText||"").trim();
@@ -1566,7 +1706,6 @@ $("#btnClearJsonPaste").onclick = ()=>{
   $("#jsonPaste").value = "";
   toast("クリアしました");
 };
-/* /追加：貼り付けJSON取り込み */
 
 $("#btnStartRandom").onclick = async ()=>{
   if(!bankSets.length){ toast("セットがありません"); return; }
@@ -1603,13 +1742,12 @@ $("#btnCopyGenPrompt").onclick = async ()=>{
 };
 
 $("#btnRunStart").onclick = async ()=>{
-  /* 追加：iOSでTTSが出ない問題対策（ユーザージェスチャー中に解錠） */
+  // Run開始ボタンは確実にユーザージェスチャー：ここでTTS解錠
   try{
-    if(TTS_ON && ("speechSynthesis" in window)){
-      await ensureTtsUnlocked();
+    if(TTS_ON && TTSEngine.supported()){
+      await TTSEngine.unlock();
     }
   }catch(e){}
-  /* /追加 */
 
   try{
     if(!isSecure){
@@ -1643,14 +1781,14 @@ $("#btnAbortRun").onclick = ()=>{
     return;
   }
   runAbort = true;
-  stopTts();
+  TTSEngine.cancel();
   toast("中断要求…");
 };
 
 $("#btnRunRestart").onclick = async ()=>{
   if(!currentSet) return;
   runAbort = true;
-  stopTts();
+  TTSEngine.cancel();
   await sleep(150);
   await openRunWithSet(currentSet);
   toast("やり直し準備完了");
@@ -1677,7 +1815,7 @@ $("#btnTtsToggle").onclick = ()=>{
   TTS_ON = !TTS_ON;
   $("#btnTtsToggle").textContent = TTS_ON ? "🔊 TTS: ON" : "🔇 TTS: OFF";
   toast(TTS_ON ? "TTS ON" : "TTS OFF");
-  if(!TTS_ON) stopTts();
+  if(!TTS_ON) TTSEngine.cancel();
 };
 
 $("#ttsRate").addEventListener("input", ()=>{
@@ -1695,6 +1833,7 @@ function renderCapabilities(){
     {name:"MediaRecorder (録音)", ok:hasMediaRecorder, note:"録音が必須"},
     {name:"SpeechRecognition (文字起こし)", ok:hasSpeechRecognition, note:"フォールバック無し。必須"},
     {name:"Browser hint", ok:isEdgeOrChrome, note:"Edge/Chrome系推奨（ASR安定）"},
+    {name:"TTS (speechSynthesis)", ok:TTSEngine.supported(), note:"iOSはwatchdog/分割でフリーズ回避"},
   ];
   for(const it of items){
     const d = document.createElement("div");
@@ -1731,4 +1870,3 @@ function renderCapabilities(){
 </script>
 </body>
 </html>
-```
