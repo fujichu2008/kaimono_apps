@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="ja">
 <head>
@@ -207,6 +208,23 @@
     line-height: 1.45;
   }
   .footnote{color: var(--muted); font-size: 11px; line-height: 1.45;}
+
+  /* iOS TTS gesture overlay */
+  .iosUnlockOverlay{
+    position:fixed; inset:0; z-index:200;
+    display:flex; align-items:center; justify-content:center;
+    padding:16px;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(10px);
+  }
+  .iosUnlockCard{
+    width:min(520px, 92vw);
+    border-radius: 18px;
+    border:1px solid rgba(36,48,71,.85);
+    background: linear-gradient(180deg, rgba(18,24,38,.96), rgba(15,21,36,.96));
+    box-shadow: var(--shadow);
+    padding:14px;
+  }
 </style>
 </head>
 <body>
@@ -311,6 +329,7 @@
               </div>
               <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
                 <button class="btn small" id="btnTtsToggle" type="button">🔊 TTS: ON</button>
+                <button class="btn small" id="btnTtsUnlock" type="button" style="display:none;">🔓 iOS音声有効化</button>
                 <button class="btn small" id="btnAbortRun" type="button">中断</button>
               </div>
             </div>
@@ -503,6 +522,55 @@ const isEdgeOrChrome = /Edg|Chrome/.test(navigator.userAgent);
 ========================= */
 const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.userAgent.includes("Mac") && ("ontouchend" in document));
 const isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/\d+/.test(navigator.userAgent);
+
+/* =========================
+   iOS: require tap overlay (when TTS needs fresh gesture)
+========================= */
+function requireTapToUnlockTTS(message="iOSでは音声再生のためにタップが必要です。"){
+  return new Promise((resolve)=>{
+    const ov = document.createElement("div");
+    ov.className = "iosUnlockOverlay";
+    ov.innerHTML = `
+      <div class="iosUnlockCard">
+        <div style="font-weight:950; font-size:14px; margin-bottom:6px;">🔓 iOS Audio Unlock</div>
+        <div class="muted" style="font-size:12px; line-height:1.6; margin-bottom:10px;">
+          ${escapeHtml(message)}<br/>
+          下のボタンを1回タップすると、以降の自動TTSが動きやすくなります。
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+          <button class="btn pri small" id="__iosUnlockBtn" type="button">タップして音声を有効化</button>
+          <button class="btn small" id="__iosUnlockCancel" type="button">キャンセル</button>
+        </div>
+        <div class="footnote" style="margin-top:10px;">
+          ※消音モードや音量ゼロの場合、TTSが聞こえないことがあります。
+        </div>
+      </div>
+    `;
+    document.body.appendChild(ov);
+
+    const btn = ov.querySelector("#__iosUnlockBtn");
+    const cancel = ov.querySelector("#__iosUnlockCancel");
+
+    const cleanup = ()=>{
+      try{ ov.remove(); }catch(e){}
+    };
+
+    cancel.onclick = ()=>{
+      cleanup();
+      resolve(false);
+    };
+
+    // IMPORTANT: call speak() synchronously in this click stack
+    btn.onclick = ()=>{
+      try{
+        TTSEngine.unlockFromGesture(); // fire immediately in gesture
+        toast("iOS音声を有効化しました");
+      }catch(e){}
+      cleanup();
+      resolve(true);
+    };
+  });
+}
 
 /* =========================
    IndexedDB
@@ -797,7 +865,7 @@ function normalizeImported(json){
 }
 
 /* =========================
-   TTS (FIXED: wait until truly finished)
+   TTS (iOS FIX: unlock must be fired synchronously in a user gesture)
 ========================= */
 let TTS_ON = true;
 
@@ -811,6 +879,10 @@ const TTSEngine = (() => {
 
   function supported(){
     return ("speechSynthesis" in window) && ("SpeechSynthesisUtterance" in window);
+  }
+
+  function isUnlocked(){
+    return !!_unlocked;
   }
 
   function cancel(){
@@ -909,7 +981,70 @@ const TTSEngine = (() => {
     }catch(e){}
   }
 
+  /* ---------- iOS FIX CORE ----------
+     This MUST be called directly inside a click/tap handler.
+     It calls speechSynthesis.speak() synchronously (no await before speak),
+     so iOS treats it as a user-gesture initiated playback.
+  ----------------------------------*/
+  function unlockFromGesture(){
+    if(_unlocked) return true;
+    if(!supported()) return false;
+
+    _unlocked = true; // optimistic: avoid later non-gesture unlock attempts
+
+    // resume AudioContext inside gesture (best effort)
+    try{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(AC){
+        if(!_ac) _ac = new AC();
+        if(_ac.state === "suspended"){
+          _ac.resume().catch(()=>{});
+        }
+      }
+    }catch(e){}
+
+    // load voices best-effort (sync fetch if available)
+    try{
+      const vv = speechSynthesis.getVoices();
+      if(vv && vv.length){
+        _voices = vv;
+        _voicesReady = true;
+      }
+    }catch(e){}
+
+    try{
+      cancel();
+
+      // NOTE: ultra-short utterance (quiet but non-zero volume)
+      const u = new SpeechSynthesisUtterance("ok");
+      u.lang = "en-US";
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.volume = 0.05;
+
+      const v = _pickVoice("en-US");
+      if(v) u.voice = v;
+
+      // fire NOW (gesture stack)
+      try{
+        speechSynthesis.speak(u);
+        try{ speechSynthesis.resume(); }catch(e){}
+      }catch(e){}
+
+      // quick cleanup later (non-blocking)
+      setTimeout(()=>{
+        try{ speechSynthesis.cancel(); }catch(e){}
+        try{ speechSynthesis.pause(); speechSynthesis.resume(); }catch(e){}
+      }, 250);
+
+      return true;
+    }catch(e){
+      return true;
+    }
+  }
+
   async function unlock(){
+    // keep as a fallback for non-iOS / already-gesture situations
     if(_unlocked) return true;
     if(!supported()) return false;
 
@@ -924,7 +1059,7 @@ const TTSEngine = (() => {
       u.lang = "en-US";
       u.rate = 1.0;
       u.pitch = 1.0;
-      u.volume = 0.01;
+      u.volume = 0.05;
       const v = _pickVoice("en-US");
       if(v) u.voice = v;
 
@@ -1033,15 +1168,17 @@ const TTSEngine = (() => {
     if(!TTS_ON) return true;
     if(!supported()) return false;
 
+    // iOS: if not unlocked yet, DO NOT rely on async unlock.
+    // Ask for a user gesture.
     if(isIOS && !_unlocked){
-      await unlock();
-    }else if(!_voicesReady){
-      await _loadVoices();
+      return false; // caller should show requireTapToUnlockTTS()
     }
+
+    if(!_voicesReady) await _loadVoices();
 
     if(interrupt) cancel();
 
-    await sleep(isIOS ? 200 : 70);
+    await sleep(isIOS ? 120 : 70);
 
     const myToken = _token;
     const chunks = _splitText(text);
@@ -1054,7 +1191,7 @@ const TTSEngine = (() => {
         timeoutMs: timeoutMs ?? _estimateTimeoutMs(c, rate),
         tokenAtStart: myToken
       });
-      await sleep(isIOS ? 140 : 50);
+      await sleep(isIOS ? 120 : 50);
       if(myToken !== _token) return false;
     }
 
@@ -1079,7 +1216,10 @@ const TTSEngine = (() => {
     return _queue;
   }
 
-  return { supported, unlock, cancel, speak, speakAndWait, speakQueued, speakQueuedAndWait, waitForIdle };
+  return {
+    supported, cancel, unlock, unlockFromGesture, isUnlocked,
+    speak, speakAndWait, speakQueued, speakQueuedAndWait, waitForIdle
+  };
 })();
 
 document.addEventListener("visibilitychange", ()=>{
@@ -1088,9 +1228,12 @@ document.addEventListener("visibilitychange", ()=>{
   }
 });
 
-document.addEventListener("pointerdown", async ()=>{
+/* iOS FIX:
+   - DO NOT await inside the first pointerdown handler.
+   - Fire unlockFromGesture() synchronously so iOS counts it as a gesture. */
+document.addEventListener("pointerdown", ()=>{
   if(TTS_ON && TTSEngine.supported()){
-    await TTSEngine.unlock();
+    try{ TTSEngine.unlockFromGesture(); }catch(e){}
   }
 }, {once:true});
 
@@ -1181,7 +1324,7 @@ async function primeSpeechRecognition(lang="en-US"){
     rec.onend = ()=> finish();
 
     try{
-      rec.start(); // if permission prompt exists, it appears during Start button click
+      rec.start();
       setTimeout(()=>{
         try{ rec.stop(); }catch(e){}
         finish();
@@ -1193,7 +1336,6 @@ async function primeSpeechRecognition(lang="en-US"){
 }
 
 async function recordWithASR({answerSec, asrLang, signal}){
-  // Do NOT call getUserMedia again. Reuse the stream acquired on Start.
   const stream = await ensureMicStream();
 
   const mimeType = pickMime();
@@ -1220,7 +1362,7 @@ async function recordWithASR({answerSec, asrLang, signal}){
     transcript = (finalTranscript + interim).trim();
   };
 
-  recog.onerror = ()=>{ /* ignore */ };
+  recog.onerror = ()=>{};
 
   recog.onend = ()=>{
     if(active){
@@ -1246,9 +1388,7 @@ async function recordWithASR({answerSec, asrLang, signal}){
     }else{
       await sleep(answerSec * 1000);
     }
-  }catch(e){
-    // aborted -> continue to cleanup
-  }
+  }catch(e){}
 
   active = false;
 
@@ -1459,6 +1599,9 @@ async function openRunWithSet(setObj){
   setPhase("Ready");
   setTimer("--", "開始を押してください");
 
+  // iOS: show unlock helper button
+  $("#btnTtsUnlock").style.display = (isIOS && TTSEngine.supported()) ? "" : "none";
+
   setActiveTab("#tabRun");
   showView("run");
 }
@@ -1519,14 +1662,35 @@ async function runSession(){
         $("#timerHint").textContent = (qIndex === 10 && q.ask_twice) ? "Q10の質問を2回読み上げ中" : `Q${qIndex} 質問読み上げ`;
         setTimer("--", "TTS...");
 
-        if(qIndex === 10 && q.ask_twice){
-          await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
-          await sleep(260);
-          await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
-          await sleep(240);
-        }else{
-          await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
-          await sleep(220);
+        // iOS: if not unlocked, require a tap NOW
+        if(isIOS && !TTSEngine.isUnlocked()){
+          const okTap = await requireTapToUnlockTTS("問題文の読み上げ(TTS)を開始する前に、1回だけタップが必要です。");
+          if(!okTap){
+            throw new Error("iOSでTTSを有効化できませんでした（キャンセルされました）。");
+          }
+        }
+
+        // speak (if still fails on iOS, ask tap and retry once)
+        const speakQuestion = async ()=>{
+          if(qIndex === 10 && q.ask_twice){
+            let ok1 = await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
+            await sleep(260);
+            let ok2 = await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
+            await sleep(240);
+            return ok1 && ok2;
+          }else{
+            let ok = await TTSEngine.speakAndWait(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
+            await sleep(220);
+            return ok;
+          }
+        };
+
+        let okSpeak = await speakQuestion();
+        if(isIOS && !okSpeak){
+          const okTap2 = await requireTapToUnlockTTS("iOS側で自動読み上げがブロックされた可能性があります。もう一度タップして再試行します。");
+          if(okTap2){
+            okSpeak = await speakQuestion();
+          }
         }
       }
 
@@ -1588,7 +1752,6 @@ async function runSession(){
     $("#btnRunStart").disabled = false;
     TTSEngine.cancel();
 
-    // ★ここで初めてマイクを解放（Run中は解放しない）
     currentAbortCtl = null;
     stopMicStream();
   }
@@ -1749,7 +1912,12 @@ function renderReview(){
         return;
       }
 
-      await TTSEngine.unlock();
+      // iOS: unlock must be fired in THIS click handler
+      if(isIOS){
+        TTSEngine.unlockFromGesture();
+      }else{
+        await TTSEngine.unlock();
+      }
 
       const q = (lastReview && lastReview.set && lastReview.set.questions) ? lastReview.set.questions.find(x=>x.q_index===idx) : null;
       if(!q || !q.model_answer){
@@ -1757,7 +1925,20 @@ function renderReview(){
         return;
       }
       const rate = Number($("#ttsRate").value || 1.0);
-      await TTSEngine.speakQueuedAndWait(q.model_answer, {rate, lang:"en-US", interrupt:true});
+
+      // if iOS still not unlocked, ask tap (rare)
+      if(isIOS && !TTSEngine.isUnlocked()){
+        const okTap = await requireTapToUnlockTTS("模範解答の読み上げを開始する前にタップが必要です。");
+        if(!okTap) return;
+      }
+
+      const ok = await TTSEngine.speakQueuedAndWait(q.model_answer, {rate, lang:"en-US", interrupt:true});
+      if(isIOS && !ok){
+        const okTap2 = await requireTapToUnlockTTS("iOS側で読み上げがブロックされた可能性があります。タップして再試行します。");
+        if(okTap2){
+          await TTSEngine.speakQueuedAndWait(q.model_answer, {rate, lang:"en-US", interrupt:true});
+        }
+      }
       return;
     }
 
@@ -1987,10 +2168,30 @@ $("#btnCopyGenPrompt").onclick = async ()=>{
   await copyText(GEN_PROMPT);
 };
 
+// iOS helper button
+$("#btnTtsUnlock").onclick = async ()=>{
+  if(!TTSEngine.supported()){
+    toast("TTS非対応です");
+    return;
+  }
+  if(!TTS_ON){
+    toast("TTSがOFFです");
+    return;
+  }
+  // must be called in this click
+  TTSEngine.unlockFromGesture();
+  toast("iOS音声を有効化しました");
+};
+
 $("#btnRunStart").onclick = async ()=>{
+  // iOS FIX: unlock must be fired synchronously in THIS click handler
   try{
     if(TTS_ON && TTSEngine.supported()){
-      await TTSEngine.unlock();
+      if(isIOS){
+        TTSEngine.unlockFromGesture(); // no await, immediate
+      }else{
+        await TTSEngine.unlock();
+      }
     }
   }catch(e){}
 
@@ -2011,10 +2212,7 @@ $("#btnRunStart").onclick = async ()=>{
       return;
     }
 
-    // ★ここで1回だけマイクを許可して保持（Run中は再取得しない）
     await ensureMicStream();
-
-    // ★ASRも開始ボタンのジェスチャー内で一度起動→停止して権限確定
     await primeSpeechRecognition($("#asrLang").value || "en-US");
   }catch(e){
     $("#micWarn").style.display = "";
@@ -2032,8 +2230,8 @@ $("#btnAbortRun").onclick = ()=>{
     return;
   }
   runAbort = true;
-  currentAbortCtl?.abort(); // ★追加
-  stopMicStream();          // ★追加（直ちに解放）
+  currentAbortCtl?.abort();
+  stopMicStream();
   TTSEngine.cancel();
   toast("中断要求…");
 };
@@ -2088,7 +2286,7 @@ function renderCapabilities(){
     {name:"MediaRecorder (録音)", ok:hasMediaRecorder, note:"録音が必須"},
     {name:"SpeechRecognition (文字起こし)", ok:hasSpeechRecognition, note:"フォールバック無し。必須"},
     {name:"Browser hint", ok:isEdgeOrChrome, note:"Edge/Chrome系推奨（ASR安定）"},
-    {name:"TTS (speechSynthesis)", ok:TTSEngine.supported(), note:"TTS終了を待ってからカウントダウン開始"},
+    {name:"TTS (speechSynthesis)", ok:TTSEngine.supported(), note:"iOSは“タップ内でunlock”して自動TTSを有効化"},
   ];
   for(const it of items){
     const d = document.createElement("div");
@@ -2125,3 +2323,4 @@ function renderCapabilities(){
 </script>
 </body>
 </html>
+
