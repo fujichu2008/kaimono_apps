@@ -266,7 +266,8 @@
               <button class="btn small" id="btnClearJsonPaste" type="button">クリア</button>
             </div>
             <div class="footnote" style="margin-top:8px;">
-              ※貼り付け時に余計な説明文が混ざっているとJSON.parseで失敗します（JSONのみを貼り付けてください）。
+              ※この版は「多少の混入（```jsonコードフェンス/前後の説明文/スマートクォート）」を自動で除去してImportします。<br/>
+              ※また、JSON文字列中に“生の改行”が混ざっていても自動で <code>\n</code> にエスケープします。
             </div>
           </div>
           <!-- /追加：JSONコード直接取り込み -->
@@ -601,6 +602,195 @@ async function dbClearAll(){
 /* =========================
    Schema / Import
 ========================= */
+
+/** 文字列外のJSON開始記号({/[)を探す（前後に説明文が混ざってもOKにする） */
+function findFirstJsonOpenOutsideStrings(s){
+  let inStr=false, esc=false;
+  for(let i=0;i<s.length;i++){
+    const ch = s[i];
+    if(inStr){
+      if(esc){ esc=false; continue; }
+      if(ch==="\\"){ esc=true; continue; }
+      if(ch==="\""){ inStr=false; continue; }
+    }else{
+      if(ch==="\""){ inStr=true; continue; }
+      if(ch==="{" || ch==="[") return i;
+    }
+  }
+  return -1;
+}
+/** 文字列外のJSON終端記号(}/])を探す */
+function findLastJsonCloseOutsideStrings(s){
+  let inStr=false, esc=false;
+  let last=-1;
+  for(let i=0;i<s.length;i++){
+    const ch = s[i];
+    if(inStr){
+      if(esc){ esc=false; continue; }
+      if(ch==="\\"){ esc=true; continue; }
+      if(ch==="\""){ inStr=false; continue; }
+    }else{
+      if(ch==="\""){ inStr=true; continue; }
+      if(ch==="}" || ch==="]") last=i;
+    }
+  }
+  return last;
+}
+
+/**
+ * JSON文字列中に「生の改行」が混ざってもparseできるように
+ * 文字列内の \n/\t などの制御文字をエスケープする。
+ */
+function escapeRawControlsInsideJsonStrings(s){
+  let out = "";
+  let inStr = false;
+  let esc = false;
+  for(let i=0;i<s.length;i++){
+    const ch = s[i];
+
+    if(!inStr){
+      if(ch === "\""){
+        inStr = true;
+        out += ch;
+      }else{
+        out += ch;
+      }
+      continue;
+    }
+
+    // in string
+    if(esc){
+      out += ch;
+      esc = false;
+      continue;
+    }
+    if(ch === "\\"){
+      out += ch;
+      esc = true;
+      continue;
+    }
+    if(ch === "\""){
+      inStr = false;
+      out += ch;
+      continue;
+    }
+
+    // 制御文字を安全に
+    if(ch === "\n"){ out += "\\n"; continue; }
+    if(ch === "\r"){ /* drop */ continue; }
+    if(ch === "\t"){ out += "\\t"; continue; }
+
+    const code = ch.charCodeAt(0);
+    if(code < 0x20){
+      out += "\\u" + code.toString(16).padStart(4,"0");
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * 貼り付けテキストを「JSON.parseできる状態」へ正規化
+ * - BOM除去
+ * - ```json ... ``` の除去
+ * - 前後の説明文を除去（最初の {/[ から最後の }/] までを抽出）
+ * - スマートクォート置換
+ * - 文字列内の生改行を \n に変換
+ */
+function sanitizeJsonText(raw){
+  let s = String(raw ?? "");
+  s = s.replace(/^\uFEFF/, "");      // BOM
+  s = s.replace(/\r\n?/g, "\n");     // normalize
+  s = s.trim();
+  if(!s) throw new Error("入力が空です。");
+
+  // まず最初の ``` ... ``` ブロックがあれば中身を優先
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if(fence && fence[1]){
+    s = String(fence[1]).trim();
+  }
+
+  // スマートクォート等（コピー元次第）
+  s = s.replace(/[“”]/g, "\"").replace(/[‘’]/g, "'");
+
+  // 前後に文章が混ざっていても、JSON本体だけを切り出す
+  const st = findFirstJsonOpenOutsideStrings(s);
+  if(st >= 0) s = s.slice(st);
+  const ed = findLastJsonCloseOutsideStrings(s);
+  if(ed >= 0) s = s.slice(0, ed + 1);
+  s = s.trim();
+
+  // それでもJSONらしくない
+  if(!s.startsWith("{") && !s.startsWith("[")){
+    throw new Error("JSONの開始記号（{ または [）が見つかりませんでした。貼り付け内容を確認してください。");
+  }
+
+  // 文字列内の生改行・制御文字をエスケープ
+  s = escapeRawControlsInsideJsonStrings(s);
+
+  return s;
+}
+
+function parsePosFromJsonErrorMessage(msg, text){
+  // Chrome系: "... at position N"
+  let m = String(msg||"").match(/position\s+(\d+)/i);
+  if(m) return {pos: Number(m[1])};
+
+  // Safari: "line X column Y"
+  m = String(msg||"").match(/line\s+(\d+)\s*column\s+(\d+)/i);
+  if(m){
+    const line = Number(m[1]);
+    const col  = Number(m[2]);
+    if(Number.isFinite(line) && Number.isFinite(col)){
+      const lines = String(text||"").split("\n");
+      let p = 0;
+      for(let i=0;i<Math.max(0,line-1) && i<lines.length;i++){
+        p += lines[i].length + 1;
+      }
+      p += Math.max(0, col-1);
+      return {pos: p, line, col};
+    }
+  }
+  return {pos: null};
+}
+
+function buildJsonParseError(err, cleanedText){
+  const msg = (err && err.message) ? err.message : String(err);
+  const {pos} = parsePosFromJsonErrorMessage(msg, cleanedText);
+
+  if(typeof pos === "number" && Number.isFinite(pos) && pos >= 0){
+    const start = Math.max(0, pos - 80);
+    const end   = Math.min(cleanedText.length, pos + 80);
+    const frag  = cleanedText.slice(start, end);
+    const caret = " ".repeat(Math.max(0, pos - start)) + "^";
+    return `${msg}
+
+--- error around here ---
+${frag}
+${caret}
+
+ヒント：
+- ChatGPTの出力に \`\`\`json ...\`\`\` が付いていてもOK（自動除去します）
+- ただし JSON文字列の途中に余計な「"」や欠けた括弧があると失敗します
+- もし body_markdown 等の文字列中に生改行が入っていても、この版は自動で \\n に直します`;
+  }
+  return `${msg}
+
+ヒント：
+- \`\`\`json\`\`\` フェンスや前後の説明文が混ざっていてもOKなはずですが、貼り付け途中で欠けている可能性があります
+- まずは先頭が { か [ で始まり、末尾が } か ] で終わっているか確認してください`;
+}
+
+function parseJsonLenient(raw){
+  const cleaned = sanitizeJsonText(raw);
+  try{
+    return { json: JSON.parse(cleaned), cleaned };
+  }catch(e){
+    throw new Error(buildJsonParseError(e, cleaned));
+  }
+}
+
 function normalizeImported(json){
   const sets = Array.isArray(json) ? json : (json && Array.isArray(json.sets) ? json.sets : null);
   if(!sets) throw new Error("JSON形式が不正です。{sets:[...]} またはセット配列を期待しています。");
@@ -900,16 +1090,15 @@ const TTSEngine = (() => {
       });
       // iOSは間隔を空けた方が安定
       await sleep(isIOS ? 130 : 40);
-      // 失敗しても「固まらず」先へ進むのが目的
       if(myToken !== _token) return false;
       if(!ok){
-        // ここで止めず、続ける（長文の一部が失敗してもRunを止めない）
+        // 失敗しても止めない
       }
     }
     return true;
   }
 
-  // 連打対策：内部キューで順番に流す（Review側のボタン連打など）
+  // 連打対策：内部キューで順番に流す
   function speakQueued(text, opts){
     _queue = _queue.then(()=> speak(text, opts)).catch(()=>false);
     return _queue;
@@ -918,14 +1107,12 @@ const TTSEngine = (() => {
   return { supported, unlock, cancel, speak, speakQueued };
 })();
 
-// 画面がバックグラウンドに行った時、iOSはTTSが詰まりやすいのでキャンセル
 document.addEventListener("visibilitychange", ()=>{
   if(document.hidden){
     try{ TTSEngine.cancel(); }catch(e){}
   }
 });
 
-// 最初のユーザージェスチャーでTTS解錠（Run開始より前でもOK）
 document.addEventListener("pointerdown", async ()=>{
   if(TTS_ON && TTSEngine.supported()){
     await TTSEngine.unlock();
@@ -1270,12 +1457,10 @@ async function runSession(){
       $("#qText").textContent = q.question_text;
       $("#recStatus").textContent = "録音：待機 / 文字起こし：待機";
 
-      // ---- FIX: iOS freeze-proof TTS ----
       if(TTS_ON && TTSEngine.supported()){
         $("#timerHint").textContent = (qIndex === 10 && q.ask_twice) ? "Q10の質問を2回読み上げ中" : `Q${qIndex} 質問読み上げ`;
         setTimer("--", "TTS...");
 
-        // iOSで「awaitが帰ってこない」問題を、watchdog付きTTSEngineで回避
         if(qIndex === 10 && q.ask_twice){
           await TTSEngine.speak(q.question_text, {rate: ttsRate, lang:"en-US", interrupt:true});
           await sleep(220);
@@ -1286,7 +1471,6 @@ async function runSession(){
           await sleep(200);
         }
       }
-      // ---- /FIX ----
 
       setPhase(`Q${qIndex} - Preparation (${q.prep_sec}s)`);
       $("#recStatus").textContent = "録音：待機 / 文字起こし：待機";
@@ -1503,7 +1687,6 @@ function renderReview(){
         return;
       }
 
-      // ボタン押下（ユーザージェスチャー）で確実に解錠
       await TTSEngine.unlock();
 
       const q = (lastReview && lastReview.set && lastReview.set.questions) ? lastReview.set.questions.find(x=>x.q_index===idx) : null;
@@ -1547,6 +1730,7 @@ const GEN_PROMPT = `あなたは TOEIC Speaking の「提示情報に基づく�
 
 # 目的
 TOEIC Speaking Q8–10形式の練習セットを 10セット 生成する。
+なお、エラー回避のため、問題の中に""（ダブルクオート）を含めない。
 
 # 本番形式（厳守）
 - 1セットにつき「資料1つ + 設問3つ（Q8, Q9, Q10）」
@@ -1657,8 +1841,8 @@ dz.addEventListener("drop", async (ev)=>{
 
 async function importJsonFile(file){
   try{
-    const txt = await file.text();
-    const json = JSON.parse(txt);
+    const raw = await file.text();
+    const { json } = parseJsonLenient(raw);
     const sets = normalizeImported(json);
 
     await setsPutMany(sets);
@@ -1675,8 +1859,8 @@ async function importJsonFile(file){
 
 async function importJsonText(rawText){
   try{
-    const txt = String(rawText||"").trim();
-    const json = JSON.parse(txt);
+    const raw = String(rawText||"");
+    const { json } = parseJsonLenient(raw);
     const sets = normalizeImported(json);
 
     await setsPutMany(sets);
@@ -1694,8 +1878,8 @@ async function importJsonText(rawText){
 }
 
 $("#btnImportJsonText").onclick = async ()=>{
-  const txt = ($("#jsonPaste").value || "").trim();
-  if(!txt){
+  const txt = ($("#jsonPaste").value || "");
+  if(!txt.trim()){
     toast("貼り付けが空です");
     return;
   }
@@ -1742,7 +1926,6 @@ $("#btnCopyGenPrompt").onclick = async ()=>{
 };
 
 $("#btnRunStart").onclick = async ()=>{
-  // Run開始ボタンは確実にユーザージェスチャー：ここでTTS解錠
   try{
     if(TTS_ON && TTSEngine.supported()){
       await TTSEngine.unlock();
