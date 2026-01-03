@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Centered Dynamic Dice</title>
+    <style>
+        :root {
+            --dice-size: 100px;
+            --bg-grad: radial-gradient(circle at center, #2b1055 0%, #000 100%);
+            
+            /* JSから制御する変数 */
+            --duration: 3s;
+            --power-level: 1; 
+            --target-x: 0deg;
+            --target-y: 0deg;
+            --target-z: 0deg;
+            --rot-axis: 1; /* ランダムな回転軸 */
+        }
+
+        body {
+            margin: 0; height: 100vh; overflow: hidden;
+            display: flex; justify-content: center; align-items: center;
+            background: var(--bg-grad); color: #fff;
+            font-family: sans-serif;
+            touch-action: none;
+            
+            /* 視点を完全な中心に固定 */
+            perspective: 1000px;
+            perspective-origin: 50% 50%;
+        }
+
+        /* --- カメラリグ --- */
+        .camera-rig {
+            position: relative;
+            width: 100%; height: 100%;
+            display: flex; justify-content: center; align-items: center;
+            transform-style: preserve-3d;
+            transition: transform 1s cubic-bezier(0.1, 0.6, 0.1, 1);
+        }
+
+        /* アニメーション中のカメラ揺れ */
+        .animating .camera-rig {
+            animation: cameraShake var(--duration) cubic-bezier(.36,.07,.19,.97) both;
+        }
+
+        /* ズーム時：変な角度をつけず、真正面（真上）から近づく */
+        .zoomed .camera-rig {
+            transform: translateZ(600px); 
+        }
+
+        /* --- 3Dシーン --- */
+        .scene {
+            position: relative; transform-style: preserve-3d;
+            width: var(--dice-size); height: var(--dice-size);
+            display: flex; justify-content: center; align-items: center;
+        }
+
+        /* 床 */
+        .floor {
+            position: absolute; width: 300vw; height: 300vw;
+            background: 
+                linear-gradient(rgba(0,255,255,0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,0,255,0.1) 1px, transparent 1px);
+            background-size: 80px 80px;
+            /* サイコロの中心から奥へ配置 */
+            transform: translateZ(-80px);
+            pointer-events: none;
+            mask-image: radial-gradient(circle, black 20%, transparent 60%);
+        }
+
+        /* --- サイコロの動きラッパー --- */
+        
+        /* 上下のバウンド担当 */
+        .dice-bounce {
+            width: 100%; height: 100%;
+            position: absolute; transform-style: preserve-3d;
+            transform: translateY(-200vh); /* 初期位置 */
+        }
+
+        /* 回転担当 */
+        .dice-rotate {
+            width: 100%; height: 100%;
+            position: absolute; transform-style: preserve-3d;
+        }
+
+        /* サイコロ本体のデザイン */
+        .face {
+            position: absolute; width: 100%; height: 100%;
+            background: #fff;
+            border: 2px solid #ddd; border-radius: 16px;
+            box-sizing: border-box;
+            box-shadow: 0 0 15px rgba(0,255,255,0.4), inset 0 0 20px rgba(0,0,0,0.1);
+            backface-visibility: hidden; /* 裏面非表示 */
+        }
+        
+        /* ドット */
+        .dot {
+            position: absolute; background: #222; border-radius: 50%;
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.5);
+            transform: translate(-50%, -50%);
+        }
+        .face.one .dot { background: #e60044; width: 34px; height: 34px; left: 50%; top: 50%; }
+        
+        /* 他の目のドットサイズ */
+        .face:not(.one) .dot { width: 22px; height: 22px; }
+
+        /* ドット位置定義 */
+        /* 2 */ .face.two .d1{top:25%;left:25%} .face.two .d2{top:75%;left:75%}
+        /* 3 */ .face.three .d1{top:25%;left:25%} .face.three .d2{top:50%;left:50%} .face.three .d3{top:75%;left:75%}
+        /* 4 */ .face.four .d1{top:25%;left:25%} .face.four .d2{top:25%;left:75%} .face.four .d3{top:75%;left:25%} .face.four .d4{top:75%;left:75%}
+        /* 5 */ .face.five .d1{top:25%;left:25%} .face.five .d2{top:25%;left:75%} .face.five .d3{top:50%;left:50%} .face.five .d4{top:75%;left:25%} .face.five .d5{top:75%;left:75%}
+        /* 6 */ .face.six .d1{top:25%;left:25%} .face.six .d2{top:25%;left:75%} .face.six .d3{top:50%;left:25%} .face.six .d4{top:50%;left:75%} .face.six .d5{top:75%;left:25%} .face.six .d6{top:75%;left:75%}
+
+        /* 面の配置 (立方体) */
+        .f1 { transform: rotateY(0deg) translateZ(50px); }
+        .f2 { transform: rotateX(-90deg) translateZ(50px); }
+        .f3 { transform: rotateY(90deg) translateZ(50px); }
+        .f4 { transform: rotateY(-90deg) translateZ(50px); }
+        .f5 { transform: rotateX(90deg) translateZ(50px); }
+        .f6 { transform: rotateY(180deg) translateZ(50px); }
+
+        /* --- エフェクト --- */
+        /* 影 */
+        .shadow {
+            position: absolute; width: 140px; height: 140px;
+            background: rgba(0,0,0,0.8); border-radius: 50%; filter: blur(15px);
+            transform: rotateX(90deg) translateZ(-80px) scale(0);
+            pointer-events: none;
+        }
+        /* リップル（衝撃波） */
+        .ripple {
+            position: absolute; width: 180px; height: 180px;
+            border: 4px solid rgba(0,255,255,0.7); border-radius: 50%;
+            transform: rotateX(90deg) translateZ(-80px) scale(0);
+            opacity: 0; pointer-events: none;
+        }
+        /* パーティクル */
+        .particles-container {
+            position: absolute; width: 0; height: 0;
+            transform: translateZ(-50px); pointer-events: none;
+        }
+        .particle {
+            position: absolute; width: 8px; height: 8px; background: #ffff00;
+            border-radius: 50%; box-shadow: 0 0 10px orange; opacity: 0;
+        }
+
+        /* --- アニメーション定義 --- */
+
+        /* カメラの揺れ（強弱はpower-level依存） */
+        @keyframes cameraShake {
+            0% { transform: translate(0,0); }
+            10%, 30%, 50%, 70% { transform: translate(calc(-2px * var(--power-level)), calc(-2px * var(--power-level))); }
+            20%, 40%, 60% { transform: translate(calc(2px * var(--power-level)), calc(2px * var(--power-level))); }
+            80% { transform: translate(0,0); }
+        }
+
+        /* バウンド（最後は必ず0に戻る） */
+        @keyframes bounceCenter {
+            0%   { transform: translateY(-150vh); animation-timing-function: ease-in; }
+            25%  { transform: translateY(0); animation-timing-function: ease-out; } /* 着地1 */
+            45%  { transform: translateY(calc(-80vh * var(--power-level))); animation-timing-function: ease-in; }
+            65%  { transform: translateY(0); animation-timing-function: ease-out; } /* 着地2 */
+            75%  { transform: translateY(calc(-30vh * var(--power-level))); animation-timing-function: ease-in; }
+            85%  { transform: translateY(0); animation-timing-function: ease-out; }
+            92%  { transform: translateY(calc(-10vh * var(--power-level))); animation-timing-function: ease-in; }
+            100% { transform: translateY(0); }
+        }
+
+        /* 回転（初速から徐々に減速して止まる自然な物理挙動） */
+        @keyframes rotateDynamic {
+            0% { transform: rotateX(0) rotateY(0) rotateZ(0); }
+            100% { transform: rotateX(var(--target-x)) rotateY(var(--target-y)) rotateZ(var(--target-z)); }
+        }
+
+        /* エフェクト系 */
+        @keyframes rippleAnim {
+            0% { opacity: 0; transform: rotateX(90deg) translateZ(-80px) scale(0); }
+            20% { opacity: 1; transform: rotateX(90deg) translateZ(-80px) scale(1.5); }
+            100% { opacity: 0; transform: rotateX(90deg) translateZ(-80px) scale(2.5); }
+        }
+        @keyframes particleBurst {
+            0% { transform: translate(0,0) scale(1); opacity: 1; }
+            100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
+        }
+        @keyframes shadowPulse {
+            0% { transform: rotateX(90deg) translateZ(-80px) scale(0); opacity: 0; }
+            25% { transform: rotateX(90deg) translateZ(-80px) scale(1.5); opacity: 0.8; }
+            45% { transform: rotateX(90deg) translateZ(-80px) scale(0.5); opacity: 0.3; }
+            65% { transform: rotateX(90deg) translateZ(-80px) scale(1.2); opacity: 0.8; }
+            100% { transform: rotateX(90deg) translateZ(-80px) scale(1); opacity: 0.6; }
+        }
+
+        .animating .dice-bounce { animation: bounceCenter var(--duration) forwards; }
+        .animating .dice-rotate { animation: rotateDynamic var(--duration) cubic-bezier(.25, .8, .25, 1) forwards; }
+        .animating .ripple { animation: rippleAnim var(--duration) forwards; }
+        .animating .shadow { animation: shadowPulse var(--duration) forwards; }
+        .animating .particle { animation: particleBurst 0.6s ease-out forwards 0.1s; }
+
+        /* UI */
+        .color-picker {
+            position: absolute; top: 20px; right: 20px;
+            display: flex; gap: 10px; z-index: 100;
+        }
+        .color-dot {
+            width: 24px; height: 24px; border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.5); cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .color-dot:hover { transform: scale(1.2); }
+
+        .ui { position: absolute; bottom: 10%; width: 100%; text-align: center; pointer-events: none; }
+        .msg { font-size: 1.5rem; letter-spacing: 2px; text-shadow: 0 0 10px rgba(0,255,255,0.8); transition: opacity 0.3s; }
+        .hide { opacity: 0; }
+
+    </style>
+</head>
+<body>
+
+    <div class="camera-rig" id="cameraRig">
+        <div class="scene">
+            <div class="floor"></div>
+            
+            <div class="dice-bounce">
+                <div class="dice-rotate">
+                    <div class="face one f1"><div class="dot"></div></div>
+                    <div class="face two f2"><div class="dot d1"></div><div class="dot d2"></div></div>
+                    <div class="face three f3"><div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div></div>
+                    <div class="face four f4"><div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div><div class="dot d4"></div></div>
+                    <div class="face five f5"><div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div><div class="dot d4"></div><div class="dot d5"></div></div>
+                    <div class="face six f6"><div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div><div class="dot d4"></div><div class="dot d5"></div><div class="dot d6"></div></div>
+                </div>
+            </div>
+
+            <div class="shadow"></div>
+            <div class="ripple"></div>
+            <div class="particles-container" id="particles"></div>
+        </div>
+    </div>
+
+    <div class="color-picker">
+        <div class="color-dot" style="background: hsl(265, 70%, 50%)" onclick="setHue(265)"></div> <div class="color-dot" style="background: hsl(210, 70%, 50%)" onclick="setHue(210)"></div> <div class="color-dot" style="background: hsl(0, 70%, 50%)"   onclick="setHue(0)"></div>   <div class="color-dot" style="background: hsl(120, 70%, 50%)" onclick="setHue(120)"></div> <div class="color-dot" style="background: #333"                 onclick="setHue(-1)"></div>  </div>
+
+    <div class="ui">
+        <div class="msg" id="msg">SWIPE TO ROLL</div>
+    </div>
+
+    <script>
+        const body = document.body;
+        const cameraRig = document.getElementById('cameraRig');
+        const msg = document.getElementById('msg');
+        const particlesContainer = document.getElementById('particles');
+        let isRolling = false;
+        let startY, startTime;
+
+        // パーティクル初期生成
+        for(let i=0; i<16; i++){
+            let p = document.createElement('div');
+            p.className = 'particle';
+            let angle = Math.random() * Math.PI * 2;
+            let dist = 100 + Math.random() * 150;
+            p.style.setProperty('--tx', `${Math.cos(angle)*dist}px`);
+            p.style.setProperty('--ty', `${Math.sin(angle)*dist}px`);
+            particlesContainer.appendChild(p);
+        }
+
+        // 面ごとのターゲット角度定義 (正面に来るように)
+        const getTarget = (num) => {
+            const base = {
+                1: {x:0, y:0}, 2: {x:90, y:0}, 3: {x:0, y:90},
+                4: {x:0, y:-90}, 5: {x:-90, y:0}, 6: {x:180, y:0}
+            }[num];
+            // わずかなランダム傾き（±5度）でリアリティを出すが、大きくはずらさない
+            const r = () => (Math.random() - 0.5) * 10;
+            return { x: base.x + r(), y: base.y + r(), z: r() };
+        };
+
+        // スワイプ処理
+        document.addEventListener('touchstart', e => {
+            if(isRolling) return;
+            startY = e.touches[0].clientY;
+            startTime = Date.now();
+        }, {passive:false});
+
+        document.addEventListener('touchend', e => {
+            if(isRolling) return;
+            const dist = Math.abs(startY - e.changedTouches[0].clientY);
+            const time = Date.now() - startTime;
+            if(dist < 10) return; 
+
+            let speed = dist / time;
+            let power = Math.min(Math.max(speed / 2.0, 0.4), 1.2); // 0.4 ~ 1.2
+            rollDice(power);
+        }, {passive:false});
+
+        // PCデバッグ用クリック
+        document.addEventListener('click', (e) => { 
+            // カラーピッカー操作時は反応させない
+            if(e.target.closest('.color-picker')) return;
+            if(!isRolling) rollDice(0.8); 
+        });
+
+        // 背景色変更関数
+        function setHue(hue) {
+            const root = document.documentElement;
+            if (hue === -1) {
+                root.style.setProperty('--bg-grad', 'radial-gradient(circle at center, #333 0%, #000 100%)');
+            } else {
+                root.style.setProperty('--bg-hue', hue);
+                root.style.setProperty('--bg-grad', `radial-gradient(circle at center, hsl(var(--bg-hue), 70%, 20%) 0%, #000 100%)`);
+            }
+        }
+
+        function rollDice(power) {
+            isRolling = true;
+            body.classList.remove('zoomed', 'animating');
+            msg.classList.add('hide');
+
+            // 計算
+            const result = Math.floor(Math.random() * 6) + 1;
+            const baseTarget = getTarget(result);
+            const duration = 2.0 + power * 2.0; // 2s ~ 4.4s
+
+            // 回転数を追加（360度の整数倍を足して、結果の向きを変えずに回転量を増やす）
+            // powerに応じて回転数を増やす（最低4回転～最大12回転程度）
+            const spins = 4 + Math.floor(power * 8); 
+            // 各軸に回転を加算（X/Y軸は結果に影響するため360度単位、Z軸は見え方のみ）
+            const target = {
+                x: baseTarget.x + (spins * 360),
+                y: baseTarget.y + (spins * 360),
+                z: baseTarget.z + (Math.floor(Math.random() * 3) * 360) 
+            };
+
+            // CSS変数セット
+            const root = document.documentElement;
+            root.style.setProperty('--power-level', power);
+            root.style.setProperty('--duration', `${duration}s`);
+            root.style.setProperty('--target-x', `${target.x}deg`);
+            root.style.setProperty('--target-y', `${target.y}deg`);
+            root.style.setProperty('--target-z', `${target.z}deg`);
+
+            // アニメーション開始
+            setTimeout(() => {
+                body.classList.add('animating');
+                
+                // 終了後ズーム
+                setTimeout(() => {
+                    body.classList.add('zoomed');
+                    isRolling = false;
+                    setTimeout(() => msg.classList.remove('hide'), 800);
+                }, duration * 1000);
+
+            }, 50);
+        }
+    </script>
+
+
+
+<script id="lfs-meta" type="application/json">
+{
+  "schema": 2,
+  "appId": "e778a77d36532fedbf3fae46cb02871f",
+  "savedAt": "2026-01-03T01:33:03.841Z",
+  "title": "Centered Dynamic Dice",
+  "aiInstruction": "背景色を、選択肢から選択可能とする。選択ボタンは、どこかに小さく表示する。",
+  "comment": "背景色を、選択肢から選択可能とする。選択ボタンは、どこかに小さく表示する。",
+  "sourceMode": "single",
+  "runId": "bcf748c01c42fec1aebf81ae4d2a1a0b"
+}
+</script>
+</body>
+</html>
