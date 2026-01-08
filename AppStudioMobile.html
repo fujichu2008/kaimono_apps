@@ -871,72 +871,100 @@
             document.getElementById('json-input').value = "";
         }
 
-                                function applyAutoFix() {
+                                        function applyAutoFix() {
             let jsonStr = document.getElementById('json-input').value;
             if (!jsonStr.trim()) return showToast("JSONが空です");
 
-            // 【改良】AIの解説テキストを無視し、JSON配列部分([ ... ])のみを抽出
             const firstOpen = jsonStr.indexOf('[');
             const lastClose = jsonStr.lastIndexOf(']');
             
             if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
                 jsonStr = jsonStr.substring(firstOpen, lastClose + 1);
             } else {
-                // フォールバック: Markdown記法のみ除去
                 jsonStr = jsonStr.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '');
             }
 
             try {
                 const fixes = JSON.parse(jsonStr);
                 let code = editor.getValue();
+                code = code.replace(/\r\n/g, '\n'); // 改行正規化
+                
                 let count = 0;
 
                 if (!Array.isArray(fixes)) throw new Error("配列ではありません");
 
-                for (const fix of fixes) {
-                    if (fix.before && fix.after) {
-                        // 【改良2】 改行コードを統一 (\r\n -> \n) して扱いやすくする
-                        let target = fix.before.replace(/\r\n/g, '\n');
-                        let replacement = fix.after.replace(/\r\n/g, '\n');
-                        
-                        // エディタ側のコードも検索用に一時的に正規化
-                        code = code.replace(/\r\n/g, '\n');
+                // Helper: Entity conversion
+                const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
+                const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 
-                        if (code.includes(target)) {
-                            // 安全対策: 対象コードが複数箇所存在する場合は警告して中断
-                            if (code.indexOf(target) !== code.lastIndexOf(target)) {
-                                alert("修正中断: 置換対象のコードが複数箇所に見つかりました。\n誤置換を防ぐため、対象コード(before)をより長くユニークにしてください。\n\n対象(先頭): " + target.substring(0, 60) + "...");
-                                return;
-                            }
-                            code = code.replace(target, replacement);
-                            count++;
-                        } else {
-                            // 【改良3】 完全一致で見つからない場合、前後の空白を無視して再トライ
-                            const trimmedTarget = target.trim();
-                            if (code.includes(trimmedTarget)) {
-                                if (code.indexOf(trimmedTarget) !== code.lastIndexOf(trimmedTarget)) {
-                                     alert("修正中断: 置換対象のコード(トリム版)が複数箇所に見つかりました。\n誤置換を防ぐため、対象コード(before)をより長くユニークにしてください。");
-                                     return;
-                                }
-                                code = code.replace(trimmedTarget, replacement);
-                                count++;
-                            } else {
-                                // それでも見つからない場合
-                                alert("修正失敗: コードが見つかりませんでした。\nAIが空白や改行を微妙に間違えている可能性があります。\n\n見つからなかったコード(先頭):\n" + target.substring(0, 60) + "...");
-                                return; // 安全のため中断
-                            }
+                for (const fix of fixes) {
+                    if (!fix.before || !fix.after) continue;
+
+                    let target = fix.before.replace(/\r\n/g, '\n');
+                    let replacement = fix.after.replace(/\r\n/g, '\n');
+                    
+                    // 候補生成 (同値表現の展開)
+                    const variants = new Set([
+                        target,
+                        decodeEnt(target),
+                        encodeEnt(target),
+                        decodeEnt(decodeEnt(target))
+                    ]);
+
+                    let bestMatch = null;
+                    let totalFound = 0;
+
+                    // 1. 完全一致スキャン
+                    for (const cand of variants) {
+                        if (code.includes(cand)) {
+                            const occurrences = code.split(cand).length - 1;
+                            totalFound += occurrences;
+                            if (occurrences > 0) bestMatch = cand;
                         }
+                    }
+
+                    // 2. ヒットなしならTrim一致スキャン
+                    if (totalFound === 0) {
+                         const variantsTrim = new Set();
+                         for (const v of variants) variantsTrim.add(v.trim());
+                         
+                         for (const cand of variantsTrim) {
+                            if (code.includes(cand)) {
+                                const occurrences = code.split(cand).length - 1;
+                                totalFound += occurrences;
+                                if (occurrences > 0) bestMatch = cand;
+                            }
+                         }
+                    }
+
+                    if (totalFound === 0) {
+                        alert("修正失敗: コードが見つかりませんでした。\n(エンティティ変換や空白無視も試行しましたがヒットしません)\n\n対象(先頭): " + target.substring(0, 60) + "...");
+                        return;
+                    }
+                    if (totalFound > 1) {
+                        alert("修正中断: 対象コードが複数箇所(または複数の表現で)見つかりました。\n誤置換を防ぐため、対象コード(before)をより長くユニークにしてください。");
+                        return;
+                    }
+
+                    // replaceテキストの形式合わせ
+                    if (bestMatch) {
+                        if (bestMatch === decodeEnt(target)) replacement = decodeEnt(replacement);
+                        else if (bestMatch === encodeEnt(target)) replacement = encodeEnt(replacement);
+                        else if (bestMatch === decodeEnt(decodeEnt(target))) replacement = decodeEnt(decodeEnt(replacement));
+                        
+                        code = code.replace(bestMatch, replacement);
+                        count++;
                     }
                 }
 
                 editor.setValue(code);
-                showToast(`${count}箇所の修正を適用しました`);
+                showToast(`${count}箇所の修正を適用しました\n(形式ゆらぎ自動補正)`);
                 document.getElementById('json-input').value = "";
                 closeModal('fix-modal');
 
             } catch (e) {
                 console.error(e);
-                alert("JSONエラー: 形式を確認してください。\nAIが ' (シングルクォート) を使っている場合は \" (ダブルクォート) に直す必要があります。");
+                alert("JSONエラー: " + e.message);
             }
         }
 
@@ -1299,17 +1327,18 @@
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "f5791908991642ab755dd87876ba27f0",
   "createdAt": "2026-01-05T22:09:30.050Z",
   "schema": 2,
   "title": "AppStudioMobile v2",
-  "savedAt": "2026-01-07T22:04:59.112Z",
-  "aiInstruction": "全コード生成またはJSONオート更新をAIに指示した際、コードを出力する前に、AIが、コードの修正箇所や制約条件、改善提案を、ごく簡潔にコメントするようにしてください。コードで何が変わったか、技術的に指示通りできなかったことがあるか、また他にどんな工夫ができるかを、VibeCoding初心者であるユーザが認識できるようにしたい。",
-  "comment": "全コード生成またはJSONオート更新をAIに指示した際、コードを出力する前に、AIが、コードの修正箇所や制約条件、改善提案を、ごく簡潔にコメントするようにしてください。コードで何が変わったか、技術的に指示通りできなかったことがあるか、また他にどんな工夫ができるかを、VibeCoding初心者であるユーザが認識できるようにしたい。",
+  "savedAt": "2026-01-08T15:41:33.326Z",
+  "aiInstruction": "JSONオート修正がうまく機能しないことがある。これは、コピー経路で &lt;⇔&amp;lt;⇔&amp;amp;lt; や \"/&quot; 等が揺れて、search が原文と一致しなくなるからである。 → search を 同値表現の候補群（生/デコード1回/デコード2回/エンコード/デコード→エンコード） に展開してから 一意一致 を取り、ヒットした原文の表現（エンティティ主体かどうか）に合わせて replace も同じ表現へ寄せる。",
+  "comment": "JSONオート修正がうまく機能しないことがある。これは、コピー経路で &lt;⇔&amp;lt;⇔&amp;amp;lt; や \"/&quot; 等が揺れて、search が原文と一致しなくなるからである。 → search を 同値表現の候補群（生/デコード1回/デコード2回/エンコード/デコード→エンコード） に展開してから 一意一致 を取り、ヒットした原文の表現（エンティティ主体かどうか）に合わせて replace も同じ表現へ寄せる。",
   "sourceMode": "project",
-  "runId": "b8e73332efb6484faa7acbc048da06fc"
+  "runId": "d698b41c1c4c7a4504975d9496e45232"
 }
 </script>
 </body>
