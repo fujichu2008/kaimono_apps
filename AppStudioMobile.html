@@ -255,7 +255,7 @@
             flex-shrink: 0; /* 縮小防止 */
         }
 
-                .file-bar {
+                        .file-bar {
             height: 45px;
             background-color: var(--bg-color);
             border-bottom: 1px solid var(--border-color);
@@ -263,17 +263,18 @@
             align-items: center;
             padding: 0 10px;
             gap: 10px;
-            flex-shrink: 0; /* 縮小防止 */
+            flex-shrink: 0;
         }
 
-        .file-input {
+        .app-name-display {
             flex: 1;
-            background: #333;
-            border: 1px solid var(--border-color);
-            color: white;
-            padding: 5px 10px;
-            border-radius: 4px;
+            color: #aaa;
             font-size: 12px;
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-left: 5px;
         }
 
         .tool-btn {
@@ -542,12 +543,15 @@
                 <span>🗑 クリア</span>
             </button>
         </div>
-        <div class="file-bar">
-            <input type="text" id="app-name-editor" class="file-input" placeholder="アプリ名 (例: Game)">
+                <div class="file-bar">
+            <div id="app-name-display" class="app-name-display">(新規作成中)</div>
+            <button class="tool-btn" onclick="pasteCode()" title="全コード上書きペースト">
+                <span>📋 ペースト</span>
+            </button>
             <button class="tool-btn primary" onclick="runCode()">
                 <span>▶ 実行</span>
             </button>
-            <button class="tool-btn" onclick="saveToLibraryFromEditor()">
+            <button class="tool-btn" onclick="openSaveModal()">
                 <span>💾 保存</span>
             </button>
         </div>
@@ -736,19 +740,16 @@
         });
         editor.setSize("100%", "100%");
 
-        const stats = document.getElementById('code-stats');
+                const stats = document.getElementById('code-stats');
         const frame = document.getElementById('app-frame');
         const filenameInput = document.getElementById('filename-input');
-        const editorNameInput = document.getElementById('app-name-editor');
-                const libraryContainer = document.getElementById('library-container');
+        const appNameDisplay = document.getElementById('app-name-display');
+        const libraryContainer = document.getElementById('library-container');
         const notification = document.getElementById('notification');
 
         let currentAppHistory = [];
         let pendingAiInstruction = "";
-
-        // Sync name inputs
-        editorNameInput.addEventListener('input', () => { filenameInput.value = editorNameInput.value; });
-        filenameInput.addEventListener('input', () => { editorNameInput.value = filenameInput.value; });
+        let currentAppName = ""; // 現在編集中のアプリ名(保存済みの場合)
 
         // --- Editor Logic ---
                 editor.on('change', updateStats);
@@ -763,22 +764,26 @@
             stats.textContent = `${lines}行 / ${chars}文字`;
         }
 
-                async function pasteCode() {
+                        async function pasteCode() {
             try {
                 const text = await navigator.clipboard.readText();
-                if(editor.getValue().length > 0) {
-                      if(!confirm("現在のコードを上書きして貼り付けますか？")) return;
+                if (!text) return showToast("クリップボードが空です");
+                if(editor.getValue().trim().length > 0) {
+                      if(!confirm("【警告】\nエディタの内容をすべて削除し、クリップボードの内容で上書きしますか？")) return;
                 }
                 editor.setValue(text);
-                showToast("貼り付けました");
+                showToast("全コードを貼り付けました");
             } catch (err) {
                 showToast("貼り付け失敗: 権限を確認してください");
             }
         }
 
-                function clearCode() {
-            if(confirm("エディタの内容をクリアしますか？")) {
+                        function clearCode() {
+            if(confirm("エディタの内容をクリアしますか？\n(編集中の状態もリセットされます)")) {
                 editor.setValue("");
+                currentAppName = "";
+                appNameDisplay.textContent = "(新規作成中)";
+                currentAppHistory = [];
             }
         }
 
@@ -985,16 +990,7 @@
             }
         }
        
-        function saveToLibraryFromEditor() {
-            // Ensure filename is synced then trigger save
-            filenameInput.value = editorNameInput.value || filenameInput.value;
-            if(!filenameInput.value) {
-                const now = new Date();
-                filenameInput.value = `App_${now.getHours()}${now.getMinutes()}`;
-                editorNameInput.value = filenameInput.value;
-            }
-            saveToLibrary();
-        }
+        
 
                                 // --- Run Logic ---
         function runCode() {
@@ -1073,11 +1069,16 @@
             }
         }
 
-        // --- Save / Load Logic ---
+                // --- Save / Load Logic ---
         function openSaveModal() {
             document.getElementById('save-modal').style.display = 'flex';
-            const now = new Date();
-            filenameInput.value = `App_${now.getHours()}${now.getMinutes()}`;
+            // 既存の名前があればそれを、なければ日時ベースのデフォルト名をセット
+            if (currentAppName) {
+                filenameInput.value = currentAppName;
+            } else {
+                const now = new Date();
+                filenameInput.value = `App_${now.getHours()}${now.getMinutes()}`;
+            }
         }
 
                 function closeModal(id) {
@@ -1166,9 +1167,12 @@
                 history: currentAppHistory
             };
 
-            try {
+                        try {
                 await idb.put(appData);
                 showToast(`「${name}」を保存しました`);
+                // 保存成功したら状態を更新
+                currentAppName = name;
+                appNameDisplay.textContent = name;
             } catch (e) {
                 showToast("保存エラー: " + e.message);
             }
@@ -1227,19 +1231,19 @@
             });
         }
 
-                async function loadApp(id) {
+                        async function loadApp(id) {
             const app = await idb.get(id);
             if(app) {
                 if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
                 editor.setValue(app.code);
                 // メタ情報復元
-                editorNameInput.value = app.name;
+                currentAppName = app.name;
+                appNameDisplay.textContent = app.name;
                 filenameInput.value = app.name;
                 currentAppHistory = app.history || []; 
                 pendingAiInstruction = "";
                 
                 switchTab('editor');
-                // 画面切り替え後にCodeMirrorを強制リフレッシュして描画させる
                 setTimeout(() => editor.refresh(), 10);
                 showToast(`「${app.name}」を読み込みました`);
             }
@@ -1328,17 +1332,18 @@
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "f5791908991642ab755dd87876ba27f0",
   "createdAt": "2026-01-05T22:09:30.050Z",
   "schema": 2,
   "title": "AppStudioMobile v2",
-  "savedAt": "2026-01-08T15:41:33.326Z",
-  "aiInstruction": "JSONオート修正がうまく機能しないことがある。これは、コピー経路で &lt;⇔&amp;lt;⇔&amp;amp;lt; や \"/&quot; 等が揺れて、search が原文と一致しなくなるからである。 → search を 同値表現の候補群（生/デコード1回/デコード2回/エンコード/デコード→エンコード） に展開してから 一意一致 を取り、ヒットした原文の表現（エンティティ主体かどうか）に合わせて replace も同じ表現へ寄せる。",
-  "comment": "JSONオート修正がうまく機能しないことがある。これは、コピー経路で &lt;⇔&amp;lt;⇔&amp;amp;lt; や \"/&quot; 等が揺れて、search が原文と一致しなくなるからである。 → search を 同値表現の候補群（生/デコード1回/デコード2回/エンコード/デコード→エンコード） に展開してから 一意一致 を取り、ヒットした原文の表現（エンティティ主体かどうか）に合わせて replace も同じ表現へ寄せる。",
+  "savedAt": "2026-01-08T15:49:18.042Z",
+  "aiInstruction": "「保存」ボタンを押したときに、アプリ名の入力欄を表示し、その入力に従って保存する。エディタ欄のアプリ名入力欄は廃止し、ここで、そのコードのアプリ名を表示する。新規で作成中であれば、新規と表示する。アプリ名入力欄には、それがライブラリから開いたコードの場合、そのアプリ名をデフォルトで表示する。\n保存ボタンの左にペーストボタンを配置し、AIからフルコードをペーストできるようにする。すでにコードが入っている状態でペースト処理した場合は、全体のコードを差し替える。",
+  "comment": "「保存」ボタンを押したときに、アプリ名の入力欄を表示し、その入力に従って保存する。エディタ欄のアプリ名入力欄は廃止し、ここで、そのコードのアプリ名を表示する。新規で作成中であれば、新規と表示する。アプリ名入力欄には、それがライブラリから開いたコードの場合、そのアプリ名をデフォルトで表示する。\n保存ボタンの左にペーストボタンを配置し、AIからフルコードをペーストできるようにする。すでにコードが入っている状態でペースト処理した場合は、全体のコードを差し替える。",
   "sourceMode": "project",
-  "runId": "d698b41c1c4c7a4504975d9496e45232"
+  "runId": "520eb9d329dc311acdcd7b747e2df0ed"
 }
 </script>
 </body>
