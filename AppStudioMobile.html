@@ -586,6 +586,7 @@
             <div class="modal-buttons">
                 <button class="btn-confirm" onclick="saveToLibrary()">アプリ保存</button>
                 <button class="btn-confirm" style="background: #4caf50;" onclick="downloadHTML()">HTML DL</button>
+                <button class="btn-confirm" style="background: #333;" onclick="uploadToGitHub()">GitHub Repo</button>
             </div>
             <div class="modal-buttons" style="margin-top:10px;">
                 <button class="btn-cancel" onclick="closeModal('save-modal')">キャンセル</button>
@@ -595,11 +596,14 @@
 
     <div id="prompt-modal" class="modal-overlay">
         <div class="modal">
-            <h2>AI指示 (プロンプト作成)</h2>
+                        <h2>AI指示 (プロンプト作成)</h2>
             <p class="section-desc">AIへの指示内容を入力してください。</p>
             <div style="position: relative;">
                 <textarea id="ai-instruction" placeholder="例: ボタンの色を赤にして、配置を中央寄せにする..." style="height:80px;"></textarea>
-                <button onclick="document.getElementById('ai-instruction').value = ''" style="position: absolute; top: 5px; right: 5px; background: rgba(0,0,0,0.6); color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 2px 6px; font-size: 10px; cursor: pointer;">✕</button>
+                <div style="position: absolute; top: 5px; right: 5px; display: flex; gap: 4px;">
+                    <button id="mic-btn" onclick="toggleSpeechRecognition()" style="background: rgba(0,0,0,0.6); color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 2px 6px; font-size: 14px; cursor: pointer; min-width: 28px; transition: all 0.2s;">🎤</button>
+                    <button onclick="document.getElementById('ai-instruction').value = ''" style="background: rgba(0,0,0,0.6); color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 2px 6px; font-size: 10px; cursor: pointer;">✕</button>
+                </div>
             </div>
            
             <h3 style="margin-top:15px;">出力形式を選択してコピー</h3>
@@ -1194,7 +1198,89 @@
             closeModal('save-modal');
         }
 
-                async function renderLibrary() {
+                        async function uploadToGitHub() {
+            const code = editor.getValue();
+            if(!code.trim()) return showToast("コードが空です");
+
+            // Load Config
+            const savedToken = localStorage.getItem('gh_token') || "";
+            const savedRepo = localStorage.getItem('gh_repo') || "";
+
+            // 1. Token Input
+            const token = prompt("GitHub Personal Access Token (repo権限) を入力してください:", savedToken);
+            if(!token) return;
+
+            // 2. Repo Input
+            const repo = prompt("アップロード先のリポジトリを入力してください (例: user/repo):\n※リポジトリは事前に作成しておく必要があります", savedRepo);
+            if(!repo || !repo.includes('/')) {
+                alert("リポジトリ名は 'ユーザー名/リポジトリ名' の形式で入力してください。");
+                return;
+            }
+
+            // Save Config
+            localStorage.setItem('gh_token', token);
+            localStorage.setItem('gh_repo', repo);
+
+            const name = filenameInput.value || "index";
+            const path = name.endsWith('.html') ? name : name + '.html';
+            
+            showToast("GitHubへ接続中...");
+
+            try {
+                const headers = {
+                    "Authorization": `token ${token}`,
+                    "Accept": "application/vnd.github.v3+json",
+                    "Content-Type": "application/json"
+                };
+
+                // 3. Check existing file to get SHA (for update)
+                const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+                let sha = null;
+
+                const checkResp = await fetch(apiUrl, { headers });
+                if (checkResp.ok) {
+                    const fileData = await checkResp.json();
+                    sha = fileData.sha;
+                } else if (checkResp.status !== 404) {
+                    throw new Error(`確認エラー: ${checkResp.status} ${checkResp.statusText}`);
+                }
+
+                // 4. Create or Update file (PUT)
+                // 日本語対応のためUTF-8をBase64に変換
+                const contentBase64 = window.btoa(unescape(encodeURIComponent(code)));
+
+                const body = {
+                    message: `Update ${path} via AppStudioMobile`,
+                    content: contentBase64,
+                    ...(sha && { sha }) // shaがあれば含める（更新用）
+                };
+
+                const putResp = await fetch(apiUrl, {
+                    method: "PUT",
+                    headers,
+                    body: JSON.stringify(body)
+                });
+
+                if (!putResp.ok) {
+                    const err = await putResp.json();
+                    throw new Error(err.message || putResp.statusText);
+                }
+
+                const data = await putResp.json();
+                closeModal('save-modal');
+                if(confirm("アップロード完了！リポジトリを開きますか？")) {
+                    window.open(data.content.html_url, "_blank");
+                } else {
+                    showToast("アップロード完了");
+                }
+
+            } catch(e) {
+                console.error(e);
+                alert("アップロード失敗: " + e.message + "\n・トークンの権限(repo)を確認してください\n・リポジトリ名が正しいか確認してください");
+            }
+        }
+
+        async function renderLibrary() {
             libraryContainer.innerHTML = '';
             let library = [];
             try {
@@ -1287,6 +1373,71 @@
             }
         }
 
+                // --- Speech Recognition ---
+        let recognition = null;
+        let isRecording = false;
+
+        function toggleSpeechRecognition() {
+            const btn = document.getElementById('mic-btn');
+            const textarea = document.getElementById('ai-instruction');
+
+            if (isRecording) {
+                if (recognition) recognition.stop();
+                return;
+            }
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert("このブラウザは音声認識に対応していません。");
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.interimResults = false;
+            recognition.continuous = false;
+
+            recognition.onstart = () => {
+                isRecording = true;
+                btn.style.color = '#ff4444';
+                btn.style.borderColor = '#ff4444';
+                btn.style.animation = 'pulse-mic 1.5s infinite';
+                showToast("音声認識を開始しました...");
+            };
+
+            recognition.onend = () => {
+                isRecording = false;
+                btn.style.color = '#ccc';
+                btn.style.borderColor = '#555';
+                btn.style.animation = 'none';
+            };
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                if (transcript) {
+                    const current = textarea.value;
+                    textarea.value = current + (current ? "\n" : "") + transcript;
+                    showToast("音声を追記しました");
+                }
+            };
+
+            recognition.onerror = (event) => {
+                console.error(event.error);
+                showToast("音声認識エラー: " + event.error);
+                isRecording = false;
+                btn.style.color = '#ccc';
+                btn.style.borderColor = '#555';
+                btn.style.animation = 'none';
+            };
+
+            recognition.start();
+        }
+
+        // Add mic animation style
+        const style = document.createElement('style');
+        style.innerHTML = `@keyframes pulse-mic { 0% { background: rgba(255, 0, 0, 0.1); } 50% { background: rgba(255, 0, 0, 0.4); } 100% { background: rgba(255, 0, 0, 0.1); } }`;
+        document.head.appendChild(style);
+
         // --- Utilities ---
         function showToast(msg) {
             notification.textContent = msg;
@@ -1333,17 +1484,21 @@
 
 
 
+
+
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "f5791908991642ab755dd87876ba27f0",
   "createdAt": "2026-01-05T22:09:30.050Z",
   "schema": 2,
   "title": "AppStudioMobile v2",
-  "savedAt": "2026-01-08T15:49:18.042Z",
-  "aiInstruction": "「保存」ボタンを押したときに、アプリ名の入力欄を表示し、その入力に従って保存する。エディタ欄のアプリ名入力欄は廃止し、ここで、そのコードのアプリ名を表示する。新規で作成中であれば、新規と表示する。アプリ名入力欄には、それがライブラリから開いたコードの場合、そのアプリ名をデフォルトで表示する。\n保存ボタンの左にペーストボタンを配置し、AIからフルコードをペーストできるようにする。すでにコードが入っている状態でペースト処理した場合は、全体のコードを差し替える。",
-  "comment": "「保存」ボタンを押したときに、アプリ名の入力欄を表示し、その入力に従って保存する。エディタ欄のアプリ名入力欄は廃止し、ここで、そのコードのアプリ名を表示する。新規で作成中であれば、新規と表示する。アプリ名入力欄には、それがライブラリから開いたコードの場合、そのアプリ名をデフォルトで表示する。\n保存ボタンの左にペーストボタンを配置し、AIからフルコードをペーストできるようにする。すでにコードが入っている状態でペースト処理した場合は、全体のコードを差し替える。",
+  "savedAt": "2026-01-11T14:01:40.134Z",
+  "aiInstruction": "Githubアップロードのときのtoken、レポジトリは、一度入力したものは記憶されるようにすること。",
+  "comment": "Githubアップロードのときのtoken、レポジトリは、一度入力したものは記憶されるようにすること。",
   "sourceMode": "project",
-  "runId": "520eb9d329dc311acdcd7b747e2df0ed"
+  "runId": "6821e6c0e8f0f254256a771e10c76cb9"
 }
 </script>
 </body>
