@@ -1,3 +1,1456 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AppStudio</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            forge: { 800: '#1e1e2e', 900: '#181825', 700: '#313244', accent: '#89b4fa', surface: '#45475a' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/monaco-editor@0.45.0/min/vs/loader.js"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+
+  <style>
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #181825; }
+    ::-webkit-scrollbar-thumb { background: #45475a; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #585b70; }
+    .glass-panel { background: rgba(30, 30, 46, 0.98); border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .sidebar-panel { background: #1e1e2e; border-right: 1px solid #313244; transition: width 0.3s ease; }
+    .gutter { background-color: #313244; cursor: col-resize; width: 6px; transition: background 0.2s; }
+    .gutter:hover { background-color: #89b4fa; }
+    .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+    .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+    .pill-btn { border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); }
+    .pill-btn:hover { background: rgba(255,255,255,.10); }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New"; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New"; }
+
+    /* Toast */
+    .toast-enter-active, .toast-leave-active { transition: all .18s ease; }
+    .toast-enter-from { opacity:0; transform: translateY(8px); }
+    .toast-leave-to { opacity:0; transform: translateY(8px); }
+
+    /* Draggable cursor */
+    .drag-handle { cursor: move; user-select: none; }
+
+    /* line-clamp fallback */
+    .line-clamp-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+  </style>
+</head>
+
+<body class="bg-forge-900 text-gray-200 overflow-hidden font-sans">
+<div id="app" class="h-screen flex flex-col">
+
+  <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[999] w-[92%] max-w-[760px] space-y-2 pointer-events-none">
+    <transition-group name="toast" tag="div">
+      <div v-for="t in toasts" :key="t.id"
+           class="pointer-events-none bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl backdrop-blur px-4 py-3 flex items-start gap-3">
+        <div class="mt-0.5">
+          <i class="fas" :class="t.iconClass"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-xs font-bold text-gray-100">{{ t.title }}</div>
+          <div class="text-[11px] text-gray-400 mt-0.5 whitespace-pre-wrap break-words">{{ t.message }}</div>
+        </div>
+      </div>
+    </transition-group>
+  </div>
+
+    <div class="fixed bottom-4 right-4 z-[50] flex flex-col items-end gap-2 pointer-events-none">
+    <div class="pointer-events-auto">
+      <button v-if="codeHistory.length > 0" @click="undoCode" class="bg-gray-800/90 hover:bg-gray-700 text-white text-xs px-4 py-2 rounded-full border border-gray-600 shadow-xl backdrop-blur transition flex items-center gap-2">
+        <i class="fas fa-undo"></i> 元に戻す
+      </button>
+    </div>
+    <div class="text-xs text-white font-mono font-bold opacity-80 select-none drop-shadow-md">
+      (c)2026 Hisashi Fujinaka All rights reserved.
+    </div>
+  </div>
+
+  <header class="glass-panel h-14 flex justify-between items-center px-4 z-30 shadow-lg relative">
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 mr-1">
+          <span class="text-lg font-bold tracking-wider">
+                        AppStudio <span class="text-xs bg-gray-700 px-1 rounded"><span @click.stop="modals.github = true" class="cursor-pointer hover:text-blue-400 select-none" title="Developer Menu">v</span>5.0</span>
+          </span>
+        </div>
+
+                <button v-if="appMode === 'project'" @click="toggleSidebar"
+                class="group relative w-8 h-8 flex items-center justify-center rounded hover:bg-gray-700 text-gray-400 hover:text-white transition">
+          <i class="fas fa-bars text-lg"></i>
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            履歴サイドバー
+          </div>
+        </button>
+
+        <div class="relative">
+          <button @click="menus.file = !menus.file"
+                  class="group flex items-center gap-2 text-xs font-bold text-gray-300 hover:text-white transition px-3 py-1.5 rounded hover:bg-white/10 border border-transparent hover:border-gray-600">
+            <div class="pointer-events-none absolute top-full left-0 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+              プロジェクト切替・新規作成
+            </div>
+            <i class="fas fa-folder text-yellow-500"></i>
+            <span>{{ projectDisplayName }}</span>
+            <i class="fas fa-caret-down opacity-50"></i>
+          </button>
+
+<div v-if="menus.file"
+               class="absolute top-full left-0 mt-1 w-72 bg-forge-800 border border-gray-600 rounded shadow-2xl py-1 z-50">
+            <div class="px-3 py-1 text-[10px] text-gray-500 font-bold uppercase">単発アプリ</div>
+            
+            <a @click="createNewSingleApp" class="group relative block px-4 py-2 hover:bg-gray-700 cursor-pointer text-sm">
+              <i class="fas fa-file-circle-plus w-4 text-green-400"></i> 単発htmlアプリを新規作成
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-64 p-3 bg-gray-900/95 border border-gray-600 rounded-lg shadow-2xl text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-[60] backdrop-blur-sm">
+                <strong class="text-green-400 block mb-1">単発アプリモード</strong>
+                履歴管理なしで、1つのHTMLファイルをサクッと作りたい時に最適です。保存先はその都度指定します。
+              </div>
+            </a>
+
+            <a @click="openSingleFile" class="group relative block px-4 py-2 hover:bg-gray-700 cursor-pointer text-sm">
+              <i class="fas fa-file-code w-4"></i> HTMLファイルを開く
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-64 p-3 bg-gray-900/95 border border-gray-600 rounded-lg shadow-2xl text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-[60] backdrop-blur-sm">
+                <strong class="text-green-400 block mb-1">単発アプリモード</strong>
+                既存のHTMLファイルを直接開いて編集します。履歴機能は使えませんが手軽です。
+              </div>
+            </a>
+
+            <div class="border-t border-gray-700 my-1"></div>
+            <div class="px-3 py-1 text-[10px] text-gray-500 font-bold uppercase">プロジェクト</div>
+            
+            <a @click="createNewProject" class="group relative block px-4 py-2 hover:bg-gray-700 cursor-pointer text-sm">
+              <i class="fas fa-plus-circle w-4"></i> 新規プロジェクト作成
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-64 p-3 bg-gray-900/95 border border-gray-600 rounded-lg shadow-2xl text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-[60] backdrop-blur-sm">
+                <strong class="text-blue-400 block mb-1">プロジェクトモード (推奨)</strong>
+                プロジェクトをフォルダ単位で管理します。保存するたびに履歴が自動記録され、いつでも過去の状態に戻せます。
+              </div>
+            </a>
+
+            <a @click="openProjectFolder" class="group relative block px-4 py-2 hover:bg-gray-700 cursor-pointer text-sm">
+              <i class="fas fa-folder w-4"></i> 既存プロジェクトを開く
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-64 p-3 bg-gray-900/95 border border-gray-600 rounded-lg shadow-2xl text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-[60] backdrop-blur-sm">
+                <strong class="text-blue-400 block mb-1">プロジェクトモード (推奨)</strong>
+                過去に作成したプロジェクトフォルダを開いて開発を再開します。変更履歴も読み込まれます。
+              </div>
+            </a>
+
+            <div class="border-t border-gray-700 my-1"></div>
+            <a v-if="appMode==='project'" @click="refreshLibrary" class="block px-4 py-2 hover:bg-gray-700 cursor-pointer text-sm">
+              <i class="fas fa-rotate w-4"></i> 履歴を再読込
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="h-8 w-px bg-gray-700"></div>
+
+            <div class="flex items-center p-1 gap-1 rounded border border-gray-600 bg-gray-800/50">
+        <button @click="runEmulator"
+                class="group relative px-4 py-1.5 bg-green-700 hover:bg-green-600 text-white text-xs rounded flex items-center gap-2 transition font-bold shadow hover:shadow-green-500/20">
+          <i class="fas fa-play"></i> 実行
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            コードを実行 (Ctrl+Enter)
+          </div>
+        </button>
+        <button @click="openFullWindow"
+                class="group relative px-3 py-1.5 text-gray-300 hover:bg-gray-700 hover:text-white rounded text-xs transition flex items-center gap-2">
+          <i class="fas fa-external-link-alt"></i> <span class="hidden xl:inline">別ウインドウ表示</span>
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            大きな画面でプレビュー
+          </div>
+        </button>
+        <button @click="stopEmulator"
+                class="group relative px-3 py-1.5 text-red-400 hover:bg-gray-700 hover:text-red-300 rounded text-xs transition">
+          <i class="fas fa-stop"></i>
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            実行停止・リセット
+          </div>
+        </button>
+      </div>
+
+      <div class="h-8 w-px bg-gray-700"></div>
+
+            <div class="flex items-center gap-2">
+        <button @click="openAiModal"
+                class="group relative text-xs px-3 py-1.5 rounded bg-purple-800 hover:bg-purple-700 flex items-center gap-2 transition border border-purple-600 text-purple-100 shadow">
+          <i class="fas fa-robot"></i> AI指示
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            AIにコード作成・修正を依頼
+          </div>
+        </button>
+                                <button @click="openPatchModal"
+                class="group relative text-xs px-3 py-1.5 rounded bg-yellow-700 hover:bg-yellow-600 flex items-center gap-2 font-bold text-white transition border border-yellow-600 shadow">
+          <i class="fas fa-sync-alt"></i> 修正を反映
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            AIによる修正案をこのアプリに反映
+          </div>
+        </button>
+
+        <div class="h-8 w-px bg-gray-700"></div>
+
+        <button @click="openConsultModal""
+                class="group relative text-xs px-3 py-1.5 rounded bg-teal-700 hover:bg-teal-600 flex items-center gap-2 font-bold text-white transition border border-teal-600 shadow">
+          <i class="fas fa-comments"></i> AIに相談
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            機能提案・評価・アドバイスをもらう
+          </div>
+        </button>
+      </div>
+
+            <div class="h-8 w-px bg-gray-700"></div>
+
+            <div class="flex gap-2">
+        <button @click="openSaveModal""""
+                class="group relative btn-primary text-xs px-5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 flex items-center gap-2 transition shadow-lg shadow-blue-900/30 font-bold text-white">
+          <i class="fas fa-save"></i> 保存
+          <div class="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+            現在の状態を保存
+          </div>
+        </button>
+      </div>
+    </div>
+
+        <div class="flex items-center gap-2">
+      <button @click="modals.settings = true"
+              class="group relative w-9 h-9 flex items-center justify-center rounded hover:bg-gray-700 text-gray-400 hover:text-white transition">
+        <i class="fas fa-cog"></i>
+        <div class="pointer-events-none absolute top-full right-0 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+          保存先・セキュリティ設定
+        </div>
+      </button>
+      <button @click="modals.help = true"
+              class="group relative w-9 h-9 flex items-center justify-center rounded hover:bg-gray-700 text-gray-400 hover:text-white transition">
+        <i class="fas fa-question-circle"></i>
+        <div class="pointer-events-none absolute top-full right-0 mt-2 w-max px-2 py-1 bg-gray-900 text-[10px] text-gray-200 rounded border border-gray-700 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity z-[60]">
+          使い方ガイド
+        </div>
+      </button>
+    </div>
+  </header>
+
+  <div class="flex-1 flex relative overflow-hidden">
+
+    <transition name="fade">
+      <aside v-if="appMode === 'project' && isSidebarOpen"
+             class="w-80 sidebar-panel flex-shrink-0 flex flex-col z-10 shadow-xl">
+        <div class="p-3 bg-forge-700 text-xs font-bold text-gray-300 flex justify-between items-center border-b border-gray-600">
+          <span><i class="fas fa-history mr-1"></i> このPJの履歴</span>
+          <button @click="refreshLibrary" class="hover:text-white" title="再読込">
+            <i class="fas fa-sync-alt"></i>
+          </button>
+        </div>
+
+        <div class="p-2 border-b border-gray-700">
+          <div class="text-[11px] text-gray-400 mb-1">モード切替</div>
+          <div class="flex gap-2">
+            <button @click="historyMode='flat'; refreshLibrary()"
+                    class="group relative flex-1 px-2 py-2 rounded text-[11px] font-bold flex flex-col items-center gap-1 leading-tight"
+                    :class="historyMode==='flat' ? 'bg-blue-700 text-white shadow-lg' : 'bg-gray-800 text-gray-400 hover:bg-gray-700 border border-gray-700'">
+              <i class="fas fa-clock"></i>
+              このPJの履歴
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-48 p-2 bg-gray-900/95 border border-gray-600 rounded shadow-xl text-[10px] text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity z-50 text-left normal-case font-normal leading-relaxed backdrop-blur-sm">
+                <strong class="text-blue-300 block mb-1">履歴モード (Default)</strong>
+                現在のプロジェクトフォルダ内にある、全ての保存履歴（HTML）を日時順に表示します。
+              </div>
+            </button>
+            <button @click="historyMode='group'; refreshLibrary()"
+                    class="group relative flex-1 px-2 py-2 rounded text-[11px] font-bold flex flex-col items-center gap-1 leading-tight"
+                    :class="historyMode==='group' ? 'bg-teal-700 text-white shadow-lg' : 'bg-gray-800 text-gray-400 hover:bg-gray-700 border border-gray-700'">
+              <i class="fas fa-folder-tree"></i>
+              PJ一覧 (Root)
+              <div class="pointer-events-none absolute left-full top-0 ml-2 w-48 p-2 bg-gray-900/95 border border-gray-600 rounded shadow-xl text-[10px] text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity z-50 text-left normal-case font-normal leading-relaxed backdrop-blur-sm">
+                <strong class="text-teal-300 block mb-1">プロジェクト一覧モード</strong>
+                設定された「親フォルダ(Root)」直下の各フォルダをスキャンし、それぞれの最新アプリを表示します。
+              </div>
+            </button>
+          </div>
+
+          <div class="mt-2 text-[10px] text-gray-500">
+            読み込み: <span class="text-gray-200 font-bold">{{ libraryFiles.length }}</span>件
+            <span class="ml-2" v-if="libraryScanStatus">/ {{ libraryScanStatus }}</span>
+          </div>
+
+          <div class="mt-2 flex gap-2">
+            <button @click="refreshLibrary"
+                    class="flex-1 px-3 py-1.5 rounded text-xs font-bold bg-gray-900/40 hover:bg-gray-800 border border-gray-700"
+                    title="ファイル一覧を更新">
+              <i class="fas fa-rotate mr-1"></i> 再読み込み
+            </button>
+            <button @click="revealCurrentFolder"
+                    class="px-3 py-1.5 rounded text-xs font-bold bg-gray-900/40 hover:bg-gray-800 border border-gray-700 text-gray-400 hover:text-white"
+                    title="エクスプローラで場所を確認">
+              <i class="fas fa-folder-open"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-2 space-y-2">
+
+          <div v-if="libraryFiles.length === 0" class="text-center text-gray-500 py-10 text-xs">
+            <i class="fas fa-folder-open mb-2 text-2xl opacity-30"></i><br>
+            履歴なし（フォルダ配下に .html が見つからない / 読み取り不可の可能性）
+          </div>
+
+<template v-if="historyMode==='group'">
+            <div v-for="grp in groupedApps" :key="grp.groupKey"
+                 class="rounded border border-gray-700 bg-gray-900/40 overflow-hidden hover:border-blue-500 transition cursor-pointer"
+                 @click="openProjectFromList(grp.versions[0])">
+              <div class="p-3 bg-gray-900/60 flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 mb-1">
+                    <i class="fas fa-folder text-yellow-500 text-sm"></i>
+                    <div class="text-xs font-bold text-blue-200 truncate">
+                      {{ grp.latestTitle || grp.groupKey }}
+                    </div>
+                  </div>
+                  <div class="text-[10px] text-gray-500 mb-1">
+                    最終更新: {{ grp.versions[0]?.savedAtStr }}
+                  </div>
+                                                      <div class="text-[10px] text-gray-400 mt-1 line-clamp-2 bg-gray-800/50 p-1.5 rounded hover:bg-gray-700/80 transition-colors"
+                       v-if="grp.latestAiInstruction"
+                       @mouseenter="showHistoryDetail($event, grp.latestAiInstruction)"
+                       @mouseleave="hideHistoryDetail">
+                    <i class="fas fa-robot mr-1 opacity-70"></i>{{ grp.latestAiInstruction }}
+                  </div>
+                </div>
+                <div class="flex flex-col gap-1 shrink-0">
+                  <button class="px-3 py-1 text-[10px] rounded bg-blue-600 hover:bg-blue-500 text-white font-bold shadow-lg flex items-center justify-center gap-1">
+                    <i class="fas fa-door-open"></i> 開く
+                  </button>
+                  <button @click.stop="openDiffModal(grp.versions[0])" class="px-3 py-1 text-[10px] rounded bg-gray-700 hover:bg-gray-600 text-gray-200 border border-gray-600 flex items-center justify-center gap-1" title="現在のコードと比較">
+                    <i class="fas fa-columns"></i> 差分
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+                    <template v-else>
+            <div v-for="(file, idx) in libraryFilesFlat" :key="file.name"
+                 class="group p-2 rounded bg-gray-800 border border-gray-700 hover:border-gray-500 transition cursor-pointer flex flex-col gap-1 relative"
+                 :class="{'border-forge-accent bg-gray-700': currentFileName === file.name}"
+                 @click="loadFile(file.handle)">
+                            <div class="flex justify-between items-start gap-2">
+                <span class="text-xs font-bold text-blue-300 truncate w-52">
+                  {{ file.displayTitle }}
+                  <span v-if="idx === 0" class="inline-block bg-pink-600 text-white text-[9px] px-1.5 rounded-sm ml-1 font-mono shadow-sm">LATEST</span>
+                </span>
+                <span class="text-[10px] text-gray-400 whitespace-nowrap">{{ file.savedAtStr }}</span>
+              </div>
+              <div class="text-[10px] text-gray-500">
+                key: <span class="mono">{{ file.groupKey.slice(0,12) }}</span>
+              </div>
+              <div class="text-[10px] text-gray-500 break-all">
+                {{ file.name }}
+              </div>
+                            <div class="text-[11px] text-gray-300 mt-1 bg-gray-900 bg-opacity-50 p-1 rounded italic line-clamp-2 hover:bg-gray-700 transition-colors"
+                   v-if="file.meta.aiInstruction || file.meta.comment"
+                   @mouseenter="showHistoryDetail($event, file.meta.aiInstruction || file.meta.comment)"
+                   @mouseleave="hideHistoryDetail">
+                <i class="fas fa-comment-alt text-[9px] mr-1 opacity-50"></i>{{ file.meta.aiInstruction || file.meta.comment }}
+              </div>
+                            <div class="mt-2 flex gap-1 opacity-60 group-hover:opacity-100 transition">
+                <button @click.stop="runExternal(file)"
+                        class="flex-1 py-1 bg-gray-600 hover:bg-gray-500 rounded text-[10px]" title="別ウィンドウで実行">
+                  <i class="fas fa-external-link-alt"></i> 実行
+                </button>
+                <button @click.stop="openDiffModal(file)"
+                        class="flex-1 py-1 bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded text-[10px]" title="現在のコードと比較">
+                  <i class="fas fa-columns"></i> 差分
+                </button>
+              </div>
+            </div>
+          </template>
+
+        </div>
+            </aside>
+    </transition>
+
+    
+    <div v-if="hoveredHistory"
+         class="fixed z-[100] w-72 p-3 bg-gray-900/95 border border-gray-500 rounded-lg shadow-2xl text-xs text-gray-100 pointer-events-none whitespace-pre-wrap break-words backdrop-blur font-sans leading-relaxed"
+         :style="{ top: hoveredHistory.top + 'px', left: hoveredHistory.left + 'px' }">
+      <div class="text-[10px] text-blue-300 font-bold mb-1 border-b border-gray-700 pb-1">History Comment</div>
+      {{ hoveredHistory.text }}
+    </div>
+
+    <section id="editor-pane" class="flex-1 flex flex-col min-w-[300px] relative z-0">
+      <div class="bg-forge-800 h-8 flex items-center justify-between px-2 border-b border-gray-700 select-none">
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold text-gray-500 px-2"><i class="fas fa-code"></i> エディタ</span>
+
+          <button @click="openFindReplace('find')"
+                  class="text-gray-400 hover:text-white px-2 py-1 hover:bg-gray-700 rounded text-xs"
+                  title="検索 (Ctrl+F)">
+            <i class="fas fa-search"></i>
+          </button>
+          <button @click="openFindReplace('replace')"
+                  class="text-gray-400 hover:text-white px-2 py-1 hover:bg-gray-700 rounded text-xs"
+                  title="置換 (Ctrl+H)">
+            <i class="fas fa-i-cursor"></i>
+          </button>
+
+          <button @click="clearCode"
+                  class="text-gray-400 hover:text-red-400 px-2 py-1 hover:bg-gray-700 rounded text-xs"
+                  title="全クリア">
+            <i class="fas fa-trash-alt"></i>
+          </button>
+        </div>
+
+        <div class="text-[10px] text-gray-500 font-mono flex gap-3">
+          <span>{{ editorStats.lines }} 行</span>
+          <span>{{ editorStats.chars }} 文字</span>
+        </div>
+      </div>
+
+      <div class="flex-1 relative group">
+        <div id="editor-container" class="w-full h-full"></div>
+
+        <div v-if="findUI.open"
+             class="absolute z-20 w-[720px] max-w-[92%] bg-gray-900/95 border border-gray-700 rounded-lg shadow-2xl backdrop-blur p-3"
+             :style="{ left: findUI.x + 'px', top: findUI.y + 'px' }">
+          <div class="flex items-center justify-between mb-2 drag-handle"
+               @mousedown.prevent="startDragFindUI">
+            <div class="text-xs font-bold text-gray-200 flex items-center gap-2">
+              <i class="fas fa-search text-blue-300"></i>
+              <span>Find / Replace</span>
+              <span class="text-[10px] text-gray-500">(Escで閉じる / ドラッグで移動)</span>
+            </div>
+            <button @click.stop="closeFindReplace"
+                    class="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200"
+                    title="閉じる">
+              <i class="fas fa-times text-xs"></i>
+            </button>
+          </div>
+
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <label class="flex items-center gap-2 text-[11px] text-gray-200 select-none cursor-pointer bg-gray-900/40 border border-gray-700 rounded px-3 py-1.5">
+              <input type="checkbox" v-model="findUI.ignoreWhitespace" class="accent-blue-500">
+              <span class="font-bold">改行・スペースを無視</span>
+              <span class="text-gray-500">(デフォルトON)</span>
+            </label>
+            <div class="text-[10px] text-gray-500">※単純検索（正規表現なし）</div>
+          </div>
+
+          <div class="mb-2">
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-[11px] font-bold text-gray-300">Find</label>
+              <button type="button"
+                      @click="findUI.find=''; recomputeMatchCount(); $nextTick(()=>findInputEl && findInputEl.focus())"
+                      class="px-2 py-1 text-[10px] rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 flex items-center gap-1"
+                      title="Findをクリア">
+                <i class="fas fa-eraser text-[10px]"></i> クリア
+              </button>
+            </div>
+
+            <textarea ref="findInputEl"
+                      v-model="findUI.find"
+                      class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs text-gray-100 outline-none focus:border-blue-400 font-mono h-24 resize-y whitespace-pre"
+                      placeholder="検索文字列（そのまま貼り付けOK / Ctrl+F）"
+                      @input="recomputeMatchCount"
+                      @keydown.enter.exact.prevent="findNext()"></textarea>
+          </div>
+
+          <div class="mb-2">
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-[11px] font-bold text-gray-300">Replace</label>
+              <button type="button"
+                      @click="findUI.replace=''; $nextTick(()=>replaceInputEl && replaceInputEl.focus())"
+                      class="px-2 py-1 text-[10px] rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 flex items-center gap-1"
+                      title="Replaceをクリア">
+                <i class="fas fa-eraser text-[10px]"></i> クリア
+              </button>
+            </div>
+
+            <textarea ref="replaceInputEl"
+                      v-model="findUI.replace"
+                      class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs text-gray-100 outline-none focus:border-yellow-400 font-mono h-24 resize-y whitespace-pre"
+                      placeholder="置換文字列（そのまま貼り付けOK / Ctrl+H）"
+                      @keydown.enter.exact.prevent="replaceOne()"></textarea>
+          </div>
+
+          <div class="flex items-center justify-between gap-2 mt-2">
+            <div class="flex gap-2">
+              <button @click="findNext"
+                      class="px-3 py-2 rounded bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold border border-blue-600">
+                次を検索
+              </button>
+              <button @click="findPrev"
+                      class="px-3 py-2 rounded bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold border border-blue-800">
+                前を検索
+              </button>
+            </div>
+
+            <div class="flex gap-2">
+              <button @click="replaceOne"
+                      class="px-3 py-2 rounded bg-yellow-700 hover:bg-yellow-600 text-white text-xs font-bold border border-yellow-600">
+                置換
+              </button>
+              <button @click="replaceAll"
+                      class="px-3 py-2 rounded bg-yellow-900 hover:bg-yellow-800 text-white text-xs font-bold border border-yellow-800">
+                全置換
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-2 text-[10px] text-gray-500 flex justify-between items-center">
+            <span v-if="findUI.find && findUI.matchCount > 0" class="text-red-400 font-bold text-[12px]">該当箇所が見つかりました：{{ findUI.matchCount }}件</span>
+                        <span v-else-if="findUI.find && findUI.matchCount === 0">
+              <span v-if="findUI.hint" class="text-yellow-400 font-bold animate-pulse">{{ findUI.hint }}</span>
+              <span v-else>該当箇所は見つかりませんでした</span>
+            </span>
+            <span v-else>検索文字列を入力してください</span>
+            <span class="text-gray-600">Enter=次</span>
+          </div>
+        </div>
+
+        <button @click="copyFullCode"
+                class="absolute top-4 right-6 bg-gray-700 bg-opacity-80 hover:bg-blue-600 text-white text-xs px-3 py-2 rounded shadow-lg backdrop-blur opacity-0 group-hover:opacity-100 transition duration-200 z-10 flex items-center gap-2 font-bold">
+          <i class="fas fa-copy"></i> コードをコピー
+        </button>
+      </div>
+    </section>
+
+    <div class="gutter" @mousedown="startResize"></div>
+
+    <section id="emulator-pane" class="flex-1 flex flex-col min-w-[300px] bg-white transition-all duration-200">
+      <div class="bg-gray-100 h-8 flex items-center justify-between px-3 border-b border-gray-300">
+        <div class="flex items-center gap-2">
+          <div class="relative group z-20">
+            <button class="flex items-center gap-2 text-xs font-bold text-gray-700 hover:bg-gray-200 px-2 py-1 rounded transition" title="デバイスサイズ切り替え">
+              <i class="fas" :class="currentDevice.icon"></i>
+              <span class="hidden sm:inline">{{ currentDevice.name }}</span>
+              <i class="fas fa-caret-down text-[10px] opacity-50"></i>
+            </button>
+            <div class="absolute top-full left-0 mt-1 w-48 bg-white border border-gray-300 rounded shadow-xl py-1 hidden group-hover:block">
+              <div v-for="d in deviceModes" :key="d.name" 
+                   @click="currentDevice = d"
+                   class="px-4 py-2 hover:bg-blue-50 cursor-pointer text-xs text-gray-700 flex items-center gap-2 transition"
+                   :class="{'bg-blue-100 font-bold text-blue-800': currentDevice.name === d.name}">
+                <i class="fas w-4 text-center" :class="d.icon"></i> {{ d.name }}
+              </div>
+            </div>
+          </div>
+
+          <button @click="runEmulator" class="text-gray-400 hover:text-green-600 ml-2" title="リロード">
+            <i class="fas fa-redo"></i>
+          </button>
+        </div>
+
+        <div class="flex items-center gap-1">
+          <button @click="openDbModal"
+                  class="flex items-center gap-2 text-xs font-bold text-gray-700 hover:bg-gray-200 px-3 py-1 rounded transition"
+                  title="IndexedDB 簡易表示">
+            <i class="fas fa-database text-blue-600"></i>
+            <span>DB</span>
+          </button>
+
+          <div class="h-4 w-px bg-gray-300 mx-1"></div>
+
+          <button @click="openFullWindow"
+                  class="flex items-center gap-2 text-xs font-bold text-gray-700 hover:bg-gray-200 px-3 py-1 rounded transition"
+                  title="別ウインドウ表示">
+            <i class="fas fa-external-link-alt text-green-600"></i>
+            <span>別ウインドウ</span>
+          </button>
+        </div>
+      </div>
+
+            <div class="flex-1 relative bg-gray-50 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZTVlNzViIiBzdHJva2Utd2lkdGg9IjEiPjxwYXRoIGQ9Ik0wIDBoMjB2MjBIMHoiLz48cGF0aCBkPSJNMCAyMGgyME0yMCAwdjIwIiBvcGFjaXR5PSIuMiIvPjwvc3ZnPg==')] overflow-auto flex items-center justify-center">
+        <div :style="{ width: currentDevice.width, height: currentDevice.height }" class="transition-all duration-300 relative shadow-2xl bg-white border border-gray-300 flex-shrink-0">
+          <iframe id="emulator-frame" class="w-full h-full border-none bg-white"></iframe>
+          <div v-if="isRunLoading" class="absolute inset-0 bg-white/50 backdrop-blur-[2px] flex flex-col items-center justify-center z-50 transition-opacity duration-300">
+            <div class="animate-spin rounded-full h-12 w-12 border-[5px] border-gray-300 border-t-blue-600 mb-4 shadow-lg"></div>
+            <div class="text-xs font-bold text-blue-700 bg-white/90 px-4 py-1.5 rounded-full shadow-xl border border-blue-100 flex items-center gap-2 animate-pulse">
+               <i class="fas fa-rocket"></i> アプリを起動中...
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="h-24 bg-gray-900 border-t border-gray-700 flex flex-col font-mono text-[10px]">
+        <div class="px-2 py-0.5 bg-gray-800 text-gray-500 flex justify-between">
+          <span>コンソール</span>
+          <button @click="consoleLogs=[]" class="hover:text-white">クリア</button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-2" id="console-output">
+          <div v-for="(log, i) in consoleLogs" :key="i" class="mb-0.5 border-b border-gray-800 pb-0.5"
+               :class="{'text-red-400': log.type === 'error', 'text-yellow-400': log.type === 'warn', 'text-green-400': log.type === 'info'}">
+            > {{ log.message }}
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div v-if="modals.ai" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
+    <div class="glass-panel p-0 rounded-lg w-[780px] max-w-full shadow-2xl border border-gray-600 flex flex-col overflow-hidden">
+      <div class="flex border-b border-gray-600 bg-gray-800">
+        <button @click="aiTab='full'"
+                class="flex-1 py-3 text-sm font-bold transition"
+                :class="aiTab==='full' ? 'bg-forge-700 text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-white'">
+          ① 全コード生成 (新規/リセット)
+        </button>
+        <button @click="aiTab='patch'"
+                class="flex-1 py-3 text-sm font-bold transition"
+                :class="aiTab==='patch' ? 'bg-forge-700 text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-400 hover:text-white'">
+          ② 部分修正 (手動)
+        </button>
+        <button @click="aiTab='json'"
+                class="flex-1 py-3 text-sm font-bold transition"
+                :class="aiTab==='json' ? 'bg-forge-700 text-pink-400 border-b-2 border-pink-400' : 'text-gray-400 hover:text-white'">
+          ③ 部分修正 (フルオート)
+        </button>
+      </div>
+
+            <div class="p-6 bg-forge-900">
+        <div class="flex items-start justify-between gap-2 mb-2">
+          <p class="text-xs text-gray-400 flex-1 leading-relaxed">
+                        <i class="fas fa-info-circle text-blue-400 mr-1"></i>
+                        <span v-if="aiTab==='full'">作りたいアプリのアイデアを教えてください。AIにコード全体を作ってもらうための『指示文』を自動で作成します。<span class="text-yellow-200 ml-1">※部分修正がうまくいかない場合の「作り直し（リカバリー）」にも最適です。</span></span>
+            <span v-else-if="aiTab==='patch'">変更指示を入力してください。AIに「変更前の内容」と「変更後の内容」を明確に出力させ、手動で修正を反映しやすくします。</span>
+            <span v-else>AIに、修正内容を「AIが理解しやすい専用の言葉(JSON)」で作らせます。それをコピーして「修正を反映」画面の「②フルオート」に貼るだけで、すべての変更が一括で適用されます。</span>
+          </p>
+          <button @click="aiHelp = !aiHelp" class="flex-shrink-0 text-xs bg-yellow-900/40 text-yellow-200 border border-yellow-700/50 px-2 py-1 rounded hover:bg-yellow-900/60 transition">
+            <i class="fas fa-life-ring mr-1"></i>迷ったら？
+          </button>
+        </div>
+
+        <div v-if="aiHelp" class="mb-4 bg-gray-800/90 border border-yellow-700/40 rounded-lg p-3 text-xs text-gray-300 space-y-2 relative animate-fade-in">
+          <div class="absolute top-2 right-2 text-gray-500 cursor-pointer hover:text-white" @click="aiHelp=false"><i class="fas fa-times"></i></div>
+          <p class="font-bold text-yellow-400 border-b border-gray-700 pb-1 mb-1"><i class="fas fa-lightbulb mr-1"></i> 初心者向けガイド：どれを選べばいい？</p>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div class="bg-gray-900/50 p-2 rounded border border-gray-700 cursor-pointer hover:border-blue-500 transition" @click="aiTab='full'">
+              <strong class="text-blue-300 block mb-1">① 全コード生成</strong>
+              <span class="text-[10px] text-gray-400">「アプリをゼロから作りたい」「バグりすぎて作り直したい」とき</span>
+            </div>
+            <div class="bg-gray-900/50 p-2 rounded border border-gray-700 cursor-pointer hover:border-yellow-500 transition" @click="aiTab='patch'">
+              <strong class="text-yellow-300 block mb-1">② 部分修正 (手動)</strong>
+              <span class="text-[10px] text-gray-400">AIが自動で直せないときや、自分の目でコードを確認して直したいとき</span>
+            </div>
+            <div class="bg-gray-900/50 p-2 rounded border border-gray-700 cursor-pointer hover:border-pink-500 transition" @click="aiTab='json'">
+              <strong class="text-pink-300 block mb-1">③ 部分修正 (フルオート)</strong>
+              <span class="text-[10px] text-gray-400">★部分修正なら、基本はこれ！「ボタンの色を変えて」「機能を追加して」など複数個所を自動で一気に修正</span>
+            </div>
+                    </div>
+        </div>
+
+                <div v-if="aiTab==='full'" class="mb-4 animate-fade-in">
+          <button @click="showRecipes = !showRecipes" class="flex items-center gap-2 text-xs font-bold text-gray-300 mb-2 hover:text-white transition w-full text-left">
+            <i class="fas" :class="showRecipes ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+            🔰 初めての方・アイデアが浮かばない方はこちら（お試しレシピ）
+          </button>
+          <div v-if="showRecipes" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button v-for="recipe in recipePrompts" :key="recipe.label"
+                    @click="aiPromptInput = recipe.prompt"
+                    class="text-left px-3 py-2 rounded border transition flex flex-col gap-0.5 shadow-sm"
+                    :class="recipe.class">
+              <span class="text-xs font-bold">{{ recipe.label }}</span>
+              <span class="text-[10px] opacity-80">{{ recipe.desc }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="aiTab==='patch' || aiTab==='json'" class="mb-4 animate-fade-in">
+          <button @click="showRecipes = !showRecipes" class="flex items-center gap-2 text-xs font-bold text-gray-300 mb-2 hover:text-white transition w-full text-left">
+            <i class="fas" :class="showRecipes ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+            🆘 修正指示のテンプレート（困ったときはコチラ）
+          </button>
+          <div v-if="showRecipes" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button v-for="recipe in patchRecipes" :key="recipe.label"
+                    @click="aiPromptInput = recipe.prompt"
+                    class="text-left px-3 py-2 rounded border transition flex flex-col gap-0.5 shadow-sm"
+                    :class="recipe.class">
+              <span class="text-xs font-bold">{{ recipe.label }}</span>
+              <span class="text-[10px] opacity-80">{{ recipe.desc }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="mb-2 text-[11px] text-gray-500" v-if="appMode==='project'">
+          対象アプリ: <span class="text-gray-200 font-bold">{{ currentAppTitle || '(未選択)' }}</span>
+          <span class="ml-2 text-gray-600">(key: <span class="mono">{{ (currentGroupKey||'').slice(0,12) }}</span>)</span>
+        </div>
+
+        <div class="mb-4">
+          <div class="flex justify-between items-end mb-1">
+            <label class="block text-xs font-bold text-gray-300">指示内容（このアプリに紐づけ）</label>
+            <button @click="toggleWizard" class="text-[10px] bg-indigo-900/50 border border-indigo-500/50 text-indigo-200 px-2 py-0.5 rounded hover:bg-indigo-800 transition flex items-center gap-1">
+              <i class="fas fa-wand-magic-sparkles"></i> ウィザードで指示を作る
+            </button>
+          </div>
+
+          <div v-if="wizardOpen" class="mb-2 bg-gray-800/80 border border-indigo-500/30 rounded-lg p-3 animate-fade-in">
+            <div class="flex justify-between items-center mb-2 border-b border-gray-700 pb-1">
+              <span class="text-xs font-bold text-indigo-300"><span class="mr-2 px-1.5 rounded bg-indigo-900 text-white">Step {{ wizardStep }}/3</span> {{ wizardTitle }}</span>
+              <button @click="wizardOpen=false" class="text-gray-500 hover:text-white"><i class="fas fa-times"></i></button>
+            </div>
+            
+            <div class="mb-3">
+              <div v-if="wizardStep===1" class="grid grid-cols-2 gap-2">
+                <button v-for="opt in wizardOptions.types" :key="opt" @click="setWizardType(opt)" 
+                  class="text-left px-3 py-2 rounded border text-xs transition"
+                  :class="wizardData.type===opt ? 'bg-indigo-600 border-indigo-400 text-white' : 'bg-gray-700 border-gray-600 hover:bg-gray-600 text-gray-200'">
+                  {{ opt }}
+                </button>
+              </div>
+              <div v-if="wizardStep===2" class="grid grid-cols-2 gap-2">
+                 <button v-for="opt in wizardOptions.designs" :key="opt" @click="setWizardDesign(opt)"
+                  class="text-left px-3 py-2 rounded border text-xs transition"
+                  :class="wizardData.design===opt ? 'bg-pink-700 border-pink-400 text-white' : 'bg-gray-700 border-gray-600 hover:bg-gray-600 text-gray-200'">
+                  {{ opt }}
+                </button>
+              </div>
+              <div v-if="wizardStep===3" class="space-y-1">
+                 <label v-for="opt in wizardOptions.features" :key="opt" 
+                  class="flex items-center gap-2 px-3 py-2 rounded border border-gray-600 bg-gray-700 hover:bg-gray-600 cursor-pointer text-xs text-gray-200">
+                  <input type="checkbox" :value="opt" v-model="wizardData.features" class="accent-indigo-400">
+                  {{ opt }}
+                </label>
+              </div>
+            </div>
+
+            <div class="flex justify-between pt-2 border-t border-gray-700">
+              <button v-if="wizardStep > 1" @click="wizardStep--" class="text-xs px-3 py-1 rounded bg-gray-700 hover:text-white">戻る</button>
+              <span v-else></span>
+              <button v-if="wizardStep < 3" @click="wizardStep++" class="text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-500">次へ</button>
+              <button v-else @click="completeWizard" class="text-xs px-4 py-1 rounded bg-green-600 text-white hover:bg-green-500 font-bold"><i class="fas fa-check mr-1"></i> 生成</button>
+            </div>
+          </div>
+
+          <textarea v-model="aiPromptInput""
+                    class="w-full h-32 bg-gray-800 border border-gray-600 rounded p-3 text-sm text-white focus:border-forge-accent outline-none resize-none"
+                    :placeholder="aiTab==='full' ? '例: シンプルなTODOアプリを作って。色は青ベースで。' : '例: 「保存ボタン」の色を赤に変更して。アラートが出るようにして。'"></textarea>
+          <div class="text-[10px] text-gray-500 mt-1">
+            ※ここでの指示は一時的に蓄積され、保存時の履歴コメント（初期値）として使用されます。
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="block text-xs font-bold text-gray-300 mb-2">コード添付</label>
+          <div class="flex flex-col gap-2 bg-gray-900/40 border border-gray-700 rounded p-3">
+            <label class="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+              <input type="radio" class="accent-blue-500" name="ai-attach" :value="true" v-model="aiIncludeFullCode">
+              <span class="font-bold text-gray-100">フルコードを添付する</span>
+              <span class="text-[11px] text-gray-500">（コードを省略せず、すべて貼り付けます）</span>
+            </label>
+            <label class="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+              <input type="radio" class="accent-blue-500" name="ai-attach" :value="false" v-model="aiIncludeFullCode">
+              <span class="font-bold text-gray-100">コード添付を省略</span>
+              <span class="text-[11px] text-gray-500">（AIが既にコードを把握している前提）</span>
+            </label>
+          </div>
+        </div>
+
+                <div class="flex justify-end gap-3 mt-2">
+          <button @click="modals.ai = false" class="px-4 py-2 rounded bg-gray-700 hover:bg-gray-600 text-sm">閉じる</button>
+          <button @click="generateAndCopyPrompt"
+                  class="px-6 py-2 rounded font-bold text-white shadow-lg flex items-center gap-2"
+                  :class="aiTab==='full' ? 'bg-blue-600 hover:bg-blue-500' : (aiTab==='json' ? 'bg-pink-600 hover:bg-pink-500' : 'bg-yellow-600 hover:bg-yellow-500')">
+            <i class="fas fa-magic"></i> プロンプト生成＆コピー
+          </button>
+        </div>
+
+        <div v-if="aiMessage" class="mt-2 text-center text-xs text-green-400 font-bold">
+          {{ aiMessage }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+    <div v-if="modals.github" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
+    <div class="glass-panel p-6 rounded-lg w-[500px] shadow-2xl border border-gray-600">
+      <h3 class="text-lg font-bold mb-3 text-white flex items-center gap-2">
+        <i class="fas fa-user-secret text-white"></i> 開発者専用
+      </h3>
+            <p class="text-xs text-gray-400 mb-4">
+        このアプリの開発者専用メニュー。
+      </p>
+
+      <div class="space-y-3 mb-4">
+        <div>
+                    <label class="block text-xs font-bold text-gray-400 mb-1">Access Token</label>
+          <input v-model="githubSettings.token" type="password" placeholder="ghp_..."
+                 class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none">
+        </div>
+        <div class="flex gap-2">
+          <div class="flex-1">
+            <label class="block text-xs font-bold text-gray-400 mb-1">Repository Name</label>
+            <input v-model="githubSettings.repo" type="text" placeholder="my-app"
+                   class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none">
+          </div>
+          <div class="w-1/3">
+             <label class="block text-xs font-bold text-gray-400 mb-1">Branch</label>
+             <input v-model="githubSettings.branch" type="text" placeholder="main"
+                    class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 mb-1">File Path</label>
+          <input v-model="githubSettings.path" type="text" placeholder="index.html"
+                 class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none">
+        </div>
+      </div>
+
+      <div v-if="githubStatus" class="mb-4 p-2 rounded bg-gray-900 border text-xs whitespace-pre-wrap"
+           :class="githubStatus.includes('Error') ? 'border-red-800 text-red-300' : 'border-green-800 text-green-300'">
+        {{ githubStatus }}
+      </div>
+      <div v-if="githubUrl" class="mb-4 text-center">
+         <a :href="githubUrl" target="_blank" class="text-blue-400 underline text-xs font-bold">
+           <i class="fas fa-external-link-alt"></i> 公開ページを開く (反映に数分かかります)
+         </a>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2 border-t border-gray-700">
+        <button @click="modals.github = false" class="px-4 py-2 text-sm rounded bg-gray-700 hover:bg-gray-600 text-white">閉じる</button>
+        <button @click="publishToGithub" class="px-4 py-2 text-sm rounded bg-gray-100 hover:bg-white text-gray-900 font-bold shadow-lg">
+          <i class="fas fa-cloud-upload-alt mr-1"></i> Upload
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.save" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
+    <div class="glass-panel p-6 rounded-lg w-[480px] shadow-2xl border border-gray-600">
+      <h3 class="text-lg font-bold mb-3 text-white flex items-center gap-2">
+        <i class="fas fa-save text-blue-400"></i> ファイル保存
+      </h3>
+
+      <div class="mb-3 text-[11px] text-gray-400">
+        <span v-if="appMode==='project'">
+          保存先: <span class="font-bold text-gray-100">プロジェクトフォルダ内</span>
+        </span>
+        <span v-else>
+          保存先: <span class="font-bold text-gray-100">毎回指定</span>（フォルダも含めて選択できます）
+        </span>
+      </div>
+
+      <div class="mb-4">
+        <label class="block text-xs text-gray-400 mb-1">ファイル名 (編集可能)</label>
+        <input v-model="saveFilename" type="text"
+               class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none">
+        <p class="text-[10px] text-gray-500 mt-1">※自動的に日時が付与されます（変更可）。</p>
+      </div>
+
+      <div class="mb-4">
+        <label class="block text-xs text-gray-400 mb-1">変更履歴メモ（AI指示が自動入力）</label>
+        <textarea v-model="saveComment"
+                  class="w-full h-20 bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white focus:border-blue-500 outline-none resize-none"></textarea>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button @click="modals.save = false" class="px-4 py-2 text-sm rounded bg-gray-700 hover:bg-gray-600">キャンセル</button>
+        <button @click="performSave" class="px-4 py-2 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white font-bold shadow-lg">保存実行</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.patch" class="fixed inset-0 bg-black bg-opacity-70 z-50 backdrop-blur-sm flex items-center justify-center">
+    <div class="glass-panel p-0 rounded-lg w-[92%] max-w-[980px] h-[90vh] shadow-2xl border border-gray-600 flex flex-col overflow-hidden">
+      <div class="flex border-b border-gray-600 bg-gray-800 flex-shrink-0">
+        <button @click="patchMode='manual'"
+                class="flex-1 py-3 text-sm font-bold transition"
+                :class="patchMode==='manual' ? 'bg-forge-700 text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-400 hover:text-white'">
+          ① 手動パッチ (Manual)
+        </button>
+        <button @click="patchMode='json'"
+                class="flex-1 py-3 text-sm font-bold transition"
+                :class="patchMode==='json' ? 'bg-forge-700 text-pink-400 border-b-2 border-pink-400' : 'text-gray-400 hover:text-white'">
+          ② フルオート (Auto)
+        </button>
+      </div>
+
+            <div class="p-6 flex-1 flex flex-col overflow-hidden bg-forge-900">
+        <div class="flex-shrink-0 mb-3" v-if="!patchHelp">
+           <button @click="patchHelp = true" class="w-full text-xs bg-gray-800 text-gray-400 border border-gray-700 border-dashed px-2 py-1.5 rounded hover:bg-gray-700 hover:text-yellow-200 transition flex items-center justify-center gap-2">
+             <i class="fas fa-life-ring"></i> どっちの画面を使えばいいかわからない時はこちら
+           </button>
+        </div>
+        <div v-else class="flex-shrink-0 mb-3 bg-gray-800/90 border border-yellow-700/40 rounded-lg p-3 text-xs text-gray-300 relative animate-fade-in">
+          <div class="absolute top-2 right-2 text-gray-500 cursor-pointer hover:text-white" @click="patchHelp=false"><i class="fas fa-times"></i></div>
+          <p class="font-bold text-yellow-400 border-b border-gray-700 pb-1 mb-2"><i class="fas fa-check-circle mr-1"></i> AIからの返答に合わせて選びましょう</p>
+          <div class="flex gap-3">
+            <div class="flex-1 bg-gray-900/50 p-2 rounded border border-gray-700 cursor-pointer hover:border-yellow-500 transition" @click="patchMode='manual'">
+              <strong class="text-yellow-300 block mb-1">① 手動パッチ (Manual)</strong>
+              <p class="text-[10px] text-gray-400 mb-1">AIが「変更前コード」「変更後コード」を別々に提示してきた場合</p>
+            </div>
+            <div class="flex-1 bg-gray-900/50 p-2 rounded border border-gray-700 cursor-pointer hover:border-pink-500 transition" @click="patchMode='json'">
+              <strong class="text-pink-300 block mb-1">② フルオート (Auto)</strong>
+              <p class="text-[10px] text-gray-400 mb-1">AIが「JSONデータ (<code>```json ...</code>)」を提示してきた場合</p>
+            </div>
+          </div>
+        </div>
+
+        <template v-if="patchMode==='manual'">
+          <div class="flex items-center justify-between gap-2 flex-shrink-0">
+            <p class="text-xs text-gray-400">
+              AIが出力した「変更前のコード」と「変更後のコード」を貼り付けてください。
+            </p>
+            <label class="flex items-center gap-2 text-xs text-gray-200 select-none cursor-pointer bg-gray-900/40 border border-gray-700 rounded px-3 py-1.5">
+              <input type="checkbox" v-model="patchIgnoreWhitespace" class="accent-yellow-500">
+              <span class="font-bold">改行・スペースを無視して検索</span>
+              <span class="text-gray-500">(デフォルトON)</span>
+            </label>
+          </div>
+
+          <div class="flex-1 flex flex-col gap-3 overflow-hidden mt-3">
+            <div class="flex-1 flex flex-col min-h-[180px]">
+              <div class="flex justify-between items-end mb-1">
+                <label class="text-xs font-bold text-red-300"><i class="fas fa-search"></i> 検索するコード (置換元)</label>
+                                <span v-if="patchFindInput" class="text-xs font-bold"
+                      :class="patchMatchCount > 0 ? 'text-red-400' : (patchMatchMessage.includes('もしかして') ? 'text-yellow-400 animate-pulse' : 'text-gray-500')">
+                  {{ patchMatchMessage }}
+                </span>
+              </div>
+              <textarea v-model="patchFindInput"
+                        class="flex-1 bg-gray-900 border border-red-900/50 rounded p-3 font-mono text-xs text-gray-200 focus:border-red-500 outline-none resize-y whitespace-pre"
+                        placeholder="ここに置換元のコードをそのまま貼り付け（改行OK）..."></textarea>
+            </div>
+            <div class="flex justify-center items-center flex-shrink-0 text-gray-500 h-4">
+              <i class="fas fa-arrow-down"></i>
+            </div>
+            <div class="flex-1 flex flex-col min-h-[180px]">
+              <label class="text-xs font-bold text-green-300 mb-1"><i class="fas fa-pen"></i> 置換後のコード (新しいコード)</label>
+              <textarea v-model="patchReplaceInput"
+                        class="flex-1 bg-gray-900 border border-green-900/50 rounded p-3 font-mono text-xs text-gray-200 focus:border-green-500 outline-none resize-y whitespace-pre"
+                        placeholder="...ここに置換後のコードをそのまま貼り付け（改行OK）"></textarea>
+            </div>
+          </div>
+
+          <div class="flex justify-end gap-2 mt-3 flex-shrink-0">
+            <button @click="modals.patch = false" class="px-4 py-2 text-sm rounded bg-gray-700 hover:bg-gray-600">閉じる</button>
+            <button @click="applyPatch" class="px-6 py-2 text-sm rounded bg-yellow-700 hover:bg-yellow-600 text-white font-bold shadow-lg">
+              置換を実行する
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="flex items-center justify-between gap-2 flex-shrink-0">
+            <p class="text-xs text-gray-400">
+              AIが出力した「AIが理解しやすい専用の言葉（JSONコードブロック）」をそのまま貼り付けてください。
+            </p>
+            <label class="flex items-center gap-2 text-xs text-gray-200 select-none cursor-pointer bg-gray-900/40 border border-gray-700 rounded px-3 py-1.5">
+              <input type="checkbox" v-model="patchIgnoreWhitespace" class="accent-pink-500">
+              <span class="font-bold">改行・スペースを無視</span>
+            </label>
+          </div>
+
+                    <div class="flex-1 flex flex-col mt-3">
+            <textarea v-model="patchJsonInput"
+                    class="flex-1 bg-gray-900 border border-pink-900/50 rounded p-3 font-mono text-xs text-gray-200 focus:border-pink-500 outline-none resize-none whitespace-pre"
+                    placeholder='[
+  {
+    "search": "...",
+    "replace": "..."
+  }
+]'></textarea>
+            <div v-if="patchJsonStatus" class="mt-2 px-3 py-2 rounded border text-xs font-bold flex items-center gap-2"
+                 :class="patchJsonStatus.type === 'error' ? 'bg-red-900/30 border-red-700/50 text-red-300' : 'bg-green-900/30 border-green-700/50 text-green-300'">
+              <i class="fas" :class="patchJsonStatus.type === 'error' ? 'fa-exclamation-triangle' : 'fa-check-circle'"></i>
+              {{ patchJsonStatus.message }}
+            </div>
+          </div>
+
+          <div class="flex justify-end gap-2 mt-3 flex-shrink-0">
+            <button @click="modals.patch = false" class="px-4 py-2 text-sm rounded bg-gray-700 hover:bg-gray-600">閉じる</button>
+            <button @click="applyAutoJsonPatch" class="px-6 py-2 text-sm rounded bg-pink-700 hover:bg-pink-600 text-white font-bold shadow-lg">
+              <i class="fas fa-magic mr-1"></i> フルオート置換を実行
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.db" class="fixed inset-0 bg-black bg-opacity-70 z-50 backdrop-blur-sm flex items-center justify-center">
+    <div class="glass-panel p-6 rounded-lg w-[92%] max-w-[900px] h-[84vh] shadow-2xl border border-gray-600 flex flex-col">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-bold text-blue-300 flex items-center gap-2">
+          <i class="fas fa-database"></i> IndexedDB 簡易表示
+        </h3>
+        <div class="flex items-center gap-2">
+          <button @click="refreshDbDump"
+                  class="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-xs font-bold">
+            <i class="fas fa-rotate"></i> 再取得
+          </button>
+          <button @click="modals.db=false"
+                  class="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-xs font-bold">
+            <i class="fas fa-times"></i> 閉じる
+          </button>
+        </div>
+      </div>
+
+      <div class="mt-2 text-[11px] text-gray-400 leading-relaxed">
+        ・プレビュー側(iframe)に対してメッセージで取得します。<br>
+        ・対応ブラウザでは <span class="kbd">indexedDB.databases()</span> を使います（未対応の場合は一部情報のみ）。
+      </div>
+
+      <div class="mt-4 flex-1 overflow-auto bg-gray-900/50 border border-gray-700 rounded p-3">
+        <div v-if="dbDump.loading" class="text-gray-400 text-sm">
+          <i class="fas fa-spinner fa-spin"></i> 取得中...
+        </div>
+
+        <div v-else-if="dbDump.error" class="text-red-300 text-sm whitespace-pre-wrap">
+          {{ dbDump.error }}
+        </div>
+
+        <div v-else-if="dbDump.items.length===0" class="text-gray-400 text-sm">
+          データベースが見つかりません（または未対応）。
+        </div>
+
+        <div v-else class="space-y-3">
+          <div v-for="db in dbDump.items" :key="db.name"
+               class="rounded border border-gray-700 bg-gray-800/60 overflow-hidden">
+            <div class="px-3 py-2 bg-gray-900/70 border-b border-gray-700 flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-sm font-bold text-gray-100 truncate">
+                  {{ db.name }} <span class="text-[11px] text-gray-400 font-normal">v{{ db.version }}</span>
+                </div>
+                <div class="text-[11px] text-gray-400">
+                  stores: {{ db.stores?.length || 0 }}
+                </div>
+              </div>
+              <button class="px-2 py-1 text-[10px] rounded bg-gray-800 hover:bg-gray-700 border border-gray-700"
+                      @click="db.open=!db.open">
+                {{ db.open ? '閉じる' : '開く' }}
+              </button>
+            </div>
+
+            <div v-if="db.open" class="p-3 space-y-2">
+              <div v-if="(db.stores||[]).length===0" class="text-gray-400 text-sm">
+                store情報なし（取得できませんでした）
+              </div>
+              <div v-for="st in (db.stores||[])" :key="st.name"
+                   class="rounded border border-gray-700 bg-gray-900/60 p-2">
+                <div class="flex items-center justify-between">
+                  <div class="text-sm font-bold text-blue-200">{{ st.name }}</div>
+                  <div class="text-[11px] text-gray-400">count: {{ st.count }}</div>
+                </div>
+                <div class="text-[11px] text-gray-400 mt-1 break-all">
+                  keyPath: {{ st.keyPath ?? '(none)' }} / autoIncrement: {{ st.autoIncrement ? 'true' : 'false' }}
+                </div>
+                <details class="mt-2">
+                  <summary class="text-[11px] text-gray-300 cursor-pointer">サンプルキー（最大20件）</summary>
+                  <pre class="mt-2 text-[10px] text-gray-200 whitespace-pre-wrap">{{ JSON.stringify(st.sampleKeys||[], null, 2) }}</pre>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-[10px] text-gray-500">
+          ※ セキュリティ上、プレビュー側のDB取得は「読み取りのみ」です（削除/更新はしません）。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.help" class="fixed inset-0 bg-black bg-opacity-70 z-50 backdrop-blur-sm flex items-center justify-center">
+    <div class="glass-panel p-0 rounded-lg w-[800px] max-w-full h-[85vh] shadow-2xl border border-gray-600 flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between px-6 py-4 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+        <div class="flex items-center gap-4">
+          <h3 class="text-lg font-bold text-white flex items-center gap-2">
+            <i class="fas fa-book-open text-green-400"></i> AppStudio 使い方ガイド
+          </h3>
+          <div class="flex bg-gray-900 rounded p-1">
+            <button @click="helpTab='beginner'" 
+                    class="px-3 py-1 rounded text-xs font-bold transition"
+                    :class="helpTab==='beginner' ? 'bg-green-600 text-white shadow' : 'text-gray-400 hover:text-gray-200'">
+              🔰 はじめての方へ
+            </button>
+            <button @click="helpTab='advanced'" 
+                    class="px-3 py-1 rounded text-xs font-bold transition"
+                    :class="helpTab==='advanced' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-gray-200'">
+              🔧 Technical Guide
+            </button>
+          </div>
+        </div>
+        <button @click="markHelpSeen" class="text-gray-400 hover:text-white">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+            <div class="flex-1 overflow-y-auto p-8 text-gray-300 bg-forge-900">
+        
+        
+        <div v-if="helpTab==='beginner'" class="space-y-10 animate-fade-in">
+          <section class="space-y-4">
+            <h4 class="text-2xl font-bold text-white border-b border-gray-700 pb-2">
+              🚀 はじめよう：知識ゼロからのアプリ開発
+            </h4>
+            <p class="text-sm leading-relaxed">
+              AppStudioは、<b>「AIにお願いして、アプリを作ってもらう」</b>ための場所です。
+              プログラミングの知識は一切不要です。あなたの言葉で「こんなアプリが欲しい」と伝えるだけで、すぐにアプリが出来上がります。
+              <br><br>
+              ブラウザだけで動作し、作成したファイルはあなたのPC内に安全に保存されます。
+              このアプリ自体も、このアプリを使って開発・改良されています（Dogfooding）。あなたも「欲しいツールを自分で作る」体験をぜひ楽しんでください。
+            </p>
+          </section>
+
+          <section>
+            <h4 class="text-lg font-bold text-blue-300 mb-4 flex items-center gap-2">
+              <i class="fas fa-route"></i> 開発の4ステップ
+            </h4>
+            
+            <div class="space-y-6 relative border-l-2 border-gray-700 ml-3 pl-6 pb-2">
+              
+              <div class="relative">
+                <span class="absolute -left-[33px] top-0 w-8 h-8 bg-blue-900 border-2 border-blue-500 rounded-full flex items-center justify-center text-white font-bold text-xs">1</span>
+                <h5 class="font-bold text-white mb-1">プロジェクトの準備</h5>
+                <p class="text-xs text-gray-400 mb-2">
+                  まずは左上のフォルダアイコン <i class="fas fa-folder text-yellow-500"></i> から開発モードを選びます。
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div class="bg-gray-800 p-2 rounded border border-gray-700">
+                    <strong class="text-blue-300">📁 プロジェクトモード (推奨)</strong><br>
+                    フォルダを1つ指定してアプリを作ります。保存するたびに履歴がファイルとして残るため、いつでも過去の状態に戻せます。
+                  </div>
+                  <div class="bg-gray-800 p-2 rounded border border-gray-700">
+                    <strong class="text-green-300">📄 単発アプリモード</strong><br>
+                    履歴管理なしで、1枚のHTMLファイルをサクッと作りたい時に使います。
+                  </div>
+                </div>
+              </div>
+
+              <div class="relative">
+                <span class="absolute -left-[33px] top-0 w-8 h-8 bg-gray-700 border-2 border-gray-500 rounded-full flex items-center justify-center text-white font-bold text-xs">2</span>
+                <h5 class="font-bold text-white mb-1">実行・プレビュー</h5>
+                <p class="text-xs text-gray-400 mb-2">
+                  エディタにコードがある状態で <button class="px-2 py-0.5 bg-green-700 text-white rounded text-[10px]"><i class="fas fa-play"></i> 実行</button> を押すと、右側の画面でアプリが動きます。
+                </p>
+                <ul class="list-disc list-inside text-xs text-gray-400">
+                  <li>デバイス切り替えボタンで、スマホやPCの画面サイズを確認できます。</li>
+                  <li><i class="fas fa-external-link-alt"></i> <b>別ウインドウ表示</b>を使うと、ブラウザの全画面で動作確認でき、より広く画面を使えます。</li>
+                </ul>
+              </div>
+
+              <div class="relative">
+                <span class="absolute -left-[33px] top-0 w-8 h-8 bg-purple-900 border-2 border-purple-500 rounded-full flex items-center justify-center text-white font-bold text-xs">3</span>
+                <h5 class="font-bold text-white mb-1">AIに指示・修正</h5>
+                <p class="text-xs text-gray-400 mb-2">
+                  <button class="px-2 py-0.5 bg-purple-800 text-purple-100 border border-purple-600 rounded text-[10px]"><i class="fas fa-robot"></i> AI指示</button> ボタンが開発の要です。
+                </p>
+                <div class="space-y-2">
+                  <div class="bg-gray-800/50 p-2 rounded border border-gray-600">
+                    <span class="text-blue-300 font-bold text-xs">① 全コード生成 (初期作成)</span>
+                    <p class="text-[11px] text-gray-400">
+                      「TODOアプリを作って」のように指示し、AIにコード全体を書かせます。出来上がったコードをエディタに<b>「全クリア」→「貼り付け」</b>して実行します。
+                    </p>
+                  </div>
+                  <div class="bg-gray-800/50 p-2 rounded border border-gray-600">
+                    <span class="text-pink-300 font-bold text-xs">③ 部分修正 (フルオート)</span>
+                    <p class="text-[11px] text-gray-400">
+                      複数の変更を一括で行う場合に便利です。AIが作った「専用の言葉(JSON)」をコピーし、<button class="px-2 py-0.5 bg-pink-700 text-white border border-pink-600 rounded text-[10px]"><i class="fas fa-magic"></i> フルオート</button> 画面に貼り付けると、すべて自動で適用されます。
+                    </p>
+                  </div>
+                  <div class="bg-gray-800/50 p-2 rounded border border-gray-600">
+                    <span class="text-yellow-300 font-bold text-xs">② 部分修正 (手動パッチ)</span>
+                    <p class="text-[11px] text-gray-400">
+                      もしフルオートでうまく修正できない場合は、こちらを使います。AIが教えてくれる「変更前のコード」と「変更後のコード」をそれぞれの欄に貼り付けて、手動で置換を実行します。
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="relative">
+                <span class="absolute -left-[33px] top-0 w-8 h-8 bg-blue-900 border-2 border-blue-500 rounded-full flex items-center justify-center text-white font-bold text-xs">4</span>
+                <h5 class="font-bold text-white mb-1">保存・履歴管理</h5>
+                <p class="text-xs text-gray-400">
+                  <button class="px-2 py-0.5 bg-blue-600 text-white rounded text-[10px]"><i class="fas fa-save"></i> 保存</button> を押すとファイルに保存されます。<br>
+                  プロジェクトモードなら、保存のたびに日時付きファイルとして履歴が積み上がります。
+                  左側のサイドバーからいつでも過去のバージョンをクリックして復元（読み込み）が可能です。
+                </p>
+              </div>
+
+            </div>
+          </section>
+
+          <section>
+            <h4 class="text-lg font-bold text-white mb-3 border-b border-gray-700 pb-2">
+              <i class="fas fa-lightbulb text-orange-400 mr-2"></i>開発のヒント (初心者向け)
+            </h4>
+            <div class="space-y-3 text-xs text-gray-300">
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                <strong class="text-yellow-300 block mb-1">Q. 最初の指示のコツは？</strong>
+                <p>
+                  最初は<b>「絶対に考慮してほしいこと」だけを最小限</b>伝えて、細かい設計はAIに任せてプロトタイプを作らせましょう。<br>
+                  まずは動くものを作り、そこから「部分修正」で理想に近づけていくスタイルのほうが、AI開発はうまくいきます。
+                </p>
+              </div>
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+              <strong class="text-orange-300 block mb-1">Q. 何を作ればいいかわからない時は？</strong>
+              <p class="mb-2">
+                画面上部の <button class="px-2 py-0.5 bg-teal-700 text-white border border-teal-600 rounded text-[10px]"><i class="fas fa-comments"></i> AIに相談</button> ボタンを使ってみてください。
+              </p>
+              <p class="text-xs text-gray-400">
+                「次に実装すべき機能を提案して」などのトピックを選ぶだけで、AIがアイデアを出してくれます。<br>
+                相談内容はコードに直接反映されないので、まずはここでアイデアを固めてから「AI指示」で作成依頼をするとスムーズです。
+              </p>
+            </div>
+            </div>
+          </section>
+
+          <section>
+            <h4 class="text-lg font-bold text-white mb-3 border-b border-gray-700 pb-2">
+              <i class="fas fa-shapes text-purple-400 mr-2"></i>作れるアプリの例
+            </h4>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-gray-300">
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                <strong class="text-blue-300 block mb-1"><i class="fas fa-briefcase"></i> 仕事に役立つ</strong>
+                <ul class="list-disc list-inside opacity-80">
+                  <li>会議用カウントダウンタイマー</li>
+                  <li>Markdownメモエディタ</li>
+                  <li>見積書・請求書PDF生成ツール</li>
+                  <li>カンバン方式タスク管理ボード</li>
+                </ul>
+              </div>
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                <strong class="text-green-300 block mb-1"><i class="fas fa-coffee"></i> 生活に役立つ</strong>
+                <ul class="list-disc list-inside opacity-80">
+                  <li>買い物リスト・冷蔵庫在庫管理</li>
+                  <li>習慣トラッカー（ハビットチェーン）</li>
+                  <li>シンプルな家計簿・支出グラフ</li>
+                  <li>ポモドーロ・タイマー</li>
+                </ul>
+              </div>
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                <strong class="text-pink-300 block mb-1"><i class="fas fa-language"></i> 語学学習に役立つ</strong>
+                <ul class="list-disc list-inside opacity-80">
+                  <li>英単語フラッシュカード</li>
+                  <li>音声認識を使った発音チェックアプリ</li>
+                  <li>AIと会話する英会話チャットボット</li>
+                  <li>ディクテーション練習プレーヤー</li>
+                </ul>
+              </div>
+              <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                <strong class="text-yellow-300 block mb-1"><i class="fas fa-gamepad"></i> ゲーム・エンタメ</strong>
+                <ul class="list-disc list-inside opacity-80">
+                  <li>落ち物パズル（テトリス風）</li>
+                  <li>ブロック崩し・インベーダー風</li>
+                  <li>選択肢で進むノベルゲーム</li>
+                  <li>放置系クリッカーゲーム</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        
+        <div v-else class="space-y-10 animate-fade-in">
+          <section class="space-y-4">
+            <h4 class="text-2xl font-bold text-white border-b border-gray-700 pb-2">
+              🛠️ AppStudio Technical Overview
+            </h4>
+            <p class="text-sm leading-relaxed">
+              AppStudioは、<b>AI-Native Development (Vibe Coding)</b> を具現化した、ブラウザ完結型の統合開発環境です。
+              全てのアーティファクトは単一のHTMLファイルに集約され、LocalFileSystem APIを通じてローカル環境で永続化されます。
+              <br><br>
+              AIに自然言語で指示を出し、生成されたコードを即座にプレビュー・実行するサイクルを高速に回すことで、従来のコーディングとは異なる次元の生産性を提供します。
+            </p>
+            <div class="grid grid-cols-2 gap-4 mt-4">
+              <div class="bg-gray-800 p-3 rounded border border-gray-700 text-xs">
+                <strong class="text-blue-300 block mb-1">Architecture</strong>
+                Vue.js + Tailwind CSS + Monaco Editorをランタイムで動作させ、iframe内のサンドボックス環境でプレビューを実行します。ビルド不要のHot Reloadを実現しています。
+              </div>
+              <div class="bg-gray-800 p-3 rounded border border-gray-700 text-xs">
+                <strong class="text-purple-300 block mb-1">Single File Concept</strong>
+                作成されるアプリは、HTML/CSS/JSすべてが1ファイル(`index.html`)に含まれます。これによりポータビリティが最大化され、配布や共有が容易になります。
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h4 class="text-lg font-bold text-blue-300 mb-4">
+              <i class="fas fa-code-branch mr-2"></i>Advanced Features & Internals
+            </h4>
+            <ul class="space-y-4 text-sm">
+              <li class="bg-gray-800/50 p-3 rounded border border-gray-700">
+                <strong class="text-white block mb-1"><i class="fas fa-file-code text-yellow-400 mr-2"></i>AI Patching Strategy (JSON/Manual)</strong>
+                <p class="text-gray-400 text-xs mt-1">
+                  コード全体の再生成（Full Gen）だけでなく、差分のみを適用する「Patch Mode」を搭載しています。
+                  <b>JSON Mode:</b> AIに `search` / `replace` ブロックを含むJSONを出力させ、Monaco EditorのAPIを用いて安全に置換を適用します。エンティティ参照の揺らぎ（<code>&amp;lt;</code> vs <code><</code>）も自動補正します。
+                  <b>Manual Mode:</b> AIがdiff形式で出力した場合などに、手動で置換元/置換先を指定してパッチを適用できます。
+                </p>
+              </li>
+              <li class="bg-gray-800/50 p-3 rounded border border-gray-700">
+                <strong class="text-white block mb-1"><i class="fas fa-database text-green-400 mr-2"></i>IndexedDB Debugger</strong>
+                <p class="text-gray-400 text-xs mt-1">
+                  プレビュー環境（iframe）内のIndexedDBを、親ウィンドウから非同期でダンプ・可視化するデバッガを内蔵しています。
+                  `postMessage` を介してデータを取得するため、クロスオリジン制約下（null origin）でも動作するように設計されています。
+                  これにより、永続化データを持つアプリ（ToDo、家計簿など）のデバッグが容易になります。
+                </p>
+              </li>
+              <li class="bg-gray-800/50 p-3 rounded border border-gray-700">
+                <strong class="text-white block mb-1"><i class="fas fa-shield-alt text-red-400 mr-2"></i>Security Injection</strong>
+                <p class="text-gray-400 text-xs mt-1">
+                  設定により、AIへの指示プロンプトに強力なセキュリティ制約（No Fetch / No External Transmission）を自動注入できます。
+                  これにより、生成されるコードが外部サーバーへデータを送信したり、意図しないCDNを読み込むことを防ぎ、完全ローカル完結型のアプリ開発を強制できます。
+                  企業内利用や機密データを扱うアプリのプロトタイピングに最適です。
+                </p>
+              </li>
+            </ul>
+          </section>
+
+          <section>
+            <h4 class="text-lg font-bold text-white mb-3 border-b border-gray-700 pb-2">
+              <i class="fas fa-terminal text-gray-400 mr-2"></i>Tips for Engineers
+            </h4>
+            <div class="text-xs text-gray-400 space-y-2">
+              <p>● <b>Console Hook:</b> プレビュー環境の `console.log/error/warn` はフックされ、`postMessage` 経由でエディタ下部のコンソールパネルに転送されます。iframe内のエラーも即座に把握できます。</p>
+              <p>● <b>External Window:</b> マルチモニタ環境では「別ウインドウ表示」が推奨です。ネイティブのChrome DevToolsがフル機能で使用でき、モバイルエミュレーションやネットワーク監視も可能です。</p>
+              <p>● <b>Refactoring:</b> AIに「リファクタリングして」「コメントを追記して」と指示し、`Full Code` モードで再生成させることで、スパゲッティ化したコードを整理・ドキュメント化できます。</p>
+              <p>● <b>Tech Spec Generation:</b> 「AIに相談」機能で「技術仕様書を書いて」と依頼すると、コードを解析してMD形式の仕様書を出力させることができます。</p>
+            </div>
+          </section>
+        </div>
+
+      </div>
+      <div class="p-4 bg-gray-800 border-t border-gray-700 flex justify-end">
+        <button @click="markHelpSeen" class="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold transition shadow-lg">
+          理解した
+        </button>
+      </div>
+    </div>
+  </div>
+
+    <div v-if="modals.consult" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 backdrop-blur-sm">
+    <div class="glass-panel p-6 rounded-lg w-[600px] max-w-[95%] shadow-2xl border border-gray-600 flex flex-col">
+      <h3 class="text-lg font-bold mb-3 text-white flex items-center gap-2">
+        <i class="fas fa-comments text-teal-400"></i> AIに相談・アドバイスをもらう
+      </h3>
+            <div class="mb-4">
+        <p class="text-xs text-gray-400 mb-2">
+          現在のアプリコードをAIに共有し、改善点やアイデアを相談できます。
+        </p>
+        <div class="bg-yellow-900/30 border border-yellow-700/50 rounded p-2 text-[10px] text-yellow-200 flex gap-2 items-start">
+          <i class="fas fa-info-circle mt-0.5 text-yellow-400"></i>
+          <span class="leading-relaxed">
+             <b>確認:</b> ここでの会話は「相談」のみです。アプリのコードや画面には<b>自動反映されません</b>。<br>
+             反映させるには、AIのアドバイスを元に「AI指示」を行うか、コードを手動で修正してください。
+          </span>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto mb-4">
+        <label class="block text-xs font-bold text-gray-300 mb-2">相談したい内容（複数選択可）</label>
+        <div class="space-y-2 mb-4">
+          <label v-for="topic in consultTopics" :key="topic.label" 
+                 class="flex items-center gap-2 text-sm text-gray-200 cursor-pointer bg-gray-800/50 p-2 rounded hover:bg-gray-700 border border-gray-700">
+            <input type="checkbox" v-model="topic.checked" class="accent-teal-500">
+            <span>{{ topic.label }}</span>
+          </label>
+        </div>
+
+        <label class="block text-xs font-bold text-gray-300 mb-2">詳しく聞きたいこと（自由記述）</label>
+        <textarea v-model="consultFreeInput" 
+                  class="w-full h-24 bg-gray-900 border border-gray-600 rounded p-3 text-sm text-white focus:border-teal-500 outline-none resize-none"
+                  placeholder="例：もっと使いやすくするにはどうしたらいい？"></textarea>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2 border-t border-gray-700">
+        <button @click="modals.consult = false" class="px-4 py-2 rounded bg-gray-700 hover:bg-gray-600 text-sm text-white">閉じる</button>
+        <button @click="generateConsultPrompt" 
+                class="px-6 py-2 rounded font-bold text-white shadow-lg flex items-center gap-2 bg-teal-600 hover:bg-teal-500">
+          <i class="fas fa-clipboard-list"></i> 相談プロンプトをコピー
+        </button>
+      </div>
+      <div v-if="aiMessage" class="mt-2 text-center text-xs text-green-400 font-bold">
+        {{ aiMessage }}
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.settings" class="fixed inset-0 bg-black bg-opacity-70 z-50 backdrop-blur-sm flex items-center justify-center">
+    <div class="glass-panel p-6 rounded-lg w-[420px] shadow-2xl border border-gray-600">
+      <h3 class="text-lg font-bold mb-4 text-gray-200 flex items-center gap-2"><i class="fas fa-cog"></i> 設定</h3>
+      <div class="mb-4">
+        <label class="block text-xs font-bold text-gray-400 mb-2">このサイトで変更を保存できる場所 (プロジェクト保存先)</label>
+        <div v-if="projectRootHandle" class="text-xs text-green-400 mb-3 flex items-center gap-2 bg-green-900/30 p-2 rounded border border-green-800">
+           <i class="fas fa-check-circle"></i> 指定済み: <span class="font-mono">{{ projectRootHandle.name }}</span>
+        </div>
+        <div v-else class="text-xs text-gray-500 mb-3 bg-gray-800 p-2 rounded border border-gray-700">
+           未指定 (作成のたびに選択します)
+        </div>
+                <button @click="setProjectRoot" class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-white border border-gray-600 flex items-center justify-center gap-2">
+           <i class="fas fa-folder-tree"></i> プロジェクト保存フォルダを指定
+        </button>
+      </div>
+
+      <div class="mb-4 border-t border-gray-700 pt-4">
+        <label class="block text-xs font-bold text-gray-400 mb-2"><i class="fas fa-shield-alt"></i> セキュリティ設定 (AI指示へ自動追加)</label>
+        <label class="flex items-center gap-2 text-xs text-gray-200 mb-2 cursor-pointer hover:bg-gray-800 p-1 rounded">
+          <input type="checkbox" v-model="securitySettings.noFetch" @change="saveSecuritySettings" class="accent-red-500">
+          <span>外部ウェブサイトからの情報取得禁止</span>
+          <span class="text-gray-500 text-[10px]">(CDN等は使わず自己完結)</span>
+        </label>
+        <label class="flex items-center gap-2 text-xs text-gray-200 cursor-pointer hover:bg-gray-800 p-1 rounded">
+          <input type="checkbox" v-model="securitySettings.noTransmit" @change="saveSecuritySettings" class="accent-red-500">
+          <span>外部への情報伝送禁止</span>
+          <span class="text-gray-500 text-[10px]">(外部サーバ通信を行わない)</span>
+        </label>
+      </div>
+
+            <div class="flex justify-end pt-2 border-t border-gray-700">
+        <button @click="modals.settings=false" class="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded text-xs text-white">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="modals.diff" class="fixed inset-0 bg-black bg-opacity-70 z-[100] backdrop-blur-sm flex items-center justify-center">
+    <div class="glass-panel p-0 rounded-lg w-[95%] max-w-[1400px] h-[90vh] shadow-2xl border border-gray-600 flex flex-col overflow-hidden bg-[#1e1e1e]">
+      <div class="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] border-b border-black flex-shrink-0">
+        <div class="flex items-center gap-4">
+          <h3 class="text-sm font-bold text-gray-200 flex items-center gap-2">
+            <i class="fas fa-columns text-blue-400"></i> 履歴差分比較
+          </h3>
+          <div class="flex items-center gap-8 text-xs font-mono">
+            <div class="flex items-center gap-2">
+              <span class="w-3 h-3 bg-[#4e4e4e] border border-gray-500 inline-block"></span>
+              <span class="text-gray-400">Original (履歴: {{ diffTargetDate }})</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-3 h-3 bg-[#1e1e1e] border border-blue-500 inline-block"></span>
+              <span class="text-gray-100">Modified (現在)</span>
+            </div>
+          </div>
+        </div>
+        <button @click="closeDiffModal" class="text-gray-400 hover:text-white px-3 py-1">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div id="diff-editor-container" class="flex-1 w-full h-full relative"></div>
+    </div>
+  </div>
+
+</div>
+
+<template id="default-code">
+<!DOCTYPE html>
+<html lang="ja">
+<head>
 /**
 * ==========================================================================
 * A P P   S T U D I O   :   W h e r e   I d e a s   T a k e   S h a p e
@@ -351,7 +1804,7 @@
 
    <div id="app-menu-btn">≡</div>
    <div id="guide-tooltip">AppStudioの左上のボタンからスタート</div>
-   <button id="skip-btn" onclick="skipDemo()">Skip Intro &gt;&gt;</button>
+   <button id="skip-btn" onclick="skipDemo()">Skip Intro >></button>
 
    <canvas id="starfield"></canvas>
    <div id="code-stream"></div>
@@ -958,3 +2411,2299 @@ runSequenceOverride();
   "runId": "4780841a6e9fa85024b865202886927f"
 }
 </script>
+</body>
+</html>
+</template>
+<script>
+const { createApp, ref, reactive, onMounted, nextTick, computed, watch } = Vue;
+
+createApp({
+  setup() {
+    // --- STATE ---
+    const appMode = ref('single'); // 'project' | 'single'
+    const projectHandle = ref(null);
+    const projectDisplayName = ref('開発をはじめる');
+    const currentFileHandle = ref(null);
+    const currentFileName = ref('');
+
+        // Library / History
+    const libraryFiles = ref([]);
+    const libraryScanStatus = ref('');
+
+    // History Tooltip
+    const hoveredHistory = ref(null);
+    const showHistoryDetail = (e, text) => {
+      if (!text) return;
+      const rect = e.target.getBoundingClientRect();
+      // Adjust position to avoid bottom overflow
+      const top = Math.min(rect.top, window.innerHeight - 200);
+      hoveredHistory.value = { text, top, left: rect.right + 12 };
+    };
+    const hideHistoryDetail = () => { hoveredHistory.value = null; };
+
+    // History mode
+    const historyMode = ref('flat'); // 'flat' (履歴) | 'group' (RootからのPJ一覧)
+
+    // UI state
+                    const menus = reactive({ file: false });
+    const modals = reactive({ ai: false, save: false, patch: false, db: false, settings: false, help: false, consult: false, diff: false, github: false });
+    const projectRootHandle = ref(null);
+    
+    // GitHub State
+    const githubSettings = reactive({ token: '', repo: '', branch: 'main', path: 'index.html' });
+    const githubStatus = ref('');
+    const githubUrl = ref('');
+
+    // Consult State
+            const consultTopics = ref([
+      { label: 'このアプリの機能やコードをレビューして（良い点・改善点）', checked: false },
+      { label: '今のアプリに100点満点で点数をつけてもらう', checked: false },
+      { label: '次に実装すべき、便利で面白い機能を提案して', checked: false },
+      { label: 'このアプリの使い方（説明書）を書いて', checked: false },
+      { label: 'バグやエラーがないかチェックして', checked: false },
+      { label: '【上級者向】このアプリの技術仕様書（内部構造の解説）を書いて', checked: false }
+    ]);
+    const consultFreeInput = ref('');
+    const securitySettings = reactive({ noFetch: true, noTransmit: true });
+    const isSidebarOpen = ref(true);
+
+            const aiTab = ref('json'); // 'full' | 'patch' | 'json''
+    const aiInstruction = ref(''); // 蓄積用(①)
+    const aiPromptInput = ref(''); // モーダル入力用
+    const aiMessage = ref('');
+        const aiIncludeFullCode = ref(true);
+    const aiHelp = ref(false);
+    const patchHelp = ref(false);
+    const showRecipes = ref(false);
+    const helpTab = ref('beginner');
+
+    const saveComment = ref('');
+    const saveFilename = ref('');
+
+    const patchMode = ref('manual'); // 'manual' | 'json'
+    const patchFindInput = ref('');
+    const patchReplaceInput = ref('');
+    const patchJsonInput = ref('');
+    const patchIgnoreWhitespace = ref(true);
+
+    // Patch Status
+        const patchMatchCount = ref(0);
+    const patchMatchMessage = ref('');
+    const patchJsonStatus = ref(null);
+
+    const updatePatchStatus = () => {
+      if (!editor || !patchFindInput.value) {
+        patchMatchCount.value = 0;
+        patchMatchMessage.value = '';
+        return;
+      }
+      const find = patchFindInput.value;
+      const full = editor.getValue();
+      let count = 0;
+
+      if (!patchIgnoreWhitespace.value) {
+        // 完全一致
+        let pos = 0;
+        while (true) {
+          const idx = full.indexOf(find, pos);
+          if (idx === -1) break;
+          count++;
+          pos = idx + find.length;
+        }
+      } else {
+        // 空白無視
+        const normFind = normalizeFind(find);
+        if (!normFind) { count = 0; }
+        else {
+          const { compact } = buildCompacted(full);
+          let pos = 0;
+          while (true) {
+            const idx = compact.indexOf(normFind, pos);
+            if (idx === -1) break;
+            count++;
+            pos = idx + normFind.length;
+          }
+        }
+      }
+            patchMatchCount.value = count;
+      if (count > 0) {
+        patchMatchMessage.value = `該当箇所あり (${count}件)`;
+      } else {
+        const hint = findPossibleRange(find);
+        patchMatchMessage.value = hint ? hint.replace(/[\r\n]+/g, ' ').trim() : '該当なし';
+      }
+    };
+
+        watch([patchFindInput, patchIgnoreWhitespace], updatePatchStatus);
+
+    const updateJsonStatus = () => {
+      if (!patchJsonInput.value.trim()) { patchJsonStatus.value = null; return; }
+      try {
+        let jsonStr = patchJsonInput.value.trim();
+        jsonStr = jsonStr.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
+        const start = jsonStr.indexOf('['); const end = jsonStr.lastIndexOf(']');
+        if (start > -1 && end > start) jsonStr = jsonStr.substring(start, end + 1);
+        const items = JSON.parse(jsonStr);
+        if (!Array.isArray(items)) throw new Error("配列形式ではありません");
+
+        const full = editor ? editor.getValue() : '';
+        let validCount = 0;
+        const total = items.length;
+        const { compact: compactFull } = patchIgnoreWhitespace.value ? buildCompacted(full) : { compact: null };
+        const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
+        const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
+        for (const item of items) {
+          if (!item.search) continue;
+          const raw = item.search;
+          const cands = new Set([raw, decodeEnt(raw), decodeEnt(decodeEnt(raw)), encodeEnt(raw)]);
+          let matchFound = false;
+          for (const cand of cands) {
+            if (!patchIgnoreWhitespace.value) {
+              if (full.indexOf(cand) !== -1) { matchFound = true; break; }
+            } else {
+              const cf = normalizeFind(cand);
+              if (cf && compactFull.indexOf(cf) !== -1) { matchFound = true; break; }
+            }
+          }
+          if (matchFound) validCount++;
+        }
+        if (validCount === total) {
+          patchJsonStatus.value = { type: 'success', message: `OK: 全${total}件の置換箇所が見つかりました` };
+        } else {
+          patchJsonStatus.value = { type: 'error', message: `注意: ${validCount}/${total}件のみ一致。残り${total - validCount}件が見つかりません` };
+        }
+      } catch(e) {
+        patchJsonStatus.value = { type: 'error', message: "JSON解析エラー: " + e.message };
+      }
+    };
+    watch([patchJsonInput, patchIgnoreWhitespace], updateJsonStatus);
+
+    // Emulator Device Mode
+    const deviceModes = [
+      { name: 'PC/スマホ/タブレット', width: '100%', height: '100%', icon: 'fa-desktop' },
+      { name: 'iPhone SE', width: '375px', height: '667px', icon: 'fa-mobile-screen-button' },
+      { name: 'iPhone 14/15', width: '393px', height: '852px', icon: 'fa-mobile-screen' },
+      { name: 'iPad Air', width: '820px', height: '1180px', icon: 'fa-tablet-screen-button' },
+      { name: 'Android (Pixel)', width: '412px', height: '915px', icon: 'fa-mobile' },
+    ];
+        const currentDevice = ref(deviceModes[0]);
+    const isRunLoading = ref(false);
+
+    // Find/Replace custom UI
+    const findUI = reactive({
+      open: false,
+      mode: 'find',
+      find: '',
+      replace: '',
+            matchCount: 0,
+      ignoreWhitespace: true,
+      hint: '',
+      x: 8,
+      y: 8
+    });
+    const findInputEl = ref(null);
+    const replaceInputEl = ref(null);
+    let lastFindDirection = 1;
+
+    // Drag state for Find UI
+    let dragActive = false;
+    let dragStartX = 0, dragStartY = 0;
+    let dragBaseX = 0, dragBaseY = 0;
+
+    // Editor & logs
+    const editorStats = reactive({ lines: 0, chars: 0 });
+    const consoleLogs = ref([]);
+    let editor = null;
+
+    // Full window handle
+    let fullWin = null;
+    let lastRunId = null;
+
+    // Current identity
+    const currentAppTitle = ref('');
+    const currentGroupKey = ref('');
+    const currentMeta = reactive({});
+
+    // DB dump state
+    const dbDump = reactive({ loading: false, error: '', items: [] });
+
+    // Toast
+    const toasts = ref([]);
+    const pushToast = (title, message, iconClass='fa-circle-info text-sky-300', timeout=2200) => {
+      const id = crypto.getRandomValues(new Uint32Array(1))[0].toString(16) + Date.now().toString(16);
+      toasts.value.push({ id, title, message, iconClass });
+      setTimeout(() => {
+        const idx = toasts.value.findIndex(t => t.id === id);
+        if (idx >= 0) toasts.value.splice(idx, 1);
+      }, Math.max(900, timeout|0));
+    };
+
+        // --- SETTINGS DB ---
+    const DB_CFG = { name: 'AppStudio_DB', store: 'handles', key: 'root_dir' };
+    const getDB = () => new Promise((res, rej) => {
+      const r = indexedDB.open(DB_CFG.name, 1);
+      r.onupgradeneeded = e => {
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains(DB_CFG.store)) db.createObjectStore(DB_CFG.store);
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    const saveRootHandle = async (h) => {
+      try { const db = await getDB(); db.transaction(DB_CFG.store, 'readwrite').objectStore(DB_CFG.store).put(h, DB_CFG.key); } catch(e){}
+    };
+    const loadRootHandle = async () => {
+      try {
+        const db = await getDB();
+        return new Promise(r => {
+          const req = db.transaction(DB_CFG.store, 'readonly').objectStore(DB_CFG.store).get(DB_CFG.key);
+          req.onsuccess = () => r(req.result);
+          req.onerror = () => r(null);
+        });
+      } catch { return null; }
+    };
+    const saveSecuritySettings = async () => {
+      try {
+        const db = await getDB();
+        const tx = db.transaction(DB_CFG.store, 'readwrite').objectStore(DB_CFG.store);
+        tx.put(securitySettings.noFetch, 'sec_no_fetch');
+        tx.put(securitySettings.noTransmit, 'sec_no_transmit');
+      } catch(e){}
+    };
+    const loadSecuritySettings = async () => {
+      try {
+        const db = await getDB();
+        const store = db.transaction(DB_CFG.store, 'readonly').objectStore(DB_CFG.store);
+        const g1 = new Promise(r => store.get('sec_no_fetch').onsuccess = e => r(e.target.result));
+        const g2 = new Promise(r => store.get('sec_no_transmit').onsuccess = e => r(e.target.result));
+        const [v1, v2] = await Promise.all([g1, g2]);
+        if (v1 !== undefined) securitySettings.noFetch = v1;
+        if (v2 !== undefined) securitySettings.noTransmit = v2;
+      } catch { }
+    };
+
+        // --- UTIL ---
+    const codeHistory = ref([]);
+
+    const saveHistory = () => {
+      if(!editor) return;
+      const current = editor.getValue();
+      if(codeHistory.value.length > 0 && codeHistory.value[codeHistory.value.length-1] === current) return;
+      codeHistory.value.push(current);
+      if(codeHistory.value.length > 50) codeHistory.value.shift();
+    };
+
+    const undoCode = () => {
+      if(codeHistory.value.length === 0) return;
+      const prev = codeHistory.value.pop();
+      if(editor) {
+        editor.setValue(prev);
+        syncIdentityFromCode(prev);
+        runEmulator(true); // 履歴保存せず実行
+        pushToast('Undo', '直前のコードに戻しました', 'fa-undo text-gray-300');
+      }
+    };
+
+    const genId = () => {
+      const buf = new Uint8Array(16);
+      crypto.getRandomValues(buf);
+      return Array.from(buf).map(b=>b.toString(16).padStart(2,'0')).join('');
+    };
+
+    const safeParseJSON = (s) => {
+      try { return JSON.parse(s); } catch { return null; }
+    };
+
+    const extractTitleFromHtml = (html) => {
+      const m = html.match(/<title>([\s\S]*?)<\/title>/i);
+      return m ? m[1].trim() : '';
+    };
+
+    const extractMeta = (html) => {
+      const m = html.match(/<script id="lfs-meta"\s+type="application\/json">\s*([\s\S]*?)\s*<\/script>/i);
+      if (!m) return {};
+      const j = safeParseJSON(m[1]);
+      return j && typeof j === 'object' ? j : {};
+    };
+
+    const normalizeTs = (isoOrAny) => {
+      if (!isoOrAny) return null;
+      const d = new Date(isoOrAny);
+      if (isNaN(d.getTime())) return null;
+      return d;
+    };
+
+    const formatLocal = (d) => {
+      try { return d.toLocaleString(); } catch { return String(d); }
+    };
+
+const injectMeta = (code, metaObj) => {
+      const meta = JSON.stringify(metaObj, null, 2);
+      // 自己置換回避: このコード自体が検索に引っかからないよう、タグ文字列を分割して結合する
+      const tagOpen = '<script id="lfs-meta" ' + 'type="application/json">';
+      const tagClose = '<\/script>';
+      const tag = `\n${tagOpen}\n${meta}\n${tagClose}\n`;
+
+      // 検索厳密化: コード内のregexリテラル(\s+等)にマッチしないよう、属性間のスペースも厳密なパターンにする
+      const pattern = /<script id="lfs-meta" type="application\/json">[\s\S]*?<\/script>\s*/i;
+
+      if (pattern.test(code)) {
+        return code.replace(pattern, () => tag);
+      }
+      if (code.match(/<\/body>/i)) return code.replace(/<\/body>/i, () => tag + '</body>');
+      return code + tag;
+    };
+
+    const miniHash = (s) => {
+      // fast, stable (not crypto) - enough for grouping fallback
+      let h = 2166136261;
+      for (let i=0;i<s.length;i++){
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return (h>>>0).toString(16).padStart(8,'0');
+    };
+
+    const stableGroupKeyFromFile = (text, meta, fileName) => {
+      // Priority: meta.appId > meta.createdAt > (title + first 200 chars hash)
+      if (meta && typeof meta.appId === 'string' && meta.appId.length >= 8) return `app:${meta.appId}`;
+      if (meta && typeof meta.createdAt === 'string' && meta.createdAt.length >= 8) return `crt:${meta.createdAt}`;
+      const title = (meta && meta.title) ? String(meta.title) : (extractTitleFromHtml(text) || '');
+      const head = (text || '').slice(0, 240);
+      return `h:${miniHash(title + '|' + head + '|' + (fileName||''))}`;
+    };
+
+    const syncIdentityFromCode = (code) => {
+      const meta = extractMeta(code);
+      const title = meta.title || extractTitleFromHtml(code) || 'App';
+      const groupKey = stableGroupKeyFromFile(code, meta, currentFileName.value);
+
+      currentAppTitle.value = title;
+      currentGroupKey.value = groupKey;
+
+      Object.keys(currentMeta).forEach(k => delete currentMeta[k]);
+      Object.assign(currentMeta, meta);
+    };
+
+    const markHelpSeen = () => {
+      modals.help = false;
+      try { localStorage.setItem('appstudio_v4_help_seen', '1'); } catch(e){}
+    };
+
+    // --- MONACO INIT ---
+    onMounted(async () => {
+      // 初回訪問ならヘルプを表示
+      try {
+        if (!localStorage.getItem('appstudio_v4_help_seen')) {
+          modals.help = true;
+        }
+      } catch(e){}
+
+      initMonaco();
+
+            // 設定保存されたフォルダハンドルの復元
+      const saved = await loadRootHandle();
+      if (saved) projectRootHandle.value = saved;
+      await loadSecuritySettings();
+
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.relative')) menus.file = false;
+      });
+
+      window.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runEmulator(); return; }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFindReplace('find'); return; }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); openFindReplace('replace'); return; }
+        if (e.key === 'Escape' && findUI.open) { e.preventDefault(); closeFindReplace(); return; }
+      });
+
+      // message receiver from preview iframes/windows
+            window.addEventListener('message', (e) => {
+        const d = e.data || {};
+        if (d?.type === 'request_ai_fix') {
+          const err = d.error || 'Unknown Error';
+          const code = editor ? editor.getValue() : '';
+          const prompt = `以下のアプリコードを実行したところ、エラーが発生しました。\n原因を特定し、修正してください。\n\n[エラーメッセージ]\n${err}\n\n[現在のコード]\n\`\`\`html\n${code}\n\`\`\``;
+          navigator.clipboard.writeText(prompt).then(() => {
+             pushToast('コピーしました', '「AI指示」を開いて貼り付けてください', 'fas fa-robot text-purple-300', 4000);
+          }).catch(e => alert("コピー失敗: " + e));
+          return;
+        }
+        if (d?.type === 'console') {
+          consoleLogs.value.push({ type: d.l, message: d.m });
+          return;
+        }
+        if (d?.type === 'idb_dump_result') {
+          if (d?.runId && d.runId !== lastRunId) return;
+          dbDump.loading = false;
+          dbDump.error = d.error || '';
+          dbDump.items = Array.isArray(d.items) ? d.items : [];
+          return;
+        }
+      });
+    });
+
+    const initMonaco = () => {
+      require.config({ paths: { 'vs': 'https://unpkg.com/monaco-editor@0.45.0/min/vs' }});
+      require(['vs/editor/editor.main'], function () {
+        editor = monaco.editor.create(document.getElementById('editor-container'), {
+          value: document.getElementById('default-code').innerHTML.trim(),
+          language: 'html',
+          theme: 'vs-dark',
+          automaticLayout: true,
+          minimap: { enabled: false },
+          fontSize: 14,
+          scrollBeyondLastLine: false,
+        });
+
+        const updateStats = () => {
+          const model = editor.getModel();
+          editorStats.lines = model.getLineCount();
+          editorStats.chars = model.getValueLength();
+        };
+
+        editor.onDidChangeModelContent(() => {
+          updateStats();
+          if (findUI.open) recomputeMatchCount();
+        });
+        updateStats();
+
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF, () => openFindReplace('find'));
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyH, () => openFindReplace('replace'));
+        editor.addCommand(monaco.KeyCode.Escape, () => { if(findUI.open) closeFindReplace(); });
+
+        // identity from initial code
+        syncIdentityFromCode(editor.getValue());
+        runEmulator();
+      });
+    };
+
+        // --- FIND/REPLACE (WHITESPACE-IGNORING SUPPORTED) ---
+    const buildCompacted = (src) => {
+      const compactChars = [];
+      const mapNormToOrig = [];
+      for (let i = 0; i < src.length; i++) {
+        const ch = src[i];
+        // Ignore whitespace, quotes, and backticks for robust AI matching
+        if (/[\s'"`]/.test(ch)) continue;
+        mapNormToOrig.push(i);
+        compactChars.push(ch);
+      }
+      return { compact: compactChars.join(""), mapNormToOrig };
+    };
+    const normalizeFind = (src) => (src || '').replace(/[\s'"`]+/g, '');
+
+    const getMatches = () => {
+      if(!editor) return [];
+      const qRaw = findUI.find || '';
+      if(!qRaw) { findUI.matchCount = 0; return []; }
+
+      const model = editor.getModel();
+      const full = model.getValue();
+
+      if(!findUI.ignoreWhitespace) {
+        const matches = model.findMatches(qRaw, true, false, false, null, true);
+        findUI.matchCount = matches.length;
+        return matches;
+      }
+
+      const compactFind = normalizeFind(qRaw);
+      if(!compactFind) { findUI.matchCount = 0; return []; }
+
+      const { compact: compactFull, mapNormToOrig } = buildCompacted(full);
+
+      const ranges = [];
+      let idx = 0;
+      while(true) {
+        const p = compactFull.indexOf(compactFind, idx);
+        if (p === -1) break;
+
+        const startOrig = mapNormToOrig[p];
+        const endOrig = mapNormToOrig[p + compactFind.length - 1] + 1;
+
+        const startPos = model.getPositionAt(startOrig);
+        const endPos = model.getPositionAt(endOrig);
+        const range = new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column);
+
+        ranges.push({ range });
+        idx = p + Math.max(1, compactFind.length);
+      }
+
+      findUI.matchCount = ranges.length;
+      return ranges;
+    };
+
+        const recomputeMatchCount = () => {
+      getMatches();
+      if (findUI.matchCount === 0 && findUI.find) {
+        const hint = findPossibleRange(findUI.find);
+        findUI.hint = hint ? hint.replace(/[\r\n]+/g, ' ').trim() : '';
+      } else {
+        findUI.hint = '';
+      }
+    };
+
+    const selectMatch = (match) => {
+      if(!editor || !match?.range) return;
+      editor.setSelection(match.range);
+      editor.revealRangeInCenter(match.range);
+      editor.focus();
+    };
+
+    const openFindReplace = (mode='find') => {
+      findUI.open = true;
+      findUI.mode = mode;
+
+      recomputeMatchCount();
+      setTimeout(() => {
+        if (mode === 'replace') (replaceInputEl.value || findInputEl.value)?.focus?.();
+        else (findInputEl.value || replaceInputEl.value)?.focus?.();
+      }, 0);
+    };
+
+    const closeFindReplace = () => {
+      findUI.open = false;
+      editor?.focus?.();
+      stopDragFindUI();
+    };
+
+    const findNext = () => {
+      if(!editor) return;
+      lastFindDirection = 1;
+      const matches = getMatches();
+      if(!matches.length) return;
+
+      const model = editor.getModel();
+      const sel = editor.getSelection();
+      const curOffset = sel ? model.getOffsetAt(sel.getStartPosition()) : 0;
+
+      let next = null;
+      for (const m of matches) {
+        const off = model.getOffsetAt(m.range.getStartPosition());
+        if (off > curOffset) { next = m; break; }
+      }
+      if(!next) next = matches[0];
+      selectMatch(next);
+    };
+
+    const findPrev = () => {
+      if(!editor) return;
+      lastFindDirection = -1;
+      const matches = getMatches();
+      if(!matches.length) return;
+
+      const model = editor.getModel();
+      const sel = editor.getSelection();
+      const curOffset = sel ? model.getOffsetAt(sel.getStartPosition()) : 0;
+
+      let prev = null;
+      for (let i = matches.length - 1; i >= 0; i--) {
+        const off = model.getOffsetAt(matches[i].range.getStartPosition());
+        if (off < curOffset) { prev = matches[i]; break; }
+      }
+      if(!prev) prev = matches[matches.length - 1];
+      selectMatch(prev);
+    };
+
+    const replaceOne = () => {
+      if(!editor) return;
+      const qRaw = findUI.find || '';
+      if(!qRaw) return;
+
+      (lastFindDirection === -1 ? findPrev : findNext)();
+      const model = editor.getModel();
+      const sel = editor.getSelection();
+      if(!sel || sel.isEmpty()) return;
+
+      const selectedText = model.getValueInRange(sel);
+
+      if(!findUI.ignoreWhitespace) {
+        if(selectedText !== qRaw) return;
+        editor.executeEdits('findui-replace-one', [{ range: sel, text: findUI.replace }]);
+        editor.pushUndoStop();
+        findUI.find = ''; findUI.replace = ''; // 成功時にクリア
+        recomputeMatchCount();
+        pushToast('置換が完了しました', '1件置換しました。', 'fa-circle-check text-emerald-300', 1800);
+        return;
+      }
+
+      if (normalizeFind(selectedText) !== normalizeFind(qRaw)) return;
+
+      editor.executeEdits('findui-replace-one', [{ range: sel, text: findUI.replace }]);
+      editor.pushUndoStop();
+      findUI.find = ''; findUI.replace = ''; // 成功時にクリア
+      recomputeMatchCount();
+      pushToast('置換が完了しました', '1件置換しました。（空白無視）', 'fa-circle-check text-emerald-300', 2000);
+    };
+
+    const replaceAll = () => {
+      if(!editor) return;
+      const qRaw = findUI.find || '';
+      if(!qRaw) return;
+
+      const model = editor.getModel();
+      const full = model.getValue();
+      const replaceText = findUI.replace;
+
+      if(!findUI.ignoreWhitespace) {
+        const matches = model.findMatches(qRaw, true, false, false, null, true);
+        findUI.matchCount = matches.length;
+        if(!matches.length) return;
+
+        const edits = matches
+          .slice()
+          .sort((a,b) => model.getOffsetAt(b.range.getStartPosition()) - model.getOffsetAt(a.range.getStartPosition()))
+          .map(m => ({ range: m.range, text: replaceText }));
+
+        editor.pushUndoStop();
+        editor.executeEdits('findui-replace-all', edits);
+        editor.pushUndoStop();
+        findUI.find = ''; findUI.replace = ''; // 成功時にクリア
+        recomputeMatchCount();
+        pushToast('全置換が完了しました', `${edits.length}件置換しました。`, 'fa-circle-check text-emerald-300', 2200);
+        return;
+      }
+
+      const compactFind = normalizeFind(qRaw);
+      if(!compactFind) return;
+
+      const { compact: compactFull, mapNormToOrig } = buildCompacted(full);
+
+      const found = [];
+      let idx = 0;
+      while(true) {
+        const p = compactFull.indexOf(compactFind, idx);
+        if (p === -1) break;
+
+        const startOrig = mapNormToOrig[p];
+        const endOrig = mapNormToOrig[p + compactFind.length - 1] + 1;
+
+        const startPos = model.getPositionAt(startOrig);
+        const endPos = model.getPositionAt(endOrig);
+        const range = new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column);
+        found.push(range);
+
+        idx = p + Math.max(1, compactFind.length);
+      }
+
+      findUI.matchCount = found.length;
+      if (!found.length) return;
+
+      const edits = found
+        .slice()
+        .sort((a,b) => model.getOffsetAt(b.getStartPosition()) - model.getOffsetAt(a.getStartPosition()))
+        .map(r => ({ range: r, text: replaceText }));
+
+      editor.pushUndoStop();
+      editor.executeEdits('findui-replace-all', edits);
+      editor.pushUndoStop();
+      findUI.find = ''; findUI.replace = ''; // 成功時にクリア
+      recomputeMatchCount();
+      pushToast('全置換が完了しました', `${edits.length}件置換しました。（空白無視）`, 'fa-circle-check text-emerald-300', 2400);
+    };
+
+    // --- DRAG FIND UI ---
+    const startDragFindUI = (e) => {
+      dragActive = true;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      dragBaseX = findUI.x || 0;
+      dragBaseY = findUI.y || 0;
+
+      window.addEventListener('mousemove', onDragFindUI);
+      window.addEventListener('mouseup', stopDragFindUI, { once: true });
+    };
+
+    const onDragFindUI = (e) => {
+      if (!dragActive) return;
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+
+      const pane = document.getElementById('editor-pane');
+      const rect = pane ? pane.getBoundingClientRect() : { left:0, top:0, width: window.innerWidth, height: window.innerHeight };
+
+      const maxX = Math.max(8, rect.width - 60);
+      const maxY = Math.max(8, rect.height - 60);
+
+      let nx = dragBaseX + dx;
+      let ny = dragBaseY + dy;
+
+      nx = Math.min(maxX, Math.max(8, nx));
+      ny = Math.min(maxY, Math.max(8, ny));
+
+      findUI.x = nx;
+      findUI.y = ny;
+    };
+
+    const stopDragFindUI = () => {
+      dragActive = false;
+      window.removeEventListener('mousemove', onDragFindUI);
+    };
+
+    // --- PROJECT & FILE OPS ---
+    const setProject = async (handle, name) => {
+      projectHandle.value = handle;
+      projectDisplayName.value = name;
+      appMode.value = 'project';
+      menus.file = false;
+    };
+
+    const ensureDirPermission = async (dir) => {
+      try{
+        if (!dir) return false;
+        if (!dir.queryPermission) return true;
+        let p = await dir.queryPermission({ mode: 'readwrite' });
+        if (p !== 'granted') p = await dir.requestPermission({ mode: 'readwrite' });
+        return p === 'granted';
+      } catch {
+        return true;
+      }
+    };
+
+    const refreshLibrary = async () => {
+      // CLEAR
+      libraryFiles.value = [];
+      libraryScanStatus.value = 'scanning...';
+
+      // MODE CHECK
+      const isProjectListMode = (historyMode.value === 'group');
+      const targetHandle = isProjectListMode ? projectRootHandle.value : projectHandle.value;
+
+      if (!targetHandle) {
+        libraryScanStatus.value = isProjectListMode ? 'Root folder not set' : 'No project selected';
+        if(isProjectListMode) {
+          pushToast('設定が必要です', '「設定」からプロジェクト保存先の親フォルダ(Root)を指定してください。', 'fa-cog text-gray-300', 4000);
+          modals.settings = true;
+        }
+        return;
+      }
+
+      // PERMISSION CHECK
+      const ok = await ensureDirPermission(targetHandle);
+      if (!ok) {
+        libraryScanStatus.value = 'permission denied';
+        pushToast('アクセス権限エラー', 'フォルダへのアクセスが拒否されました。再度選択してください。', 'fa-triangle-exclamation text-amber-300', 3400);
+        return;
+      }
+
+      const files = [];
+      let scanned = 0;
+      let readable = 0;
+      let failed = 0;
+
+      try {
+        if (isProjectListMode) {
+          // --- ROOT SCAN (Project List) ---
+          // ルート直下のフォルダを列挙し、各フォルダ内で「最も新しいHTML」を1つ探す
+          for await (const entry of targetHandle.values()) {
+            if (entry.kind !== 'directory') continue; // プロジェクトフォルダのみ対象
+            
+            scanned++;
+            let latestFile = null;
+            let latestTime = 0;
+
+            // 各プロジェクトフォルダ内を浅くスキャンして最新を探す
+            try {
+               for await (const subEntry of entry.values()) {
+                 if (subEntry.kind !== 'file') continue;
+                 const low = subEntry.name.toLowerCase();
+                 if(!(low.endsWith('.html') || low.endsWith('.htm'))) continue;
+                 
+                 const file = await subEntry.getFile();
+                 const mTime = file.lastModified;
+                 if (mTime > latestTime) {
+                   latestTime = mTime;
+                   latestFile = { handle: subEntry, file: file };
+                 }
+               }
+            } catch(e) { console.warn("Subfolder scan error", e); }
+
+            if (latestFile) {
+               try {
+                 const text = await latestFile.file.text();
+                 const meta = extractMeta(text);
+                 const title = meta.title || entry.name; // メタタイトル優先、なければフォルダ名
+                 const savedAt = new Date(latestTime);
+                 
+                 // プロジェクト一覧モードでは、グループキーを「フォルダ名」にする
+                 const groupKey = entry.name; 
+
+                 readable++;
+                 files.push({
+                    name: entry.name + '/' + latestFile.handle.name,
+                    handle: latestFile.handle,
+                    content: text,
+                    meta,
+                    displayTitle: title,
+                    savedAt,
+                    savedAtStr: formatLocal(savedAt),
+                    groupKey,
+                    relPath: entry.name + '/',
+                    projectDirHandle: entry,
+                    projectName: entry.name
+                  });
+               } catch (e) {
+                 failed++;
+               }
+            }
+          }
+        } else {
+          // --- CURRENT PROJECT SCAN (Flat History) ---
+          // 既存の再帰スキャン
+          const walk = async (dirHandle, relPath, depth) => {
+            if (depth > 10) return;
+            for await (const entry of dirHandle.values()) {
+              if(entry.kind === 'directory') {
+                await walk(entry, relPath + entry.name + '/', depth + 1);
+                continue;
+              }
+              if(entry.kind !== 'file') continue;
+              const low = entry.name.toLowerCase();
+              if(!(low.endsWith('.html') || low.endsWith('.htm'))) continue;
+
+              scanned++;
+              try {
+                const file = await entry.getFile();
+                const text = await file.text();
+                const meta = extractMeta(text);
+                const title = meta.title || extractTitleFromHtml(text) || entry.name;
+                const savedAt = normalizeTs(meta.savedAt) || new Date(file.lastModified);
+                const groupKey = stableGroupKeyFromFile(text, meta, entry.name);
+
+                readable++;
+                files.push({
+                  name: relPath + entry.name,
+                  handle: entry,
+                  content: text,
+                  meta,
+                  displayTitle: title,
+                  savedAt,
+                  savedAtStr: formatLocal(savedAt),
+                  groupKey,
+                  relPath
+                });
+              } catch(e) {
+                failed++;
+                files.push({
+                  name: relPath + entry.name,
+                  handle: entry,
+                  content: '',
+                  meta: {},
+                  displayTitle: entry.name,
+                  savedAt: new Date(0),
+                  savedAtStr: '(read error)',
+                  groupKey: stableGroupKeyFromFile(entry.name, {}, entry.name),
+                  relPath,
+                  readError: true
+                });
+              }
+            }
+          };
+          await walk(targetHandle, '', 0);
+        }
+
+        // ソート: 新しい順
+        files.sort((a,b) => (b.savedAt?.getTime?.()||0) - (a.savedAt?.getTime?.()||0));
+        libraryFiles.value = files;
+
+        libraryScanStatus.value = `done (scanned:${scanned}, items:${files.length})`;
+        
+        if (files.length === 0) {
+          pushToast('アイテムが見つかりません', '対象フォルダにHTMLが見つかりませんでした。', 'fa-circle-info text-sky-300', 2000);
+        } else {
+          const modeName = isProjectListMode ? 'プロジェクト一覧' : '履歴';
+          pushToast(`${modeName}を更新`, `${files.length}件 読み込みました。`, 'fa-rotate text-teal-300', 1500);
+        }
+
+      } catch(e) {
+        libraryScanStatus.value = 'error';
+        console.error(e);
+        pushToast('読込エラー', e?.message || String(e), 'fa-triangle-exclamation text-rose-300', 3600);
+      }
+    };
+
+    const revealCurrentFolder = async () => {
+      const h = (historyMode.value === 'group') ? projectRootHandle.value : projectHandle.value;
+      if (!h) {
+        pushToast('確認不可', 'フォルダが選択されていません。', 'fa-triangle-exclamation text-amber-300');
+        return;
+      }
+      // Browser Security Limitation: Cannot open explorer directly.
+      alert(`【現在の保存フォルダ】\n📂 ${h.name}\n\n※ブラウザのセキュリティ制限により、直接エクスプローラを起動することはできません。\n上記フォルダを手動で開いてください。`);
+    };
+
+    const setProjectRoot = async () => {
+      try {
+        const handle = await window.showDirectoryPicker({ id: 'localforge_root', mode: 'readwrite' });
+        projectRootHandle.value = handle;
+        await saveRootHandle(handle);
+        pushToast('設定完了', `親フォルダを「${handle.name}」に設定・保存しました。`, 'fa-check text-green-300');
+      } catch(e) { /* cancel */ }
+    };
+
+    const createNewProject = async () => {
+      try {
+        // 設定済みの親フォルダがあればそれを使う（フォルダ選択ダイアログをスキップ）
+        let parentHandle = projectRootHandle.value;
+        if (!parentHandle) {
+          parentHandle = await window.showDirectoryPicker({ id: 'localforge_root', mode: 'readwrite' });
+        } else {
+          // 権限確認のみ行う（ダイアログは出ない、または権限許可のみ）
+          await ensureDirPermission(parentHandle);
+        }
+
+        const name = prompt("新規プロジェクトフォルダ名を入力してください:", "NewApp");
+        if(!name) return;
+
+        const newDirHandle = await parentHandle.getDirectoryHandle(name, { create: true });
+        await setProject(newDirHandle, name);
+
+        const fileHandle = await newDirHandle.getFileHandle('index_v1.html', { create: true });
+        const writable = await fileHandle.createWritable();
+        
+        // 新規時はテンプレートを使わず、エディタを空にする
+        const seed = "";
+
+        const nowIso = new Date().toISOString();
+        const seedMeta = {
+          schema: 2,
+          appId: genId(),
+          createdAt: nowIso,
+          savedAt: nowIso,
+          title: 'New App',
+          aiInstruction: '',
+          comment: 'initial',
+          runId: ''
+        };
+        
+                const initialContent = injectMeta(seed, seedMeta);
+        await writable.write(initialContent);
+        await writable.close();
+
+        // 作成した空ファイルをエディタに即時ロード
+        editor.setValue(''); // エディタ上は空欄スタート
+        currentFileName.value = 'index_v1.html';
+        syncIdentityFromCode(initialContent); // メタ情報はメモリに保持
+        runEmulator();
+
+                await refreshLibrary();
+        pushToast('作成完了', `プロジェクト「${name}」を作成し、エディタをクリアしました。`, 'fa-check text-green-300', 2000);
+        
+        // 初心者向け誘導トースト
+        setTimeout(() => {
+          pushToast('💡 次のステップ', 'まずは「AI指示」ボタンから「全コード生成」を試してみましょう！', 'fa-robot text-purple-300', 4000);
+        }, 1200);
+      } catch(e) {
+        console.error(e);
+        if(e.name !== 'AbortError') alert("作成エラー: " + e.message);
+      }
+    };
+
+    const openProjectFolder = async () => {
+      try {
+        // 設定済みの親フォルダがあればそこを起点に開く
+        const opts = { id: 'localforge_root', mode: 'readwrite' };
+        if (projectRootHandle.value) opts.startIn = projectRootHandle.value;
+
+        const handle = await window.showDirectoryPicker(opts);
+        await setProject(handle, handle.name);
+
+        isSidebarOpen.value = true;
+        historyMode.value = 'flat';
+
+        await refreshLibrary();
+      } catch(e) { if(e.name !== 'AbortError') alert(e.message); }
+    };
+
+    const openSingleFile = async () => {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: 'HTML Files', accept: {'text/html': ['.html', '.htm']} }]
+        });
+        const file = await handle.getFile();
+        const text = await file.text();
+
+        editor.setValue(text);
+        currentFileHandle.value = handle;
+        currentFileName.value = file.name;
+        projectDisplayName.value = file.name + " (単発)";
+        appMode.value = 'single';
+        menus.file = false;
+
+        syncIdentityFromCode(text);
+        runEmulator();
+      } catch(e) { if(e.name !== 'AbortError') alert(e.message); }
+    };
+
+const createNewSingleApp = async () => {
+  // 目的：単発新規＝エディタを完全ブランク（コピペ即開始）
+  menus.file = false;
+
+  appMode.value = 'single';
+      projectHandle.value = null;
+      currentFileHandle.value = null;
+      currentFileName.value = '';
+      projectDisplayName.value = '開発をはじめる';
+
+      // ★ここが本題：テンプレを入れず空にする
+  editor.setValue('');
+
+  // identity / meta を空コードとして同期
+  syncIdentityFromCode('');
+  aiInstruction.value = '';
+  saveComment.value = '';
+
+// プレビューは「空コード」表示にする（エディタは空のまま）
+    runEmulator();
+  pushToast('単発新規', 'エディタを空にしました。ここにそのまま貼り付けできます。', 'fa-circle-check text-emerald-300', 2200);
+
+  // 初心者向け誘導トースト
+  setTimeout(() => {
+    pushToast('💡 次のステップ', 'まずは「AI指示」ボタンから「全コード生成」を試してみましょう！', 'fa-robot text-purple-300', 4000);
+  }, 1200);
+};
+
+    const openProjectFromList = async (fileItem) => {
+      // 1. ファイルをロード
+      await loadFile(fileItem.handle);
+
+      // 2. そのプロジェクトフォルダを選択状態にする
+      if (fileItem.projectDirHandle) {
+        await setProject(fileItem.projectDirHandle, fileItem.projectName);
+        
+        // 3. モードを「このPJの履歴」に切り替え
+        historyMode.value = 'flat';
+        
+        // 4. 新しいプロジェクトで履歴再スキャン
+        await refreshLibrary();
+        
+        pushToast('プロジェクトを開きました', `${fileItem.projectName} に切り替えました。`, 'fa-folder-open text-blue-300');
+      }
+    };
+
+        const loadFile = async (handle) => {
+      codeHistory.value = [];
+      const file = await handle.getFile();
+      const text = await file.text();
+
+      editor.setValue(text);
+      currentFileName.value = handle.name;
+
+      syncIdentityFromCode(text);
+
+      // 新たに開いたときはリセット（引き継がない）
+      aiInstruction.value = '';
+      aiPromptInput.value = '';
+      saveComment.value = '';
+
+      runEmulator();
+    };
+
+    const runExternal = async (fileEntry) => {
+      // fileEntry can be from grouped/flat, should include handle
+      try{
+        const file = await fileEntry.handle.getFile();
+        const text = await file.text();
+        const runId = genId();
+        const shim = buildPreviewShim(runId);
+        const safeCode = injectShimIntoHtml(text, shim);
+        const blob = new Blob([safeCode], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        // 新規タブで開く (_blank)
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } catch(e){
+        alert("別窓実行に失敗: " + (e.message || String(e)));
+      }
+    };
+
+    // --- COMPUTED: GROUPED HISTORY ---
+    const libraryFilesFlat = computed(() => libraryFiles.value);
+
+    const groupedApps = computed(() => {
+      const map = new Map();
+      for (const f of libraryFiles.value) {
+        const key = f.groupKey || 'unknown';
+        if (!map.has(key)) map.set(key, { groupKey: key, versions: [], open: false });
+        map.get(key).versions.push(f);
+      }
+
+      const arr = Array.from(map.values()).map(grp => {
+        const versions = grp.versions.slice().sort((a,b)=> (b.savedAt?.getTime?.()||0) - (a.savedAt?.getTime?.()||0));
+        const latest = versions[0];
+        const latestTitle = latest?.displayTitle || '';
+        const latestAiInstruction = (latest?.meta?.aiInstruction || latest?.meta?.comment || '').trim();
+
+        return {
+          groupKey: grp.groupKey,
+          open: grp.open,
+          versions,
+          latestTitle,
+          latestAiInstruction
+        };
+      });
+
+      arr.sort((a,b)=> {
+        const at = a.versions[0]?.savedAt?.getTime?.()||0;
+        const bt = b.versions[0]?.savedAt?.getTime?.()||0;
+        return bt - at;
+      });
+
+      return arr;
+    });
+
+    // --- GITHUB INTEGRATION ---
+    onMounted(() => {
+      const savedGh = localStorage.getItem('appstudio_gh_config');
+      if(savedGh) { try { Object.assign(githubSettings, JSON.parse(savedGh)); } catch(e){} }
+    });
+
+    const publishToGithub = async () => {
+      githubStatus.value = 'Preparing...'; githubUrl.value = '';
+      const { token, repo, branch, path } = githubSettings;
+      if(!token || !repo || !path) { githubStatus.value = 'Error: Token, Repo, Path are required.'; return; }
+      
+      localStorage.setItem('appstudio_gh_config', JSON.stringify(githubSettings));
+      const headers = { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+
+      try {
+        githubStatus.value = 'Fetching user info...';
+        const userRes = await fetch('https://api.github.com/user', { headers });
+        if(!userRes.ok) throw new Error('Token invalid or network error');
+        const user = await userRes.json();
+        const owner = user.login;
+
+        githubStatus.value = `Checking repo ${owner}/${repo}...`;
+        let repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+        if(repoRes.status === 404) {
+          if(!confirm(`リポジトリ '${owner}/${repo}' が見つかりません。新規作成しますか？`)) throw new Error('Aborted');
+          githubStatus.value = 'Creating repository...';
+          const createRes = await fetch('https://api.github.com/user/repos', { method: 'POST', headers, body: JSON.stringify({ name: repo, auto_init: true }) });
+          if(!createRes.ok) throw new Error('Failed to create repo');
+          await new Promise(r => setTimeout(r, 2000));
+        }
+
+        githubStatus.value = 'Checking existing file...';
+        let sha = null;
+        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, { headers });
+        if(fileRes.ok) { const d = await fileRes.json(); sha = d.sha; }
+
+        githubStatus.value = 'Uploading content...';
+        const content = editor.getValue();
+        const contentBase64 = btoa(unescape(encodeURIComponent(content)));
+
+        const putRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+          method: 'PUT', headers,
+          body: JSON.stringify({ message: `Update ${path} via AppStudio`, content: contentBase64, branch: branch, sha: sha || undefined })
+        });
+        if(!putRes.ok) { const err = await putRes.json(); throw new Error(err.message); }
+
+        try { await fetch(`https://api.github.com/repos/${owner}/${repo}/pages`, { method: 'POST', headers, body: JSON.stringify({ source: { branch: branch, path: '/' } }) }); } catch(e){}
+
+        githubStatus.value = '✅ Upload Success!';
+        githubUrl.value = `https://${owner}.github.io/${repo}/${path === 'index.html' ? '' : path}`;
+        pushToast('Upload完了', 'GitHubへの反映に成功しました。', 'fab fa-github text-white');
+      } catch(e) {
+        githubStatus.value = 'Error: ' + e.message;
+      }
+    };
+
+    // --- SAVE LOGIC ---
+    const openSaveModal = () => {
+      // ①(蓄積)を②(初期値)に同期。ハンド修正(③)が空なら入れる。
+      if (!saveComment.value && aiInstruction.value) {
+        saveComment.value = aiInstruction.value;
+      }
+
+      const now = new Date();
+      const ts =
+        now.getFullYear() +
+        (now.getMonth()+1).toString().padStart(2,'0') +
+        now.getDate().toString().padStart(2,'0') + '_' +
+        now.getHours().toString().padStart(2,'0') +
+        now.getMinutes().toString().padStart(2,'0');
+
+      let base = (currentAppTitle.value || 'App').replace(/[\\\/:*?"<>|]/g,'_').slice(0,40);
+      if(!base) base = 'App';
+
+      saveFilename.value = `${base}_${ts}.html`;
+
+      // 単発アプリの場合は編集ログモーダルをスキップし、OS標準の保存ダイアログへ直行
+      if (appMode.value === 'single') {
+        performSave();
+        return;
+      }
+
+      modals.save = true;
+    };
+
+    const performSave = async () => {
+      try {
+        let filename = saveFilename.value || 'App.html';
+        if(!filename.toLowerCase().endsWith('.html')) filename += '.html';
+
+        const rawCode = editor.getValue();
+        const metaExisting = extractMeta(rawCode);
+
+        const nowIso = new Date().toISOString();
+
+                // Ensure identifiers
+        const title = metaExisting.title || extractTitleFromHtml(rawCode) || currentAppTitle.value || 'App';
+
+        // We keep appId stable if present; otherwise create (and set createdAt)
+        const finalMeta = { ...metaExisting };
+        
+        // エディタが空でタグがない場合、メモリ上の現在の情報を引き継ぐ
+        if (!finalMeta.appId && currentMeta.appId) finalMeta.appId = currentMeta.appId;
+        if (!finalMeta.createdAt && currentMeta.createdAt) finalMeta.createdAt = currentMeta.createdAt;
+
+        if (!finalMeta.appId) finalMeta.appId = genId();
+        if (!finalMeta.createdAt) finalMeta.createdAt = nowIso;
+
+        finalMeta.schema = 2;
+        finalMeta.title = title;
+        finalMeta.savedAt = nowIso;
+        
+        // ③が④に反映される（ハンド修正内容を正として両方に記録）
+        const finalNote = (saveComment.value || '').trim();
+        finalMeta.aiInstruction = finalNote;
+        finalMeta.comment = finalNote;
+        
+        finalMeta.sourceMode = appMode.value;
+        finalMeta.runId = lastRunId || '';
+
+        const codeWithMeta = injectMeta(rawCode, finalMeta);
+
+        if (appMode.value === 'project') {
+          if(!projectHandle.value) throw new Error("プロジェクトが未選択です。");
+
+          const newHandle = await projectHandle.value.getFileHandle(filename, { create: true });
+          const writable = await newHandle.createWritable();
+          await writable.write(codeWithMeta);
+          await writable.close();
+
+          currentFileName.value = filename;
+          syncIdentityFromCode(codeWithMeta);
+
+          await refreshLibrary();
+          modals.save = false;
+          // 保存完了でリセット
+          saveComment.value = '';
+          aiInstruction.value = '';
+          aiPromptInput.value = '';
+
+          editor.setValue(codeWithMeta);
+          alert("保存しました（プロジェクト内）: " + filename);
+          return;
+        }
+
+        if ('showSaveFilePicker' in window) {
+          const picker = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{ description: 'HTML Files', accept: { 'text/html': ['.html', '.htm'] } }]
+          });
+          const writable = await picker.createWritable();
+          await writable.write(codeWithMeta);
+          await writable.close();
+
+          currentFileHandle.value = picker;
+          currentFileName.value = filename;
+          projectDisplayName.value = filename + " (単発)";
+          syncIdentityFromCode(codeWithMeta);
+
+          modals.save = false;
+          // 保存完了でリセット
+          saveComment.value = '';
+          aiInstruction.value = '';
+          aiPromptInput.value = '';
+
+          editor.setValue(codeWithMeta);
+          alert("保存しました（指定先）: " + filename);
+          return;
+        }
+
+        // Fallback download
+        const blob = new Blob([codeWithMeta], {type: 'text/html'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+
+        currentFileName.value = filename;
+        projectDisplayName.value = filename + " (単発)";
+        syncIdentityFromCode(codeWithMeta);
+
+        modals.save = false;
+        saveComment.value = '';
+        aiInstruction.value = '';
+        aiPromptInput.value = '';
+        editor.setValue(codeWithMeta);
+        alert("ダウンロードで保存しました: " + filename);
+
+      } catch(e) {
+        if(e.name !== 'AbortError') alert("保存失敗: " + (e.message || String(e)));
+      }
+    };
+
+    // --- AI PROMPT ---
+            const openAiModal = () => {
+      // ランディングページ（未作成状態）での警告
+      if (projectDisplayName.value === '開発をはじめる') {
+        const msg = "【ヒント】\n現在はデモ画面（ランディングページ）です。\nこのまま指示を出すと、デモ用サンプルコードへの修正となります。\n\nはじめてアプリを作る場合は、キャンセルして左上のフォルダアイコンから\n「新規作成」を行ってから開始することをお勧めします。\n\nこのままAI指示画面を開きますか？";
+        if (!confirm(msg)) return;
+      }
+
+      modals.ai = true;
+      aiMessage.value = '';
+      aiPromptInput.value = ''; // 入力欄は常にクリア（過去の読込はしない）
+      // エディタが空なら自動で全コード生成モードにする
+      if (editor && !editor.getValue().trim()) {
+        aiTab.value = 'full';
+      }
+    };
+
+        const generateAndCopyPrompt = () => {
+      const input = (aiPromptInput.value || '').trim();
+      
+      // ①: 蓄積 (複数ある場合は連結)
+      if (input) {
+        const sep = aiInstruction.value ? '\n\n' : '';
+        aiInstruction.value = aiInstruction.value + sep + input;
+      }
+      // プロンプトには今回の入力を使う（空なら蓄積全体を使う）
+      const baseInst = input || aiInstruction.value || '';
+      const fullCode = editor ? editor.getValue() : '';
+
+      // セキュリティ指示の構成
+      let secNote = "";
+      if (securitySettings.noFetch) secNote += "\n- [セキュリティ制約] 外部ウェブサイトからの情報取得禁止: CDNや外部APIからのfetchは絶対に行わないでください。外部リソース(画像等)はDataURIかプレースホルダを使用し、JSライブラリが必要な場合はコード内にバンドルできる小規模なもののみ書いてください。\n";
+      if (securitySettings.noTransmit) secNote += "\n- [セキュリティ制約] 外部への情報伝送禁止: 外部サーバーへのデータ送信(POST/GET等)を含むコードは絶対に作成しないでください。localStorageやIndexedDBなどブラウザ内完結の保存機能のみ使用してください。\n";
+      
+      const inst = baseInst + (secNote ? ("\n\n[重要:セキュリティ設定]\n" + secNote) : "");
+
+      const cdnRule = securitySettings.noFetch
+         ? "- 外部ライブラリ(CDN)の使用は禁止します。必要なロジックはバニラJSで書くか、最小限のコードを内包してください。"
+         : "- 外部ライブラリはCDN(Tailwind, Vue, React等)を使用してよい。";
+
+      // 共通の役割設定
+      const roleDescription = "あなたはブラウザ上で動作する開発環境「AppStudio」のアシスタントAIです。";
+
+            let prompt = "";
+            if(aiTab.value === 'full') {
+        const commonInst = `\n[出力形式]\n1. 冒頭で、ユーザーに対して『AppStudioのエディタ画面（左側の大きなコード入力欄）の「全クリア」ボタンを押して内容を消去し、以下の新しいコードを貼り付けてください』と案内し、修正箇所・制約条件を簡潔に解説してください。\n2. その後、修正済みの完全なHTMLフルコードを出力してください。`;
+
+        if (aiIncludeFullCode.value) {
+          prompt =
+`${roleDescription}
+以下の現在のコードと指示に基づいて、単一のHTMLファイルで動作するウェブアプリを再構築（または新規作成）してください。
+
+[現在のコード]
+\`\`\`html
+${fullCode}
+\`\`\`
+
+[指示]
+${inst}
+
+[制約]
+- HTML, CSS, JSを一つのファイルにまとめること。
+${cdnRule}
+${commonInst}`; 
+        } else {
+          prompt =
+`${roleDescription}
+以下の指示に基づいて、単一のHTMLファイルで動作するウェブアプリを作成してください。
+
+[指示]
+${inst}
+
+[制約]
+- HTML, CSS, JSを一つのファイルにまとめること。
+${cdnRule}
+${commonInst}`; 
+        }
+                  } else if (aiTab.value !== 'json') {
+        const patchInst = `\n[重要：出力形式]\n私が手動でコードを置換しやすいように、以下の順序で出力してください。\n\n1. 冒頭で、ユーザーに対して『「修正を反映」ボタンを押し、「① 手動パッチ (Manual)」タブを使って適用してください』と案内してください。\n\n2. 修正方針・制約・改善案の簡潔な解説\n\n3. 変更コード（以下のフォーマット）\n※修正箇所が複数ある場合は、1-1, 1-2, 2-1, 2-2... のように通し番号をつけてください。\n\n# 1-1. 修正前 (Search)\n\`\`\`\n(ここに置換対象となる、現在のコードのユニークな数行～ブロックをそのまま書く)\n\`\`\`\n\n# 1-2. 修正後 (Replace)\n\`\`\`\n(ここに新しく置き換えるコードを書く)\n\`\`\`\n`;
+        if (aiIncludeFullCode.value) {
+          prompt =
+`${roleDescription}
+あなたはコード修正のエキスパートです。以下のアプリコードの一部を修正してください。
+
+[対象コード(全体)]
+\`\`\`html
+${fullCode}
+\`\`\`
+
+[修正指示]
+${inst}
+${patchInst}`; 
+        } else {
+          prompt =
+`${roleDescription}
+あなたはコード修正のエキスパートです。以下の修正指示に従って、既存アプリの一部修正パッチを作成してください。
+（※コードはここでは添付しません。）
+
+[修正指示]
+${inst}
+${patchInst}`; 
+        }
+      } else {
+        // JSON Auto Mode
+        const codeBlock = aiIncludeFullCode.value ? `[対象コード(全体)]\n\`\`\`html\n${fullCode}\n\`\`\`\n` : '';
+        prompt =
+`${roleDescription}
+あなたはコード修正のエキスパートです。以下のアプリコードの一部を修正してください。
+
+${codeBlock}
+[修正指示]
+${inst}
+
+[重要：出力形式]
+ツールで自動置換を行うため、以下の手順で出力してください。
+
+1. まず、ユーザーに対して『「修正を反映」ボタンを押し、「② フルオート (Auto)」タブに以下のJSONを貼り付けてください』と案内してください。
+2. 次に、修正方針・制約・改善案を簡潔に解説してください。
+3. 最後に、コード置換用のJSONデータを **Markdownコードブロック(\`\`\`json ... \`\`\`)** で出力してください。
+
+\`\`\`json
+[
+  {
+    "search": "(置換対象となる、現在のコードのユニークな数行～ブロックをそのまま書く。改行コード含む)",
+    "replace": "(新しく置き換えるコード)"
+  },
+  {
+    "search": "...",
+    "replace": "..."
+  }
+]
+\`\`\`
+`;
+      }
+
+            navigator.clipboard.writeText(prompt).then(() => {
+        aiMessage.value = "📋 コピーしました！AIチャットに貼り付けてください。";
+        setTimeout(() => aiMessage.value = '', 3000);
+      });
+    };
+
+    const openConsultModal = () => {
+      modals.consult = true;
+      aiMessage.value = '';
+      // Reset selection but keep free input maybe? No, reset all for fresh start.
+      consultTopics.value.forEach(t => t.checked = false);
+      consultFreeInput.value = '';
+    };
+
+    const generateConsultPrompt = () => {
+      const selected = consultTopics.value.filter(t => t.checked).map(t => '・' + t.label).join('\n');
+      const free = consultFreeInput.value.trim();
+      const query = [selected, free].filter(Boolean).join('\n\n[具体的な相談]\n');
+      
+      if(!query) {
+        alert("相談内容を選択するか、入力してください。");
+        return;
+      }
+
+      const fullCode = editor ? editor.getValue() : '';
+
+            // 技術仕様書モードか判定
+      const isTechSpec = consultTopics.value.some(t => t.checked && t.label.includes('技術仕様書'));
+      
+      let roleDesc = "あなたはプロのWebエンジニアであり、親切な相談相手です。";
+      let rules = `1. アプリの概要を把握した上で、親身になってアドバイスしてください。\n2. もし新しい機能追加やコード修正を提案する場合は、ユーザーがすぐに実行できるように、「AppStudioの『AI指示』画面に貼り付けるとそのまま使えるプロンプト例」を具体的に提示してください。\n（例：「〇〇機能を追加しましょう。その場合はAIに『～する機能を追加して』と指示すると良いですよ」）`;
+
+      if (isTechSpec) {
+        roleDesc = "あなたは熟練のソフトウェアアーキテクトです。";
+        rules = `1. 対象読者は中級以上のエンジニアです。専門用語を用いて、コードの構造、ロジック、データフローを正確かつ詳細に解説してください。\n2. HTML構造、CSS設計、JavaScriptの主要関数・変数について網羅的な「技術仕様書」を作成してください。\n3. 初心者への配慮は不要です。技術的な正確性と深さを最優先してください。`;
+      }
+
+      const prompt = 
+`${roleDesc}
+現在、私は「AppStudio」というツールを使って、ブラウザ上で動く単一HTMLファイルのWebアプリを開発しています。
+
+[現在のアプリコード]
+\`\`\`html
+${fullCode}
+\`\`\`
+
+[あなたへの相談]
+${query}
+
+[回答のルール]
+${rules}
+`;
+
+            // クリップボードコピー（非セキュア環境対応のフォールバック付き）
+      const doCopy = (txt) => {
+        if (navigator.clipboard && window.isSecureContext) {
+          return navigator.clipboard.writeText(txt);
+        }
+        return new Promise((resolve, reject) => {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = txt;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            resolve();
+          } catch(e) { reject(e); }
+        });
+      };
+
+      doCopy(prompt).then(() => {
+        aiMessage.value = "📋 コピーしました！AIのチャット欄に貼り付けてください。";
+        setTimeout(() => aiMessage.value = '', 5000);
+      }).catch(e => {
+        console.error(e);
+        alert("コピーに失敗しました。お手数ですが手動でコピーしてください。");
+      });
+    };
+
+            // --- PATCH ---
+    const openPatchModal = () => {
+      if (aiTab.value === 'json') {
+        patchMode.value = 'json';
+      } else {
+        patchMode.value = 'manual';
+      }
+
+      patchFindInput.value = '';
+      patchReplaceInput.value = '';
+      patchJsonInput.value = '';
+      patchIgnoreWhitespace.value = true;
+      patchMatchCount.value = 0;
+      patchMatchMessage.value = '';
+      modals.patch = true;
+    };
+
+    // 類似コードの場所を推定するヘルパー
+    const findPossibleRange = (rawSearch) => {
+      if (!editor || !rawSearch) return '';
+      try {
+        const model = editor.getModel();
+        // 空行を除いた有効な行を抽出
+        const lines = rawSearch.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 2);
+        if (lines.length < 2) return '';
+
+        const head = lines[0].replace(/\s/g, '');
+        const tail = lines[lines.length - 1].replace(/\s/g, '');
+        const maxLines = model.getLineCount();
+
+        // 全行走査して「先頭行」と「末尾行」が近くにある場所を探す
+        for (let i = 1; i <= maxLines; i++) {
+          const lineContent = model.getLineContent(i).replace(/\s/g, '');
+          if (lineContent.includes(head)) {
+             const estLines = rawSearch.split(/\r?\n/).length;
+             // 予想される終了位置周辺 (±20行) を探す
+             const searchLimit = Math.min(maxLines, i + estLines + 20);
+             const searchStart = Math.max(i, i + estLines - 20);
+             for (let j = searchStart; j <= searchLimit; j++) {
+               const endContent = model.getLineContent(j).replace(/\s/g, '');
+               if (endContent.includes(tail)) {
+                 return `\n\n🔎 もしかして: ${i}行目 ～ ${j}行目 付近のコードですか？`;
+               }
+             }
+          }
+        }
+      } catch(e) { console.error(e); }
+      return '';
+    };
+
+        const suggestRecovery = (errorMsg, jsonContext = null) => {
+      let msg = `❌ パッチ適用失敗: ${errorMsg}\n\n【リカバリー策を選んでください】\n`;
+      if (jsonContext) {
+        msg += `\n1️⃣ 手動修正に切り替える (推奨)\n   → AIに修正箇所を整理させ、手動で反映します。\n`;
+      }
+      msg += `\n2️⃣ 全コードを作り直す\n   → AIにファイル全体を再生成させます。\n\n番号を入力してください:`;
+
+      const def = jsonContext ? "1" : "2";
+      const choice = prompt(msg, def);
+
+      if (choice === '1' && jsonContext) {
+        patchMode.value = 'manual';
+        const p = `先ほどの修正指示ですが、パッチ適用に失敗しました。\nこのJSONコードから修正前、修正後のコードを不足なくすべて抜き出し、手動で置換できるようにユーザーに提示してください。\n\n[JSON Code]\n${jsonContext}`;
+        navigator.clipboard.writeText(p).then(() => alert("📋 リカバリー用プロンプトをコピーしました。\nAIチャットに貼り付けてください。"));
+      } else if (choice === '2') {
+        modals.patch = false;
+        modals.ai = true;
+        aiTab.value = 'full';
+        const full = editor.getValue();
+        const p = `先ほどの修正指示ですが、パッチ適用に失敗しました。\n部分修正ではなく、修正を適用したあとの『HTMLフルコード』をすべて出力してください。\n\n[現在のコード]\n\`\`\`html\n${full}\n\`\`\``;
+        navigator.clipboard.writeText(p).then(() => alert("📋 リカバリー用プロンプトをコピーしました。\nAIチャットに貼り付けてください。"));
+      }
+    };
+
+        const applyPatch = () => {
+      saveHistory();
+      try {
+        const findTextRaw = patchFindInput.value;
+        const replaceText = patchReplaceInput.value;
+
+        if (!findTextRaw || !replaceText) {
+          alert("検索コードと置換コードの両方を入力してください。");
+          return;
+        }
+
+        const model = editor.getModel();
+        const full = model.getValue();
+
+        if (!patchIgnoreWhitespace.value) {
+          const idx = full.indexOf(findTextRaw);
+          if (idx === -1) {
+            suggestRecovery("一致する箇所が見つかりません（完全一致）。" + findPossibleRange(findTextRaw));
+            return;
+          }
+          const idx2 = full.indexOf(findTextRaw, idx + 1);
+          if (idx2 !== -1) {
+            alert("一致する箇所が複数あります。意図しない変更を防ぐため、より長いコードを指定して一意に定めてください。");
+            return;
+          }
+
+          const startPos = model.getPositionAt(idx);
+          const endPos = model.getPositionAt(idx + findTextRaw.length);
+          const range = new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column);
+
+          editor.executeEdits("manual-patch", [{ range, text: replaceText }]);
+          modals.patch = false;
+          runEmulator();
+          alert("コードを置換しました！（完全一致）");
+          return;
+        }
+
+        const { compact: compactFull, mapNormToOrig } = buildCompacted(full);
+        const compactFind = normalizeFind(findTextRaw);
+        if (!compactFind) { alert("検索コードが空白のみです。"); return; }
+
+        const normIdx = compactFull.indexOf(compactFind);
+        if (normIdx === -1) {
+          suggestRecovery("一致する箇所が見つかりません（空白無視）。" + findPossibleRange(findTextRaw));
+          return;
+        }
+        const normIdx2 = compactFull.indexOf(compactFind, normIdx + 1);
+        if (normIdx2 !== -1) {
+          alert("一致する箇所が複数あります（空白無視）。意図しない変更を防ぐため、より長いコードを指定して一意に定めてください。");
+          return;
+        }
+
+        const startOrig = mapNormToOrig[normIdx];
+        const endOrig = mapNormToOrig[normIdx + compactFind.length - 1] + 1;
+
+        const startPos = model.getPositionAt(startOrig);
+        const endPos = model.getPositionAt(endOrig);
+        const range = new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column);
+
+        editor.executeEdits("manual-patch", [{ range, text: replaceText }]);
+        modals.patch = false;
+        runEmulator();
+        alert("コードを置換しました！（空白・改行は無視）");
+      } catch (e) {
+        alert("エラー: " + (e.message || String(e)));
+      }
+    };
+
+        const applyAutoJsonPatch = () => {
+      saveHistory();
+      let items = [];
+      try {
+        let jsonStr = patchJsonInput.value.trim();
+        const start = jsonStr.indexOf('[');
+        const end = jsonStr.lastIndexOf(']');
+        if (start !== -1 && end !== -1 && end > start) {
+          jsonStr = jsonStr.substring(start, end + 1);
+        } else {
+          jsonStr = jsonStr.replace(/^```json/, '').replace(/^```/, '').replace(/```$/, '');
+        }
+        items = JSON.parse(jsonStr);
+        if (!Array.isArray(items)) throw new Error("JSON is not an array");
+      } catch(e) {
+        suggestRecovery("JSON解析エラー: " + e.message, patchJsonInput.value);
+        return;
+      }
+
+      const model = editor.getModel();
+      const full = model.getValue();
+      const edits = [];
+      let entityAdjusted = false;
+      
+      let compactData = null;
+      if (patchIgnoreWhitespace.value) {
+        compactData = buildCompacted(full);
+      }
+
+      const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
+      const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
+      for (const item of items) {
+        if (!item.search || typeof item.replace !== 'string') continue;
+
+        const raw = item.search;
+        const cands = new Set([raw, decodeEnt(raw), decodeEnt(decodeEnt(raw)), encodeEnt(raw)]);
+        
+        let bestCand = null;
+        let bestRange = null;
+        let totalMatches = 0;
+
+        for (const cand of cands) {
+            let ranges = [];
+            if (!patchIgnoreWhitespace.value) {
+                let pos = 0;
+                while(true) {
+                    const idx = full.indexOf(cand, pos);
+                    if (idx === -1) break;
+                    ranges.push({ s: idx, e: idx + cand.length });
+                    pos = idx + 1;
+                }
+            } else {
+                const { compact: compactFull, mapNormToOrig } = compactData;
+                const compactFind = normalizeFind(cand);
+                if (!compactFind) continue;
+
+                let idx = 0;
+                while(true) {
+                    const p = compactFull.indexOf(compactFind, idx);
+                    if (p === -1) break;
+                    const s = mapNormToOrig[p];
+                    const e = mapNormToOrig[p + compactFind.length - 1] + 1;
+                    ranges.push({ s, e });
+                    idx = p + 1;
+                }
+            }
+
+            if (ranges.length > 0) {
+                totalMatches += ranges.length;
+                if (ranges.length === 1) {
+                    bestCand = cand;
+                    const startPos = model.getPositionAt(ranges[0].s);
+                    const endPos = model.getPositionAt(ranges[0].e);
+                    bestRange = new monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column);
+                }
+            }
+        }
+
+        if (totalMatches === 0) {
+            suggestRecovery("該当箇所が見つかりません: " + raw.slice(0,30) + "...", patchJsonInput.value);
+            return;
+        }
+        if (totalMatches > 1) {
+             suggestRecovery("複数箇所一致してしまい特定できません: " + raw.slice(0,30) + "...", patchJsonInput.value);
+             return;
+        }
+
+        let finalReplace = item.replace;
+        if (bestCand !== raw) {
+            entityAdjusted = true;
+            if (bestCand === decodeEnt(raw)) finalReplace = decodeEnt(finalReplace);
+            else if (bestCand === encodeEnt(raw)) finalReplace = encodeEnt(finalReplace);
+            else if (bestCand === decodeEnt(decodeEnt(raw))) finalReplace = decodeEnt(decodeEnt(finalReplace));
+        }
+
+        edits.push({ range: bestRange, text: finalReplace });
+      }
+      
+      if (edits.length === 0) {
+        alert("適用対象が見つかりませんでした。");
+        return;
+      }
+      
+      editor.executeEdits("auto-json-patch", edits);
+      modals.patch = false;
+      runEmulator();
+      const msg = `${edits.length}箇所の修正を自動適用しました！` + (entityAdjusted ? "\n(エンティティ揺らぎを自動補正)" : "");
+      alert(msg);
+    };
+
+    // --- PREVIEW SHIM (console + idb dump) ---
+      const buildPreviewShim = (runId) => {
+      return `
+<script>
+(() => {
+  const RUN_ID = ${JSON.stringify(runId)};
+  const send = (obj) => { try { window.parent?.postMessage(obj, "*"); } catch(e){} };
+
+    const showErrorOverlay = (msg) => {
+    const div = document.createElement('div');
+    div.id = 'app-error-overlay';
+    div.style = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#fee2e2;color:#b91c1c;padding:12px;font-family:sans-serif;font-size:12px;border-bottom:2px solid #ef4444;box-shadow:0 4px 12px rgba(0,0,0,0.1)';
+    const safeMsg = String(msg).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    div.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px"><div><strong style="display:block;margin-bottom:4px;font-size:13px">⚠️ Runtime Error</strong><div style="white-space:pre-wrap;word-break:break-all">'+safeMsg+'</div></div><button onclick="document.getElementById(\'app-error-overlay\').remove()" style="background:none;border:none;color:#b91c1c;cursor:pointer;font-size:20px;font-weight:bold;padding:0 4px;line-height:1">×</button></div><button id="ai-fix-btn" style="background:#fff;border:1px solid #b91c1c;color:#b91c1c;padding:6px 12px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:11px;display:inline-flex;align-items:center;gap:4px;transition:all 0.2s">🚑 AIに修正を依頼する</button>';
+    document.body?.appendChild(div) || document.documentElement.appendChild(div);
+    const btn = div.querySelector('#ai-fix-btn');
+    if(btn) btn.onclick = () => {
+      send({ type: "request_ai_fix", error: msg });
+      btn.style.background = '#b91c1c'; btn.style.color = '#fff'; btn.innerText = '指示をコピーしました！';
+    };
+  };
+
+  window.onerror = (msg, url, line, col, error) => {
+    const cleanMsg = msg + " (line:" + line + ")";
+    showErrorOverlay(cleanMsg);
+    send({ type: "console", l: "error", m: cleanMsg });
+    return false;
+  };
+
+  window.onunhandledrejection = (event) => {
+    const msg = "Unhandled Promise Rejection: " + event.reason;
+    showErrorOverlay(msg);
+    send({ type: "console", l: "error", m: msg });
+  };
+
+  const _log = console.log.bind(console);
+  const _err = console.error.bind(console);
+  const _warn = console.warn.bind(console);
+  console.log = (...a)=>{ _log(...a); send({ type: "console", l: "info", m: a.map(x=>{try{return typeof x==="string"?x:JSON.stringify(x)}catch(e){return String(x)}}).join(" ") }); };
+  console.error = (...a)=>{ _err(...a); showErrorOverlay(a.join(" ")); send({ type: "console", l: "error", m: a.map(x=>{try{return typeof x==="string"?x:JSON.stringify(x)}catch(e){return String(x)}}).join(" ") }); };
+  console.warn = (...a)=>{ _warn(...a); send({ type: "console", l: "warn", m: a.map(x=>{try{return typeof x==="string"?x:JSON.stringify(x)}catch(e){return String(x)}}).join(" ") }); };
+
+  async function dumpIdb() {
+    const items = [];
+    const databasesFn = indexedDB.databases ? indexedDB.databases.bind(indexedDB) : null;
+    if (!databasesFn) {
+      return { items: [], warning: "indexedDB.databases() が未対応のため、DB一覧は取得できません。" };
+    }
+    const dbs = await databasesFn();
+    for (const d of (dbs||[])) {
+      const name = d.name;
+      const version = d.version || 0;
+      if (!name) continue;
+
+      const info = { name, version, stores: [], open: true };
+
+      await new Promise((resolve) => {
+        const req = indexedDB.open(name);
+        req.onerror = () => resolve();
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            info.version = db.version || info.version;
+            const storeNames = Array.from(db.objectStoreNames || []);
+            const tx = db.transaction(storeNames, "readonly");
+            const storeInfos = [];
+
+            let pending = storeNames.length;
+            if (pending === 0) { try{db.close()}catch(e){}; info.stores = []; resolve(); return; }
+
+            storeNames.forEach(sn => {
+              try {
+                const st = tx.objectStore(sn);
+                const stInfo = {
+                  name: sn,
+                  keyPath: st.keyPath ?? null,
+                  autoIncrement: !!st.autoIncrement,
+                  count: 0,
+                  sampleKeys: []
+                };
+
+                const cReq = st.count();
+                cReq.onsuccess = () => { stInfo.count = cReq.result || 0; maybeDone(); };
+                cReq.onerror = () => { maybeDone(); };
+
+                const keys = [];
+                const kReq = st.openKeyCursor();
+                kReq.onsuccess = (ev) => {
+                  const cur = ev.target.result;
+                  if (cur && keys.length < 20) { keys.push(cur.key); cur.continue(); }
+                  else { stInfo.sampleKeys = keys; }
+                };
+                kReq.onerror = () => {};
+
+                storeInfos.push(stInfo);
+              } catch(e) {
+                pending = Math.max(0, pending - 1);
+              }
+            });
+
+            function maybeDone(){
+              pending = Math.max(0, pending - 1);
+              if (pending === 0) {
+                info.stores = storeInfos.sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+                try { db.close(); } catch(e){}
+                resolve();
+              }
+            }
+          } catch(e) {
+            try { db.close(); } catch(_){}
+            resolve();
+          }
+        };
+      });
+
+      items.push(info);
+    }
+
+    items.sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+    return { items };
+  }
+
+  window.addEventListener("message", async (ev) => {
+    const data = ev.data || {};
+    if (data.type === "idb_dump_request" && data.runId === RUN_ID) {
+      try {
+        const res = await dumpIdb();
+        send({ type: "idb_dump_result", runId: RUN_ID, items: res.items || [], error: res.warning || "" });
+      } catch(e) {
+        send({ type: "idb_dump_result", runId: RUN_ID, items: [], error: String(e && e.message ? e.message : e) });
+      }
+    }
+  });
+})();
+<\/script>`;
+    };
+
+    const injectShimIntoHtml = (code, shim) => {
+      if (code.match(/<head[^>]*>/i)) return code.replace(/<head[^>]*>/i, (m)=> m + shim);
+      return shim + code;
+    };
+
+        // --- PREVIEW (iframe) ---
+const runEmulator = (skipSave = false) => {
+  if(!editor) return;
+  if(!skipSave) saveHistory();
+
+  const frame = document.getElementById('emulator-frame');
+  isRunLoading.value = true;
+  frame.onload = () => {
+    setTimeout(() => { isRunLoading.value = false; }, 300);
+  };
+
+  const code = editor.getValue() || '';
+  syncIdentityFromCode(code);
+
+  lastRunId = genId();
+  const shim = buildPreviewShim(lastRunId);
+
+  // ★空コードの場合：エディタは空のまま、プレビューだけ説明表示
+  if (code.trim() === '') {
+    const emptyHtml =
+`<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>(empty)</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:0; display:grid; place-items:center; height:100vh; background:#f3f4f6; color:#111827;}
+  .card{background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:18px 16px; width:min(92vw,520px); box-shadow:0 10px 24px rgba(0,0,0,.08);}
+  h1{font-size:16px; margin:0 0 6px;}
+  p{font-size:12px; margin:0; color:#6b7280; line-height:1.6;}
+  code{background:#f9fafb; border:1px solid #e5e7eb; padding:2px 6px; border-radius:8px;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>プレビュー：コードが空です</h1>
+    <p>エディタは <b>完全に空</b> の状態です。<br>そのままHTMLを貼り付けて <code>実行</code> してください。</p>
+  </div>
+</body>
+</html>`;
+    const safe = injectShimIntoHtml(emptyHtml, shim);
+    frame.srcdoc = safe;
+    return;
+  }
+
+  const safeCode = injectShimIntoHtml(code, shim);
+  frame.srcdoc = safeCode;
+};
+
+
+    const stopEmulator = () => {
+      const frame = document.getElementById('emulator-frame');
+      frame.src = 'about:blank';
+      consoleLogs.value.push({type:'info', message:'プレビューを停止しました。'});
+
+      if (fullWin && !fullWin.closed) {
+        try { fullWin.close(); } catch {}
+      }
+      fullWin = null;
+    };
+
+    // --- FULLSCREEN (separate window) ---
+    const openFullWindow = () => {
+      if(!editor) return;
+
+      const code = editor.getValue();
+      syncIdentityFromCode(code);
+
+      const runId = genId();
+      const shim = buildPreviewShim(runId);
+      const safeCode = injectShimIntoHtml(code, shim);
+
+      const blob = new Blob([safeCode], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+
+      // 常に新規タブで開く (_blank)
+      // ※一部環境で開いているのにwinがnull判定されるケースがあるため、アラート判定は削除
+      window.open(url, '_blank', 'noopener,noreferrer');
+    };
+
+        // --- DB MODAL ---
+    const openDbModal = async () => {
+      if (!confirm("【注意】\nIndexedDB簡易表示は現在、機能が不完全なため停止推奨となっています。\n\n無理に実行するとブラウザがフリーズする可能性がありますが、それでも実行しますか？")) return;
+
+      modals.db = true;
+      await refreshDbDump();
+    };
+
+    const refreshDbDump = async () => {
+      dbDump.loading = true;
+      dbDump.error = '';
+      dbDump.items = [];
+
+      const frame = document.getElementById('emulator-frame');
+      if (!frame || !frame.contentWindow) {
+        dbDump.loading = false;
+        dbDump.error = "プレビューが起動していません。先に「実行」してください。";
+        return;
+      }
+      if (!lastRunId) {
+        dbDump.loading = false;
+        dbDump.error = "runId が未設定です。いったん「実行」を押してください。";
+        return;
+      }
+
+      try {
+        frame.contentWindow.postMessage({ type: 'idb_dump_request', runId: lastRunId }, '*');
+        setTimeout(() => {
+          if (dbDump.loading) {
+            dbDump.loading = false;
+            dbDump.error = "タイムアウトしました。プレビュー側が応答しませんでした。";
+          }
+        }, 4000);
+      } catch(e) {
+        dbDump.loading = false;
+        dbDump.error = "DB取得に失敗: " + (e.message || String(e));
+      }
+    };
+
+    // --- OTHER HELPERS ---
+const clearCode = () => {
+      if(!confirm("本当にコードを全消去しますか？")) return;
+
+      // エディタを完全に空にする
+      editor.setValue('');
+
+      // 内部状態のリセット（メタ情報やAI指示もクリア）
+      syncIdentityFromCode('');
+      aiInstruction.value = '';
+      saveComment.value = '';
+
+      // プレビューとトースト通知
+      runEmulator();
+      pushToast('全クリア', 'エディタを空にしました。', 'fa-trash-alt text-red-300', 1500);
+    };
+    const copyFullCode = async () => {
+      try{
+        await navigator.clipboard.writeText(editor.getValue());
+        pushToast('コピーしました', 'フルコードをクリップボードにコピーしました。', 'fa-circle-check text-emerald-300', 1600);
+      }catch(e){
+        alert("コピー失敗: " + (e.message || String(e)));
+      }
+    };
+
+    const toggleSidebar = () => { isSidebarOpen.value = !isSidebarOpen.value; };
+
+    // --- RESIZE ---
+    let resizing = false;
+    const startResize = (e) => {
+      resizing = true;
+      const editorPane = document.getElementById('editor-pane');
+      const emulatorPane = document.getElementById('emulator-pane');
+      const root = editorPane.parentElement;
+
+      const onMove = (ev) => {
+        if(!resizing) return;
+        const rect = root.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const w = rect.width;
+        const left = Math.max(260, Math.min(w - 260, x));
+        editorPane.style.flex = 'none';
+        emulatorPane.style.flex = 'none';
+        editorPane.style.width = left + 'px';
+        emulatorPane.style.width = (w - left - 6) + 'px';
+      };
+      const onUp = () => {
+        resizing = false;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+
+      window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+    };
+
+    // --- DIFF VIEWER ---
+    let diffEditor = null;
+    const diffTargetDate = ref('');
+
+    const openDiffModal = async (fileItem) => {
+      let originalCode = fileItem.content || '';
+      if (!originalCode && fileItem.handle) {
+         try {
+           const f = await fileItem.handle.getFile();
+           originalCode = await f.text();
+         } catch(e) { console.error(e); }
+      }
+      const modifiedCode = editor ? editor.getValue() : '';
+      diffTargetDate.value = fileItem.savedAtStr || 'Unknown Date';
+      modals.diff = true;
+
+      await nextTick();
+      const container = document.getElementById('diff-editor-container');
+      if (!container) return;
+      if (diffEditor) diffEditor.dispose();
+
+      diffEditor = monaco.editor.createDiffEditor(container, {
+        originalEditable: false,
+        readOnly: true,
+        theme: 'vs-dark',
+        automaticLayout: true,
+        renderSideBySide: true,
+        diffWordWrap: 'off'
+      });
+      diffEditor.setModel({
+        original: monaco.editor.createModel(originalCode, 'html'),
+        modified: monaco.editor.createModel(modifiedCode, 'html')
+      });
+    };
+
+    const closeDiffModal = () => {
+      modals.diff = false;
+      if (diffEditor) {
+        diffEditor.dispose();
+        diffEditor = null;
+      }
+    };
+
+    // --- WIZARD LOGIC ---
+    const wizardOpen = ref(false);
+    const wizardStep = ref(1);
+    const wizardData = reactive({ type: '', design: '', features: [] });
+    const wizardOptions = {
+      types: ['タスク管理(ToDo)', '学習・クイズアプリ', '業務効率化ツール', 'ダッシュボード', 'ミニゲーム', 'チャットボット', '文字起こし・録音'],
+      designs: ['モダン・ダーク', 'シンプル・ミニマル', 'ポップ・カラフル', 'プロフェッショナル(信頼感)', 'レトロ・フューチャー'],
+      features: ['データのローカル保存(LocalStorage)', 'レスポンシブ対応(スマホOK)', 'アニメーション演出', 'ダークモード切替機能', 'CSV/PDFエクスポート']
+    };
+    const wizardTitle = computed(() => {
+       if(wizardStep.value===1) return '何を作りますか？';
+       if(wizardStep.value===2) return 'デザインの雰囲気は？';
+       return 'こだわり機能は？';
+    });
+
+    const toggleWizard = () => {
+      wizardOpen.value = !wizardOpen.value;
+      if(wizardOpen.value) {
+        wizardStep.value = 1;
+        wizardData.type = ''; wizardData.design = ''; wizardData.features = [];
+      }
+    };
+    const setWizardType = (t) => { wizardData.type = t; wizardStep.value = 2; };
+    const setWizardDesign = (d) => { wizardData.design = d; wizardStep.value = 3; };
+    const completeWizard = () => {
+      const parts = [];
+      if(wizardData.type) parts.push(`【アプリ概要】\n${wizardData.type}を作成してください。`);
+      if(wizardData.design) parts.push(`【デザイン】\n${wizardData.design}な雰囲気で、見やすく使いやすいUIにしてください。`);
+      if(wizardData.features.length > 0) parts.push(`【機能要件】\n以下の機能を実装してください：\n` + wizardData.features.map(f=>`・${f}`).join('\n'));
+      
+      aiPromptInput.value = (aiPromptInput.value ? aiPromptInput.value + '\n\n' : '') + parts.join('\n\n');
+      wizardOpen.value = false;
+    };
+
+        return {
+      wizardOpen, wizardStep, wizardData, wizardOptions, wizardTitle, toggleWizard, setWizardType, setWizardDesign, completeWizard,
+      openDiffModal, closeDiffModal, diffTargetDate,
+            // state
+appMode, projectDisplayName, menus, modals, isSidebarOpen, isRunLoading,
+                  aiTab, aiInstruction, aiPromptInput, aiMessage, aiIncludeFullCode, aiHelp, patchHelp, showRecipes, helpTab,
+      consultTopics, consultFreeInput,
+          saveComment, saveFilename,
+      patchMode, patchFindInput, patchReplaceInput, patchJsonInput, patchIgnoreWhitespace,
+            patchMatchCount, patchMatchMessage, patchJsonStatus,
+      applyAutoJsonPatch,
+      deviceModes, currentDevice,
+      findUI, findInputEl, replaceInputEl,
+            editorStats, consoleLogs,
+      libraryFiles, libraryFilesFlat, groupedApps, historyMode,
+      currentAppTitle, currentGroupKey, libraryScanStatus,
+      hoveredHistory, showHistoryDetail, hideHistoryDetail,
+
+            // actions
+      toggleSidebar,
+      createNewProject, openProjectFolder, openSingleFile, createNewSingleApp,
+      refreshLibrary, revealCurrentFolder,
+      loadFile, runExternal,
+      runEmulator, stopEmulator, openFullWindow,
+      openAiModal, generateAndCopyPrompt,
+      openConsultModal, generateConsultPrompt,
+            openSaveModal, performSave,
+      githubSettings, githubStatus, githubUrl, publishToGithub,
+      openPatchModal, applyPatch,
+      openDbModal, refreshDbDump,
+      openFindReplace, closeFindReplace,
+      startDragFindUI,
+      findNext, findPrev, replaceOne, replaceAll, recomputeMatchCount,
+      clearCode, copyFullCode,
+      startResize,
+            toasts,
+      projectRootHandle, setProjectRoot,
+            securitySettings, saveSecuritySettings,
+                        markHelpSeen, codeHistory, undoCode,
+      patchRecipes: [
+        {
+          label: '🐞 バグ修正・フリーズ',
+          desc: '動かない・エラーが出る時',
+          class: 'bg-red-900/40 border-red-700/50 hover:bg-red-800 text-red-100 border',
+          prompt: `アプリを実行するとフリーズしたり、エラーが出たりして動きません。\nコード全体を見直して、原因を特定し修正してください。\nまた、再発防止のためのチェック処理も追加してください。`
+        },
+        {
+          label: '🎨 表示崩れ・デザイン',
+          desc: 'レイアウトがおかしい時',
+          class: 'bg-orange-900/40 border-orange-700/50 hover:bg-orange-800 text-orange-100 border',
+          prompt: `画面のレイアウトが崩れています（スマホ表示やウィンドウサイズ変更時など）。\nCSSを見直して、きれいに表示されるようにレスポンシブ対応を含めて修正してください。`
+        },
+        {
+          label: '✨ 機能追加',
+          desc: '新しい機能を入れたい時',
+          class: 'bg-purple-900/40 border-purple-700/50 hover:bg-purple-800 text-purple-100 border',
+          prompt: `以下の機能を追加してください。\n・[ここに追加したい機能を書く]\n\n既存のコードスタイルやデザインと整合性が取れるように実装してください。`
+        },
+        {
+          label: '🧹 コード整理',
+          desc: 'リファクタリング',
+          class: 'bg-teal-900/40 border-teal-700/50 hover:bg-teal-800 text-teal-100 border',
+          prompt: `コードが複雑になってきたので整理（リファクタリング）してください。\n可読性を上げるためにコメントを追記し、長すぎる関数があれば分割してください。\n機能や動作は変えないでください。`
+        }
+      ],
+      recipePrompts: [
+        {
+          label: '🎙️ 自動議事録',
+          desc: '会議の音声を文字起こし・保存',
+          class: 'bg-blue-900/40 border-blue-700/50 hover:bg-blue-800 text-blue-100 border',
+          prompt: `PCのマイクを使って、会議の議事録を自動でとれるアプリを作って。\n話している内容がリアルタイムで画面に文字になって出てくる感じで。\n最後に、その内容をテキストファイルとして保存できるようにしてほしい。\nデザインは仕事で使うから、紺色っぽくてカッコいい感じで頼む。`
+        },
+        {
+          label: '📚 TOEIC 600単語帳',
+          desc: 'レベル別・進捗バー付き',
+          class: 'bg-green-900/40 border-green-700/50 hover:bg-green-800 text-green-100 border',
+          prompt: `TOEIC600点を目指して勉強したいから、英単語帳アプリを作ってほしい。\n私のレベルにあった単語が100個くらい最初から入ってて、クリックすると裏返って日本語が出るやつ。\n『覚えた』か『まだ』かを選べて、進み具合がバーでわかるとやる気が出るかも。`
+        },
+        {
+          label: '📋 秘密のカンバン',
+          desc: 'ローカル保存・D&D対応',
+          class: 'bg-purple-900/40 border-purple-700/50 hover:bg-purple-800 text-purple-100 border',
+          prompt: `ネットに繋がないで使える、自分専用のタスク管理ボードを作って。\nタスクを書いたカードをマウスで掴んで、『未着手』から『完了』とかに移動できるやつ。\nブラウザを閉じても内容は消えないようにしておいて。目に優しいダークモードで。`
+        },
+        {
+          label: '💣 マインスイーパ',
+          desc: 'レトロな暇つぶしゲーム',
+          class: 'bg-gray-700/40 border-gray-600/50 hover:bg-gray-600 text-gray-200 border',
+          prompt: `昼休みの暇つぶし用に、マインスイーパーを作って。\n見た目は昔のWindowsのみたいな、グレーでレトロな感じで。\n左クリックで開いて、右クリックで旗を立てる、いつものルールで遊べるようにして。`
+        }
+      ]
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
