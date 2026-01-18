@@ -354,6 +354,41 @@ header nav button:hover{
   font-variant-numeric:tabular-nums;
 }
 
+/* ヒートマップ */
+.kpi-heatmap-card{
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:12px;
+  background:#0c101b;
+  margin-top:10px;
+}
+.kpi-heatmap-title{
+  font-size:13px;
+  font-weight:600;
+  margin-bottom:8px;
+  color:var(--ink);
+}
+.heatmap-scroll{
+  overflow-x:auto;
+  padding-bottom:4px;
+}
+.heatmap-grid{
+  display:grid;
+  grid-template-rows:repeat(7, 10px);
+  grid-auto-flow:column;
+  gap:3px;
+  width:max-content;
+}
+.heatmap-cell{
+  width:10px;
+  height:10px;
+  border-radius:2px;
+  background:rgba(255,255,255,0.08);
+}
+.heatmap-cell[data-level="1"]{ background:rgba(23,201,100,0.4); }
+.heatmap-cell[data-level="2"]{ background:rgba(23,201,100,0.7); }
+.heatmap-cell[data-level="3"]{ background:#17c964; box-shadow:0 0 4px rgba(23,201,100,0.6); }
+
 
 
 
@@ -464,7 +499,7 @@ header nav button:hover{
             <span id="kpi-today-sentences">0</span>
             <span class="kpi-unit">件</span>
           </div>
-          <div class="kpi-caption">今日登録した例文</div>
+                    <div class="kpi-caption">登録済みの全例文</div>
         </button>
 
         <button class="kpi-tile" data-metric="playCount">
@@ -507,8 +542,14 @@ header nav button:hover{
             <button data-range="120">120日</button>
           </div>
         </div>
-        <div id="kpi-graph-body" class="kpi-graph-body">
-          <!-- JSで描画 -->
+<div id="kpi-graph-body" class="kpi-graph-body">
+          </div>
+      </div>
+      
+      <div class="kpi-heatmap-card">
+        <div class="kpi-heatmap-title">学習の足跡（Learning Heatmap）</div>
+        <div class="heatmap-scroll">
+          <div id="heatmap-grid" class="heatmap-grid"></div>
         </div>
       </div>
     </div>
@@ -987,40 +1028,95 @@ function formatDateLabel(key){
 let kpiCurrentMetric = 'sentences';  // sentences / playCount / playTime / recTime
 let kpiCurrentRange = 7;             // 7 / 30 / 120
 
-function updateHomeKpi(){
+async function updateHomeKpi(){
   const el1 = $('#kpi-today-sentences');
   if(!el1) return; // ホームがまだ描画されていないケース
   const t = getTodayKpi();
-  $('#kpi-today-sentences').textContent   = t.added;
+  
+  // 全件数を取得して表示
+  try {
+    const count = await countAllSentences();
+    $('#kpi-today-sentences').textContent = count;
+  } catch(e) {
+    // DB未接続時などは0表示
+    $('#kpi-today-sentences').textContent = '0';
+  }
+
   $('#kpi-today-play-count').textContent  = t.playCount;
   $('#kpi-today-play-sec').textContent    = t.playMin.toFixed(1);
   $('#kpi-today-rec-sec').textContent     = t.recMin.toFixed(1);
   renderHomeGraph();
+  renderHeatmap();
+}
+
+function renderHeatmap(){
+  const root = $('#heatmap-grid');
+  if(!root) return;
+  root.innerHTML = '';
+  
+  const today = new Date();
+  // 過去約20週間分(140日)を表示
+  const past = new Date(today);
+  past.setDate(today.getDate() - 140);
+  
+  // 表示開始日をその週の日曜日に揃える（CSS Gridの縦7行が日曜始まりと仮定して綺麗に並べるため）
+  const startDayOfWeek = past.getDay();
+  const startDate = new Date(past);
+  startDate.setDate(past.getDate() - startDayOfWeek);
+
+  let curr = new Date(startDate);
+  
+  while(curr <= today){
+    const y = curr.getFullYear();
+    const m = ('0'+(curr.getMonth()+1)).slice(-2);
+    const d = ('0'+curr.getDate()).slice(-2);
+    const key = `${y}-${m}-${d}`;
+    
+    const dayData = kpiData.days[key] || {};
+    const added = dayData.added || 0;
+    const playC = dayData.playCount || 0;
+    const recMin= Math.round((dayData.recMs||0)/60000);
+    const score = added + playC + recMin;
+    
+    let level = 0;
+    if(score > 0) level = 1;
+    if(score >= 6) level = 2;
+    if(score >= 16) level = 3;
+    
+    const cell = document.createElement('div');
+    cell.className = 'heatmap-cell';
+    if(level > 0) cell.dataset.level = level;
+    cell.title = `${key}: ${score} activity`;
+    root.appendChild(cell);
+    
+    curr.setDate(curr.getDate() + 1);
+  }
 }
 
 async function renderHomeGraph(){
   const body  = $('#kpi-graph-body');
   const title = $('#kpi-graph-title');
+  const switcher = $('.kpi-range-switch');
   if(!body || !title) return;
   body.innerHTML = '';
 
-  // ① 登録例文数：例文カテゴリ別の表（直近N日）
+  // 登録例文数のときは期間切替ボタンを隠す
+  if(switcher) switcher.style.display = (kpiCurrentMetric === 'sentences') ? 'none' : 'flex';
+
+  // ① 登録例文数：例文カテゴリ別の表（全期間）
   if(kpiCurrentMetric === 'sentences'){
     if(!db){
       body.innerHTML = '<div class="kpi-empty">データ読み込み中…</div>';
       title.textContent = '登録例文数（カテゴリ別）';
       return;
     }
-    title.textContent = `登録例文数（カテゴリ別／直近${kpiCurrentRange}日）`;
+        title.textContent = `登録例文数（カテゴリ別／全期間）`;
 
     const rows = await getAll();
-    const nowMs  = Date.now();
-    const fromMs = nowMs - kpiCurrentRange * 86400000;
+    // 全期間のため期間フィルタは行わない
     const map = new Map(); // cat -> count
 
     for(const r of rows){
-      const created = Number(r.createdAt || 0);
-      if(!created || created < fromMs) continue;
       let cats = (r.categories || []).filter(c => ALLOWED_CATEGORIES.includes(c));
       if(cats.length === 0) cats = ['（未分類）'];
       for(const c of cats){
@@ -1253,6 +1349,7 @@ const addSentence = item => new Promise(res=> store('readwrite').add(item).onsuc
 const updateSentence = item => new Promise(res=> store('readwrite').put(item).onsuccess=()=>res());
 const deleteSentence = id => new Promise(res=> store('readwrite').delete(id).onsuccess=()=>res());
 const getAll = ()=> new Promise((res,rej)=>{ const r=store().getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=rej; });
+const countAllSentences = ()=> new Promise((res,rej)=>{ if(!db) return res(0); const r=store().count(); r.onsuccess=()=>res(r.result||0); r.onerror=rej; });
 const getOne = id => new Promise((res,rej)=>{ const r=store().get(id); r.onsuccess=()=>res(r.result||null); r.onerror=rej; });
 
 async function clearAllSentences(){
@@ -2858,17 +2955,18 @@ window.addEventListener('pageshow', ()=> loadVoices());
 </script>
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "280a8dd4f1abe2afe58bf8d243eb8119",
   "createdAt": "2026-01-18T16:42:46.922Z",
   "schema": 2,
   "title": "SpeakNote（英語例文・場面学習）",
-  "savedAt": "2026-01-18T16:49:03.232Z",
-  "aiInstruction": "SpeakNote左の球が、常に立体的に、ぐるぐると回っているような形のモーションをいれてください。平面の球が回るのではなく、立体の球が回っている様子を、光の当たり方などをもとに表現して。",
-  "comment": "SpeakNote左の球が、常に立体的に、ぐるぐると回っているような形のモーションをいれてください。平面の球が回るのではなく、立体の球が回っている様子を、光の当たり方などをもとに表現して。",
+  "savedAt": "2026-01-18T18:16:11.441Z",
+  "aiInstruction": "ホーム画面（#view-home）のKPIダッシュボードの下部に、「学習ヒートマップ（Learning Heatmap）」を追加してください。\n\n【仕様要件】\n1. **表示位置**:\n   - `.kpi-graph-card` の下に新しいカード（セクション）を作成して配置する。\n   - タイトルは「学習の足跡（Learning Heatmap）」とする。\n\n2. **ヒートマップのロジック**:\n   - 過去「140日間（約20週間）」分の日付のマスのグリッドを表示する。\n   - 各マスの色は、その日の「アクティビティ量」によって4段階（なし、少、中、多）に変化させる。\n   - **アクティビティ量の算出**: `kpiData` 内のデータを使用し、`added` (登録数) + `playCount` (再生回数) + `recMs`(録音時間/分換算) の合計値をスコアとする。\n     - レベル0 (0): 色なし (bg: #1f2937)\n     - レベル1 (1-5): 暗めの緑 (例: rgba(23, 201, 100, 0.4))\n     - レベル2 (6-15): 中間の緑 (例: rgba(23, 201, 100, 0.7))\n     - レベル3 (16+): 明るい緑 (var(--ok))\n\n3. **UI/デザイン**:\n   - GithubのContribution Graphのような、小さな正方形が横に並ぶスタイル。\n   - CSS Gridを使用し、7行（曜日）× 20列（週）程度のレイアウトにする。\n   - スマホで見ても崩れないよう、必要なら横スクロール(`overflow-x: auto`)を許可する。\n   - 各マスに `title` 属性を設定し、ホバー時に「YYYY-MM-DD: XX activity」と表示されるようにする。\n\n4. **実装場所**:\n   - `updateHomeKpi()` 関数の中から呼び出す、`renderHeatmap()` 関数を新規作成して実装してください。\n\nKPI画面の一番上の「登録例文数」の欄には、今日登録した例文数ではなく、現在登録されている例文の総計を反映する。\n\n登録例文数のKPIを選択したときに表示される表については、期間別の登録数ではなく、現在登録されている総例文数の分類別内訳を常に表示すること。\n\n登録例文数の表の上に7日、30日、120日のボタンが残っているので削除。それ以外のKPIには影響を与えないこと。",
+  "comment": "ホーム画面（#view-home）のKPIダッシュボードの下部に、「学習ヒートマップ（Learning Heatmap）」を追加してください。\n\n【仕様要件】\n1. **表示位置**:\n   - `.kpi-graph-card` の下に新しいカード（セクション）を作成して配置する。\n   - タイトルは「学習の足跡（Learning Heatmap）」とする。\n\n2. **ヒートマップのロジック**:\n   - 過去「140日間（約20週間）」分の日付のマスのグリッドを表示する。\n   - 各マスの色は、その日の「アクティビティ量」によって4段階（なし、少、中、多）に変化させる。\n   - **アクティビティ量の算出**: `kpiData` 内のデータを使用し、`added` (登録数) + `playCount` (再生回数) + `recMs`(録音時間/分換算) の合計値をスコアとする。\n     - レベル0 (0): 色なし (bg: #1f2937)\n     - レベル1 (1-5): 暗めの緑 (例: rgba(23, 201, 100, 0.4))\n     - レベル2 (6-15): 中間の緑 (例: rgba(23, 201, 100, 0.7))\n     - レベル3 (16+): 明るい緑 (var(--ok))\n\n3. **UI/デザイン**:\n   - GithubのContribution Graphのような、小さな正方形が横に並ぶスタイル。\n   - CSS Gridを使用し、7行（曜日）× 20列（週）程度のレイアウトにする。\n   - スマホで見ても崩れないよう、必要なら横スクロール(`overflow-x: auto`)を許可する。\n   - 各マスに `title` 属性を設定し、ホバー時に「YYYY-MM-DD: XX activity」と表示されるようにする。\n\n4. **実装場所**:\n   - `updateHomeKpi()` 関数の中から呼び出す、`renderHeatmap()` 関数を新規作成して実装してください。\n\nKPI画面の一番上の「登録例文数」の欄には、今日登録した例文数ではなく、現在登録されている例文の総計を反映する。\n\n登録例文数のKPIを選択したときに表示される表については、期間別の登録数ではなく、現在登録されている総例文数の分類別内訳を常に表示すること。\n\n登録例文数の表の上に7日、30日、120日のボタンが残っているので削除。それ以外のKPIには影響を与えないこと。",
   "sourceMode": "project",
-  "runId": "27e4c93dae1f9f4cdbb8cd778414d9a1"
+  "runId": "79896d41827fb3b9eabf1f8727d32e42"
 }
 </script>
 </body>
