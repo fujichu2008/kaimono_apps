@@ -786,11 +786,25 @@ header nav button:hover{
         </select>
       </div>
     </div>
-    <div class="row">
+        <div class="row">
       <label style="display:flex;align-items:center;gap:8px">
         <input id="keep-awake" type="checkbox"> シャドーイング中に画面を自動スリープさせない（バッテリー消費に注意）
       </label>
     </div>
+
+    <h3 style="margin:12px 0 6px">単語検索の表示設定</h3>
+    <div class="row two">
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lk-enDef"> 英英定義</label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lk-jaSum"> 日本語要約</label>
+    </div>
+    <div class="row two">
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lk-jaDefList"> 定義リスト和訳（遅）</label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lk-jaEx"> 例文の和訳（遅）</label>
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lk-wiki"> Wiktionary補足（遅）</label>
+    </div>
+
     <div class="actions">
       <button class="btn warn" id="reset-standard">標準設定</button>
       <button class="btn ok" id="save-settings">保存</button>
@@ -1311,7 +1325,11 @@ const KeepAwake = (()=>{
    設定
 ========================= */
 const LS_SETTINGS='speakscene_settings_v1';
-const defaultSettings={ ttsLang:'en-US', voiceName:'', rate:1.0, pitch:1.0, volume:1.0, gapSec:1.0, repeat:1, speakTarget:'en', keepAwake:false };
+const defaultSettings={
+  ttsLang:'en-US', voiceName:'', rate:1.0, pitch:1.0, volume:1.0, gapSec:1.0, repeat:1, speakTarget:'en', keepAwake:false,
+  // Lookup設定（初期値は速度優先で一部OFF）
+  lookup: { enDef:true, jaSum:true, jaDefList:false, jaEx:false, wiki:false }
+};
 let settings = loadSettings();
 function loadSettings(){ try{ return Object.assign({}, defaultSettings, JSON.parse(localStorage.getItem(LS_SETTINGS)||'{}')); }catch(e){ return {...defaultSettings}; } }
 function saveSettings(){ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); }
@@ -2485,6 +2503,12 @@ function fillSettingsFields(){
   $('#lang').value = settings.ttsLang||''; $('#rate').value = settings.rate; $('#pitch').value = settings.pitch;
   $('#volume').value = settings.volume; $('#gap').value = settings.gapSec; $('#repeat').value = settings.repeat; $('#speak-target').value = settings.speakTarget;
   $('#keep-awake').checked = !!settings.keepAwake;
+  const lk = settings.lookup || defaultSettings.lookup;
+  $('#lk-enDef').checked = !!lk.enDef;
+  $('#lk-jaSum').checked = !!lk.jaSum;
+  $('#lk-jaDefList').checked = !!lk.jaDefList;
+  $('#lk-jaEx').checked = !!lk.jaEx;
+  $('#lk-wiki').checked = !!lk.wiki;
 }
 $('#reset-standard').onclick = (ev)=>{ ev.preventDefault(); settings = { ...defaultSettings, voiceName: '' }; saveSettings(); loadVoices(); fillSettingsFields(); alert('標準設定を適用しました（音声はOS推奨に自動設定）。'); };
 $('#save-settings').onclick = (ev)=>{
@@ -2493,6 +2517,13 @@ $('#save-settings').onclick = (ev)=>{
   settings.rate=Number($('#rate').value)||1.0; settings.pitch=Number($('#pitch').value)||1.0; settings.volume=Number($('#volume').value)||1.0;
   settings.gapSec=Number($('#gap').value)||0; settings.repeat=Math.max(1, parseInt($('#repeat').value||'1',10)); settings.speakTarget=$('#speak-target').value||'en';
   settings.keepAwake = !!$('#keep-awake').checked;
+  settings.lookup = {
+    enDef: $('#lk-enDef').checked,
+    jaSum: $('#lk-jaSum').checked,
+    jaDefList: $('#lk-jaDefList').checked,
+    jaEx: $('#lk-jaEx').checked,
+    wiki: $('#lk-wiki').checked
+  };
   const chosen=voices.find(v=>v.name===settings.voiceName); if(chosen&&chosen.lang&&chosen.lang!==settings.ttsLang){ settings.ttsLang=chosen.lang; }
   saveSettings(); renderVoiceList(); $('#dlg-settings').close(); alert('設定を保存しました');
 };
@@ -2784,13 +2815,51 @@ function setLookupLinks(word){
 }
 async function translateJa(text){
   if(!text) return '';
-  try{
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|ja`;
-    const res = await fetch(url, {mode:'cors'});
-    if(!res.ok) throw new Error('bad');
-    const json = await res.json();
-    return (json?.responseData?.translatedText || '').replace(/\s+/g,' ').trim();
-  }catch(e){ return ''; }
+  text = text.trim();
+
+  // 単発の翻訳リクエスト関数
+  const req = async (q) => {
+    try {
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|ja`;
+      const res = await fetch(url, {mode:'cors'});
+      if(!res.ok) throw new Error('status ' + res.status);
+      const json = await res.json();
+      // APIが200以外を返す場合(Limit到達など)もエラー扱い
+      if(json.responseStatus !== 200) throw new Error(json.responseDetails);
+      return (json.responseData.translatedText || '').trim();
+    } catch(e) {
+      console.warn('Translate error:', e);
+      return q; // エラー時は原文を返す（穴あき防止）
+    }
+  };
+
+  // 短い場合は即リクエスト（目安500文字未満）
+  if(text.length < 500) return await req(text);
+
+  // 長文分割処理: 文末区切りなどでトークン化
+  const sentences = text.match(/[^.!?\n]+[.!?\n]*(\s+|$)|.+/g) || [text];
+  const chunks = [];
+  let buf = '';
+
+  for(const s of sentences){
+    // URL長制限を考慮して安全圏(450文字)で切る
+    if((buf + s).length > 450){
+      if(buf) chunks.push(buf);
+      buf = s;
+    } else {
+      buf += s;
+    }
+  }
+  if(buf) chunks.push(buf);
+
+  // チャンクごとに翻訳（API制限回避のため直列実行＆ウェイト）
+  const results = [];
+  for(const chunk of chunks){
+    results.push(await req(chunk));
+    await new Promise(r => setTimeout(r, 300)); // レートリミット対策
+  }
+
+  return results.join(' ').replace(/\s+/g,' ').trim();
 }
 async function translateBulkToJa(lines){
   const chunks=[]; const size=5;
@@ -2876,17 +2945,65 @@ async function openLookup(word){
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
+  
+  const cfg = settings.lookup || defaultSettings.lookup;
+
   try{
-    const dict = await fetchEnDict(word);
-    const jaSummary = await translateJa(word + ': ' + (dict.defs[0]?.def || ''));
+    // 1. 英英辞書データ取得（これは基本必須だが設定で一応制御）
+    let dict = { phonetic:'', defs:[] };
+    if(cfg.enDef || cfg.jaSum || cfg.jaDefList || cfg.jaEx) {
+      dict = await fetchEnDict(word);
+    }
+
+    // 2. 必要なデータだけ非同期で取得
+    const promises = {};
+
+    // 日本語要約
+    if(cfg.jaSum){
+      promises.jaSummary = translateJa(word + ': ' + (dict.defs[0]?.def || ''));
+    }
+
     const topDefs = dict.defs.slice(0, 12);
-    const enDefLines = topDefs.map(d => (d.pos?`[${d.pos}] `:'') + d.def);
-    const jaDefs = await translateBulkToJa(enDefLines);
-    const exPairs = []; for(const d of topDefs){ if(d.ex) exPairs.push(d.ex); if(exPairs.length>=5) break; }
-    const jaExList = await translateBulkToJa(exPairs);
+
+    // 定義リストの和訳（重い）
+    if(cfg.jaDefList){
+      const enDefLines = topDefs.map(d => (d.pos?`[${d.pos}] `:'') + d.def);
+      promises.jaDefs = translateBulkToJa(enDefLines);
+    }
+
+    // 例文の和訳（重い）
+    let exPairs = [];
+    if(cfg.jaEx){
+      for(const d of topDefs){ if(d.ex) exPairs.push(d.ex); if(exPairs.length>=5) break; }
+      promises.jaExList = translateBulkToJa(exPairs);
+    }
+
+    // Wiktionary（重い）
+    if(cfg.wiki){
+      promises.jaWiki = fetchJaWiktionarySnippet(word);
+    }
+
+    // 並列実行待機
+    const results = await Promise.all(
+      [promises.jaSummary, promises.jaDefs, promises.jaExList, promises.jaWiki]
+    );
+    
+    const jaSummary = results[0] || '';
+    const jaDefs = results[1] || [];
+    const jaExList = results[2] || [];
+    const jaWiki = results[3] || '';
+
     const jaExamples = exPairs.map((en, i)=>({ en, ja: jaExList[i]||'' }));
-    const jaWiki = await fetchJaWiktionarySnippet(word);
-    renderLookupContentRich({ word, jaSummary, enDefs: topDefs, jaDefs, jaExamples, phonetic: dict.phonetic, jaWiki });
+
+    renderLookupContentRich({ 
+      word, 
+      jaSummary, 
+      enDefs: cfg.enDef ? topDefs : [], 
+      jaDefs, 
+      jaExamples: cfg.jaEx ? jaExamples : [], 
+      phonetic: dict.phonetic, 
+      jaWiki 
+    });
   }catch(e){
     const ja = await translateJa(word);
     $('#lk-body').innerHTML =
@@ -2956,17 +3073,19 @@ window.addEventListener('pageshow', ()=> loadVoices());
 
 
 
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "280a8dd4f1abe2afe58bf8d243eb8119",
   "createdAt": "2026-01-18T16:42:46.922Z",
   "schema": 2,
   "title": "SpeakNote（英語例文・場面学習）",
-  "savedAt": "2026-01-18T18:16:11.441Z",
-  "aiInstruction": "ホーム画面（#view-home）のKPIダッシュボードの下部に、「学習ヒートマップ（Learning Heatmap）」を追加してください。\n\n【仕様要件】\n1. **表示位置**:\n   - `.kpi-graph-card` の下に新しいカード（セクション）を作成して配置する。\n   - タイトルは「学習の足跡（Learning Heatmap）」とする。\n\n2. **ヒートマップのロジック**:\n   - 過去「140日間（約20週間）」分の日付のマスのグリッドを表示する。\n   - 各マスの色は、その日の「アクティビティ量」によって4段階（なし、少、中、多）に変化させる。\n   - **アクティビティ量の算出**: `kpiData` 内のデータを使用し、`added` (登録数) + `playCount` (再生回数) + `recMs`(録音時間/分換算) の合計値をスコアとする。\n     - レベル0 (0): 色なし (bg: #1f2937)\n     - レベル1 (1-5): 暗めの緑 (例: rgba(23, 201, 100, 0.4))\n     - レベル2 (6-15): 中間の緑 (例: rgba(23, 201, 100, 0.7))\n     - レベル3 (16+): 明るい緑 (var(--ok))\n\n3. **UI/デザイン**:\n   - GithubのContribution Graphのような、小さな正方形が横に並ぶスタイル。\n   - CSS Gridを使用し、7行（曜日）× 20列（週）程度のレイアウトにする。\n   - スマホで見ても崩れないよう、必要なら横スクロール(`overflow-x: auto`)を許可する。\n   - 各マスに `title` 属性を設定し、ホバー時に「YYYY-MM-DD: XX activity」と表示されるようにする。\n\n4. **実装場所**:\n   - `updateHomeKpi()` 関数の中から呼び出す、`renderHeatmap()` 関数を新規作成して実装してください。\n\nKPI画面の一番上の「登録例文数」の欄には、今日登録した例文数ではなく、現在登録されている例文の総計を反映する。\n\n登録例文数のKPIを選択したときに表示される表については、期間別の登録数ではなく、現在登録されている総例文数の分類別内訳を常に表示すること。\n\n登録例文数の表の上に7日、30日、120日のボタンが残っているので削除。それ以外のKPIには影響を与えないこと。",
-  "comment": "ホーム画面（#view-home）のKPIダッシュボードの下部に、「学習ヒートマップ（Learning Heatmap）」を追加してください。\n\n【仕様要件】\n1. **表示位置**:\n   - `.kpi-graph-card` の下に新しいカード（セクション）を作成して配置する。\n   - タイトルは「学習の足跡（Learning Heatmap）」とする。\n\n2. **ヒートマップのロジック**:\n   - 過去「140日間（約20週間）」分の日付のマスのグリッドを表示する。\n   - 各マスの色は、その日の「アクティビティ量」によって4段階（なし、少、中、多）に変化させる。\n   - **アクティビティ量の算出**: `kpiData` 内のデータを使用し、`added` (登録数) + `playCount` (再生回数) + `recMs`(録音時間/分換算) の合計値をスコアとする。\n     - レベル0 (0): 色なし (bg: #1f2937)\n     - レベル1 (1-5): 暗めの緑 (例: rgba(23, 201, 100, 0.4))\n     - レベル2 (6-15): 中間の緑 (例: rgba(23, 201, 100, 0.7))\n     - レベル3 (16+): 明るい緑 (var(--ok))\n\n3. **UI/デザイン**:\n   - GithubのContribution Graphのような、小さな正方形が横に並ぶスタイル。\n   - CSS Gridを使用し、7行（曜日）× 20列（週）程度のレイアウトにする。\n   - スマホで見ても崩れないよう、必要なら横スクロール(`overflow-x: auto`)を許可する。\n   - 各マスに `title` 属性を設定し、ホバー時に「YYYY-MM-DD: XX activity」と表示されるようにする。\n\n4. **実装場所**:\n   - `updateHomeKpi()` 関数の中から呼び出す、`renderHeatmap()` 関数を新規作成して実装してください。\n\nKPI画面の一番上の「登録例文数」の欄には、今日登録した例文数ではなく、現在登録されている例文の総計を反映する。\n\n登録例文数のKPIを選択したときに表示される表については、期間別の登録数ではなく、現在登録されている総例文数の分類別内訳を常に表示すること。\n\n登録例文数の表の上に7日、30日、120日のボタンが残っているので削除。それ以外のKPIには影響を与えないこと。",
+  "savedAt": "2026-01-19T21:49:08.342Z",
+  "aiInstruction": "自動和訳機能が、短い英文しか対応していない。より長い英文を自動和訳に対応できないか。",
+  "comment": "自動和訳機能が、短い英文しか対応していない。より長い英文を自動和訳に対応できないか。",
   "sourceMode": "project",
-  "runId": "79896d41827fb3b9eabf1f8727d32e42"
+  "runId": "41cc4e64e571a628dca6a0dfe9c7a894"
 }
 </script>
 </body>
