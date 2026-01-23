@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>火中の栗 - The Burning Chestnut</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Yuji+Syuku&family=Zen+Antique+Soft&display=swap" rel="stylesheet">
+    
+    <style>
+        body {
+            font-family: 'Zen Antique Soft', serif;
+            background-color: #0f0500;
+            color: #ffecd1;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        
+        .title-font {
+            font-family: 'Yuji Syuku', serif;
+        }
+
+        /* 画面シェイク */
+        @keyframes shake {
+            0% { transform: translate(0, 0); }
+            10% { transform: translate(-5px, -5px); }
+            20% { transform: translate(5px, 5px); }
+            30% { transform: translate(-5px, 5px); }
+            40% { transform: translate(5px, -5px); }
+            50% { transform: translate(-5px, 0); }
+            60% { transform: translate(5px, 0); }
+            70% { transform: translate(0, 5px); }
+            80% { transform: translate(0, -5px); }
+            90% { transform: translate(-2px, 2px); }
+            100% { transform: translate(0, 0); }
+        }
+        .shake-hard {
+            animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both;
+        }
+
+        /* UI オーバーレイ */
+        .overlay-gradient {
+            background: radial-gradient(circle, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
+        }
+
+        /* ゲージアニメーション */
+        .progress-bar {
+            transition: width 0.1s linear;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app" class="relative w-full h-screen overflow-hidden" :class="{'shake-hard': isDamaged}">
+    
+    <canvas ref="canvas" class="absolute top-0 left-0 w-full h-full z-0"></canvas>
+
+    <div class="absolute inset-0 pointer-events-none overlay-gradient z-10"></div>
+    <div class="absolute inset-0 pointer-events-none bg-red-900 mix-blend-overlay opacity-20 z-10"></div>
+
+    <div class="absolute inset-0 z-20 pointer-events-none flex flex-col justify-between p-4 safe-area-inset">
+        
+        <div v-if="gameState === 'playing'" class="flex justify-between items-start pt-2">
+            <div class="bg-black/40 backdrop-blur-md rounded-lg p-3 border border-orange-900/50">
+                <div class="text-xs text-orange-300 mb-1">収穫数</div>
+                <div class="text-3xl font-bold text-white leading-none">
+                    <i class="fas fa-cookie-bite text-yellow-600 mr-2"></i>{{ score }}
+                </div>
+            </div>
+
+            <div class="flex flex-col items-end gap-2 w-1/2">
+                <div class="text-4xl font-bold title-font text-white drop-shadow-[0_0_10px_rgba(255,100,0,0.8)]">
+                    {{ timeLeft.toFixed(1) }}<span class="text-sm ml-1">秒</span>
+                </div>
+                
+                <div class="w-full max-w-[150px]">
+                    <div class="flex justify-between text-xs text-orange-300 mb-1">
+                        <span>耐久力</span>
+                        <span>{{ Math.ceil(hp) }}%</span>
+                    </div>
+                    <div class="h-3 bg-gray-900 rounded-full border border-gray-700 overflow-hidden relative">
+                        <div class="absolute inset-0 bg-gradient-to-r from-red-600 to-orange-500 transition-all duration-300"
+                             :style="{ width: hp + '%' }"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="gameState === 'start'" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-auto z-50">
+            <h1 class="text-6xl md:text-8xl text-red-500 title-font mb-2 drop-shadow-[0_0_20px_rgba(255,0,0,0.8)] tracking-widest text-center">
+                火中の栗
+            </h1>
+            <p class="text-xl text-orange-200 mb-8 title-font tracking-widest">～ 灼熱の収穫 ～</p>
+            
+            <div class="bg-gray-900/80 p-6 rounded-xl border border-orange-800 max-w-md w-full mb-8 text-center shadow-2xl">
+                <div class="grid gap-4 text-left text-sm md:text-base">
+                    <div class="flex items-start">
+                        <span class="bg-orange-600 text-white rounded px-2 py-0.5 mr-2 text-xs shrink-0 mt-1">基本</span>
+                        <span>炎が<b>弱まった隙</b>に、栗を<b>長押し</b>して回収せよ。</span>
+                    </div>
+                    <div class="flex items-start">
+                        <span class="bg-red-600 text-white rounded px-2 py-0.5 mr-2 text-xs shrink-0 mt-1">危険</span>
+                        <span>栗が<b>ブルブル震えたら</b>即座に<b>指を離せ！</b>爆発するぞ。</span>
+                    </div>
+                    <div class="flex items-start">
+                        <span class="bg-yellow-600 text-black rounded px-2 py-0.5 mr-2 text-xs shrink-0 mt-1">目的</span>
+                        <span>60秒以内に、無傷で多くの栗を持ち帰ること。</span>
+                    </div>
+                </div>
+            </div>
+
+            <button @click="startGame" class="group relative px-12 py-4 bg-transparent overflow-hidden rounded-full transition-all hover:scale-105 active:scale-95">
+                <div class="absolute inset-0 w-full h-full bg-gradient-to-r from-red-600 via-orange-500 to-red-600 animate-gradient-x opacity-80 group-hover:opacity-100"></div>
+                <span class="relative text-2xl font-bold text-white tracking-widest drop-shadow-md">挑戦する</span>
+            </button>
+        </div>
+
+        <div v-if="gameState === 'result'" class="absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md pointer-events-auto z-50 animate-fade-in">
+            <div class="text-center mb-8">
+                <p class="text-gray-400 mb-2">TIME UP</p>
+                <h2 class="text-5xl md:text-6xl text-white title-font mb-6">結果発表</h2>
+                
+                <div class="grid grid-cols-2 gap-8 text-left mb-6">
+                    <div>
+                        <div class="text-sm text-gray-500">拾った栗</div>
+                        <div class="text-3xl text-yellow-400 font-bold">{{ score }}<span class="text-sm text-white ml-2">個</span></div>
+                    </div>
+                    <div>
+                        <div class="text-sm text-gray-500">残り耐久</div>
+                        <div class="text-3xl font-bold" :class="hp > 50 ? 'text-green-400' : 'text-red-500'">{{ Math.ceil(hp) }}<span class="text-sm text-white ml-2">%</span></div>
+                    </div>
+                </div>
+
+                <div class="text-2xl title-font text-orange-200 border-t border-gray-700 pt-6">
+                    {{ resultComment }}
+                </div>
+            </div>
+
+            <button @click="startGame" class="bg-white text-black font-bold py-3 px-8 rounded-full hover:bg-gray-200 transition-colors">
+                もう一度挑む
+            </button>
+        </div>
+
+        <div v-if="showHint" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none transition-opacity duration-500" :class="{'opacity-0': !showHint}">
+            <div class="text-2xl font-bold text-white bg-black/50 px-4 py-2 rounded backdrop-blur">
+                {{ hintText }}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const { createApp, ref, onMounted, onUnmounted, computed } = Vue;
+
+createApp({
+    setup() {
+        // --- Reactive State ---
+        const canvas = ref(null);
+        const gameState = ref('start'); // start, playing, result
+        const score = ref(0);
+        const hp = ref(100);
+        const timeLeft = ref(60);
+        const isDamaged = ref(false);
+        const showHint = ref(false);
+        const hintText = ref('');
+
+        // --- Game Constants & Variables ---
+        let ctx = null;
+        let animationId = null;
+        let lastTime = 0;
+        let width = 0;
+        let height = 0;
+        let scale = 1;
+
+        // Entities
+        let chestnuts = [];
+        let fireParticles = [];
+        let emberParticles = [];
+        let activeTouchId = null; // Track current touch for holding
+        let heldChestnutIndex = -1; // Index of chestnut currently being held
+
+        // Parameters
+        const TOTAL_CHESTNUTS = 5;
+        const HOLD_TIME_REQUIRED = 1.5; // Seconds to collect
+        const EXPLOSION_DAMAGE = 25;
+        const GAME_DURATION = 60;
+
+        // Sound Effects (Web Audio API - Simple Synth)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function playSound(type) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            const now = audioCtx.currentTime;
+            
+            if (type === 'collect') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(800, now);
+                osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                osc.start(now);
+                osc.stop(now + 0.1);
+            } else if (type === 'explode') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(100, now);
+                osc.frequency.exponentialRampToValueAtTime(10, now + 0.3);
+                gain.gain.setValueAtTime(0.5, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            } else if (type === 'charging') {
+                // Continuous sound handled differently, skipping for simplicity
+            }
+        }
+
+        // --- Lifecycle ---
+        onMounted(() => {
+            initCanvas();
+            window.addEventListener('resize', resize);
+            
+            // Event Listeners for Touch/Mouse
+            const c = canvas.value;
+            c.addEventListener('pointerdown', onPointerDown);
+            c.addEventListener('pointerup', onPointerUp);
+            c.addEventListener('pointermove', onPointerMove);
+            // Cancel events
+            c.addEventListener('pointercancel', onPointerUp);
+            c.addEventListener('pointerleave', onPointerUp);
+        });
+
+        onUnmounted(() => {
+            cancelAnimationFrame(animationId);
+            window.removeEventListener('resize', resize);
+        });
+
+        // --- Canvas Setup ---
+        function initCanvas() {
+            const c = canvas.value;
+            ctx = c.getContext('2d', { alpha: false }); // Optimize
+            resize();
+            // Start rendering loop for start screen background
+            lastTime = performance.now();
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            const c = canvas.value;
+            width = window.innerWidth;
+            height = window.innerHeight;
+            scale = Math.min(window.devicePixelRatio, 2); // Cap at 2x for performance
+            c.width = width * scale;
+            c.height = height * scale;
+            ctx.scale(scale, scale);
+        }
+
+        // --- Game Logic ---
+        function startGame() {
+            score.value = 0;
+            hp.value = 100;
+            timeLeft.value = GAME_DURATION;
+            gameState.value = 'playing';
+            isDamaged.value = false;
+            
+            // Initialize Chestnuts
+            chestnuts = [];
+            for(let i=0; i<TOTAL_CHESTNUTS; i++) {
+                spawnChestnut(i);
+            }
+
+            // Initialize Fire
+            fireParticles = [];
+            emberParticles = [];
+
+            // Hint
+            hintText.value = "炎が弱まったら長押し！";
+            showHint.value = true;
+            setTimeout(() => showHint.value = false, 3000);
+        }
+
+                function spawnChestnut(index) {
+            // ランダムな位置と速度を設定
+            const margin = 50;
+            const x = margin + Math.random() * (width - margin * 2);
+            const y = margin + Math.random() * (height * 0.6) + height * 0.1;
+
+            chestnuts[index] = {
+                x: x,
+                y: y,
+                vx: (Math.random() - 0.5) * 1.5, // 横方向の速度
+                vy: (Math.random() - 0.5) * 1.5, // 縦方向の速度
+                radius: 35,
+                state: 'hidden', // hidden, visible, held, warning, exploded
+                heatLevel: 1.0,
+                heatCycleOffset: Math.random() * 1000,
+                heatCycleSpeed: 0.001 + Math.random() * 0.002,
+                collectProgress: 0,
+                warningTimer: 0,
+                shakeOffset: {x:0, y:0}
+            };
+        }
+
+        // --- Interaction Handlers ---
+        function onPointerDown(e) {
+            if (gameState.value !== 'playing') return;
+            e.preventDefault();
+
+            // Only one touch at a time for simplicity
+            if (activeTouchId !== null) return;
+
+            const rect = canvas.value.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+
+            // Check collision
+            for (let i = 0; i < chestnuts.length; i++) {
+                const c = chestnuts[i];
+                // Can only touch if visible and safe enough (heat < threshold)
+                if (c.heatLevel > 0.6 || c.state === 'exploded') continue;
+
+                const dx = px - c.x;
+                const dy = py - c.y;
+                if (dx*dx + dy*dy < (c.radius * 1.5)**2) {
+                    activeTouchId = e.pointerId;
+                    heldChestnutIndex = i;
+                    c.state = 'held';
+                    break;
+                }
+            }
+        }
+
+        function onPointerUp(e) {
+            if (activeTouchId === e.pointerId) {
+                // Release hold
+                if (heldChestnutIndex !== -1) {
+                    const c = chestnuts[heldChestnutIndex];
+                    if (c.state === 'held' || c.state === 'warning') {
+                        // Reset progress if released early
+                        // Optionally: keep progress? No, risk/reward suggests reset.
+                        // Or maybe slow decay. Let's do reset for simplicity and difficulty.
+                        c.state = 'visible'; 
+                        c.collectProgress = 0;
+                    }
+                }
+                activeTouchId = null;
+                heldChestnutIndex = -1;
+            }
+        }
+
+        function onPointerMove(e) {
+            if (activeTouchId === e.pointerId && heldChestnutIndex !== -1) {
+                // Verify finger is still near the chestnut
+                const c = chestnuts[heldChestnutIndex];
+                const rect = canvas.value.getBoundingClientRect();
+                const px = e.clientX - rect.left;
+                const py = e.clientY - rect.top;
+                const dx = px - c.x;
+                const dy = py - c.y;
+                
+                // If dragged too far away, cancel hold
+                if (dx*dx + dy*dy > (c.radius * 2.0)**2) {
+                    onPointerUp(e);
+                }
+            }
+        }
+
+        // --- Main Loop ---
+        function loop(timestamp) {
+            const dt = Math.min((timestamp - lastTime), 50); // Cap dt
+            lastTime = timestamp;
+
+            update(dt, timestamp);
+            draw(timestamp);
+
+            animationId = requestAnimationFrame(loop);
+        }
+
+                function update(dt, time) {
+            if (gameState.value === 'playing') {
+                timeLeft.value -= dt / 1000;
+                if (timeLeft.value <= 0) {
+                    timeLeft.value = 0;
+                    finishGame();
+                }
+            }
+
+            // Update Chestnuts
+            chestnuts.forEach((c, idx) => {
+                if (c.state === 'exploded') {
+                    if (Math.random() < 0.005) {
+                        spawnChestnut(idx);
+                    }
+                    return;
+                }
+
+                // --- 移動処理 (コロコロ転がる) ---
+                if (c.state !== 'held') {
+                    c.x += c.vx;
+                    c.y += c.vy;
+
+                    // 壁で跳ね返る
+                    if (c.x < c.radius || c.x > width - c.radius) {
+                        c.vx *= -1;
+                        c.x = Math.max(c.radius, Math.min(width - c.radius, c.x));
+                    }
+                    if (c.y < c.radius || c.y > height - c.radius) {
+                        c.vy *= -1;
+                        c.y = Math.max(c.radius, Math.min(height - c.radius, c.y));
+                    }
+                }
+
+                // Heat Cycle
+                const t = time * c.heatCycleSpeed + c.heatCycleOffset;
+                let rawHeat = Math.sin(t) * 0.5 + 0.5;
+                rawHeat += Math.sin(t * 2.3) * 0.2;
+                c.heatLevel = Math.max(0, Math.min(1, rawHeat));
+
+                // State logic (Visibility)
+                if (c.state !== 'held' && c.state !== 'warning') {
+                    c.state = c.heatLevel < 0.6 ? 'visible' : 'hidden';
+                }
+
+                // --- 自然爆発 (触っていなくても爆発する) ---
+                if (c.state === 'visible' && c.heatLevel > 0.7) {
+                    // 熱いとき、稀に自然にWarning状態へ移行
+                    if (Math.random() < 0.002) {
+                        c.state = 'warning';
+                        c.warningTimer = 0;
+                        // 自然爆発の時はヒントを出さない（不気味に震えだす）
+                    }
+                }
+
+                // Warning & Holding Logic
+                if (c.state === 'held' || c.state === 'warning') {
+                    // 自分が持っている最中の警告トリガー
+                    if (c.state === 'held' && Math.random() < 0.005 * (c.collectProgress + 1)) {
+                         c.state = 'warning';
+                         c.warningTimer = 0;
+                         hintText.value = "離せ！！";
+                         showHint.value = true;
+                    }
+
+                    if (c.state === 'warning') {
+                        // 激しく震える
+                        c.shakeOffset.x = (Math.random() - 0.5) * 15;
+                        c.shakeOffset.y = (Math.random() - 0.5) * 15;
+                        
+                        c.warningTimer += dt;
+                        if (c.warningTimer > 600) { // 限界突破
+                            explode(c);
+                        }
+                    } else {
+                        // 収穫進行中
+                        c.collectProgress += dt / 1000;
+                        c.shakeOffset.x = (Math.random() - 0.5) * 2; 
+                        c.shakeOffset.y = (Math.random() - 0.5) * 2;
+
+                        if (c.collectProgress >= HOLD_TIME_REQUIRED) {
+                            collect(idx);
+                        }
+                    }
+                } else {
+                    // Reset
+                    c.collectProgress = 0;
+                    c.shakeOffset.x = 0;
+                    c.shakeOffset.y = 0;
+                }
+            });
+
+                        // Update Fire Particles
+            // 炎の発生源を調整：環境炎（下部）＋ 栗からの炎
+            if (fireParticles.length < 350) {
+                // 1. 環境炎（画面下部からうっすら）
+                if (Math.random() < 0.3) {
+                    fireParticles.push({
+                        x: Math.random() * width,
+                        y: height + Math.random() * 30,
+                        vx: (Math.random() - 0.5) * 1,
+                        vy: -(Math.random() * 2 + 2),
+                        life: 1.0,
+                        decay: 0.01 + Math.random() * 0.01,
+                        size: 40 + Math.random() * 40,
+                        hue: 0 + Math.random() * 30
+                    });
+                }
+
+                // 2. 栗からの炎（熱量に比例して発生）
+                chestnuts.forEach(c => {
+                   if (c.state !== 'exploded' && c.heatLevel > 0.1) {
+                       // 熱いほどパーティクル生成確率アップ
+                       if (Math.random() < c.heatLevel * 0.4) {
+                           const angle = Math.random() * Math.PI * 2;
+                           const dist = Math.random() * c.radius;
+                           fireParticles.push({
+                               x: c.x + Math.cos(angle) * dist,
+                               y: c.y + Math.sin(angle) * dist + 10,
+                               vx: (Math.random() - 0.5) * 2,
+                               vy: -(Math.random() * 3 + 2 * c.heatLevel),
+                               life: 0.6 + Math.random() * 0.4,
+                               decay: 0.02 + Math.random() * 0.03,
+                               size: 20 + Math.random() * 30 * c.heatLevel,
+                               hue: 0 + Math.random() * 40 // Red to Yellow
+                           });
+                       }
+                   }
+                });
+            }
+            
+            // Embers
+            if (emberParticles.length < 50) {
+                emberParticles.push({
+                    x: Math.random() * width,
+                    y: height,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: -(Math.random() * 5 + 5),
+                    life: 1.0,
+                    size: 2 + Math.random() * 3
+                });
+            }
+
+            // Move Particles
+            for (let i = fireParticles.length - 1; i >= 0; i--) {
+                const p = fireParticles[i];
+                p.x += p.vx + Math.sin(time * 0.002 + p.y * 0.01) * 1; // Waving
+                p.y += p.vy;
+                p.life -= p.decay;
+                p.size *= 0.98; // Shrink
+                if (p.life <= 0) fireParticles.splice(i, 1);
+            }
+
+            for (let i = emberParticles.length - 1; i >= 0; i--) {
+                const p = emberParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.01;
+                if (p.life <= 0) emberParticles.splice(i, 1);
+            }
+        }
+
+        function collect(index) {
+            playSound('collect');
+            score.value += 1;
+            // Respawn instantly elsewhere or same place?
+            // Reset chestnut
+            const c = chestnuts[index];
+            c.state = 'hidden';
+            c.collectProgress = 0;
+            c.heatLevel = 1.0; // Hot immediately
+            c.heatCycleOffset += Math.PI; // Invert cycle to hide it
+            
+            // Effect
+            spawnExplosionParticles(c.x, c.y, '#ffff00', 20);
+            
+            // Force release
+            activeTouchId = null;
+            heldChestnutIndex = -1;
+            
+            showHint.value = false;
+        }
+
+                function explode(c) {
+            playSound('explode');
+            
+            // 自分が掴んでいた栗ならダメージを受ける
+            // （勝手に爆発した栗ならダメージなし）
+            const isHoldingThis = (heldChestnutIndex !== -1 && chestnuts[heldChestnutIndex] === c);
+            if (isHoldingThis) {
+                hp.value = Math.max(0, hp.value - EXPLOSION_DAMAGE);
+                isDamaged.value = true;
+                setTimeout(() => isDamaged.value = false, 500);
+                
+                // 強制リリース
+                activeTouchId = null;
+                heldChestnutIndex = -1;
+                showHint.value = false;
+            }
+
+            // 栗はどちらにせよ爆発して消える
+            c.state = 'exploded';
+            c.collectProgress = 0;
+            spawnExplosionParticles(c.x, c.y, '#ff4500', 50);
+
+            if (hp.value <= 0) {
+                finishGame();
+            }
+        }
+
+        function spawnExplosionParticles(x, y, color, count) {
+            for(let i=0; i<count; i++) {
+                emberParticles.push({
+                    x: x,
+                    y: y,
+                    vx: (Math.random() - 0.5) * 15,
+                    vy: (Math.random() - 0.5) * 15,
+                    life: 1.0,
+                    size: 3 + Math.random() * 5
+                });
+            }
+        }
+
+        function finishGame() {
+            gameState.value = 'result';
+            activeTouchId = null;
+            heldChestnutIndex = -1;
+        }
+
+        // --- Drawing ---
+        function draw(time) {
+            // Clear
+            ctx.fillStyle = '#1a0500';
+            ctx.fillRect(0, 0, width, height);
+
+                        // 1. Draw Chestnuts (Real 3D Rendering)
+            chestnuts.forEach(c => {
+                if (c.state === 'exploded') {
+                    // 爆発跡（焦げ）
+                    ctx.save();
+                    ctx.translate(c.x, c.y);
+                    ctx.scale(1, 0.6);
+                    ctx.fillStyle = 'rgba(10, 5, 5, 0.8)';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, c.radius * 1.2, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.restore();
+                    return;
+                }
+
+                const shakeX = c.shakeOffset.x;
+                const shakeY = c.shakeOffset.y;
+                const cx = c.x + shakeX;
+                const cy = c.y + shakeY;
+
+                // 炎が強いときも見えなくするのではなく、「炎に包まれる」表現にするため
+                // 栗自体の不透明度は下げない（常に実体がある）
+                ctx.save();
+
+                // --- 影 (Shadow) ---
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.beginPath();
+                ctx.ellipse(cx, cy + c.radius * 0.8, c.radius * 0.9, c.radius * 0.4, 0, 0, Math.PI*2);
+                ctx.fill();
+
+                // --- 栗の本体 (Body) - 3D Gradient ---
+                // 警告時は赤熱化
+                let baseColorStart = '#A0522D';
+                let baseColorEnd = '#3E1E09';
+                
+                if (c.state === 'warning' || (c.heatLevel > 0.8 && Math.floor(time / 100) % 2 === 0)) {
+                    baseColorStart = '#FF4500';
+                    baseColorEnd = '#8B0000';
+                }
+
+                // 形状クリッピング
+                ctx.beginPath();
+                // 少し尖ったトップを持つ形状
+                ctx.moveTo(cx, cy - c.radius * 1.1);
+                ctx.bezierCurveTo(cx + c.radius * 1.1, cy - c.radius * 0.2, cx + c.radius * 0.9, cy + c.radius * 0.9, cx, cy + c.radius * 0.9);
+                ctx.bezierCurveTo(cx - c.radius * 0.9, cy + c.radius * 0.9, cx - c.radius * 1.1, cy - c.radius * 0.2, cx, cy - c.radius * 1.1);
+                ctx.closePath();
+                
+                ctx.save();
+                ctx.clip();
+
+                // 立体グラデーション (左上からの光)
+                const gradBody = ctx.createRadialGradient(cx - c.radius*0.3, cy - c.radius*0.3, c.radius*0.1, cx, cy, c.radius * 1.5);
+                gradBody.addColorStop(0, baseColorStart); // Highlight
+                gradBody.addColorStop(0.5, baseColorEnd); // Base
+                gradBody.addColorStop(1, '#1a0d00'); // Shadow
+                ctx.fillStyle = gradBody;
+                ctx.fill();
+
+                // ハイライト (ツヤ)
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.beginPath();
+                ctx.ellipse(cx - c.radius*0.3, cy - c.radius*0.3, c.radius*0.3, c.radius*0.2, -Math.PI/4, 0, Math.PI*2);
+                ctx.fill();
+
+                ctx.restore(); // End Clip
+
+                // --- 栗の座 (Bottom/Base) ---
+                // ザラザラした質感の底面
+                ctx.beginPath();
+                ctx.ellipse(cx, cy + c.radius * 0.9, c.radius * 0.4, c.radius * 0.15, 0, 0, Math.PI*2);
+                const gradBase = ctx.createLinearGradient(cx, cy + c.radius*0.75, cx, cy + c.radius*1.05);
+                gradBase.addColorStop(0, '#D2B48C');
+                gradBase.addColorStop(1, '#8B4513');
+                ctx.fillStyle = gradBase;
+                ctx.fill();
+
+                // 座の質感ノイズ（簡易的）
+                ctx.fillStyle = 'rgba(100, 50, 0, 0.2)';
+                for(let i=0; i<5; i++) {
+                    ctx.beginPath();
+                    ctx.arc(cx + (Math.random()-0.5)*c.radius*0.5, cy + c.radius*0.9 + (Math.random()-0.5)*5, 2, 0, Math.PI*2);
+                    ctx.fill();
+                }
+
+                // Warning Flash (Outline)
+                if (c.state === 'warning') {
+                    if (Math.floor(time / 50) % 2 === 0) {
+                        ctx.strokeStyle = '#ffff00';
+                        ctx.lineWidth = 3;
+                        ctx.stroke();
+                    }
+                }
+
+                // Progress Circle (Ring)
+                if (c.collectProgress > 0) {
+                    const pct = c.collectProgress / HOLD_TIME_REQUIRED;
+                    ctx.strokeStyle = '#00ff00';
+                    ctx.lineWidth = 6;
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, c.radius + 15, -Math.PI/2, -Math.PI/2 + (Math.PI*2 * pct));
+                    ctx.stroke();
+                }
+
+                ctx.restore();
+            });
+
+            // 2. Draw Fire (Additive Blending)
+            ctx.globalCompositeOperation = 'lighter'; // This creates the glowing fire effect
+            
+            fireParticles.forEach(p => {
+                const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+                // Colors: Red -> Orange -> Yellow -> Transparent
+                const alpha = p.life * 0.6;
+                gradient.addColorStop(0, `hsla(${p.hue}, 100%, 60%, ${alpha})`);
+                gradient.addColorStop(0.5, `hsla(${p.hue - 10}, 100%, 50%, ${alpha * 0.5})`);
+                gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+                ctx.fill();
+            });
+            
+            // Draw localized intense fire over hot chestnuts
+            ctx.globalCompositeOperation = 'lighter';
+            chestnuts.forEach(c => {
+                if (c.state === 'exploded' || c.heatLevel < 0.2) return;
+                
+                // Draw fire blob over chestnut based on heat
+                const intensity = c.heatLevel;
+                if (intensity > 0.3) {
+                    const size = c.radius * 2 * intensity + (Math.random()*10);
+                    const grad = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, size);
+                    grad.addColorStop(0, `rgba(255, 50, 0, ${intensity * 0.8})`);
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(c.x, c.y, size, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            });
+
+            // 3. Embers / Sparks (Top Layer)
+            ctx.globalCompositeOperation = 'source-over'; // Normal blending for sparks
+            emberParticles.forEach(p => {
+                ctx.fillStyle = `rgba(255, 200, 100, ${p.life})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+                ctx.fill();
+            });
+            
+            // Reset composite
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        const resultComment = computed(() => {
+            if (hp.value <= 0) return "大火傷でリタイア...";
+            if (score.value < 5) return "怖気付いてしまったか？";
+            if (score.value < 10) return "平凡な栗拾いだ。";
+            if (score.value < 15) return "見事な手際！達人級。";
+            return "まさに火中の栗マスター！！";
+        });
+
+        return {
+            canvas,
+            gameState,
+            score,
+            hp,
+            timeLeft,
+            isDamaged,
+            startGame,
+            resultComment,
+            showHint,
+            hintText
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
