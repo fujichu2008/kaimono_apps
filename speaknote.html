@@ -606,6 +606,14 @@ header nav button:hover{
         <input id="tags" type="text" placeholder="例：調達, 納期, 外注" />
       </div>
     </div>
+    <div class="row hidden" id="row-image">
+      <div>
+        <label>画像（写真描写用）</label>
+        <input type="file" id="inp-image" accept="image/*">
+        <input type="hidden" id="enc-image">
+        <img id="preview-image" style="display:none;max-height:200px;margin-top:8px;border-radius:8px;border:1px solid var(--line)">
+      </div>
+    </div>
     <div class="row">
       <div>
         <label>メモ（生成プロンプト等）</label>
@@ -684,8 +692,18 @@ header nav button:hover{
     <span>Japanese</span>
     <button type="button" class="btn mini" id="d-toggle-ja">和訳を表示</button>
   </div>
-  <div id="d-ja-wrap" class="speak-text hidden" style="margin-bottom:8px;max-height:36vh;overflow:auto;">
+  <div id="d-ja-wrap" class="speak-text hidden" style="margin-bottom:8px;max-height:30vh;overflow:auto;">
     <div id="d-ja" style="white-space:pre-wrap;"></div>
+  </div>
+  
+  <div id="d-image-section" class="hidden">
+    <div class="tiny" style="display:flex;align-items:center;gap:8px;margin-top:2px">
+      <span>Image</span>
+      <button type="button" class="btn mini" id="d-toggle-image">画像を表示</button>
+    </div>
+    <div id="d-image-wrap" class="hidden" style="margin-bottom:8px;margin-top:4px">
+      <img id="d-image-view" style="max-width:100%;max-height:300px;border-radius:8px;">
+    </div>
   </div>
 
 
@@ -722,13 +740,17 @@ header nav button:hover{
   <div id="sh-text" class="speak-text" style="margin-top:8px;max-height:60vh;"></div>
 
   <!-- 和訳の開閉ボタン -->
-  <div class="actions tiny" style="margin-top:4px">
+<div class="actions tiny" style="margin-top:4px;display:flex;gap:8px">
     <button type="button" class="btn mini" id="sh-toggle-ja">和訳を表示</button>
+    <button type="button" class="btn mini hidden" id="sh-toggle-image">画像を表示</button>
   </div>
 
-  <!-- 和訳（デフォルト折りたたみ＋スクロール枠） -->
   <div id="sh-text-ja-wrap" class="speak-text hidden" style="max-height:30vh;overflow:auto;margin-top:2px;">
     <div id="sh-text-ja" style="white-space:pre-wrap;"></div>
+  </div>
+  
+  <div id="sh-image-wrap" class="hidden" style="margin-top:4px;text-align:center">
+    <img id="sh-image-view" style="max-width:100%;max-height:40vh;border-radius:8px;">
   </div>
 
   <div class="actions" style="margin-top:8px">
@@ -932,6 +954,26 @@ function escapeHTML(s=''){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&
 const UA = navigator.userAgent||'';
 const isIOS = /iP(hone|od|ad)/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isAndroid = /Android/i.test(UA);
+
+/* 画像圧縮ユーティリティ */
+const resizeImage = (file, max=800) => new Promise(r=>{
+  if(!file || !file.type.match('image.*')) return r('');
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const img=new Image();
+    img.onload=()=>{
+      const c=document.createElement('canvas');
+      let w=img.width, h=img.height;
+      if(w>h){if(w>max){h*=max/w;w=max;}}else{if(h>max){w*=max/h;h=max;}}
+      c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h);
+      r(c.toDataURL('image/jpeg',0.7));
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+/* 許可されるカテゴリ一覧（それ以外は表示上は廃止） */
 
 /* 許可されるカテゴリ一覧（それ以外は表示上は廃止） */
 const ALLOWED_CATEGORIES = [
@@ -1427,6 +1469,19 @@ function setActiveNav(id){ $$('nav button').forEach(b=>b.classList.remove('activ
    登録画面
 ========================= */
 function defaultSaveHandler(){
+  // カテゴリ変更で画像欄トグル
+  $('#cats').addEventListener('change', ()=>{
+     const cats = Array.from($('#cats').selectedOptions).map(o=>o.value);
+     const r = $('#row-image');
+     if(r) { if(cats.includes('写真描写')) r.classList.remove('hidden'); else r.classList.add('hidden'); }
+  });
+  // 画像圧縮
+  $('#inp-image').addEventListener('change', async (e)=>{
+     const f = e.target.files[0];
+     if(f){ const d=await resizeImage(f); $('#enc-image').value=d; $('#preview-image').src=d; $('#preview-image').style.display='block'; }
+     else { $('#enc-image').value=''; $('#preview-image').style.display='none'; }
+  });
+
   $('#btn-save').onclick = async ()=>{
     const scene = $('#scene').value.trim();
     const english = $('#en').value.trim();
@@ -1453,9 +1508,17 @@ function collectFormToItem(base={}){
   const categories = Array.from($('#cats').selectedOptions).map(o=>o.value);
   const tags = $('#tags').value.split(',').map(s=>s.trim()).filter(Boolean);
   const notes = $('#notes').value.trim();
-  return Object.assign(base, { scene, english, japanese, categories, tags, notes });
+  const imageData = $('#enc-image').value;
+  return Object.assign(base, { scene, english, japanese, categories, tags, notes, imageData });
 }
-function clearForm(){ ['scene','en','ja','tags','notes'].forEach(id=>$('#'+id).value=''); Array.from($('#cats').options).forEach(o=>o.selected=false); const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML=''; }
+function clearForm(){
+  ['scene','en','ja','tags','notes','enc-image'].forEach(id=>$('#'+id).value='');
+  $('#inp-image').value='';
+  $('#preview-image').style.display='none'; $('#preview-image').src='';
+  $('#row-image').classList.add('hidden');
+  Array.from($('#cats').options).forEach(o=>o.selected=false);
+  const pv=$('#preview-en'); pv.classList.add('hidden'); pv.innerHTML='';
+}
 $('#btn-clear').onclick = ()=> clearForm();
 defaultSaveHandler();
 
@@ -2229,33 +2292,50 @@ async function openDetail(id){
   renderSpeakText($('#d-en'), row.english||''); 
   $('#d-en').scrollTop=0;
 
-  // 和文：折りたたみ＋スクロール枠
+  // 和文・画像
   const jaWrap = $('#d-ja-wrap');
   const jaBody = $('#d-ja');
   const jaBtn  = $('#d-toggle-ja');
+  const imgSec = $('#d-image-section');
+  const imgWrap= $('#d-image-wrap');
+  const imgBtn = $('#d-toggle-image');
+  const imgView= $('#d-image-view');
   const jaText = (row.japanese || '').trim();
 
-  if(jaBody){
-    jaBody.textContent = jaText;
-  }
+  if(jaBody) jaBody.textContent = jaText;
+  
+  // 和訳ロジック
   if(jaWrap && jaBtn){
+    jaWrap.classList.add('hidden');
     if(jaText){
-      // 和訳がある場合：ボタン有効＋デフォルト非表示
-      jaWrap.classList.add('hidden');
       jaBtn.disabled = false;
       jaBtn.textContent = '和訳を表示';
     }else{
-      // 和訳がない場合：枠は隠したまま、ボタンは無効
-      jaWrap.classList.add('hidden');
       jaBtn.disabled = true;
       jaBtn.textContent = '和訳なし';
     }
-    // ボタンのクリックで開閉
     jaBtn.onclick = ()=>{
       if(jaBtn.disabled) return;
-      const hidden = jaWrap.classList.toggle('hidden');
-      jaBtn.textContent = hidden ? '和訳を表示' : '和訳を隠す';
+      const h = jaWrap.classList.toggle('hidden');
+      jaBtn.textContent = h ? '和訳を表示' : '和訳を隠す';
     };
+  }
+
+  // 画像ロジック
+  if(imgSec && imgView && imgBtn){
+    if(row.imageData){
+      imgSec.classList.remove('hidden');
+      imgWrap.classList.add('hidden');
+      imgView.src = row.imageData;
+      imgBtn.textContent = '画像を表示';
+      imgBtn.onclick = ()=>{
+        const h = imgWrap.classList.toggle('hidden');
+        imgBtn.textContent = h ? '画像を表示' : '画像を隠す';
+      };
+    }else{
+      imgSec.classList.add('hidden');
+      imgView.src = '';
+    }
   }
 
   $('#dlg-detail').showModal();
@@ -2426,6 +2506,15 @@ else if(recEngine.state==='ready'){
       if(!row) return;
       $('#scene').value=row.scene||''; $('#en').value=row.english||''; $('#ja').value=row.japanese||''; 
       Array.from($('#cats').options).forEach(o=>o.selected=(row.categories||[]).includes(o.value));
+      // 画像復元
+      $('#enc-image').value = row.imageData||'';
+      if(row.imageData){
+        $('#preview-image').src=row.imageData; $('#preview-image').style.display='block';
+        if((row.categories||[]).includes('写真描写')) $('#row-image').classList.remove('hidden');
+      }else{
+        $('#preview-image').style.display='none';
+        $('#row-image').classList.add('hidden');
+      }
       $('#tags').value=(row.tags||[]).join(', '); $('#notes').value=row.notes||'';
       $('#btn-save').onclick = async ()=>{
         const scene=$('#scene').value.trim(); if(!scene){ alert('「場面」は必須です'); return; }
@@ -2608,26 +2697,38 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
   renderSpeakText(sh.container, text);
   sh.container.scrollTop=0;
 
-  // 和訳：折りたたみ＋スクロール枠にセット
+// 和訳・画像
   const jaWrap = $('#sh-text-ja-wrap');
   const jaBody = $('#sh-text-ja');
   const jaBtn  = $('#sh-toggle-ja');
+  const imgWrap= $('#sh-image-wrap');
+  const imgView= $('#sh-image-view');
+  const imgBtn = $('#sh-toggle-image');
   const jaText = (row.japanese || '').trim();
 
-  if(jaBody){
-    jaBody.textContent = jaText;
-  }
+  if(jaBody) jaBody.textContent = jaText;
+
   if(jaWrap && jaBtn){
+    jaWrap.classList.add('hidden');
     if(jaText){
-      // 和訳あり：デフォルト折りたたみ／ボタン有効
-      jaWrap.classList.add('hidden');
       jaBtn.disabled = false;
       jaBtn.textContent = '和訳を表示';
     }else{
-      // 和訳なし：枠非表示のまま／ボタン無効
-      jaWrap.classList.add('hidden');
       jaBtn.disabled = true;
       jaBtn.textContent = '和訳なし';
+    }
+  }
+
+  if(imgWrap && imgView && imgBtn){
+    if(row.imageData){
+      imgBtn.classList.remove('hidden');
+      imgWrap.classList.add('hidden');
+      imgView.src = row.imageData;
+      imgBtn.textContent = '画像を表示';
+    }else{
+      imgBtn.classList.add('hidden');
+      imgWrap.classList.add('hidden');
+      imgView.src = '';
     }
   }
 
@@ -2774,8 +2875,16 @@ $('#sh-toggle-ja').onclick = ()=> {
   const wrap = $('#sh-text-ja-wrap');
   const btn  = $('#sh-toggle-ja');
   if(!wrap || !btn || btn.disabled) return;
-  const hidden = wrap.classList.toggle('hidden');
-  btn.textContent = hidden ? '和訳を表示' : '和訳を隠す';
+  const h = wrap.classList.toggle('hidden');
+  btn.textContent = h ? '和訳を表示' : '和訳を隠す';
+};
+// 画像表示の開閉ボタン
+$('#sh-toggle-image').onclick = ()=>{
+  const wrap = $('#sh-image-wrap');
+  const btn  = $('#sh-toggle-image');
+  if(!wrap || !btn) return;
+  const h = wrap.classList.toggle('hidden');
+  btn.textContent = h ? '画像を表示' : '画像を隠す';
 };
 
 
@@ -3076,17 +3185,18 @@ window.addEventListener('pageshow', ()=> loadVoices());
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "280a8dd4f1abe2afe58bf8d243eb8119",
   "createdAt": "2026-01-18T16:42:46.922Z",
   "schema": 2,
   "title": "SpeakNote（英語例文・場面学習）",
-  "savedAt": "2026-01-19T21:56:58.505Z",
-  "aiInstruction": "学習の足跡は、210日分、表示する。\n\n学習の足跡は214日分でお願いします\n\n学習の足跡を180日分とする。\n\n学習の足跡を175日分とする。",
-  "comment": "学習の足跡は、210日分、表示する。\n\n学習の足跡は214日分でお願いします\n\n学習の足跡を180日分とする。\n\n学習の足跡を175日分とする。",
+  "savedAt": "2026-01-29T06:00:36.233Z",
+  "aiInstruction": "登録画面で、カテゴリ「写真描写」を選択した場合に画像の登録メニューを表示させ、ここで画像を登録すると、個別メニューの画面やシャドーイング画面に（グループ化された和訳メニューの下部）、その画像を表示できるようにする。\n\n登録画面で、カテゴリ「写真描写」を選択すると、PCまたはスマホの写真フォルダから、写真をアプリ内に登録可能とする。個別の例文を開いたときや、シャドーイング画面で、登録した画像を表示する（隠している和訳表示の下部）。\n\n登録した写真が表示されない。\n\n和訳と、画像を表示を、いっしょにせずに、別にする。",
+  "comment": "登録画面で、カテゴリ「写真描写」を選択した場合に画像の登録メニューを表示させ、ここで画像を登録すると、個別メニューの画面やシャドーイング画面に（グループ化された和訳メニューの下部）、その画像を表示できるようにする。\n\n登録画面で、カテゴリ「写真描写」を選択すると、PCまたはスマホの写真フォルダから、写真をアプリ内に登録可能とする。個別の例文を開いたときや、シャドーイング画面で、登録した画像を表示する（隠している和訳表示の下部）。\n\n登録した写真が表示されない。\n\n和訳と、画像を表示を、いっしょにせずに、別にする。",
   "sourceMode": "project",
-  "runId": "cb7471660610aad698cf9d8fd493c2e2"
+  "runId": "5336c800e90b7eff017cb341226bcc84"
 }
 </script>
 </body>
