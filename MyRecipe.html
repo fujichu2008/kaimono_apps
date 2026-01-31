@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>My Recipe Note (DB版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        body { touch-action: manipulation; background-color: #f3f4f6; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .resizer-handle {
+            touch-action: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f3f4f6;
+            border-top: 1px solid #e5e7eb;
+            border-bottom: 1px solid #e5e7eb;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            z-index: 10;
+            cursor: row-resize;
+        }
+        /* Loading Spinner */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #f97316;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- IndexedDB Helper ---
+        const DB_NAME = 'MyRecipeNoteDB';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'recipes';
+
+        const dbHelper = {
+            open: () => {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(DB_NAME, DB_VERSION);
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        if (!db.objectStoreNames.contains(STORE_NAME)) {
+                            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                        }
+                    };
+                    request.onsuccess = (event) => resolve(event.target.result);
+                    request.onerror = (event) => reject(event.target.error);
+                });
+            },
+            getAll: async () => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readonly');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result || []);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            put: async (data) => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.put(data);
+                    request.onsuccess = () => resolve(data);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            delete: async (id) => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.delete(id);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+        };
+
+        // --- アイコン ---
+        const Icon = ({ name, size = 20, className = "" }) => {
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            }, [name]);
+            return <i data-lucide={name} width={size} height={size} className={className}></i>;
+        };
+
+        // --- 画像圧縮 ---
+        const compressImage = (file) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 1000; // 少し画質向上
+                        let width = img.width;
+                        let height = img.height;
+                        if (width > MAX_WIDTH) {
+                            height *= MAX_WIDTH / width;
+                            width = MAX_WIDTH;
+                        }
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.8));
+                    };
+                };
+            });
+        };
+
+        // --- メインアプリ ---
+        const App = () => {
+            const [view, setView] = useState('list');
+            const [recipes, setRecipes] = useState([]);
+            const [activeRecipeId, setActiveRecipeId] = useState(null);
+            const [isLoading, setIsLoading] = useState(true);
+
+            // 初期ロード (IndexedDBから)
+            useEffect(() => {
+                const loadData = async () => {
+                    try {
+                        const data = await dbHelper.getAll();
+                        // 作成日順にソート（新しい順）
+                        data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                        setRecipes(data);
+                    } catch (e) {
+                        console.error("DB Load Error:", e);
+                        alert("データの読み込みに失敗しました");
+                    } finally {
+                        setIsLoading(false);
+                    }
+                };
+                loadData();
+            }, []);
+
+            // 追加・保存・削除のアクションはDB操作後にStateを更新する
+            const addRecipe = async (newRecipe) => {
+                try {
+                    await dbHelper.put(newRecipe);
+                    setRecipes([newRecipe, ...recipes]);
+                    setView('list');
+                } catch (e) {
+                    alert("保存に失敗しました: " + e.message);
+                }
+            };
+
+            const updateRecipe = async (updatedRecipe) => {
+                try {
+                    await dbHelper.put(updatedRecipe);
+                    setRecipes(recipes.map(r => r.id === updatedRecipe.id ? updatedRecipe : r));
+                } catch (e) {
+                    alert("更新に失敗しました: " + e.message);
+                }
+            };
+
+            const deleteRecipe = async (id) => {
+                if(!confirm("削除しますか？この操作は取り消せません。")) return;
+                try {
+                    await dbHelper.delete(id);
+                    setRecipes(recipes.filter(r => r.id !== id));
+                    setView('list');
+                } catch (e) {
+                    alert("削除に失敗しました");
+                }
+            };
+
+            const openDetail = (recipe) => {
+                setActiveRecipeId(recipe.id);
+                setView('detail');
+            };
+
+            const activeRecipe = useMemo(() => recipes.find(r => r.id === activeRecipeId), [recipes, activeRecipeId]);
+
+            if (isLoading) {
+                return <div className="h-screen w-full flex items-center justify-center bg-gray-100"><div className="spinner"></div></div>;
+            }
+
+            return (
+                <div className="h-screen w-full flex flex-col bg-gray-100 text-gray-800 font-sans overflow-hidden">
+                    {/* ヘッダー */}
+                    <header className="bg-orange-600 text-white p-4 shadow-md flex justify-between items-center z-20 shrink-0">
+                        {view === 'list' ? (
+                            <h1 className="text-xl font-bold flex items-center gap-2">
+                                <Icon name="chef-hat" /> My Recipe Note
+                            </h1>
+                        ) : (
+                            <button onClick={() => setView('list')} className="flex items-center gap-1 font-bold">
+                                <Icon name="arrow-left" /> 戻る
+                            </button>
+                        )}
+                        {view === 'list' && (
+                            <button onClick={() => setView('form')} className="bg-white text-orange-600 px-3 py-1 rounded-full text-sm font-bold shadow hover:bg-orange-50 transition">
+                                <Icon name="plus" size={16} className="inline mr-1" /> 追加
+                            </button>
+                        )}
+                    </header>
+
+                    {/* コンテンツエリア */}
+                    <main className="flex-1 overflow-hidden relative">
+                        {view === 'list' && (
+                            <RecipeList recipes={recipes} onOpen={openDetail} />
+                        )}
+                        {view === 'form' && (
+                            <RecipeForm onSave={addRecipe} onCancel={() => setView('list')} />
+                        )}
+                        {view === 'detail' && activeRecipe && (
+                            <RecipeDetail 
+                                recipe={activeRecipe} 
+                                onUpdate={updateRecipe} 
+                                onDelete={() => deleteRecipe(activeRecipe.id)}
+                            />
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        // --- コンポーネント群 (ロジックは前回とほぼ同じ、データ渡しのみ変更) ---
+
+        const RecipeList = ({ recipes, onOpen }) => {
+            if (recipes.length === 0) {
+                return (
+                    <div className="h-full flex flex-col items-center justify-center text-gray-400 p-8 text-center">
+                        <Icon name="book-open" size={48} className="mb-4 opacity-50" />
+                        <p>レシピがまだありません。<br/>右上の「追加」から登録しましょう！</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="h-full overflow-y-auto p-4 space-y-4">
+                    {recipes.map(recipe => (
+                        <div key={recipe.id} onClick={() => onOpen(recipe)} className="bg-white rounded-xl shadow p-4 flex gap-4 active:scale-95 transition-transform cursor-pointer">
+                            <div className="w-20 h-20 bg-gray-200 rounded-lg shrink-0 overflow-hidden flex items-center justify-center">
+                                {recipe.image ? (
+                                    <img src={recipe.image} className="w-full h-full object-cover" />
+                                ) : (
+                                    <Icon name={recipe.type === 'url' ? 'link' : 'file-text'} className="text-gray-400" />
+                                )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <h3 className="font-bold text-lg truncate mb-1">{recipe.title}</h3>
+                                <div className="text-xs text-gray-500 mb-2 flex items-center gap-1">
+                                    <span className={`px-2 py-0.5 rounded-full text-white ${recipe.type === 'url' ? 'bg-blue-400' : 'bg-green-400'}`}>
+                                        {recipe.type === 'url' ? 'Web' : 'Memo'}
+                                    </span>
+                                    <span>{new Date(recipe.createdAt).toLocaleDateString()}</span>
+                                </div>
+                                <p className="text-sm text-gray-600 line-clamp-2">
+                                    {recipe.logs?.length > 0 
+                                        ? `★ ${recipe.logs.length}回の調理記録あり` 
+                                        : (recipe.memo || "メモなし")}
+                                </p>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            );
+        };
+
+        const RecipeForm = ({ onSave, onCancel }) => {
+            const [type, setType] = useState('url'); 
+            const [title, setTitle] = useState('');
+            const [content, setContent] = useState('');
+            const [memo, setMemo] = useState('');
+            const [image, setImage] = useState(null);
+            const [isProcessing, setIsProcessing] = useState(false);
+
+            const handleImage = async (e) => {
+                if (e.target.files && e.target.files[0]) {
+                    const compressed = await compressImage(e.target.files[0]);
+                    setImage(compressed);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!title || !content) return alert("タイトルと内容（URLまたは本文）は必須です");
+                setIsProcessing(true);
+                
+                const newRecipe = {
+                    id: Date.now().toString(),
+                    createdAt: new Date().toISOString(),
+                    type,
+                    title,
+                    content,
+                    memo,
+                    image, 
+                    logs: [] 
+                };
+                await onSave(newRecipe); // DB保存を待つ
+                setIsProcessing(false);
+            };
+
+            return (
+                <div className="h-full overflow-y-auto p-4 bg-white">
+                    <h2 className="text-lg font-bold mb-4">新規レシピ登録</h2>
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                        <div className="flex bg-gray-100 p-1 rounded-lg">
+                            <button type="button" onClick={() => setType('url')} className={`flex-1 py-2 rounded-md text-sm font-bold transition ${type === 'url' ? 'bg-white shadow text-blue-600' : 'text-gray-500'}`}>
+                                ネットレシピ (URL)
+                            </button>
+                            <button type="button" onClick={() => setType('text')} className={`flex-1 py-2 rounded-md text-sm font-bold transition ${type === 'text' ? 'bg-white shadow text-green-600' : 'text-gray-500'}`}>
+                                自由記述 (Text/AI)
+                            </button>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">レシピ名</label>
+                            <input required type="text" value={title} onChange={e => setTitle(e.target.value)} className="w-full border rounded-lg p-2 focus:ring-2 focus:ring-orange-300 outline-none" placeholder="例: 絶品ハンバーグ" />
+                        </div>
+
+                        {type === 'url' ? (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">レシピURL</label>
+                                <input required type="url" value={content} onChange={e => setContent(e.target.value)} className="w-full border rounded-lg p-2 focus:ring-2 focus:ring-orange-300 outline-none" placeholder="https://..." />
+                            </div>
+                        ) : (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">レシピ詳細・手順</label>
+                                <textarea required value={content} onChange={e => setContent(e.target.value)} className="w-full border rounded-lg p-2 h-40 focus:ring-2 focus:ring-orange-300 outline-none" placeholder="材料や手順を入力..." />
+                            </div>
+                        )}
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">ひとことメモ</label>
+                            <textarea value={memo} onChange={e => setMemo(e.target.value)} className="w-full border rounded-lg p-2 h-20 outline-none" placeholder="コツや注意点など" />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">代表写真 (任意)</label>
+                            <input type="file" accept="image/*" onChange={handleImage} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100"/>
+                            {image && <img src={image} className="mt-2 h-32 rounded-lg object-cover border" />}
+                        </div>
+
+                        <div className="pt-4 flex gap-3">
+                            <button type="button" onClick={onCancel} className="flex-1 bg-gray-200 py-3 rounded-lg font-bold text-gray-700">キャンセル</button>
+                            <button type="submit" disabled={isProcessing} className="flex-1 bg-orange-500 py-3 rounded-lg font-bold text-white shadow-lg shadow-orange-200 disabled:opacity-50">
+                                {isProcessing ? '保存中...' : '登録する'}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            );
+        };
+
+        const RecipeDetail = ({ recipe, onUpdate, onDelete }) => {
+            const containerRef = useRef(null);
+            const [topHeightPercent, setTopHeightPercent] = useState(66);
+            const [activeTab, setActiveTab] = useState('memo');
+            const [isDragging, setIsDragging] = useState(false);
+
+            const handleTouchMove = (e) => {
+                if (!containerRef.current) return;
+                const containerRect = containerRef.current.getBoundingClientRect();
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                const relativeY = clientY - containerRect.top;
+                let newPercent = (relativeY / containerRect.height) * 100;
+                newPercent = Math.max(10, Math.min(90, newPercent));
+                setTopHeightPercent(newPercent);
+            };
+
+            const handleTouchStart = () => setIsDragging(true);
+            const handleTouchEnd = () => setIsDragging(false);
+
+            // メモ保存（入力完了後にDB更新すると重いので、onBlurなどで保存するのが理想だが、ここでは簡易的に随時更新とする）
+            // ただし、頻繁なDB書き込みを避けるため簡易的なDebounceもどき（実際は親のonUpdateが非同期）
+            const handleMemoSave = (text) => {
+                onUpdate({ ...recipe, memo: text });
+            };
+
+            const handleAddLog = async (logData) => {
+                const newLogs = [logData, ...(recipe.logs || [])];
+                await onUpdate({ ...recipe, logs: newLogs });
+            };
+
+            return (
+                <div ref={containerRef} className="h-full w-full relative flex flex-col overflow-hidden" 
+                     onMouseMove={isDragging ? handleTouchMove : null} 
+                     onMouseUp={handleTouchEnd}
+                     onTouchMove={isDragging ? handleTouchMove : null}
+                     onTouchEnd={handleTouchEnd}
+                >
+                    <div style={{ height: `${topHeightPercent}%` }} className="w-full bg-white relative shrink-0 transition-none">
+                        {recipe.type === 'url' ? (
+                            <div className="w-full h-full relative">
+                                <iframe src={recipe.content} className="w-full h-full border-0" title="Recipe Site" sandbox="allow-scripts allow-same-origin allow-popups" />
+                                <a href={recipe.content} target="_blank" rel="noopener noreferrer" className="absolute top-2 right-2 bg-black bg-opacity-50 text-white text-xs px-2 py-1 rounded hover:bg-opacity-70 flex items-center gap-1">
+                                    <Icon name="external-link" size={12} /> 外部で開く
+                                </a>
+                            </div>
+                        ) : (
+                            <div className="w-full h-full p-4 overflow-y-auto whitespace-pre-wrap leading-relaxed text-gray-800">
+                                <h2 className="text-xl font-bold mb-4 border-b pb-2">{recipe.title}</h2>
+                                {recipe.image && <img src={recipe.image} className="w-full max-h-48 object-cover rounded-lg mb-4" />}
+                                {recipe.content}
+                            </div>
+                        )}
+                    </div>
+
+                    <div 
+                        className="resizer-handle h-6 w-full shrink-0 flex items-center justify-center bg-gray-100"
+                        onMouseDown={handleTouchStart}
+                        onTouchStart={handleTouchStart}
+                    >
+                        <div className="w-12 h-1 bg-gray-300 rounded-full"></div>
+                    </div>
+
+                    <div className="flex-1 bg-white flex flex-col min-h-0 overflow-hidden">
+                        <div className="flex border-b text-sm font-bold bg-gray-50">
+                            <button 
+                                onClick={() => setActiveTab('memo')} 
+                                className={`flex-1 py-3 flex items-center justify-center gap-2 ${activeTab === 'memo' ? 'text-orange-600 border-b-2 border-orange-600 bg-white' : 'text-gray-500'}`}
+                            >
+                                <Icon name="sticky-note" size={16} /> メモ
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('logs')} 
+                                className={`flex-1 py-3 flex items-center justify-center gap-2 ${activeTab === 'logs' ? 'text-orange-600 border-b-2 border-orange-600 bg-white' : 'text-gray-500'}`}
+                            >
+                                <Icon name="camera" size={16} /> 調理記録 ({recipe.logs?.length || 0})
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+                            {activeTab === 'memo' ? (
+                                <div className="space-y-4">
+                                    <p className="text-xs text-gray-500">調理中に気付いたことやアレンジ案を自由にメモできます。</p>
+                                    <textarea 
+                                        className="w-full h-40 p-3 border rounded-lg shadow-sm focus:ring-2 focus:ring-orange-200 outline-none resize-none"
+                                        value={recipe.memo}
+                                        onChange={(e) => handleMemoSave(e.target.value)}
+                                        placeholder="例：玉ねぎは飴色になるまでしっかり炒めるのがコツ！"
+                                    />
+                                    <div className="mt-4 text-center">
+                                         <button onClick={onDelete} className="text-red-400 text-xs border border-red-200 px-3 py-1 rounded hover:bg-red-50">このレシピを削除</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <CookingLog logs={recipe.logs || []} onAdd={handleAddLog} />
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const CookingLog = ({ logs, onAdd }) => {
+            const [isAdding, setIsAdding] = useState(false);
+            const [text, setText] = useState('');
+            const [image, setImage] = useState(null);
+
+            const handleImage = async (e) => {
+                if (e.target.files && e.target.files[0]) {
+                    const compressed = await compressImage(e.target.files[0]);
+                    setImage(compressed);
+                }
+            };
+
+            const handleSubmit = () => {
+                if (!text && !image) return;
+                const newLog = {
+                    id: Date.now().toString(),
+                    date: new Date().toISOString(),
+                    text,
+                    image
+                };
+                onAdd(newLog);
+                setIsAdding(false);
+                setText('');
+                setImage(null);
+            };
+
+            return (
+                <div className="space-y-6 pb-20">
+                    {!isAdding ? (
+                        <button onClick={() => setIsAdding(true)} className="w-full py-3 bg-white border-2 border-dashed border-orange-300 text-orange-500 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-orange-50">
+                            <Icon name="plus-circle" /> 作った記録を追加
+                        </button>
+                    ) : (
+                        <div className="bg-white p-4 rounded-lg shadow-md space-y-3 animate-fade-in">
+                            <h4 className="font-bold text-sm text-gray-700">今日の仕上がりはどうでしたか？</h4>
+                            <textarea 
+                                className="w-full border rounded p-2 text-sm h-20 outline-none" 
+                                placeholder="感想：ちょっと味が濃かったかも..."
+                                value={text}
+                                onChange={e => setText(e.target.value)}
+                            />
+                            <div className="flex items-center gap-2">
+                                <label className="cursor-pointer bg-gray-100 px-3 py-2 rounded text-xs font-bold text-gray-600 flex items-center gap-1 hover:bg-gray-200">
+                                    <Icon name="camera" size={14} /> 写真を撮る/選ぶ
+                                    <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+                                </label>
+                                {image && <span className="text-xs text-green-600">画像選択済み</span>}
+                            </div>
+                            {image && <img src={image} className="w-full h-32 object-cover rounded-lg" />}
+                            <div className="flex gap-2 pt-2">
+                                <button onClick={() => setIsAdding(false)} className="flex-1 bg-gray-200 text-gray-600 text-xs py-2 rounded font-bold">キャンセル</button>
+                                <button onClick={handleSubmit} className="flex-1 bg-orange-500 text-white text-xs py-2 rounded font-bold shadow">記録する</button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="space-y-6">
+                        {logs.map(log => (
+                            <div key={log.id} className="flex gap-3 relative">
+                                <div className="flex flex-col items-center">
+                                    <div className="w-3 h-3 bg-orange-300 rounded-full z-10"></div>
+                                    <div className="flex-1 w-0.5 bg-gray-200 -my-1"></div>
+                                </div>
+                                <div className="flex-1 bg-white p-3 rounded-lg shadow-sm border border-gray-100 pb-4">
+                                    <div className="text-xs text-gray-400 mb-1">{new Date(log.date).toLocaleDateString()} {new Date(log.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                                    <p className="text-sm text-gray-800 whitespace-pre-wrap mb-2">{log.text}</p>
+                                    {log.image && <img src={log.image} className="w-full h-40 object-cover rounded-md" />}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+
+<script id="lfs-meta" type="application/json">
+{
+  "appId": "b8f6c136606f2a927a3d213d89d079cb",
+  "createdAt": "2026-01-31T22:41:24.044Z",
+  "schema": 2,
+  "title": "My Recipe Note (DB版)",
+  "savedAt": "2026-01-31T22:41:24.044Z",
+  "aiInstruction": "スマホに最適化した、レシピ登録アプリをつくってください。\n・目的：お気に入りのレシピを自由に登録し、メモを残すことができる。\n　①ネットレシピ登録\n　ネット上のレシピを、URLで登録できる。登録すると、画面が上下２分割され（上：下＝２：１の高さだがD&Dで変更できる）、\n　上部にネットのレシピを表示、下部に自分なりのメモを、残すことができる（写真登録もOK）\n　②自由記述\n　AI等で生成してうまくいったレシピはテキスト情報として登録することもできる。この場合は①のネットレシピの部分がテキストの情報になる。写真を挿入することもできる。\n　③料理の記録\n　　レシピごとにしあがりや感想を、あとで追加登録できる。写真を撮り、そのまま写真を登録。メモも記載できる。",
+  "comment": "スマホに最適化した、レシピ登録アプリをつくってください。\n・目的：お気に入りのレシピを自由に登録し、メモを残すことができる。\n　①ネットレシピ登録\n　ネット上のレシピを、URLで登録できる。登録すると、画面が上下２分割され（上：下＝２：１の高さだがD&Dで変更できる）、\n　上部にネットのレシピを表示、下部に自分なりのメモを、残すことができる（写真登録もOK）\n　②自由記述\n　AI等で生成してうまくいったレシピはテキスト情報として登録することもできる。この場合は①のネットレシピの部分がテキストの情報になる。写真を挿入することもできる。\n　③料理の記録\n　　レシピごとにしあがりや感想を、あとで追加登録できる。写真を撮り、そのまま写真を登録。メモも記載できる。",
+  "sourceMode": "project",
+  "runId": "d4816124f99fa2c40ca05d512d9c554c"
+}
+</script>
+</body>
+</html>
