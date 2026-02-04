@@ -845,11 +845,14 @@
                   <button id="cmdSkill" class="btn2 px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2">
                     <i data-lucide="flame" class="w-4 h-4"></i><span class="mono">Skill</span>
                   </button>
-                  <button id="cmdPivot" class="btn px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2">
+                                    <button id="cmdPivot" class="btn px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2">
                     <i data-lucide="move-right" class="w-4 h-4"></i><span class="mono">Pivot</span>
                   </button>
-                  <button id="cmdSummon" class="sm:col-span-1 col-span-2 btn2 px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2 border-dashed border-slate-500">
+                  <button id="cmdSummon" class="btn2 px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2 border-dashed border-slate-500">
                     <i data-lucide="megaphone" class="w-4 h-4"></i><span class="mono">Summon</span>
+                  </button>
+                  <button id="cmdInvest" class="btn px-3 py-3 rounded-2xl text-sm flex items-center justify-center gap-2 border-emerald-500/30">
+                    <i data-lucide="briefcase" class="w-4 h-4"></i><span class="mono">Invest</span>
                   </button>
                 </div>
 
@@ -1366,7 +1369,8 @@
         skill:  () => { osc('sawtooth', 220, 0.5, 0.2, 880); setTimeout(()=>noise(0.4, 0.5), 300); },
         heal:   () => { osc('sine', 523, 0.4, 0.1); setTimeout(()=>osc('sine', 659, 0.4, 0.1), 100); setTimeout(()=>osc('sine', 784, 0.6, 0.1), 200); },
         summon: () => { osc('sawtooth', 110, 0.8, 0.4); osc('sawtooth', 164, 0.8, 0.4); },
-        pivot:  () => { osc('square', 440, 0.1, 0.2); setTimeout(()=>osc('square', 880, 0.1, 0.2), 80); },
+                pivot:  () => { osc('square', 440, 0.1, 0.2); setTimeout(()=>osc('square', 880, 0.1, 0.2), 80); },
+        invest: () => { osc('sine', 1567, 0.1, 0.3); setTimeout(()=>osc('sine', 2093, 0.1, 0.3), 80); setTimeout(()=>osc('sine', 2637, 0.2, 0.3), 160); },
         damage: () => { noise(0.2, 0.4, 'lowpass', 500); }
       };
     })();
@@ -2641,7 +2645,13 @@ const SAMPLE_COMPANIES = [
           const dot = bleed.meta?.dot ?? 0.03;
           const amount = Math.max(6, Math.round(t.maxHP * dot));
           battle.damage(t, amount, {label:"PIPELINE DOT", isDot:true});
-          battle.log(`${battle.nameOf(t)} のパイプライン圧力が継続ダメージ！ <span class="text-rose-300">-${amount}</span>`);
+                    battle.log(`${battle.nameOf(t)} のパイプライン圧力が継続ダメージ！ <span class="text-rose-300">-${amount}</span>`);
+        }
+        // Dividend Logic
+        const div = t.buffs.find(b=>b.key==="dividend");
+        if(div){
+           const gain = Math.floor(t.maxHP * 0.06);
+           battle.heal(t, gain, "DIVIDEND");
         }
       }
     }
@@ -2890,10 +2900,16 @@ const SAMPLE_COMPANIES = [
       $("cmdSkill").disabled = !canAct || (P.skill < 60);
       $("cmdSkill").classList.toggle("opacity-50", P.skill < 60);
       
-      // Summon Button State
+            // Summon Button State
       const btnSummon = $("cmdSummon");
       btnSummon.disabled = !canAct || (P.skill < 50);
       btnSummon.classList.toggle("opacity-50", P.skill < 50);
+
+      // Invest Button State
+      const btnInvest = $("cmdInvest");
+      const hasDiv = P.buffs.some(b=>b.key==="dividend");
+      btnInvest.disabled = !canAct || (P.skill < 40) || hasDiv;
+      btnInvest.classList.toggle("opacity-50", P.skill < 40 || hasDiv);
       
       if(P.company.capital >= 3.0){
         const risk = calcSummonRisk(P, C);
@@ -2975,6 +2991,15 @@ const SAMPLE_COMPANIES = [
       const wantSkill = canSkill && (plHpPct < 0.55 || cpuHpPct < 0.55);
       const wantPivot = cpuHpPct >= 0.45 && (cpuMods.atkM < 1.12) && (Math.random() < 0.40);
       
+            // Invest Logic
+      const canInvest = cpu.skill >= 40 && !cpu.buffs.some(b=>b.key==="dividend");
+      if(canInvest){
+        // HPに余裕あり(>40%) or R&D余り(>80)
+        if((cpuHpPct > 0.4 || cpu.skill > 80) && Math.random() < 0.20){
+          return "Invest";
+        }
+      }
+
       // Summon Logic
       const canSummon = cpu.skill >= 50;
       if(canSummon){
@@ -3153,11 +3178,20 @@ const SAMPLE_COMPANIES = [
         await sleep(500);
         spriteUser.classList.remove("atk-anim");
       }
-      else if(action==="Guard"){
+            else if(action==="Guard"){
         // Guard Shield
         SoundEffects.guard();
         spriteUser.classList.add("guard-anim");
         setTimeout(()=>spriteUser.classList.remove("guard-anim"), 600);
+      }
+      else if(action==="Invest"){
+        SoundEffects.invest();
+        b.spendSkill(user, 40);
+        const cost = Math.floor(user.hp * 0.15);
+        b.damage(user, cost, {fx:"MONEY"}); // Cost treated as damage visual
+        b.addBuff(user, {key:"dividend", name:"DIVIDEND", turns:99, meta:{}});
+        b.log(`${userName} は戦略的投資を実行！ ${enemyName} の株式を取得。<br/><span class="text-xs text-slate-400">代償: 資金流出(-${cost}) ➡ 効果: 毎ターン配当収入</span>`);
+        b.fx(side, "MONEY");
       }
 
       const sector = user.company.sector;
@@ -4590,9 +4624,10 @@ function startBattle({auto=false, tournamentCtx=null}={}){
       // commands
       $("cmdAttack").onclick = ()=>runTurn("Attack");
       $("cmdGuard").onclick = ()=>runTurn("Guard");
-      $("cmdPivot").onclick = ()=>runTurn("Pivot");
+            $("cmdPivot").onclick = ()=>runTurn("Pivot");
       $("cmdSkill").onclick = ()=>runTurn("Skill");
       $("cmdSummon").onclick = ()=>runTurn("Summon");
+      $("cmdInvest").onclick = ()=>runTurn("Invest");
 
       $("btnClearLog").onclick = ()=>{
         if(state.battle){
@@ -4802,17 +4837,18 @@ function startBattle({auto=false, tournamentCtx=null}={}){
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "ea644a3fa162beb269314f429c0dec93",
   "createdAt": "2026-02-02T16:25:29.642Z",
   "schema": 2,
   "title": "CORPORATE QUEST — Real Company Battle",
-  "savedAt": "2026-02-04T21:29:40.091Z",
-  "aiInstruction": "公正取引委員会の人が召喚してもすぐに画面から消えてしまう。効果継続中は召喚した人によりそい画面上に表示されるように。",
-  "comment": "公正取引委員会の人が召喚してもすぐに画面から消えてしまう。効果継続中は召喚した人によりそい画面上に表示されるように。",
+  "savedAt": "2026-02-04T21:43:25.145Z",
+  "aiInstruction": "// AppStudio AI Instruction\n以下の「Invest（戦略投資）」機能を実装してください。\n\n1. **コマンドボタンの追加とレイアウト調整**\n   - コマンドエリアに「Invest」ボタンを追加してください。アイコンは `briefcase` (カバン) または `trending-up`。\n   - ボタンのレイアウトを整理し、Attack, Guard, Skill, Pivot, Summon, Invest の計6個が、スマホでもPCでもきれいに並ぶようにしてください（`col-span`の調整）。\n\n2. **Invest（戦略投資）のロジック実装**\n   - **発動条件:** R&Dゲージ 40以上。\n   - **コスト:** R&Dゲージ 40消費 ＆ 現在HPの15%を消費（投資資金）。\n   - **効果:** - 自分に「Dividend（配当益）」という永続バフ（ターン数無限または99）を付与する。\n     - このバフがある場合、ターン開始時（`applyDot`内など）に、最大HPの6%が回復する。\n   - **ログ:** 「${User} は戦略的投資を実行！ ${Enemy} の株式を取得。<br/><span class=\"text-xs text-slate-400\">代償: 資金流出(-${cost}) ➡ 効果: 毎ターン配当収入</span>」のように表示。\n\n3. **ターン処理への組み込み**\n   - `applyDot` 関数内で、「Dividend」バフを持っている場合、HP回復処理（`battle.heal`）を実行してください。回復エフェクトも出すこと。\n\n4. **演出とSE**\n   - `performAction` 内で Invest 実行時の演出を追加（`MONEY`エフェクトなど）。\n   - `SoundEffects` に `invest` (レジスターの音やコイン音のような煌びやかな音) を追加し、実行時に鳴らす。\n   - `cpuChooseAction` のロジックにも、「HPに余裕があり、かつ長期戦になりそうな場合（またはR&Dが余っている場合）にInvestを選ぶ」分岐を追加。\n\n5. **既存コードの調整**\n   - `cmdSummon` の `col-span-2` 指定を削除し、グリッドに収まるようにする。",
+  "comment": "// AppStudio AI Instruction\n以下の「Invest（戦略投資）」機能を実装してください。\n\n1. **コマンドボタンの追加とレイアウト調整**\n   - コマンドエリアに「Invest」ボタンを追加してください。アイコンは `briefcase` (カバン) または `trending-up`。\n   - ボタンのレイアウトを整理し、Attack, Guard, Skill, Pivot, Summon, Invest の計6個が、スマホでもPCでもきれいに並ぶようにしてください（`col-span`の調整）。\n\n2. **Invest（戦略投資）のロジック実装**\n   - **発動条件:** R&Dゲージ 40以上。\n   - **コスト:** R&Dゲージ 40消費 ＆ 現在HPの15%を消費（投資資金）。\n   - **効果:** - 自分に「Dividend（配当益）」という永続バフ（ターン数無限または99）を付与する。\n     - このバフがある場合、ターン開始時（`applyDot`内など）に、最大HPの6%が回復する。\n   - **ログ:** 「${User} は戦略的投資を実行！ ${Enemy} の株式を取得。<br/><span class=\"text-xs text-slate-400\">代償: 資金流出(-${cost}) ➡ 効果: 毎ターン配当収入</span>」のように表示。\n\n3. **ターン処理への組み込み**\n   - `applyDot` 関数内で、「Dividend」バフを持っている場合、HP回復処理（`battle.heal`）を実行してください。回復エフェクトも出すこと。\n\n4. **演出とSE**\n   - `performAction` 内で Invest 実行時の演出を追加（`MONEY`エフェクトなど）。\n   - `SoundEffects` に `invest` (レジスターの音やコイン音のような煌びやかな音) を追加し、実行時に鳴らす。\n   - `cpuChooseAction` のロジックにも、「HPに余裕があり、かつ長期戦になりそうな場合（またはR&Dが余っている場合）にInvestを選ぶ」分岐を追加。\n\n5. **既存コードの調整**\n   - `cmdSummon` の `col-span-2` 指定を削除し、グリッドに収まるようにする。",
   "sourceMode": "project",
-  "runId": "5575706a54a50c35a14eac3e60587ac1"
+  "runId": "9a1c25062200a056289d4c6fae829a69"
 }
 </script>
 </body>
