@@ -490,6 +490,10 @@
     .intro-sprite-mode { animation: sprite-counter 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
     .intro-hud-wait { opacity: 0; animation: hud-fade-in 0.8s ease-out 2.0s forwards; }
 
+    /* Protest Mob Animation */
+    .protest-bob { animation: protestBob 0.8s infinite alternate ease-in-out; }
+    @keyframes protestBob { 0%{transform:translateY(0);} 100%{transform:translateY(-12px);} }
+
     /* Title Screen Animations */
     @keyframes shine { 100% { transform: translateX(100%); } }
     .animate-shine { animation: shine 1s; }
@@ -1802,20 +1806,24 @@
         });
         return msg || "影響なし。";
       }},
-      { name: "Embezzlement Scandal", text: "巨額横領事件が発生！", type:"bad", func:(b)=>{
-        b.fx(null, "FLASH_RED"); b.fx(null, "STORM");
-        let msg = "";
-        [b.P, b.C].forEach(u=>{
-          let chance = u.company.sector==="Finance" ? 0.5 : 0.1;
-          if(Math.random() < chance){
-            const dmg = Math.floor(u.maxHP * 0.15);
-            b.damage(u, dmg, {isDot:true});
-            b.addBuff(u, {key:"def_down", name:"SCANDAL", turns:3, meta:{def:-0.25}});
-            msg += `${b.nameOf(u)}で不祥事発覚！信用失墜(-${dmg}, DEF↓) `;
-          }
-        });
-        return msg || "内部統制は機能している。";
-      }},
+            { name: "Embezzlement Scandal", text: "巨額横領事件が発生！", type:"bad", func:(b)=>{
+        b.fx(null, "FLASH_RED"); b.fx(null, "STORM");
+        let msg = "";
+        [b.P, b.C].forEach(u=>{
+          // Finance確率: 50% -> 20%
+          let chance = u.company.sector==="Finance" ? 0.2 : 0.1;
+          // 防御(Guard)中は内部統制強化とみなし確率半減
+          if(u.buffs.some(x=>x.key==="guard")) chance *= 0.5;
+
+          if(Math.random() < chance){
+            const dmg = Math.floor(u.maxHP * 0.15);
+            b.damage(u, dmg, {isDot:true});
+            b.addBuff(u, {key:"def_down", name:"SCANDAL", turns:3, meta:{def:-0.25}});
+            msg += `${b.nameOf(u)}で不祥事発覚！信用失墜(-${dmg}, DEF↓) `;
+          }
+        });
+        return msg || "内部統制は機能している。";
+      }},
       { name: "China Shock", text: "中国市場からの余剰材が流入！", type:"bad", func:(b)=>{
         b.fx(null, "WAVE"); b.fx(null, "QUAKE");
         let msg = "";
@@ -2900,10 +2908,10 @@ const SAMPLE_COMPANIES = [
       $("cmdSkill").disabled = !canAct || (P.skill < 60);
       $("cmdSkill").classList.toggle("opacity-50", P.skill < 60);
       
-            // Summon Button State
+                  // Summon Button State
       const btnSummon = $("cmdSummon");
-      btnSummon.disabled = !canAct || (P.skill < 50);
-      btnSummon.classList.toggle("opacity-50", P.skill < 50);
+      btnSummon.disabled = !canAct || (P.skill < 100);
+      btnSummon.classList.toggle("opacity-50", P.skill < 100);
 
       // Invest Button State
       const btnInvest = $("cmdInvest");
@@ -3000,8 +3008,8 @@ const SAMPLE_COMPANIES = [
         }
       }
 
-      // Summon Logic
-      const canSummon = cpu.skill >= 50;
+            // Summon Logic
+      const canSummon = cpu.skill >= 100;
       if(canSummon){
          const isBig = (cpu.company.capital||0) >= 3.0;
          if(isBig){
@@ -3203,8 +3211,17 @@ const SAMPLE_COMPANIES = [
          setTimeout(()=>spriteEnemy.classList.remove("dmg-anim"), 450);
       };
 
-                  if(action==="Summon"){
-        b.spendSkill(user, 50);
+if(action==="Summon"){
+        b.spendSkill(user, 100);
+        
+                // ★ BGM PLAY: 召喚時は無条件でBGM切り替え
+        try {
+          AudioEngine.stop();
+          BossAudioEngine.stop();
+          // AudioContextの切り替え競合を防ぐため少し遅延して再生
+          setTimeout(() => SummonBgmEngine.play(), 250);
+        } catch(e){}
+
         const cap = user.company.capital || 0;
         
         // A. 中小企業 (Capital < 3.0)
@@ -3227,15 +3244,8 @@ const SAMPLE_COMPANIES = [
             b.damage(enemy, dmg, {fx:"GLITCH"});
             b.log(`「下請法違反の疑い」により ${b.nameOf(enemy)} に監査が入る！<br/><span class="text-rose-300">${turns}ターン行動不能</span> & ダメージ${dmg}`);
             
-                                    // 継続表示登録（効果ターン+1 して長めに表示）
+            // 継続表示登録
             if(b.summons) b.summons.push({el: summonEl, turns: turns + 1});
-            
-            // BGM Change
-            if(b.summons.length === 1) {
-              AudioEngine.stop();
-              BossAudioEngine.stop();
-              SummonBgmEngine.play();
-            }
             summonEl = null;
 
             if(Math.random() < 0.4){
@@ -3246,6 +3256,9 @@ const SAMPLE_COMPANIES = [
             // 敵も中小 -> 効果薄い
             b.log(`しかし、${b.nameOf(enemy)} も中小企業のため、委員会はすぐに帰った…`);
             b.damage(enemy, 5, {fx:"WAVE"});
+            // 即終了だがBGM/表示のために1ターンだけ登録
+            if(b.summons) b.summons.push({el: summonEl, turns: 1});
+            summonEl = null;
           }
         }
         // B. 大企業 (Capital >= 3.0)
@@ -3270,14 +3283,7 @@ const SAMPLE_COMPANIES = [
             }
             b.log(`政治工作成功！ <span class="text-emerald-300">規制緩和措置</span>を獲得！(ATK1.5倍)${extra}<br/><span class="text-xs text-slate-400">代償: 政治献金(毎ターンHP5%減)</span>`);
             
-                                    // 継続表示登録（効果ターン+1 して長めに表示）
             if(b.summons) b.summons.push({el: summonEl, turns: duration + 1});
-            // BGM Change
-            if(b.summons.length === 1) {
-              AudioEngine.stop();
-              BossAudioEngine.stop();
-              SummonBgmEngine.play();
-            }
             summonEl = null;
           } else {
             // 失敗（炎上）
@@ -3286,27 +3292,50 @@ const SAMPLE_COMPANIES = [
             b.log(`<span class="text-rose-400 font-black text-lg">【炎上】</span> 政治利用が露見！SNSで拡散！`);
             await sleep(2000);
 
-            counterEl = showSummonVisual(side, "👩‍💼", true); // カウンター
-            b.log(`市民団体と野党がカウンター召喚！`);
+            // 市民団体による包囲（秩序ある抗議デモ）
+            const mobContainer = document.createElement("div");
+            mobContainer.className = "absolute inset-0 z-50 pointer-events-none mob-layer flex flex-wrap justify-center items-end content-end gap-1 pb-2";
             
-            // ペナルティ
-            b.addBuff(user, {key:"atk_down", name:"BOYCOTT", turns:3, meta:{atk:-0.3}});
-            b.addBuff(user, {key:"bleed", name:"FIRE", turns:3, meta:{dot:0.10}});
-            if(Math.random() < 0.3){
-              b.addBuff(user, {key:"def_down", name:"FLAME", turns:3, meta:{def:-0.2}});
-              b.log(`${userName} は釈明会見でさらに炎上！(DEF↓)`);
-            }
-            b.log(`${userName} に不買運動発生！(ATK激減 & 炎上ダメージ)`);
+            const protesters = ["👩‍💼", "👨‍💼", "🧑‍💼"];
+            const signs = ["🚫", "📢", "💢", "📉"];
             
-                                    // カウンター継続
-            if(b.summons) b.summons.push({el: counterEl, turns: 4});
-            // BGM Change
-            if(b.summons.length === 1) {
-              AudioEngine.stop();
-              BossAudioEngine.stop();
-              SummonBgmEngine.play();
+            // 3列くらいの集団を作る
+            for(let i=0; i<12; i++){
+                const span = document.createElement("div");
+                const person = pick(protesters);
+                const sign = Math.random() < 0.6 ? pick(signs) : "";
+                span.textContent = sign + person;
+                span.style.fontSize = rnd(24, 32) + "px";
+                span.style.filter = "drop-shadow(0 4px 6px rgba(0,0,0,0.9))";
+                // 秩序あるシュプレヒコール（同期した上下動）
+                span.className = "protest-bob";
+                span.style.animationDelay = (i * 0.05) + "s"; // わずかなウェーブ
+                mobContainer.appendChild(span);
             }
-            counterEl = null;
+            
+            // 親要素に追加
+            const parent = side==="P" ? $("spritePlayer") : $("spriteCPU");
+            parent.appendChild(mobContainer);
+
+            b.log(`市民団体が本社前に整列！ 秩序ある抗議デモが活動を阻害！`);
+            
+            // ペナルティ強化
+            b.addBuff(user, {key:"atk_down", name:"BOYCOTT", turns:3, meta:{atk:-0.5}});
+            b.addBuff(user, {key:"bleed", name:"FIRE", turns:3, meta:{dot:0.12}});
+            b.addBuff(user, {key:"spd_down", name:"STUCK", turns:3, meta:{spd:-0.4}});
+
+            if(Math.random() < 0.5){
+              b.addBuff(user, {key:"def_down", name:"FLAME", turns:3, meta:{def:-0.3}});
+              b.log(`${userName} の謝罪会見が大炎上！(DEF↓)`);
+            }
+            b.log(`${userName} に不買運動と抗議デモが発生！(全ステータス大幅ダウン)`);
+            
+            // 継続表示登録
+            if(b.summons) b.summons.push({el: mobContainer, turns: 4});
+            
+            // 失敗時の政治家は消す
+            if(summonEl) summonEl.remove();
+            summonEl = null;
           }
         }
         await sleep(2000);
@@ -4425,6 +4454,10 @@ ${customClause}
 function startBattle({auto=false, tournamentCtx=null}={}){
       MenuAudioEngine.stop(); // Menu BGM Stop
       
+      // Clear previous summons if any
+      document.querySelectorAll(".summon-emoji").forEach(el => el.remove());
+      document.querySelectorAll(".mob-layer").forEach(el => el.remove());
+
       const p = getCompany(state.playerId);
       const c = getCompany(state.cpuId);
       if(!p || !c){
@@ -4838,17 +4871,22 @@ function startBattle({auto=false, tournamentCtx=null}={}){
 
 
 
+
+
+
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "ea644a3fa162beb269314f429c0dec93",
   "createdAt": "2026-02-02T16:25:29.642Z",
   "schema": 2,
   "title": "CORPORATE QUEST — Real Company Battle",
-  "savedAt": "2026-02-04T21:43:25.145Z",
-  "aiInstruction": "// AppStudio AI Instruction\n以下の「Invest（戦略投資）」機能を実装してください。\n\n1. **コマンドボタンの追加とレイアウト調整**\n   - コマンドエリアに「Invest」ボタンを追加してください。アイコンは `briefcase` (カバン) または `trending-up`。\n   - ボタンのレイアウトを整理し、Attack, Guard, Skill, Pivot, Summon, Invest の計6個が、スマホでもPCでもきれいに並ぶようにしてください（`col-span`の調整）。\n\n2. **Invest（戦略投資）のロジック実装**\n   - **発動条件:** R&Dゲージ 40以上。\n   - **コスト:** R&Dゲージ 40消費 ＆ 現在HPの15%を消費（投資資金）。\n   - **効果:** - 自分に「Dividend（配当益）」という永続バフ（ターン数無限または99）を付与する。\n     - このバフがある場合、ターン開始時（`applyDot`内など）に、最大HPの6%が回復する。\n   - **ログ:** 「${User} は戦略的投資を実行！ ${Enemy} の株式を取得。<br/><span class=\"text-xs text-slate-400\">代償: 資金流出(-${cost}) ➡ 効果: 毎ターン配当収入</span>」のように表示。\n\n3. **ターン処理への組み込み**\n   - `applyDot` 関数内で、「Dividend」バフを持っている場合、HP回復処理（`battle.heal`）を実行してください。回復エフェクトも出すこと。\n\n4. **演出とSE**\n   - `performAction` 内で Invest 実行時の演出を追加（`MONEY`エフェクトなど）。\n   - `SoundEffects` に `invest` (レジスターの音やコイン音のような煌びやかな音) を追加し、実行時に鳴らす。\n   - `cpuChooseAction` のロジックにも、「HPに余裕があり、かつ長期戦になりそうな場合（またはR&Dが余っている場合）にInvestを選ぶ」分岐を追加。\n\n5. **既存コードの調整**\n   - `cmdSummon` の `col-span-2` 指定を削除し、グリッドに収まるようにする。",
-  "comment": "// AppStudio AI Instruction\n以下の「Invest（戦略投資）」機能を実装してください。\n\n1. **コマンドボタンの追加とレイアウト調整**\n   - コマンドエリアに「Invest」ボタンを追加してください。アイコンは `briefcase` (カバン) または `trending-up`。\n   - ボタンのレイアウトを整理し、Attack, Guard, Skill, Pivot, Summon, Invest の計6個が、スマホでもPCでもきれいに並ぶようにしてください（`col-span`の調整）。\n\n2. **Invest（戦略投資）のロジック実装**\n   - **発動条件:** R&Dゲージ 40以上。\n   - **コスト:** R&Dゲージ 40消費 ＆ 現在HPの15%を消費（投資資金）。\n   - **効果:** - 自分に「Dividend（配当益）」という永続バフ（ターン数無限または99）を付与する。\n     - このバフがある場合、ターン開始時（`applyDot`内など）に、最大HPの6%が回復する。\n   - **ログ:** 「${User} は戦略的投資を実行！ ${Enemy} の株式を取得。<br/><span class=\"text-xs text-slate-400\">代償: 資金流出(-${cost}) ➡ 効果: 毎ターン配当収入</span>」のように表示。\n\n3. **ターン処理への組み込み**\n   - `applyDot` 関数内で、「Dividend」バフを持っている場合、HP回復処理（`battle.heal`）を実行してください。回復エフェクトも出すこと。\n\n4. **演出とSE**\n   - `performAction` 内で Invest 実行時の演出を追加（`MONEY`エフェクトなど）。\n   - `SoundEffects` に `invest` (レジスターの音やコイン音のような煌びやかな音) を追加し、実行時に鳴らす。\n   - `cpuChooseAction` のロジックにも、「HPに余裕があり、かつ長期戦になりそうな場合（またはR&Dが余っている場合）にInvestを選ぶ」分岐を追加。\n\n5. **既存コードの調整**\n   - `cmdSummon` の `col-span-2` 指定を削除し、グリッドに収まるようにする。",
+  "savedAt": "2026-02-05T15:38:09.558Z",
+  "aiInstruction": "政治家召喚時、BGMが切り替わらない。",
+  "comment": "政治家召喚時、BGMが切り替わらない。",
   "sourceMode": "project",
-  "runId": "9a1c25062200a056289d4c6fae829a69"
+  "runId": "73b866bd0e19cc2783b631750f46d37e"
 }
 </script>
 </body>
