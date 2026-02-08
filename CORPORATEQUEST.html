@@ -718,8 +718,9 @@
              style="background: radial-gradient(180px 120px at 30% 20%, rgba(53,247,255,.16), transparent 60%),
                             radial-gradient(180px 120px at 70% 60%, rgba(167,139,250,.16), transparent 60%),
                             rgba(2,6,23,.65);">
-          <div class="scanline" style="border-radius:16px;"></div>
-          <span class="mono font-black text-lg glowText">CQ</span>
+          <div class="scanline" style="border-radius:16px; z-index:5;"></div>
+          <canvas id="vizCanvas" class="absolute inset-0 w-full h-full opacity-80 pointer-events-none" style="mix-blend-mode:screen; z-index:1;"></canvas>
+          <span class="mono font-black text-lg glowText relative" style="z-index:10;">CQ</span>
         </div>
         <div>
           <div class="text-xl sm:text-2xl font-black tracking-tight glowText">CORPORATE QUEST</div>
@@ -1615,7 +1616,67 @@
   </div>
 
     <script>
-                    /* --- FANFARE ENGINE (Victory) --- */
+                    /* --- VISUALIZER ENGINE --- */
+    const Visualizer = (() => {
+      let cv, cx, an, da;
+      const init = () => {
+        cv = document.getElementById('vizCanvas');
+        if (cv) {
+          cv.width = cv.offsetWidth;
+          cv.height = cv.offsetHeight;
+          cx = cv.getContext('2d');
+          loop();
+        }
+      };
+      const connect = (ac, src) => {
+        if (!cv) init();
+        if (!cx) return;
+        try {
+          an = ac.createAnalyser();
+          an.fftSize = 64;
+          an.smoothingTimeConstant = 0.6;
+          src.connect(an);
+          da = new Uint8Array(an.frequencyBinCount);
+        } catch(e){}
+      };
+      const loop = () => {
+        requestAnimationFrame(loop);
+        if (!cx || !an || !da) return;
+        if (an.context.state !== 'running') {
+          cx.clearRect(0, 0, cv.width, cv.height);
+          return;
+        }
+        an.getByteFrequencyData(da);
+        cx.clearRect(0, 0, cv.width, cv.height);
+        
+        // Glitch
+        if (Math.random() < 0.03) {
+          cx.fillStyle = 'rgba(53,247,255,0.1)';
+          cx.fillRect(0, 0, cv.width, cv.height);
+          cx.setTransform(1, 0, 0, 1, (Math.random()-0.5)*4, 0);
+        } else {
+          cx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+
+        const barCount = da.length * 0.7;
+        const barW = cv.width / barCount;
+        cx.fillStyle = '#35F7FF';
+        
+        for (let i = 0; i < barCount; i++) {
+          const v = da[i];
+          const h = (v / 255) * cv.height * 0.9;
+          if (h > 1) {
+            cx.globalAlpha = 0.4 + Math.random() * 0.6;
+            cx.fillRect(i * barW, cv.height - h, barW - 1, h);
+          }
+        }
+        cx.globalAlpha = 1.0;
+        cx.setTransform(1, 0, 0, 1, 0, 0);
+      };
+      return { connect };
+    })();
+
+    /* --- FANFARE ENGINE (Victory) --- */
     const FanfareEngine = (() => {
       let ctx = null, isPlaying = false, tempo = 138, nextNoteTime = 0, noteIndex = 0;
       let timerID, masterGain = null;
@@ -1631,7 +1692,7 @@
       function playBass(t,f,d){const o=ctx.createOscillator(),g=ctx.createGain();o.type='triangle';o.frequency.value=f;g.gain.setValueAtTime(0.5,t);g.gain.exponentialRampToValueAtTime(0.01,t+0.3);o.connect(g).connect(masterGain);o.start(t);o.stop(t+0.4);}
       function schedule(){let ct=ctx.currentTime+0.1; introMelody.forEach(n=>{const d=n.d*(60/tempo/4); playTrumpet(ct,noteToFreq(n.n),d); if(n.n==='G#4')playStrings(ct,noteToFreq('G#3'),2); if(n.n==='A#4')playStrings(ct,noteToFreq('A#3'),2); if(n.n==='C5'){playStrings(ct,noteToFreq('C3'),4);playStrings(ct,noteToFreq('E3'),4);playStrings(ct,noteToFreq('G3'),4);playTimpani(ct);} ct+=d;}); const loopStart=ct; function runLoop(st){if(!isPlaying)return; for(let i=0;i<loopLength;i++){const t=st+(i*(60/tempo/4)); const n=loopMelody[i]; if(n)playTrumpet(t,noteToFreq(n),0.2); const b=loopBass[i]; if(b)playBass(t,noteToFreq(b),0.2); if(i%4===0)playSnare(t); if(i%4===2){playSnare(t);playSnare(t+(60/tempo/4)*0.5);}} const next=st+(loopLength*(60/tempo/4)); timerID=setTimeout(()=>runLoop(next),(next-ctx.currentTime-0.5)*1000);} timerID=setTimeout(()=>runLoop(loopStart),(loopStart-ctx.currentTime-0.1)*1000);}
       return {
-        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.4;masterGain.connect(ctx.destination);} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; schedule();}catch(e){console.log(e);}},
+        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.4;masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; schedule();}catch(e){console.log(e);}},
         stop:()=>{isPlaying=false;clearTimeout(timerID);if(masterGain)try{masterGain.gain.setTargetAtTime(0,ctx.currentTime,0.1);}catch(e){} setTimeout(()=>{if(ctx){ctx.close();ctx=null;}},200);}
       };
     })();
@@ -1649,7 +1710,7 @@
       function playLead(t,n){const f=noteToFreq(n.n),d=n.d*(60/tempo/4),o=ctx.createOscillator(),l=ctx.createOscillator(),lg=ctx.createGain(),g=ctx.createGain(),rs=ctx.createGain(),c=ctx.createConvolver();o.type='triangle';o.frequency.value=f;l.frequency.value=5;lg.gain.setValueAtTime(0,t);lg.gain.linearRampToValueAtTime(2,t+0.5);l.connect(lg).connect(o.frequency);l.start(t);g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.2,t+0.2);g.gain.setValueAtTime(0.2,t+d-0.2);g.gain.linearRampToValueAtTime(0,t+d+0.5);rs.gain.value=0.5;c.buffer=reverbBuffer;o.connect(g);g.connect(masterGain);g.connect(rs).connect(c).connect(masterGain);o.start(t);o.stop(t+d+1.0);}
       function schedule(){while(nextNoteTime<ctx.currentTime+0.1){const i=current16thNote%seqLength; if(harpLine[i])playHarp(nextNoteTime,noteToFreq(harpLine[i])); if(bassLine[i])playBass(nextNoteTime,bassLine[i]); if(padLine[i])playStrings(nextNoteTime,padLine[i]); if(leadLine[i])playLead(nextNoteTime,leadLine[i]); nextNoteTime+=0.25*(60.0/tempo); current16thNote++;} timerID=setTimeout(schedule,25);}
       return {
-        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.5;masterGain.connect(ctx.destination);reverbBuffer=createReverb();compose();} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; current16thNote=0; nextNoteTime=ctx.currentTime+0.1; schedule();}catch(e){console.log(e);}},
+        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.5;masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);reverbBuffer=createReverb();compose();} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; current16thNote=0; nextNoteTime=ctx.currentTime+0.1; schedule();}catch(e){console.log(e);}},
         stop:()=>{isPlaying=false;clearTimeout(timerID);if(masterGain)try{masterGain.gain.setTargetAtTime(0,ctx.currentTime,0.1);}catch(e){} setTimeout(()=>{if(ctx){ctx.close();ctx=null;}},200);}
       };
     })();
@@ -1704,7 +1765,7 @@
       function playPad(t,ns){const d=16*0.25*(60/tempo);ns.forEach(n=>{const o=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain(),rg=ctx.createGain(),c=ctx.createConvolver();o.type='sawtooth';o.frequency.value=noteToFreq(n);o2.type='sawtooth';o2.frequency.value=noteToFreq(n)*1.002;f.type='lowpass';f.frequency.value=2000;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.15,t+0.5);g.gain.setValueAtTime(0.15,t+d-0.5);g.gain.linearRampToValueAtTime(0.01,t+d);rg.gain.value=0.5;c.buffer=reverbBuffer;o.connect(f);o2.connect(f);f.connect(g);g.connect(masterGain);g.connect(rg);rg.connect(c);c.connect(masterGain);o.start(t);o2.start(t);o.stop(t+d);o2.stop(t+d);});}
       function schedule(){while(nextNoteTime<ctx.currentTime+0.1){const i=current16thNote%seqLength;if(kickPat[i])playKick(nextNoteTime);if(snarePat[i])playSnare(nextNoteTime);if(hatPat[i])playHihat(nextNoteTime,hatPat[i]);if(bassLine[i])playBass(nextNoteTime,bassLine[i]);if(arpLine[i])playArp(nextNoteTime,arpLine[i]);if(leadLine[i])playLead(nextNoteTime,leadLine[i]);if(padChords[i])playPad(nextNoteTime,padChords[i]);nextNoteTime+=0.25*(60.0/tempo);current16thNote++;}timerID=setTimeout(schedule,25);}
       return {
-        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.6;masterGain.connect(ctx.destination);reverbBuffer=createReverb();compose();} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; current16thNote=0; nextNoteTime=ctx.currentTime+0.1; schedule();}catch(e){console.error(e);}},
+        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.6;masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);reverbBuffer=createReverb();compose();} if(ctx.state==='suspended')await ctx.resume(); if(isPlaying)return; isPlaying=true; current16thNote=0; nextNoteTime=ctx.currentTime+0.1; schedule();}catch(e){console.error(e);}},
         stop:()=>{isPlaying=false;clearTimeout(timerID);if(masterGain)try{masterGain.gain.setTargetAtTime(0,ctx.currentTime,0.1);}catch(e){} setTimeout(()=>{if(ctx){ctx.close();ctx=null;}},200);}
             };
     })();
@@ -1754,7 +1815,7 @@
       function playLead(t,no){const f=noteToFreq(no.n),d=no.l*0.25*(60/tempo),o=ctx.createOscillator(),l=ctx.createOscillator(),lg=ctx.createGain(),g=ctx.createGain(),dl=ctx.createDelay(),dg=ctx.createGain();o.type='square';o.frequency.setValueAtTime(f*0.9,t);o.frequency.linearRampToValueAtTime(f,t+0.05);l.frequency.value=6;lg.gain.value=f*0.02;l.connect(lg).connect(o.frequency);l.start(t);g.gain.setValueAtTime(0.15,t);g.gain.linearRampToValueAtTime(0.15,t+d*0.8);g.gain.linearRampToValueAtTime(0.01,t+d);dl.delayTime.value=60/tempo*0.5;dg.gain.value=0.3;o.connect(g).connect(masterGain);g.connect(dl).connect(dg).connect(dl).connect(masterGain);o.start(t);o.stop(t+d+1.0);}
       function schedule(){while(nextNoteTime<ctx.currentTime+0.1){const i=current16thNote%seqLength;if(kickPat[i])playKick(nextNoteTime);if(snarePat[i])playClap(nextNoteTime);if(hatPat[i])playHihat(nextNoteTime,hatPat[i]);if(bassLine[i])playBass(nextNoteTime,bassLine[i]);if(arpLine[i])playArp(nextNoteTime,arpLine[i]);if(leadLine[i])playLead(nextNoteTime,leadLine[i]);if(padChords[i])playPad(nextNoteTime,padChords[i]);nextNoteTime+=0.25*(60.0/tempo);current16thNote++;}timerID=setTimeout(schedule,25);}
       return {
-        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.4;masterGain.connect(ctx.destination);reverbBuffer=createReverb();compose();}if(ctx.state==='suspended')await ctx.resume();if(isPlaying)return;isPlaying=true;current16thNote=0;nextNoteTime=ctx.currentTime+0.1;schedule();}catch(e){console.error(e);}},
+        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.4;masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);reverbBuffer=createReverb();compose();}if(ctx.state==='suspended')await ctx.resume();if(isPlaying)return;isPlaying=true;current16thNote=0;nextNoteTime=ctx.currentTime+0.1;schedule();}catch(e){console.error(e);}},
         stop:()=>{isPlaying=false;clearTimeout(timerID);if(masterGain)try{masterGain.gain.setTargetAtTime(0,ctx.currentTime,0.1);}catch(e){} setTimeout(()=>{if(ctx){ctx.close();ctx=null;}},250);}
       };
     })();
@@ -1829,7 +1890,7 @@
       function playPad(t,ns){const dur=16*0.25*(60/tempo);ns.forEach((n,idx)=>{const o=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain(),rg=ctx.createGain(),c=ctx.createConvolver();o.type=idx%2===0?'triangle':'sawtooth';o.frequency.value=noteToFreq(n);o2.type='square';o2.frequency.value=noteToFreq(n)*0.5;f.type='bandpass';f.frequency.value=800;f.Q.value=0.5;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.2,t+0.8);g.gain.setValueAtTime(0.2,t+dur-0.5);g.gain.linearRampToValueAtTime(0.01,t+dur+0.5);rg.gain.value=0.8;c.buffer=reverbBuffer;o.connect(f);o2.connect(f);f.connect(g).connect(masterGain);g.connect(rg).connect(c).connect(masterGain);o.start(t);o2.start(t);o.stop(t+dur+1);o2.stop(t+dur+1);});}
       function schedule(){while(nextNoteTime<ctx.currentTime+0.1){const i=current16thNote%seqLength;if(kickPat[i])playKick(nextNoteTime);if(snarePat[i])playSnare(nextNoteTime);if(hatPat[i])playHihat(nextNoteTime,hatPat[i]);if(bassLine[i])playBass(nextNoteTime,bassLine[i]);if(arpLine[i])playArp(nextNoteTime,arpLine[i]);if(leadLine[i])playLead(nextNoteTime,leadLine[i]);if(padChords[i])playPad(nextNoteTime,padChords[i]);nextNoteTime+=0.25*(60.0/tempo);current16thNote++;}timerID=setTimeout(schedule,25);}
       return {
-        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.6;masterGain.connect(ctx.destination);reverbBuffer=createReverb();compose();}if(ctx.state==='suspended')await ctx.resume();if(isPlaying)return;isPlaying=true;current16thNote=0;nextNoteTime=ctx.currentTime+0.1;schedule();}catch(e){console.error(e);}},
+        play:async()=>{try{if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();masterGain=ctx.createGain();masterGain.gain.value=0.6;masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);reverbBuffer=createReverb();compose();}if(ctx.state==='suspended')await ctx.resume();if(isPlaying)return;isPlaying=true;current16thNote=0;nextNoteTime=ctx.currentTime+0.1;schedule();}catch(e){console.error(e);}},
         stop:()=>{isPlaying=false;clearTimeout(timerID);if(masterGain)try{masterGain.gain.setTargetAtTime(0,ctx.currentTime,0.1);}catch(e){} setTimeout(()=>{if(ctx){ctx.close();ctx=null;}},200);}
       };
     })();
@@ -2060,7 +2121,7 @@
                ctx = new AC();
                masterGain = ctx.createGain();
                masterGain.gain.value = 0.5;
-               masterGain.connect(ctx.destination);
+               masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);
                reverbBuffer = createReverb();
                compose();
             }
@@ -2140,7 +2201,7 @@
               ctx = new AC();
               masterGain = ctx.createGain();
               masterGain.gain.value = 0.6; // Volume Up
-              masterGain.connect(ctx.destination);
+              masterGain.connect(ctx.destination); Visualizer.connect(ctx, masterGain);
               reverbBuffer = createReverb();
               compose();
             }
@@ -6165,17 +6226,18 @@ function startBattle({auto=false, tournamentCtx=null}={}){
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "ea644a3fa162beb269314f429c0dec93",
   "createdAt": "2026-02-02T16:25:29.642Z",
   "schema": 2,
   "title": "CORPORATE QUEST — Real Company Battle",
-  "savedAt": "2026-02-08T11:32:29.967Z",
-  "aiInstruction": "HELPページに、各財務諸表や指標がゲームの中でどのようにステータスに反映されるかを明示してください。\n\nHELPページに、各財務諸表や指標がゲームの中でどのようにステータスに反映されるかを明示してください。\n\nHelpページに、AI　ForgeのM&A機能について説明を加えて",
-  "comment": "HELPページに、各財務諸表や指標がゲームの中でどのようにステータスに反映されるかを明示してください。\n\nHELPページに、各財務諸表や指標がゲームの中でどのようにステータスに反映されるかを明示してください。\n\nHelpページに、AI　ForgeのM&A機能について説明を加えて",
+  "savedAt": "2026-02-08T12:03:17.919Z",
+  "aiInstruction": "現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。\n\n現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。\n\n現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。",
+  "comment": "現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。\n\n現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。\n\n現在実装されている Web Audio API の音源（masterGainノード）を利用して、画面ヘッダーの「CORPORATE QUEST」ロゴの背景に、再生中の音に合わせて動く「オーディオスペクトラム（棒グラフ状のビジュアライザー）」を追加してください。\n\n要件：\n1. AnalyserNodeを作成し、既存の音声出力（masterGain）に接続する。\n2. ヘッダー部分にcanvas要素を目立たないように配置し、半透明のシアン色（#35F7FF）で周波数データをリアルタイム描画する。\n3. BGMが流れている時のみ波形が動くようにする。\n4. デザインはアプリのサイバーパンクな雰囲気に合わせ、少しグリッチノイズが入ったようなデジタルな表現にする。",
   "sourceMode": "project",
-  "runId": "79fbcbbc31bf90ba916a8e0e86564b1f"
+  "runId": "ebf0552b8e6c536c1c860d220d1401da"
 }
 </script>
 </body>
