@@ -650,7 +650,11 @@
             </div>
             <div class="form-group">
                 <label>水量 (L)</label>
-                <input type="number" id="settingVolume" value="20">
+                <input type="number" id="settingVolume" value="20" min="1" step="0.1">
+            </div>
+            <div class="form-group">
+                <label>水深 (cm)</label>
+                <input type="number" id="settingDepth" value="18" min="3" max="100" step="0.5">
             </div>
             <div class="form-group">
                 <label>生き物・生体数</label>
@@ -730,7 +734,7 @@ const state = {
     selectedDate: new Date(),
     settings: {
         lat: 35.6895, lng: 139.6917, region: '東京', // Default
-        location: 'garden', container: 'black', sunlight: 4, volume: 20,
+        location: 'garden', container: 'black', sunlight: 4, volume: 20, depth: 18,
         bio_count: '', plant_status: '', policy: ''
     },
     tempEntry: { files: [], weather: null, temp: null, waterTemp: null }
@@ -886,46 +890,161 @@ async function fetchWeather(lat, lng) {
     }
 }
 
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
+function round1(value) {
+    return Math.round(value * 10) / 10;
+}
+
+function getWaterModelParams() {
+    const s = state.settings;
+    const vol = Math.max(1, parseFloat(s.volume) || 20);
+    const depth = Math.max(3, parseFloat(s.depth) || 18);
+    const sunlight = clamp(parseFloat(s.sunlight) || 0, 0, 14);
+
+    let baseOffset = 0;
+    let solarAbsorb = 1.0;
+    let coolingRate = 1.0;
+    let indoorStableBoost = 0;
+
+    switch (s.container) {
+        case 'white':
+            solarAbsorb = 0.7;
+            coolingRate = 0.85;
+            baseOffset += 0.1;
+            break;
+        case 'black':
+            solarAbsorb = 1.35;
+            coolingRate = 1.05;
+            baseOffset += 0.4;
+            break;
+        case 'pot':
+            solarAbsorb = 0.95;
+            coolingRate = 0.82;
+            baseOffset -= 0.6;
+            break;
+        case 'plastic_pot':
+            solarAbsorb = 1.05;
+            coolingRate = 0.95;
+            baseOffset -= 0.1;
+            break;
+        case 'glass':
+            solarAbsorb = 1.1;
+            coolingRate = 1.15;
+            baseOffset += 0.2;
+            break;
+    }
+
+    let locationSunFactor = 1.0;
+    let dayBias = 0;
+    let nightBias = 0;
+
+    switch (s.location) {
+        case 'indoor':
+            locationSunFactor = 0.15;
+            dayBias += 1.8;
+            nightBias += 2.0;
+            indoorStableBoost = 0.45;
+            break;
+        case 'eaves':
+            locationSunFactor = 0.45;
+            dayBias -= 0.3;
+            nightBias += 0.2;
+            break;
+        case 'balcony':
+            locationSunFactor = 1.2;
+            dayBias += 0.6;
+            nightBias += 0.3;
+            break;
+        case 'garden':
+        default:
+            locationSunFactor = 1.0;
+            dayBias += 0.1;
+            nightBias -= 0.4;
+            break;
+    }
+
+    // 熱慣性: 水量が多い・水深が深いほど変化しにくい
+    const volumeFactor = 22 / (22 + vol);      // 20L前後を基準
+    const depthFactor = 16 / (16 + depth);     // 15〜20cm前後を基準
+    const inertia = clamp((volumeFactor * 0.58) + (depthFactor * 0.42) - indoorStableBoost, 0.12, 0.9);
+
+    // 日較差への追従率（大きいほど最高/最低が気温に引っ張られる）
+    const swingFollow = clamp(inertia * coolingRate, 0.1, 0.95);
+
+    // 日中の加熱量（浅いほど、少水量ほど上がりやすい）
+    const shallowBoost = clamp((22 - Math.min(depth, 22)) / 22, 0, 0.85);
+    const smallVolumeBoost = clamp((30 - Math.min(vol, 30)) / 30, 0, 0.8);
+    const solarGain = sunlight * 0.18 * solarAbsorb * locationSunFactor * (1 + shallowBoost * 0.45 + smallVolumeBoost * 0.35);
+
+    // 夜間放射冷却（屋外・浅い・少水量で効きやすい）
+    let nightCooling = (0.35 + shallowBoost * 0.7 + smallVolumeBoost * 0.45) * coolingRate;
+    if (s.location === 'indoor') nightCooling *= 0.15;
+    if (s.location === 'eaves') nightCooling *= 0.55;
+    if (s.location === 'balcony') nightCooling *= 0.85;
+
+    return {
+        vol,
+        depth,
+        sunlight,
+        inertia,
+        swingFollow,
+        solarGain,
+        nightCooling,
+        baseOffset,
+        dayBias,
+        nightBias
+    };
+}
+
 function calculateWaterTemp(targetAirTemp, dailyMaxAir, dailyMinAir) {
-    let t = parseFloat(targetAirTemp);
-    let max = parseFloat(dailyMaxAir);
-    let min = parseFloat(dailyMinAir);
+    const t = parseFloat(targetAirTemp);
+    const max = parseFloat(dailyMaxAir);
+    const min = parseFloat(dailyMinAir);
     if (isNaN(t) || isNaN(max) || isNaN(min)) return '--';
 
-    const s = state.settings;
-    
-    // 1. ベースライン: 日平均気温
-    const dailyAvg = (max + min) / 2;
+    const avg = (max + min) / 2;
+    const airRange = Math.max(0, max - min);
+    const p = getWaterModelParams();
 
-    // 2. 熱緩衝 (Damping): 水量によるなまり係数
-    const vol = parseFloat(s.volume) || 20;
-    let damping = Math.max(0.2, 1.0 - (vol / 80));
-    if (s.location === 'indoor') damping *= 0.4;
+    const isNearMax = Math.abs(t - max) < 0.05;
+    const isNearMin = Math.abs(t - min) < 0.05;
 
-    // 3. 日射と容器による加熱 (Solar Gain)
-    let solarHeat = 0;
-    if (s.location !== 'indoor') {
-        const sunlight = parseFloat(s.sunlight) || 0;
-        solarHeat = sunlight * 0.25;
+    let est;
 
-        let containerFactor = 1.0;
-        if (s.container === 'black') containerFactor = 1.3;
-        else if (s.container === 'white' || s.container === 'glass') containerFactor = 0.8;
-        else if (s.container === 'pot') containerFactor = 0.9;
-        
-        solarHeat *= containerFactor;
+    if (isNearMax) {
+        // 最高水温: 日中の蓄熱を強く反映
+        est = avg
+            + (airRange * 0.52 * p.swingFollow)
+            + p.solarGain
+            + p.baseOffset
+            + p.dayBias;
+    } else if (isNearMin) {
+        // 最低水温: 夜間は水の熱慣性で下がりにくいが、浅い容器は冷えやすい
+        est = avg
+            - (airRange * 0.42 * p.swingFollow)
+            - p.nightCooling
+            + p.baseOffset
+            + p.nightBias;
+    } else {
+        // 現在/任意時点の代表値
+        const diffFromAvg = t - avg;
+        est = avg
+            + (diffFromAvg * p.swingFollow)
+            + (p.solarGain * 0.45)
+            - (p.nightCooling * 0.2)
+            + p.baseOffset
+            + ((p.dayBias + p.nightBias) / 2);
     }
 
-    // 4. 気化熱・環境バイアス
-    let bias = -0.5;
-    if (s.location === 'eaves') bias -= 0.8;
-    if (s.location === 'indoor') {
-        bias = 1.0;
-        solarHeat = 0;
-    }
+    // 異常な暴れを抑制（現実的な範囲に制限）
+    const upperCap = max + Math.min(6.5, 1.2 + p.solarGain + (p.sunlight * 0.08));
+    const lowerCap = min - Math.min(2.5, 0.3 + p.nightCooling * 0.35);
 
-    let est = dailyAvg + (t - dailyAvg) * damping + solarHeat + bias;
-    return Math.round(est * 10) / 10;
+    est = clamp(est, lowerCap, upperCap);
+    return round1(est);
 }
 
 function getWeatherLabel(code) {
@@ -1264,6 +1383,7 @@ function loadSettings() {
     document.getElementById('settingContainer').value = state.settings.container;
     document.getElementById('settingSunlight').value = state.settings.sunlight;
     document.getElementById('settingVolume').value = state.settings.volume;
+    document.getElementById('settingDepth').value = state.settings.depth ?? 18;
     document.getElementById('settingBioCount').value = state.settings.bio_count || '';
     document.getElementById('settingPlantStatus').value = state.settings.plant_status || '';
     document.getElementById('settingPolicy').value = state.settings.policy || '';
@@ -1277,6 +1397,7 @@ function saveSettingsUI() {
     state.settings.container = document.getElementById('settingContainer').value;
     state.settings.sunlight = parseFloat(document.getElementById('settingSunlight').value);
     state.settings.volume = parseFloat(document.getElementById('settingVolume').value);
+    state.settings.depth = parseFloat(document.getElementById('settingDepth').value);
     state.settings.bio_count = document.getElementById('settingBioCount').value;
     state.settings.plant_status = document.getElementById('settingPlantStatus').value;
     state.settings.policy = document.getElementById('settingPolicy').value;
