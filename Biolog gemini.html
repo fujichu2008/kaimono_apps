@@ -886,35 +886,46 @@ async function fetchWeather(lat, lng) {
     }
 }
 
-function estimateWaterTemp(airTemp) {
-    // 数値型であることを保証
-    let temp = parseFloat(airTemp);
-    if (isNaN(temp)) return '--';
+function calculateWaterTemp(targetAirTemp, dailyMaxAir, dailyMinAir) {
+    let t = parseFloat(targetAirTemp);
+    let max = parseFloat(dailyMaxAir);
+    let min = parseFloat(dailyMinAir);
+    if (isNaN(t) || isNaN(max) || isNaN(min)) return '--';
 
     const s = state.settings;
-    const sunlight = parseFloat(s.sunlight) || 0;
+    
+    // 1. ベースライン: 日平均気温
+    const dailyAvg = (max + min) / 2;
 
-    // 日当たりの影響 (0.2度/時)
-    temp += (sunlight * 0.2);
+    // 2. 熱緩衝 (Damping): 水量によるなまり係数
+    const vol = parseFloat(s.volume) || 20;
+    let damping = Math.max(0.2, 1.0 - (vol / 80));
+    if (s.location === 'indoor') damping *= 0.4;
 
-    // 容器の影響
-    switch (s.container) {
-        case 'black': temp += 2.0; break;
-        case 'white': temp -= 0.5; break;
-        case 'pot': temp -= 1.0; break;
-        case 'plastic_pot': temp += 0.5; break;
-        case 'glass': temp -= 0.5; break;
-        default: break;
+    // 3. 日射と容器による加熱 (Solar Gain)
+    let solarHeat = 0;
+    if (s.location !== 'indoor') {
+        const sunlight = parseFloat(s.sunlight) || 0;
+        solarHeat = sunlight * 0.25;
+
+        let containerFactor = 1.0;
+        if (s.container === 'black') containerFactor = 1.3;
+        else if (s.container === 'white' || s.container === 'glass') containerFactor = 0.8;
+        else if (s.container === 'pot') containerFactor = 0.9;
+        
+        solarHeat *= containerFactor;
     }
 
-    // 設置場所の影響
-    if (s.location === 'eaves' || s.location === 'indoor') temp -= 1.5;
+    // 4. 気化熱・環境バイアス
+    let bias = -0.5;
+    if (s.location === 'eaves') bias -= 0.8;
+    if (s.location === 'indoor') {
+        bias = 1.0;
+        solarHeat = 0;
+    }
 
-    // 水量の影響 (水量が多いと水温変化が緩やかになる＝最高気温時には低めに出る傾向と仮定)
-    const vol = parseFloat(s.volume) || 20;
-    if (vol > 50) temp -= 1.0;
-
-    return Math.round(temp * 10) / 10;
+    let est = dailyAvg + (t - dailyAvg) * damping + solarHeat + bias;
+    return Math.round(est * 10) / 10;
 }
 
 function getWeatherLabel(code) {
@@ -1132,9 +1143,9 @@ document.getElementById('detailCameraInput').onchange = async (e) => {
             temp: w.temp,
             maxTemp: w.maxTemp,
             minTemp: w.minTemp,
-            waterTemp: estimateWaterTemp(w.temp),
-            maxWaterTemp: estimateWaterTemp(w.maxTemp),
-            minWaterTemp: estimateWaterTemp(w.minTemp),
+            waterTemp: calculateWaterTemp(w.temp, w.maxTemp, w.minTemp),
+            maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
+            minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
             memo: ''
         };
     }
@@ -1161,9 +1172,9 @@ async function handleFileSelect(event) {
     state.tempEntry.temp = weatherData.temp;
     state.tempEntry.maxTemp = weatherData.maxTemp;
     state.tempEntry.minTemp = weatherData.minTemp;
-    state.tempEntry.waterTemp = estimateWaterTemp(weatherData.temp);
-    state.tempEntry.maxWaterTemp = estimateWaterTemp(weatherData.maxTemp);
-    state.tempEntry.minWaterTemp = estimateWaterTemp(weatherData.minTemp);
+    state.tempEntry.waterTemp = calculateWaterTemp(weatherData.temp, weatherData.maxTemp, weatherData.minTemp);
+    state.tempEntry.maxWaterTemp = calculateWaterTemp(weatherData.maxTemp, weatherData.maxTemp, weatherData.minTemp);
+    state.tempEntry.minWaterTemp = calculateWaterTemp(weatherData.minTemp, weatherData.maxTemp, weatherData.minTemp);
 
     // Open Modal
     openModal();
@@ -1336,9 +1347,9 @@ async function saveCurrentDetail() {
             temp: w.temp,
             maxTemp: w.maxTemp,
             minTemp: w.minTemp,
-            waterTemp: estimateWaterTemp(w.temp),
-            maxWaterTemp: estimateWaterTemp(w.maxTemp),
-            minWaterTemp: estimateWaterTemp(w.minTemp),
+            waterTemp: calculateWaterTemp(w.temp, w.maxTemp, w.minTemp),
+            maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
+            minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
             memo: newMemo,
             ai_comment: newAiComment
         };
@@ -1542,8 +1553,10 @@ async function updateStats() {
 
         if (statsMode === 'water') {
             labelPrefix = "水温(推定)";
-            maxData = maxData.map(t => estimateWaterTemp(t));
-            minData = minData.map(t => estimateWaterTemp(t));
+            const airMax = [...maxData];
+            const airMin = [...minData];
+            maxData = airMax.map((t, i) => calculateWaterTemp(t, airMax[i], airMin[i]));
+            minData = airMin.map((t, i) => calculateWaterTemp(t, airMax[i], airMin[i]));
         }
 
         renderChart(dates, maxData, minData, labelPrefix);
