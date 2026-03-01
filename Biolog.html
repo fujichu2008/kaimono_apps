@@ -131,15 +131,57 @@
         justify-content: center;
         background: #1a1a1a;
         border-radius: 12px;
-        overflow: hidden;
         margin-bottom: 12px;
         touch-action: pan-y pinch-zoom;
+        /* 3D Perspective for Page Flip */
+        perspective: 1200px;
+        overflow: visible;
     }
     .gallery-img {
         max-width: 100%;
         max-height: 100%;
         object-fit: contain;
-        pointer-events: none; /* スワイプ判定用 */
+        pointer-events: none;
+        z-index: 1;
+        position: relative;
+        background: #1a1a1a; /* 背面が見えないように */
+        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        border-radius: 4px;
+    }
+    /* Animation Clone */
+    .gallery-clone {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: auto;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        z-index: 10;
+        pointer-events: none;
+        box-shadow: 5px 10px 25px rgba(0,0,0,0.4);
+        background: #1a1a1a;
+        border-radius: 4px;
+        backface-visibility: hidden;
+    }
+    /* Animations */
+    @keyframes flipNextLeave {
+        0% { transform: rotateY(0deg); opacity: 1; }
+        100% { transform: rotateY(-110deg) translateX(-20%); opacity: 0; }
+    }
+    @keyframes flipPrevEnter {
+        0% { transform: rotateY(-110deg) translateX(-20%); opacity: 0; }
+        100% { transform: rotateY(0deg); opacity: 1; }
+    }
+    .flip-next-leave {
+        transform-origin: center left;
+        animation: flipNextLeave 0.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+    }
+    .flip-prev-enter {
+        transform-origin: center left;
+        animation: flipPrevEnter 0.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
     }
     .gallery-overlay {
         position: absolute;
@@ -3015,11 +3057,101 @@ function updateGalleryUI() {
     const item = galleryItems[currentGalleryIndex];
     const imgEl = document.getElementById('galleryImg');
     
-    // メモリリーク防止
+    // 既存のURLがあれば破棄して再生成（アニメーション中でない初期ロード時用）
+    // ※changeGalleryIndexからの呼び出しでは既にURL管理されている場合があるため、
+    //  ここでの無条件破棄は注意が必要だが、初期ロードやスライダー操作用として機能させる。
     if (galleryBlobUrl) URL.revokeObjectURL(galleryBlobUrl);
     galleryBlobUrl = URL.createObjectURL(item.blob);
     imgEl.src = galleryBlobUrl;
 
+    updateGalleryMetaUI();
+}
+
+function changeGalleryIndex(delta) {
+    const next = currentGalleryIndex + delta;
+    if (next >= 0 && next < galleryItems.length) {
+        const display = document.getElementById('galleryDisplay');
+        const mainImg = document.getElementById('galleryImg');
+        
+        // URL生成 (メモリ効率のため都度生成・破棄)
+        const nextItem = galleryItems[next];
+        const nextBlobUrl = URL.createObjectURL(nextItem.blob);
+
+        if (delta > 0) {
+            // --- NEXT: 今の写真をめくって、下の（次の）写真を見せる ---
+            
+            // 1. 現在の表示画像(Clone)を作成して最前面に配置
+            const clone = mainImg.cloneNode(true);
+            clone.className = 'gallery-clone';
+            display.appendChild(clone);
+
+            // 2. メイン画像は「次の画像」に差し替えて、裏に配置しておく
+            if (galleryBlobUrl) URL.revokeObjectURL(galleryBlobUrl); // 前のURL解放
+            galleryBlobUrl = nextBlobUrl;
+            mainImg.src = galleryBlobUrl;
+
+            // 3. Cloneを「左へめくる」アニメーション
+            requestAnimationFrame(() => {
+                clone.classList.add('flip-next-leave');
+            });
+
+            // 4. 掃除
+            setTimeout(() => {
+                if (clone.parentNode) clone.parentNode.removeChild(clone);
+            }, 550);
+
+        } else {
+            // --- PREV: めくった写真を、左から戻す（被せる） ---
+
+            // 1. 「前の画像（＝次に見る画像）」をCloneとして作成
+            const clone = document.createElement('img');
+            clone.className = 'gallery-clone';
+            clone.src = nextBlobUrl;
+            // 初期状態はめくられている（見えない）状態クラスをつけるか、アニメーションで制御
+            // ここではJSでクラス付与時にアニメーション開始
+            display.appendChild(clone);
+
+            // メイン画像はまだ「現在の画像」のまま維持（Cloneの下に見える）
+
+            // 2. Cloneを「戻す」アニメーション
+            requestAnimationFrame(() => {
+                clone.classList.add('flip-prev-enter');
+            });
+
+            // 3. アニメーション完了後にメイン画像を差し替え
+            setTimeout(() => {
+                if (galleryBlobUrl) URL.revokeObjectURL(galleryBlobUrl);
+                galleryBlobUrl = nextBlobUrl;
+                mainImg.src = galleryBlobUrl;
+                
+                if (clone.parentNode) clone.parentNode.removeChild(clone);
+            }, 500);
+        }
+
+        currentGalleryIndex = next;
+        
+        // UI更新（スライダーなど。画像src更新は上記で制御済みなのでスキップしたいが、
+        // updateGalleryUIはsrc更新も含むため、干渉しないよう注意深く呼ぶか、
+        // ここではカウンター更新だけ個別にやる）
+        // ※簡易的にupdateGalleryUIを呼ぶとsrcが再設定されるが、同じURLならチラつかないはず
+        // ただしPrev時はタイミングが重要なので、メタデータのみ更新する処理に分けるのがベストだが
+        // 既存コード維持のため、Prevのアニメーション完了後に呼ぶ。
+        
+        if (delta > 0) {
+            // Next: すぐにメイン画像が変わっているのでUIも更新してOK
+            updateGalleryMetaUI();
+        } else {
+            // Prev: アニメーション後に更新
+            setTimeout(() => updateGalleryMetaUI(), 500);
+        }
+    }
+}
+
+// メタデータ（日付・カウンター）のみ更新する分離関数
+function updateGalleryMetaUI() {
+    if (!galleryItems[currentGalleryIndex]) return;
+    const item = galleryItems[currentGalleryIndex];
+    
     document.getElementById('galleryDate').textContent = item.dateStr;
     document.getElementById('galleryWeather').textContent = item.weather;
     document.getElementById('galleryTemp').textContent = item.temp ? `${item.temp}℃` : '';
@@ -3027,14 +3159,6 @@ function updateGalleryUI() {
     
     document.getElementById('gallerySlider').value = currentGalleryIndex;
     document.getElementById('galleryCounter').textContent = `${currentGalleryIndex + 1} / ${galleryItems.length}`;
-}
-
-function changeGalleryIndex(delta) {
-    const next = currentGalleryIndex + delta;
-    if (next >= 0 && next < galleryItems.length) {
-        currentGalleryIndex = next;
-        updateGalleryUI();
-    }
 }
 
 // --- STATS LOGIC ---
