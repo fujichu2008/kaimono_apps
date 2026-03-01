@@ -715,7 +715,7 @@
                         <span>🤖 AIアドバイザー</span>
                         <button id="btnAiDiag" class="btn" style="width:auto; padding: 6px 12px; font-size: 12px; background-color: #8e24aa;">✨ JSON診断プロンプト作成</button>
                     </div>
-                    <p style="font-size:12px; color:#4a148c; margin-bottom:8px; margin-top:0;">1. JSON診断プロンプトをコピー<br>2. AIチャットに貼り付け<br>3. AIのJSON返答を下に貼り付け<br>4. 読み込むと、ビオトープ診断と必要時のみガーデニング助言を画面反映・保存します</p>
+                    <p style="font-size:12px; color:#4a148c; margin-bottom:8px; margin-top:0;">1. JSON診断プロンプトをコピー<br>2. AIチャットに貼り付け<br>3. AIが返したJSONをコピー<br>4. JSON読込で、そのまま画面反映・保存します（JSON文字列の表示は不要）</p>
                     
                     <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:5px; flex-wrap:wrap;">
                         <button id="btnImportAiJson" class="btn" style="width:auto; padding:4px 10px; font-size:11px; background:#ce93d8; color:#4a148c; border:none;">⬇ JSON読込</button>
@@ -723,7 +723,7 @@
                         <button id="btnClearAi" class="btn" style="width:auto; padding:4px 10px; font-size:11px; background:#ffcdd2; color:#b71c1c; border:none;">✕ クリア</button>
                     </div>
 
-                    <textarea class="detail-memo-input" id="detailAiComment" rows="6" placeholder="ここにAIが返したJSON（またはJSONを含む返答）を貼り付けてください。" style="border-color: #e1bee7;"></textarea>
+                    <textarea class="detail-memo-input" id="detailAiComment" rows="6" placeholder="必要ならAIの返答メモを保存できます（JSON読込はクリップボードから直接行います）。" style="border-color: #e1bee7;"></textarea>
                     <div style="text-align:right; font-size:10px; color:#8e24aa;">文字数: <span id="aiCharCount">0</span></div>
 
                     <div id="aiStructuredMount"></div>
@@ -1800,14 +1800,50 @@ document.getElementById('btnPasteAi').onclick = async () => {
 };
 
 document.getElementById('btnImportAiJson').onclick = async () => {
-    const parsed = parseAiStructuredPayload(aiCommentEl.value);
-    if (!parsed) {
-        alert('JSONを認識できませんでした。AIの返答に { ... } 形式のJSONが含まれているか確認してください。');
-        aiCommentEl.focus();
-        return;
+    try {
+        const clipText = await navigator.clipboard.readText();
+        const parsed = parseAiStructuredPayload(clipText);
+        if (!parsed) {
+            alert('クリップボード内のJSONを認識できませんでした。AIが返したJSONをコピーしてから、もう一度お試しください。');
+            return;
+        }
+
+        const dateStr = formatDate(state.selectedDate);
+        let rec = await getRecord(dateStr);
+        const newMemo = document.getElementById('detailMemoInput').value;
+
+        if (!rec) {
+            const w = await fetchWeather(state.settings.lat, state.settings.lng);
+            rec = {
+                dateStr: dateStr,
+                timestamp: Date.now(),
+                media: [],
+                weather: getWeatherLabel(w.weatherCode),
+                temp: w.temp,
+                maxTemp: w.maxTemp,
+                minTemp: w.minTemp,
+                waterTemp: calculateWaterTemp(w.temp, w.maxTemp, w.minTemp),
+                maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
+                minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
+                memo: newMemo,
+                ai_comment: rec && rec.ai_comment ? rec.ai_comment : '',
+                ai_structured: parsed,
+                gardening_advice: parsed.gardening ? parsed.gardening : null
+            };
+        } else {
+            rec.memo = newMemo;
+            rec.ai_structured = parsed;
+            rec.gardening_advice = parsed.gardening ? parsed.gardening : null;
+            rec.timestamp = Date.now();
+        }
+
+        await saveRecord(rec);
+        renderStructuredAi(rec);
+        document.getElementById('detailTimestamp').textContent = `AI読込完了: ${new Date().toLocaleTimeString()}`;
+        alert('クリップボードのJSONを読み込み、画面に反映しました。');
+    } catch (err) {
+        alert('クリップボードの読み取りに失敗しました。ブラウザの権限または実行環境を確認してください。');
     }
-    await saveCurrentDetail();
-    alert('AI JSONを読み込み、構造化診断を記録しました。');
 };
 
 document.getElementById('btnClearAi').onclick = () => {
@@ -1850,7 +1886,7 @@ document.getElementById('btnAiDiag').onclick = () => {
     const prompt = `あなたはビオトープ管理と家庭菜園の専門家です。以下の記録データと添付画像をもとに診断してください。出力は説明文を付けず、必ずJSONオブジェクト1つのみを返してください。\n\n【重要】\n- ビオトープ診断は常に出力\n- 野菜・花などビオトープ外の対象が画像やメモに含まれる場合のみ gardening を出力\n- ビオトープ外の内容が無い場合は gardening を null にする\n- risk は low / medium / high のいずれか\n- actions は短い日本語の配列\n\n【返却JSONスキーマ】\n{\n  \"biotope\": {\n    \"state\": \"ビオトープの状態を1〜2文で要約\",\n    \"risk\": \"low|medium|high\",\n    \"actions\": [\"推奨アクション1\", \"推奨アクション2\"]\n  },\n  \"gardening\": null または {\n    \"related\": true,\n    \"advice\": \"ビオトープ外のガーデニング対象に対する助言\"\n  }\n}\n\n【診断データ】\n${JSON.stringify(info, null, 2)}`;
 
     navigator.clipboard.writeText(prompt).then(() => {
-        alert('📋 JSON診断プロンプトをコピーしました。AIに貼り付けて、返ってきたJSONを下の欄に貼り、JSON読込を押してください。');
+        alert('📋 JSON診断プロンプトをコピーしました。AIに貼り付け、返ってきたJSONをコピーしたら、そのままJSON読込を押してください。');
     }).catch(err => {
         alert('コピーに失敗しました。');
     });
