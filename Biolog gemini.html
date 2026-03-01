@@ -496,6 +496,7 @@
     .hidden { display: none !important; }
     .flex-row { display: flex; gap: 10px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
@@ -507,6 +508,7 @@
         <div class="app-title">Biolog</div>
         <div class="top-actions" role="tablist" aria-label="画面切り替え">
             <button class="tab-btn active" type="button" onclick="switchTab('record')">記録</button>
+            <button class="tab-btn" type="button" onclick="switchTab('stats')">統計</button>
             <button class="tab-btn" type="button" onclick="switchTab('settings')">設定</button>
         </div>
     </div>
@@ -577,6 +579,28 @@
             <p>日々の記録が蓄積されると、<br>AIがビオトープの状態を分析します。</p>
             <p style="font-size: 12px; margin-top: 20px;">今後のアップデートをお待ちください。</p>
         </div>
+    </div>
+
+    <div id="view-stats" class="view-section">
+        <div class="setting-section">
+            <div class="setting-title">📊 気温・水温グラフ</div>
+            <div class="calendar-controls" style="margin-bottom:15px; justify-content:center; gap:10px;">
+                <input type="date" id="statsStart" style="width:45%; font-size:14px;">
+                <span style="align-self:center;">～</span>
+                <input type="date" id="statsEnd" style="width:45%; font-size:14px;">
+            </div>
+            
+            <div class="flex-row" style="margin-bottom:15px; justify-content:center;">
+                <button class="tab-btn active" id="btnModeAir" onclick="switchStatsMode('air')" style="background:var(--accent); color:#fff; flex:1; text-align:center; box-shadow:none;">気温</button>
+                <button class="tab-btn" id="btnModeWater" onclick="switchStatsMode('water')" style="background:#e0e0e0; color:#333; flex:1; text-align:center; box-shadow:none;">水温(推定)</button>
+            </div>
+
+            <div style="position: relative; height:300px; width:100%;">
+                <canvas id="statsChart"></canvas>
+            </div>
+            <p style="font-size:11px; color:var(--text-sub); margin-top:10px; text-align:right;">Data source: Open-Meteo Historical API</p>
+        </div>
+        <button class="btn" onclick="updateStats()">グラフを更新</button>
     </div>
 
     <div id="view-settings" class="view-section">
@@ -905,13 +929,21 @@ function getWeatherLabel(code) {
 
 // --- UI FUNCTIONS ---
 function switchTab(tabName) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    // Header tabs: Record(0), Stats(1), Settings(2)
+    const tabs = ['record', 'stats', 'settings'];
+    const index = tabs.indexOf(tabName);
+    if (index === -1) return;
+
+    const headerBtns = document.querySelectorAll('.header-top .tab-btn');
+    headerBtns.forEach(b => b.classList.remove('active'));
+    headerBtns[index].classList.add('active');
+
     document.querySelectorAll('.view-section').forEach(v => v.classList.remove('active'));
-    
-    // Find index for button logic (0: Record, 1: Settings)
-    const index = tabName === 'record' ? 0 : 1;
-    document.querySelectorAll('.tab-btn')[index].classList.add('active');
     document.getElementById(`view-${tabName}`).classList.add('active');
+
+    if (tabName === 'stats') {
+        initStatsView();
+    }
 }
 
 async function renderCalendar() {
@@ -1458,6 +1490,115 @@ async function renderGridCalendar() {
 
         container.appendChild(cell);
     }
+}
+
+// --- INIT ---
+// --- STATS LOGIC ---
+let statsChart = null;
+let statsMode = 'air'; // 'air' or 'water'
+
+function initStatsView() {
+    if (!document.getElementById('statsStart').value) {
+        // Default: Last 30 days
+        const end = new Date();
+        const start = new Date();
+        start.setDate(end.getDate() - 30);
+        document.getElementById('statsStart').value = formatDate(start);
+        document.getElementById('statsEnd').value = formatDate(end);
+        updateStats();
+    }
+}
+
+function switchStatsMode(mode) {
+    statsMode = mode;
+    document.getElementById('btnModeAir').style.background = mode === 'air' ? 'var(--accent)' : '#e0e0e0';
+    document.getElementById('btnModeAir').style.color = mode === 'air' ? '#fff' : '#333';
+    document.getElementById('btnModeWater').style.background = mode === 'water' ? 'var(--accent)' : '#e0e0e0';
+    document.getElementById('btnModeWater').style.color = mode === 'water' ? '#fff' : '#333';
+    updateStats();
+}
+
+async function updateStats() {
+    const lat = state.settings.lat;
+    const lng = state.settings.lng;
+    const start = document.getElementById('statsStart').value;
+    const end = document.getElementById('statsEnd').value;
+
+    if (!start || !end) return;
+
+    // Open-Meteo Archive API
+    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${start}&end_date=${end}&daily=temperature_2m_max,temperature_2m_min&timezone=auto`;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        
+        if (!data.daily) throw new Error("No data");
+
+        const dates = data.daily.time;
+        let maxData = data.daily.temperature_2m_max;
+        let minData = data.daily.temperature_2m_min;
+        let labelPrefix = "気温";
+
+        if (statsMode === 'water') {
+            labelPrefix = "水温(推定)";
+            maxData = maxData.map(t => estimateWaterTemp(t));
+            minData = minData.map(t => estimateWaterTemp(t));
+        }
+
+        renderChart(dates, maxData, minData, labelPrefix);
+
+    } catch (e) {
+        console.error(e);
+        alert('データの取得に失敗しました');
+    }
+}
+
+function renderChart(labels, maxData, minData, labelPrefix) {
+    const ctx = document.getElementById('statsChart').getContext('2d');
+    
+    if (statsChart) {
+        statsChart.destroy();
+    }
+
+    statsChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: `最高${labelPrefix}`,
+                    data: maxData,
+                    borderColor: '#ff7043',
+                    backgroundColor: 'rgba(255, 112, 67, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.3
+                },
+                {
+                    label: `最低${labelPrefix}`,
+                    data: minData,
+                    borderColor: '#42a5f5',
+                    backgroundColor: 'rgba(66, 165, 245, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.3
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'top' },
+                tooltip: { mode: 'index', intersect: false }
+            },
+            scales: {
+                y: {
+                    beginAtZero: false,
+                    title: { display: true, text: '℃' }
+                }
+            }
+        }
+    });
 }
 
 // --- INIT ---
