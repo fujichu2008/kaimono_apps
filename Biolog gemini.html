@@ -366,7 +366,40 @@
         border-radius: 8px;
     }
     .env-item { display: flex; align-items: center; gap: 4px; }
-    
+
+    .care-event-section {
+        margin-bottom: 16px;
+    }
+    .care-event-label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text-main);
+    }
+    .care-chip-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .care-chip {
+        border: 1px solid var(--border);
+        background: #fff;
+        color: var(--text-main);
+        border-radius: 999px;
+        padding: 8px 10px;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+    }
+    .care-chip.active {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+        box-shadow: 0 4px 10px rgba(46,125,50,0.18);
+    }
+
     .media-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -697,6 +730,11 @@
                     </div>
                 </div>
                 
+                <div class="care-event-section">
+                    <label class="care-event-label">🪴 ワンタップ育成イベント</label>
+                    <div class="care-chip-wrap" id="careEventChips"></div>
+                </div>
+
                 <div class="env-info">
                     <div class="env-item">🌤 <span id="detailWeather">--</span></div>
                     <div class="env-item">🌡 <span id="detailTemp">--</span>℃ <span style="font-size:12px; opacity:0.8; margin-left:4px;">(H:<span id="detailMaxTemp">--</span> / L:<span id="detailMinTemp">--</span>)</span></div>
@@ -887,6 +925,17 @@
  */
 
 // --- GLOBAL STATE ---
+const CARE_EVENT_OPTIONS = [
+    { key: 'topup', label: '💧 足し水' },
+    { key: 'water_change', label: '🚿 水換え' },
+    { key: 'feeding', label: '🍚 エサ' },
+    { key: 'cleaning', label: '🧽 掃除' },
+    { key: 'spawning', label: '🐣 産卵' },
+    { key: 'fry', label: '🐟 稚魚' },
+    { key: 'death', label: '⚠ 死亡' },
+    { key: 'trimming', label: '🌿 トリミング' }
+];
+
 const state = {
     currentDate: new Date(),
     selectedDate: new Date(),
@@ -946,6 +995,7 @@ function saveRecord(record, options = {}) {
                     ...record,
                     media: mergedMedia,
                     memo: record.memo !== undefined ? record.memo : existing.memo,
+                    events: record.events !== undefined ? [...record.events] : Array.isArray(existing.events) ? [...existing.events] : [],
                     ai_structured: record.ai_structured !== undefined ? record.ai_structured : existing.ai_structured,
                     gardening_advice: record.gardening_advice !== undefined ? record.gardening_advice : existing.gardening_advice,
                     weather: record.weather ?? existing.weather,
@@ -963,6 +1013,7 @@ function saveRecord(record, options = {}) {
                     ...record,
                     media: cloneMediaArray(record.media || []),
                     memo: record.memo !== undefined ? record.memo : '',
+                    events: Array.isArray(record.events) ? [...record.events] : [],
                     ai_structured: record.ai_structured !== undefined ? record.ai_structured : null,
                     gardening_advice: record.gardening_advice !== undefined ? record.gardening_advice : null,
                     timestamp: record.timestamp || Date.now()
@@ -1118,6 +1169,79 @@ function parseAiStructuredPayload(rawText) {
     } catch (e) {
         return { ok: false, error: 'JSON解析エラー: ' + e.message + '（スマートクオート “ ” が混じっていないか確認）' };
     }
+}
+
+function renderCareEventChips(events) {
+    const mount = document.getElementById('careEventChips');
+    if (!mount) return;
+    const activeEvents = Array.isArray(events) ? events : [];
+
+    mount.innerHTML = CARE_EVENT_OPTIONS.map(item => {
+        const active = activeEvents.includes(item.label) ? ' active' : '';
+        return `<button type="button" class="care-chip${active}" data-event-label="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`;
+    }).join('');
+
+    mount.querySelectorAll('.care-chip').forEach(btn => {
+        btn.onclick = () => toggleCareEvent(btn.dataset.eventLabel || '');
+    });
+}
+
+async function toggleCareEvent(label) {
+    if (!label) return;
+
+    const dateStr = formatDate(state.selectedDate);
+    let rec = await getRecord(dateStr);
+
+    if (!rec) {
+        const w = await fetchWeather(state.settings.lat, state.settings.lng);
+        rec = {
+            dateStr: dateStr,
+            timestamp: Date.now(),
+            media: [],
+            weather: getWeatherLabel(w.weatherCode),
+            temp: w.temp,
+            maxTemp: w.maxTemp,
+            minTemp: w.minTemp,
+            waterTemp: calculateWaterTemp(w.temp, w.maxTemp, w.minTemp),
+            maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
+            minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
+            memo: '',
+            events: [],
+            ai_structured: null,
+            gardening_advice: null
+        };
+    }
+
+    const currentEvents = Array.isArray(rec.events) ? [...rec.events] : [];
+    rec.events = currentEvents.includes(label)
+        ? currentEvents.filter(v => v !== label)
+        : [...currentEvents, label];
+    rec.timestamp = Date.now();
+
+    await saveRecord(rec);
+    renderCareEventChips(rec.events);
+    document.getElementById('detailTimestamp').textContent = `イベント保存: ${new Date().toLocaleTimeString()}`;
+    await renderCalendar();
+}
+
+async function getRecentHistoryForAiPrompt(baseDate, days = 30) {
+    const list = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(baseDate);
+        d.setDate(d.getDate() - i);
+        const dateStr = formatDate(d);
+        const rec = await getRecord(dateStr);
+        if (!rec) continue;
+        list.push({
+            date: dateStr,
+            weather: rec.weather ?? '--',
+            air_temp: rec.temp ?? '--',
+            water_temp: rec.waterTemp ?? '--',
+            events: Array.isArray(rec.events) ? rec.events : [],
+            memo: rec.memo || ''
+        });
+    }
+    return list;
 }
 
 function renderStructuredAi(record) {
@@ -1432,6 +1556,8 @@ async function selectDate(date) {
     const mediaContainer = document.getElementById('detailMedia');
     mediaContainer.innerHTML = '';
 
+    renderCareEventChips(rec && Array.isArray(rec.events) ? rec.events : []);
+
     document.getElementById('deleteRecordBtn').style.display = rec ? 'flex' : 'none';
     // 自動保存のため保存ボタンは非表示
 
@@ -1554,7 +1680,8 @@ document.getElementById('detailCameraInput').onchange = async (e) => {
             waterTemp: calculateWaterTemp(w.temp, w.maxTemp, w.minTemp),
             maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
             minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
-            memo: ''
+            memo: '',
+            events: []
         };
     }
 
@@ -1638,7 +1765,8 @@ async function saveEntry() {
             waterTemp: state.tempEntry.waterTemp,
             maxWaterTemp: state.tempEntry.maxWaterTemp,
             minWaterTemp: state.tempEntry.minWaterTemp,
-            memo: memo
+            memo: memo,
+            events: []
         };
 
         await saveRecord(record, { appendMedia: true });
@@ -1760,6 +1888,7 @@ async function saveCurrentDetail() {
             maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
             minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
             memo: newMemo,
+            events: [],
             ai_structured: null,
             gardening_advice: null
         };
@@ -1809,6 +1938,7 @@ document.getElementById('btnImportAiJson').onclick = async () => {
                 maxWaterTemp: calculateWaterTemp(w.maxTemp, w.maxTemp, w.minTemp),
                 minWaterTemp: calculateWaterTemp(w.minTemp, w.maxTemp, w.minTemp),
                 memo: newMemo,
+                events: [],
                 ai_structured: parsed,
                 gardening_advice: parsed.gardening ? parsed.gardening : null
             };
@@ -1831,7 +1961,7 @@ document.getElementById('btnImportAiJson').onclick = async () => {
 document.getElementById('btnGeo').onclick = getCurrentPosition;
 document.getElementById('btnSaveSettings').onclick = saveSettingsUI;
 
-document.getElementById('btnAiDiag').onclick = () => {
+document.getElementById('btnAiDiag').onclick = async () => {
     const date = document.getElementById('detailDateStr').textContent;
     const weather = document.getElementById('detailWeather').textContent;
     const temp = document.getElementById('detailTemp').textContent;
@@ -1839,7 +1969,9 @@ document.getElementById('btnAiDiag').onclick = () => {
     const maxWaterTemp = document.getElementById('detailMaxWaterTemp').textContent;
     const minWaterTemp = document.getElementById('detailMinWaterTemp').textContent;
     const memo = document.getElementById('detailMemoInput').value;
+    const currentRec = await getRecord(formatDate(state.selectedDate));
     const s = state.settings;
+    const monthlyHistory = await getRecentHistoryForAiPrompt(state.selectedDate, 30);
 
     const info = {
         date: date,
@@ -1849,6 +1981,7 @@ document.getElementById('btnAiDiag').onclick = () => {
         predicted_water_temp_max: maxWaterTemp,
         predicted_water_temp_min: minWaterTemp,
         user_memo: memo,
+        today_events: currentRec && Array.isArray(currentRec.events) ? currentRec.events : [],
         bio_info: s.bio_count || '未設定',
         plant_info: s.plant_status || '未設定',
         location: s.location,
@@ -1856,10 +1989,11 @@ document.getElementById('btnAiDiag').onclick = () => {
         sunlight_hours: s.sunlight,
         volume_l: s.volume,
         depth_cm: s.depth,
-        policy: s.policy || '特になし'
+        policy: s.policy || '特になし',
+        past_30_days_history: monthlyHistory
     };
 
-    const prompt = `あなたはビオトープ管理と家庭菜園の専門家です。以下の記録データと添付画像をもとに診断してください。出力は説明文を付けず、必ずJSONオブジェクト1つのみを返してください。\n\n【重要】\n- ビオトープ診断は常に出力\n- 野菜・花などビオトープ外の対象が画像やメモに含まれる場合のみ gardening を出力\n- ビオトープ外の内容が無い場合は gardening を null にする\n- risk は low / medium / high のいずれか\n- actions は短い日本語の配列\n\n【返却JSONスキーマ】\n{\n  \"biotope\": {\n    \"state\": \"ビオトープの状態を1〜2文で要約\",\n    \"risk\": \"low|medium|high\",\n    \"actions\": [\"推奨アクション1\", \"推奨アクション2\"]\n  },\n  \"gardening\": null または {\n    \"related\": true,\n    \"advice\": \"ビオトープ外のガーデニング対象に対する助言\"\n  }\n}\n\n【診断データ】\n${JSON.stringify(info, null, 2)}`;
+    const prompt = `あなたはビオトープ管理と家庭菜園の専門家です。以下の記録データと添付画像をもとに診断してください。出力は説明文を付けず、必ずJSONオブジェクト1つのみを返してください。\n\n【重要】\n- ビオトープ診断は常に出力\n- 野菜・花などビオトープ外の対象が画像やメモに含まれる場合のみ gardening を出力\n- ビオトープ外の内容が無い場合は gardening を null にする\n- risk は low / medium / high のいずれか\n- actions は短い日本語の配列\n- 過去30日分の気温・水温・育成イベント・メモの推移も踏まえて総合判断する\n\n【返却JSONスキーマ】\n{\n  \"biotope\": {\n    \"state\": \"ビオトープの状態を1〜2文で要約\",\n    \"risk\": \"low|medium|high\",\n    \"actions\": [\"推奨アクション1\", \"推奨アクション2\"]\n  },\n  \"gardening\": null または {\n    \"related\": true,\n    \"advice\": \"ビオトープ外のガーデニング対象に対する助言\"\n  }\n}\n\n【診断データ】\n${JSON.stringify(info, null, 2)}`;
 
     navigator.clipboard.writeText(prompt).then(() => {
         alert('📋 JSON診断プロンプトをコピーしました。AIに貼り付け、返ってきたJSONをコピーしたら、そのままJSON読込を押してください。');
@@ -2055,6 +2189,7 @@ function renderChart(labels, maxData, minData, labelPrefix) {
 window.onload = async () => {
     await initDB();
     loadSettings();
+    renderCareEventChips([]);
     await goToCurrentMonthAndToday();
     autoResizeDetailTextareas();
 };
