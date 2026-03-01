@@ -687,6 +687,21 @@
     /* Helpers */
     .hidden { display: none !important; }
     .flex-row { display: flex; gap: 10px; }
+
+    .copy-fallback-box {
+        width: 100%;
+        min-height: 240px;
+        max-height: 52vh;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--text-main);
+        background: #fff;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -885,6 +900,21 @@
             <div class="grid-header">日</div><div class="grid-header">月</div><div class="grid-header">火</div><div class="grid-header">水</div><div class="grid-header">木</div><div class="grid-header">金</div><div class="grid-header">土</div>
         </div>
         <div id="gridCalendar" class="calendar-grid"></div>
+    </div>
+</div>
+
+<div id="copyFallbackModal" class="modal">
+    <div class="modal-content">
+        <div class="flex-row" style="justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin:0;">JSON診断プロンプト</h3>
+            <button class="icon-btn" onclick="closeCopyFallbackModal()">✕</button>
+        </div>
+        <p style="font-size:12px; color:var(--text-sub); margin-top:0; margin-bottom:10px;">自動コピーを試みます。失敗する場合は枠内を長押しして選択してください。</p>
+        <textarea id="copyFallbackTextarea" class="copy-fallback-box"></textarea>
+        <div class="flex-row" style="margin-top:12px; gap:10px;">
+            <button class="btn" id="btnFallbackCopyAction" onclick="handleFallbackCopy()" style="flex:2; background-color: #8e24aa;">内容をすべてコピー</button>
+            <button class="btn btn-secondary" onclick="closeCopyFallbackModal()" style="flex:1;">閉じる</button>
+        </div>
     </div>
 </div>
 
@@ -1246,35 +1276,82 @@ async function getRecentHistoryForAiPrompt(baseDate, days = 30) {
 
 async function copyTextRobust(text) {
     const value = String(text ?? '');
-
+    // 1. Secure ContextかつClipboard APIが利用可能な場合
     if (navigator.clipboard && window.isSecureContext) {
         try {
             await navigator.clipboard.writeText(value);
             return true;
-        } catch (e) {
-            // fallbackへ
-        }
+        } catch (e) { /* fallbackへ */ }
     }
-
+    // 2. Fallback: 伝統的な textarea + execCommand 方式 (iOS/非HTTPS対策)
     try {
         const ta = document.createElement('textarea');
         ta.value = value;
-        ta.setAttribute('readonly', '');
         ta.style.position = 'fixed';
-        ta.style.top = '-1000px';
-        ta.style.left = '-1000px';
-        ta.style.opacity = '0';
+        ta.style.left = '-9999px';
+        // 表示領域内に置かないとiOSでフォーカスが外れることがあるため調整
+        ta.style.top = (window.pageYOffset || document.documentElement.scrollTop) + 'px';
+        ta.setAttribute('readonly', '');
         document.body.appendChild(ta);
-
-        ta.focus();
+        
+        const selected = document.getSelection().rangeCount > 0 ? document.getSelection().getRangeAt(0) : false;
         ta.select();
-        ta.setSelectionRange(0, ta.value.length);
+        ta.setSelectionRange(0, 999999); // iOS向けの広範囲選択
 
         const ok = document.execCommand('copy');
         document.body.removeChild(ta);
+
+        if (selected) {
+            document.getSelection().removeAllRanges();
+            document.getSelection().addRange(selected);
+        }
         return !!ok;
     } catch (e) {
+        console.error('Copy failed:', e);
         return false;
+    }
+}
+
+function openCopyFallbackModal(text) {
+    const modal = document.getElementById('copyFallbackModal');
+    const ta = document.getElementById('copyFallbackTextarea');
+    if (!modal || !ta) return;
+    ta.value = String(text ?? '');
+    modal.classList.add('open');
+    requestAnimationFrame(() => {
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+    });
+}
+
+function closeCopyFallbackModal() {
+    const modal = document.getElementById('copyFallbackModal');
+    if (modal) modal.classList.remove('open');
+}
+
+async function handleFallbackCopy() {
+    const ta = document.getElementById('copyFallbackTextarea');
+    const btn = document.getElementById('btnFallbackCopyAction');
+    
+    // 確実に選択状態にする
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, 999999);
+
+    const ok = await copyTextRobust(ta.value);
+
+    if (ok) {
+        const originalText = btn.textContent;
+        const originalBg = btn.style.backgroundColor;
+        btn.textContent = '✅ コピー完了！';
+        btn.style.backgroundColor = '#43a047';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.style.backgroundColor = originalBg;
+        }, 2000);
+    } else {
+        alert('コピーに失敗しました。枠内を長押しして「コピー」を選択してください。');
     }
 }
 
@@ -2006,6 +2083,7 @@ document.getElementById('btnAiDiag').onclick = async () => {
     const currentRec = await getRecord(formatDate(state.selectedDate));
     const s = state.settings;
     const monthlyHistory = await getRecentHistoryForAiPrompt(state.selectedDate, 30);
+    const hasMonthlyHistory = monthlyHistory.length > 0;
 
     const info = {
         date: date,
@@ -2024,7 +2102,8 @@ document.getElementById('btnAiDiag').onclick = async () => {
         volume_l: s.volume,
         depth_cm: s.depth,
         policy: s.policy || '特になし',
-        past_30_days_history: monthlyHistory
+        past_30_days_history: monthlyHistory,
+        past_30_days_history_note: hasMonthlyHistory ? '記録あり' : '過去30日分の記録はまだありません。今日の情報を中心に診断してください。'
     };
 
     const prompt = `あなたはビオトープ管理と家庭菜園の専門家です。以下の記録データと添付画像をもとに診断してください。出力は説明文を付けず、必ずJSONオブジェクト1つのみを返してください。\n\n【重要】\n- ビオトープ診断は常に出力\n- 野菜・花などビオトープ外の対象が画像やメモに含まれる場合のみ gardening を出力\n- ビオトープ外の内容が無い場合は gardening を null にする\n- risk は low / medium / high のいずれか\n- actions は短い日本語の配列\n- 過去30日分の気温・水温・育成イベント・メモの推移も踏まえて総合判断する\n\n【返却JSONスキーマ】\n{\n  \"biotope\": {\n    \"state\": \"ビオトープの状態を1〜2文で要約\",\n    \"risk\": \"low|medium|high\",\n    \"actions\": [\"推奨アクション1\", \"推奨アクション2\"]\n  },\n  \"gardening\": null または {\n    \"related\": true,\n    \"advice\": \"ビオトープ外のガーデニング対象に対する助言\"\n  }\n}\n\n【診断データ】\n${JSON.stringify(info, null, 2)}`;
@@ -2033,7 +2112,7 @@ document.getElementById('btnAiDiag').onclick = async () => {
     if (copied) {
         alert('📋 JSON診断プロンプトをコピーしました。AIに貼り付け、返ってきたJSONをコピーしたら、そのままJSON読込を押してください。');
     } else {
-        alert('コピーに失敗しました。HTTPS環境か確認し、必要なら長押し選択できる入力欄への表示方式も検討してください。');
+        openCopyFallbackModal(prompt);
     }
 };
 
