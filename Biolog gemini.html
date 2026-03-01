@@ -115,6 +115,65 @@
     }
     .icon-btn:active { background-color: var(--accent); color: white; }
 
+    /* --- Gallery View --- */
+    .gallery-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        position: relative;
+        overflow: hidden;
+    }
+    .gallery-display {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #1a1a1a;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-bottom: 12px;
+        touch-action: pan-y pinch-zoom;
+    }
+    .gallery-img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        pointer-events: none; /* スワイプ判定用 */
+    }
+    .gallery-overlay {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+        padding: 30px 14px 14px;
+        color: #fff;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+        pointer-events: none;
+    }
+    .gallery-info-date { font-size: 18px; font-weight: 800; letter-spacing: 0.5px; }
+    .gallery-info-meta { font-size: 13px; opacity: 0.95; margin-top: 4px; display: flex; gap: 10px; align-items: center; }
+    .gallery-controls {
+        padding: 0 4px;
+        flex-shrink: 0;
+    }
+    .gallery-slider {
+        width: 100%;
+        height: 40px;
+        margin: 0;
+        cursor: pointer;
+        accent-color: var(--accent);
+    }
+    .gallery-nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 4px;
+        color: var(--text-sub);
+        font-size: 12px;
+    }
+
     /* --- Header Tabs (moved to top-right) --- */
     .tabs {
         display: none;
@@ -851,6 +910,7 @@
         </div>
         <div class="top-actions" role="tablist" aria-label="画面切り替え">
             <button class="tab-btn active" type="button" onclick="switchTab('record')">記録</button>
+            <button class="tab-btn" type="button" onclick="switchTab('photos')">写真</button>
             <button class="tab-btn" type="button" onclick="switchTab('stats')">統計</button>
             <button class="tab-btn" type="button" onclick="switchTab('settings')">設定</button>
         </div>
@@ -935,6 +995,30 @@
             <h3>AI診断（準備中）</h3>
             <p>日々の記録が蓄積されると、<br>AIがビオトープの状態を分析します。</p>
             <p style="font-size: 12px; margin-top: 20px;">今後のアップデートをお待ちください。</p>
+        </div>
+    </div>
+
+    <div id="view-photos" class="view-section">
+        <div class="gallery-container">
+            <div class="gallery-display" id="galleryDisplay">
+                <img id="galleryImg" class="gallery-img" src="" alt="">
+                <div class="gallery-overlay">
+                    <div class="gallery-info-date" id="galleryDate">--/--</div>
+                    <div class="gallery-info-meta">
+                        <span id="galleryWeather">--</span>
+                        <span id="galleryTemp">--℃</span>
+                        <span id="galleryWaterTemp">水温 --℃</span>
+                    </div>
+                </div>
+            </div>
+            <div class="gallery-controls">
+                <input type="range" id="gallerySlider" class="gallery-slider" min="0" max="0" value="0" step="1">
+                <div class="gallery-nav">
+                    <button class="icon-btn" onclick="changeGalleryIndex(-1)" style="font-size:18px; padding:6px; width:36px; height:36px;">◀</button>
+                    <span id="galleryCounter" style="font-feature-settings: 'tnum';">0 / 0</span>
+                    <button class="icon-btn" onclick="changeGalleryIndex(1)" style="font-size:18px; padding:6px; width:36px; height:36px;">▶</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -2061,20 +2145,23 @@ function getWeatherLabel(code) {
 
 // --- UI FUNCTIONS ---
 function switchTab(tabName) {
-    // Header tabs: Record(0), Stats(1), Settings(2)
-    const tabs = ['record', 'stats', 'settings'];
+    // Header tabs: Record, Photos, Stats, Settings
+    const tabs = ['record', 'photos', 'stats', 'settings'];
     const index = tabs.indexOf(tabName);
     if (index === -1) return;
 
     const headerBtns = document.querySelectorAll('.header-top .tab-btn');
     headerBtns.forEach(b => b.classList.remove('active'));
-    headerBtns[index].classList.add('active');
+    if (headerBtns[index]) headerBtns[index].classList.add('active');
 
     document.querySelectorAll('.view-section').forEach(v => v.classList.remove('active'));
-    document.getElementById(`view-${tabName}`).classList.add('active');
+    const target = document.getElementById(`view-${tabName}`);
+    if (target) target.classList.add('active');
 
     if (tabName === 'stats') {
         initStatsView();
+    } else if (tabName === 'photos') {
+        initGalleryView();
     }
 }
 
@@ -2734,6 +2821,104 @@ async function renderGridCalendar() {
 }
 
 // --- INIT ---
+// --- GALLERY LOGIC ---
+let galleryItems = [];
+let currentGalleryIndex = 0;
+let galleryBlobUrl = null;
+
+async function initGalleryView() {
+    const records = await getAllRecords();
+    // 日付昇順（古い順）にソート
+    records.sort((a, b) => (a.dateStr > b.dateStr ? 1 : -1));
+
+    galleryItems = [];
+    records.forEach(rec => {
+        if (rec.media && Array.isArray(rec.media)) {
+            rec.media.forEach((blob, i) => {
+                // 画像のみを対象とする（動画はサムネイル生成等の負荷があるため簡易実装では除外またはvideoタグ対応が必要だが、今回はimgタグで扱えるもの前提）
+                if (blob.type.startsWith('image')) {
+                    galleryItems.push({
+                        blob: blob,
+                        dateStr: rec.dateStr,
+                        weather: rec.weather || '',
+                        temp: rec.temp,
+                        waterTemp: rec.waterTemp,
+                        memo: rec.memo
+                    });
+                }
+            });
+        }
+    });
+
+    const slider = document.getElementById('gallerySlider');
+    const display = document.getElementById('galleryDisplay');
+    
+    if (galleryItems.length === 0) {
+        document.getElementById('galleryImg').style.display = 'none';
+        document.getElementById('galleryDate').textContent = '写真なし';
+        document.getElementById('galleryCounter').textContent = '0 / 0';
+        slider.disabled = true;
+        return;
+    }
+
+    document.getElementById('galleryImg').style.display = 'block';
+    slider.disabled = false;
+    slider.min = 0;
+    slider.max = galleryItems.length - 1;
+    
+    // 初回ロード時は最新（最後）の画像を表示
+    if (currentGalleryIndex === 0 || currentGalleryIndex >= galleryItems.length) {
+        currentGalleryIndex = galleryItems.length - 1;
+    }
+    
+    updateGalleryUI();
+
+    // スライダーイベント
+    slider.oninput = (e) => {
+        currentGalleryIndex = parseInt(e.target.value, 10);
+        updateGalleryUI();
+    };
+
+    // スワイプイベント
+    let startX = 0;
+    display.ontouchstart = (e) => { startX = e.touches[0].clientX; };
+    display.ontouchend = (e) => {
+        const endX = e.changedTouches[0].clientX;
+        const diff = endX - startX;
+        if (Math.abs(diff) > 50) {
+            changeGalleryIndex(diff > 0 ? -1 : 1); // 右スワイプで前へ、左スワイプで次へ
+        }
+    };
+}
+
+function updateGalleryUI() {
+    if (!galleryItems[currentGalleryIndex]) return;
+
+    const item = galleryItems[currentGalleryIndex];
+    const imgEl = document.getElementById('galleryImg');
+    
+    // メモリリーク防止
+    if (galleryBlobUrl) URL.revokeObjectURL(galleryBlobUrl);
+    galleryBlobUrl = URL.createObjectURL(item.blob);
+    imgEl.src = galleryBlobUrl;
+
+    document.getElementById('galleryDate').textContent = item.dateStr;
+    document.getElementById('galleryWeather').textContent = item.weather;
+    document.getElementById('galleryTemp').textContent = item.temp ? `${item.temp}℃` : '';
+    document.getElementById('galleryWaterTemp').textContent = item.waterTemp ? `水温 ${item.waterTemp}℃` : '';
+    
+    document.getElementById('gallerySlider').value = currentGalleryIndex;
+    document.getElementById('galleryCounter').textContent = `${currentGalleryIndex + 1} / ${galleryItems.length}`;
+}
+
+function changeGalleryIndex(delta) {
+    const next = currentGalleryIndex + delta;
+    if (next >= 0 && next < galleryItems.length) {
+        currentGalleryIndex = next;
+        updateGalleryUI();
+    }
+}
+
 // --- STATS LOGIC ---
 let statsChart = null;
 let statsMode = 'air'; // 'air' or 'water'
