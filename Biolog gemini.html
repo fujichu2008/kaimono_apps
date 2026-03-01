@@ -499,7 +499,14 @@
                         <button id="btnAiDiag" class="btn" style="width:auto; padding: 6px 12px; font-size: 12px; background-color: #8e24aa;">✨ 診断プロンプト作成</button>
                     </div>
                     <p style="font-size:12px; color:#4a148c; margin-bottom:8px; margin-top:0;">1. 右上のボタンでデータをコピー<br>2. AIチャットに貼り付け<br>3. 返信を下にペーストして保存</p>
-                    <textarea class="detail-memo-input" id="detailAiComment" rows="5" placeholder="ここにAIからの診断結果やアドバイスを貼り付けてください。" style="border-color: #e1bee7;"></textarea>
+                    
+                    <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:5px;">
+                        <button id="btnPasteAi" class="btn" style="width:auto; padding:4px 10px; font-size:11px; background:#e1bee7; color:#4a148c; border:none;">📋 ペースト</button>
+                        <button id="btnClearAi" class="btn" style="width:auto; padding:4px 10px; font-size:11px; background:#ffcdd2; color:#b71c1c; border:none;">✕ クリア</button>
+                    </div>
+
+                    <textarea class="detail-memo-input" id="detailAiComment" rows="5" maxlength="400" placeholder="ここにAIからの診断結果やアドバイスを貼り付けてください（最大400文字）。" style="border-color: #e1bee7;"></textarea>
+                    <div style="text-align:right; font-size:10px; color:#8e24aa;"><span id="aiCharCount">0</span>/400</div>
                 </div>
 
                 <div style="font-size: 10px; color: #666; margin-top: 15px; text-align: right;" id="detailTimestamp"></div>
@@ -769,23 +776,32 @@ async function fetchWeather(lat, lng) {
 }
 
 function estimateWaterTemp(airTemp) {
-    // Simple heuristic logic
+    // 数値型であることを保証
+    let temp = parseFloat(airTemp);
+    if (isNaN(temp)) return '--';
+
     const s = state.settings;
-    let temp = airTemp;
+    const sunlight = parseFloat(s.sunlight) || 0;
 
-    // Sunlight effect (0.2 degree per hour of sun)
-    temp += (s.sunlight * 0.2);
+    // 日当たりの影響 (0.2度/時)
+    temp += (sunlight * 0.2);
 
-    // Container effect
-    if (s.container === 'black') temp += 2;
-    if (s.container === 'pot') temp -= 1; // Insulated
-    if (s.container === 'plastic_pot') temp += 0.5;
+    // 容器の影響
+    switch (s.container) {
+        case 'black': temp += 2.0; break;
+        case 'white': temp -= 0.5; break;
+        case 'pot': temp -= 1.0; break;
+        case 'plastic_pot': temp += 0.5; break;
+        case 'glass': temp -= 0.5; break;
+        default: break;
+    }
 
-    // Location effect
+    // 設置場所の影響
     if (s.location === 'eaves' || s.location === 'indoor') temp -= 1.5;
 
-    // Volume inertia (More water = closer to avg, simpler: larger volume reduces extreme heating)
-    if (s.volume > 50) temp -= 1; 
+    // 水量の影響 (水量が多いと水温変化が緩やかになる＝最高気温時には低めに出る傾向と仮定)
+    const vol = parseFloat(s.volume) || 20;
+    if (vol > 50) temp -= 1.0;
 
     return Math.round(temp * 10) / 10;
 }
@@ -889,6 +905,7 @@ async function selectDate(date) {
         document.getElementById('detailMinWaterTemp').textContent = rec.minWaterTemp ?? '--';
         document.getElementById('detailMemoInput').value = rec.memo || '';
         document.getElementById('detailAiComment').value = rec.ai_comment || '';
+        document.getElementById('aiCharCount').textContent = (rec.ai_comment || '').length;
         autoResizeDetailTextareas();
         document.getElementById('detailTimestamp').textContent = `最終更新: ${new Date(rec.timestamp).toLocaleString()}`;
 
@@ -928,6 +945,7 @@ async function selectDate(date) {
         document.getElementById('detailMinWaterTemp').textContent = '--';
         document.getElementById('detailMemoInput').value = '';
         document.getElementById('detailAiComment').value = '';
+        document.getElementById('aiCharCount').textContent = '0';
         autoResizeDetailTextareas();
         document.getElementById('detailTimestamp').textContent = 'この日はまだ記録がありません。写真追加やメモ保存で新規作成できます。';
     }
@@ -1165,7 +1183,32 @@ document.getElementById('albumInput').onchange = handleFileSelect;
 document.getElementById('btnSaveEntry').onclick = saveEntry;
 
 document.getElementById('detailMemoInput').addEventListener('input', (e) => autoResizeTextarea(e.target));
-document.getElementById('detailAiComment').addEventListener('input', (e) => autoResizeTextarea(e.target));
+const aiCommentEl = document.getElementById('detailAiComment');
+const aiCountEl = document.getElementById('aiCharCount');
+
+function updateAiCharCount() {
+    aiCountEl.textContent = aiCommentEl.value.length;
+    autoResizeTextarea(aiCommentEl);
+}
+
+aiCommentEl.addEventListener('input', updateAiCharCount);
+
+document.getElementById('btnPasteAi').onclick = async () => {
+    try {
+        const text = await navigator.clipboard.readText();
+        aiCommentEl.value = text.slice(0, 400); // 400文字制限
+        updateAiCharCount();
+    } catch (err) {
+        alert('クリップボードの読み取りに失敗しました。\nブラウザの制限により、手動でペーストしてください。');
+        aiCommentEl.focus();
+    }
+};
+
+document.getElementById('btnClearAi').onclick = () => {
+    if(aiCommentEl.value.length > 0 && !confirm('AIアドバイス欄をクリアしますか？')) return;
+    aiCommentEl.value = '';
+    updateAiCharCount();
+};
 
 document.getElementById('btnGeo').onclick = getCurrentPosition;
 document.getElementById('btnSaveSettings').onclick = saveSettingsUI;
@@ -1185,7 +1228,7 @@ document.getElementById('btnAiDiag').onclick = () => {
         user_memo: memo
     };
 
-    const prompt = `あなたはビオトープ管理の専門家です。以下の記録データおよび添付された画像（もしあれば）を元に、専門的な視点から診断を行ってください。\n\n【制約事項】\n・挨拶や社交辞令は一切不要です。即座に本題に入ってください。\n・以下の4点を明確に指摘してください：\n  1. 状況診断（水温・天候・季節性からの分析）\n  2. 現状の評価（良い点・できている点）\n  3. 懸念点（リスク要因、画像から読み取れる汚れや異変など）\n  4. 今後すべき対策\n・画像がある場合は、水の色、生体の様子、植物の状態などを具体的に分析結果に反映させてください。\n・季節（${date.split('年')[1]}頃）特有の管理ポイントも考慮してください。\n・300文字以内で簡潔にまとめてください。\n\nデータ: ${JSON.stringify(info)}`;
+    const prompt = `あなたはビオトープ管理の専門家です。以下の記録データおよび添付された画像（もしあれば）を元に、専門的な視点から診断を行ってください。\n\n【制約事項】\n・挨拶や社交辞令は一切不要です。即座に本題に入ってください。\n・以下の4点を明確に指摘してください：\n  1. 状況診断（水温・天候・季節性からの分析）\n  2. 現状の評価（良い点・できている点）\n  3. 懸念点（リスク要因、画像から読み取れる汚れや異変など）\n  4. 今後すべき対策\n・画像がある場合は、水の色、生体の様子、植物の状態などを具体的に分析結果に反映させてください。\n・季節（${date.split('年')[1]}頃）特有の管理ポイントも考慮してください。\n・400文字以内で簡潔にまとめてください。\n\nデータ: ${JSON.stringify(info)}`;
 
     navigator.clipboard.writeText(prompt).then(() => {
         alert('📋 プロンプトをコピーしました！\nChatGPTやGemini等のAIチャットに貼り付けて、返信を下の欄に保存してください。');
