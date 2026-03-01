@@ -702,6 +702,44 @@
         resize: vertical;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+
+    .stats-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 16px;
+    }
+    .stats-mini-card {
+        background: #f8fbf8;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+    }
+    .stats-mini-label {
+        font-size: 12px;
+        color: var(--text-sub);
+        margin-bottom: 6px;
+        font-weight: 700;
+        line-height: 1.4;
+    }
+    .stats-mini-value {
+        font-size: 24px;
+        line-height: 1;
+        font-weight: 800;
+        color: var(--accent-dark);
+    }
+    .stats-mini-unit {
+        font-size: 12px;
+        color: var(--text-sub);
+        margin-left: 4px;
+        font-weight: 600;
+    }
+    .stats-summary-note {
+        margin-top: 10px;
+        font-size: 11px;
+        color: var(--text-sub);
+        text-align: right;
+    }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -811,6 +849,20 @@
             </div>
             <p style="font-size:11px; color:var(--text-sub); margin-top:10px; text-align:right;">Data source: Open-Meteo Historical API</p>
         </div>
+
+        <div class="setting-section">
+            <div class="setting-title">📅 期間内イベント集計</div>
+            <div id="statsEventSummary" class="stats-summary-grid">
+                <div class="stats-mini-card"><div class="stats-mini-label">💧 足し水</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+                <div class="stats-mini-card"><div class="stats-mini-label">🚿 水換え</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+                <div class="stats-mini-card"><div class="stats-mini-label">🧽 掃除</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+                <div class="stats-mini-card"><div class="stats-mini-label">⚠ 死亡</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+                <div class="stats-mini-card"><div class="stats-mini-label">🐣 産卵</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+                <div class="stats-mini-card"><div class="stats-mini-label">🐟 孵化・稚魚</div><div class="stats-mini-value">0<span class="stats-mini-unit">回</span></div></div>
+            </div>
+            <div class="stats-summary-note" id="statsEventSummaryNote">選択期間内の記録を集計します</div>
+        </div>
+
         <button class="btn" onclick="updateStats()">グラフを更新</button>
     </div>
 
@@ -1116,6 +1168,16 @@ function getAllRecordsKeys() {
         const store = tx.objectStore('records');
         const req = store.getAllKeys();
         req.onsuccess = () => resolve(req.result); 
+    });
+}
+
+function getAllRecords() {
+    return new Promise((resolve) => {
+        const tx = db.transaction(['records'], 'readonly');
+        const store = tx.objectStore('records');
+        const req = store.getAll();
+        req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+        req.onerror = () => resolve([]);
     });
 }
 
@@ -2323,6 +2385,8 @@ async function updateStats() {
 
     if (!start || !end) return;
 
+    await renderEventStatsSummary(start, end);
+
     // Open-Meteo Archive API
     const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${start}&end_date=${end}&daily=temperature_2m_max,temperature_2m_min&timezone=auto`;
 
@@ -2398,6 +2462,60 @@ function renderChart(labels, maxData, minData, labelPrefix) {
             }
         }
     });
+}
+
+async function renderEventStatsSummary(start, end) {
+    const mount = document.getElementById('statsEventSummary');
+    const note = document.getElementById('statsEventSummaryNote');
+    if (!mount || !note) return;
+
+    if (!start || !end) {
+        mount.innerHTML = '';
+        note.textContent = '期間を指定してください';
+        return;
+    }
+
+    const all = await getAllRecords();
+    const filtered = all.filter(rec => rec && rec.dateStr && rec.dateStr >= start && rec.dateStr <= end);
+
+    const counts = {
+        topup: 0,
+        waterChange: 0,
+        cleaning: 0,
+        death: 0,
+        spawning: 0,
+        fry: 0
+    };
+
+    filtered.forEach(rec => {
+        const events = Array.isArray(rec.events) ? rec.events : [];
+        events.forEach(ev => {
+            if (ev === '💧 足し水') counts.topup += 1;
+            if (ev === '🚿 水換え') counts.waterChange += 1;
+            if (ev === '🧽 掃除') counts.cleaning += 1;
+            if (ev === '⚠ 死亡') counts.death += 1;
+            if (ev === '🐣 産卵') counts.spawning += 1;
+            if (ev === '🐟 稚魚') counts.fry += 1;
+        });
+    });
+
+    const cards = [
+        { label: '💧 足し水', value: counts.topup },
+        { label: '🚿 水換え', value: counts.waterChange },
+        { label: '🧽 掃除', value: counts.cleaning },
+        { label: '⚠ 死亡', value: counts.death },
+        { label: '🐣 産卵', value: counts.spawning },
+        { label: '🐟 孵化・稚魚', value: counts.fry }
+    ];
+
+    mount.innerHTML = cards.map(card => `
+        <div class="stats-mini-card">
+            <div class="stats-mini-label">${card.label}</div>
+            <div class="stats-mini-value">${card.value}<span class="stats-mini-unit">回</span></div>
+        </div>
+    `).join('');
+
+    note.textContent = `${start} 〜 ${end} / 記録日数: ${filtered.length}日`;
 }
 
 // --- INIT ---
