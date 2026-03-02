@@ -1509,6 +1509,20 @@ const state = {
     lastCleaningTimestamp: Date.now() // Default to now, updated on load
 };
 
+// --- Memory Management ---
+const activeObjectUrls = [];
+
+function trackObjectUrl(url) {
+    if (url) activeObjectUrls.push(url);
+    return url;
+}
+
+function revokeActiveObjectUrls() {
+    while (activeObjectUrls.length > 0) {
+        URL.revokeObjectURL(activeObjectUrls.pop());
+    }
+}
+
 async function updateAlgaeState() {
     const all = await getAllRecords();
     if (!all || all.length === 0) return;
@@ -2376,6 +2390,9 @@ async function renderCalendar() {
     const daysInMonth = lastDay.getDate();
     const container = document.getElementById('calendarDays');
     container.innerHTML = '';
+    
+    // カレンダー再描画時にメモリ解放は行わない(サムネイル用URLは維持する必要があるため)
+    // ただし、月移動などで全書き換えする場合は解放すべきだが、今回は詳細ビュー遷移時などに解放する運用とする
 
     const keys = await getAllRecordsKeys();
     const todayStr = formatDate(new Date());
@@ -2408,7 +2425,7 @@ async function renderCalendar() {
                     if (rec.media.length > 0 && rec.media[0].type.startsWith('image')) {
                         const img = document.createElement('img');
                         img.className = 'date-card-thumb';
-                        img.src = URL.createObjectURL(rec.media[0]);
+                        img.src = trackObjectUrl(URL.createObjectURL(rec.media[0]));
                         el.prepend(img);
                     }
                 }
@@ -2436,6 +2453,7 @@ function getWeatherIcon(label) {
 }
 
 async function selectDate(date) {
+    revokeActiveObjectUrls(); // 詳細表示前にメモリ解放
     state.selectedDate = date;
     await renderCalendar();
 
@@ -2475,7 +2493,7 @@ async function selectDate(date) {
 
                 const el = document.createElement(blob.type.startsWith('video') ? 'video' : 'img');
                 el.className = 'media-item';
-                el.src = URL.createObjectURL(blob);
+                el.src = trackObjectUrl(URL.createObjectURL(blob));
                 if (blob.type.startsWith('video')) el.controls = true;
                 el.onclick = () => window.open(el.src);
 
@@ -2615,10 +2633,11 @@ function openModal() {
     const preview = document.getElementById('uploadPreview');
     preview.innerHTML = '';
     
+    revokeActiveObjectUrls(); // プレビュー生成前に解放
     state.tempEntry.files.forEach(file => {
         const el = document.createElement(file.type.startsWith('video') ? 'video' : 'img');
         el.className = 'media-item';
-        el.src = URL.createObjectURL(file);
+        el.src = trackObjectUrl(URL.createObjectURL(file));
         if(file.type.startsWith('video')) el.controls = true;
         preview.appendChild(el);
     });
@@ -3037,7 +3056,7 @@ async function renderGridCalendar() {
                     if (rec.media.length > 0 && rec.media[0].type.startsWith('image')) {
                         const img = document.createElement('img');
                         img.className = 'grid-cell-thumb';
-                        img.src = URL.createObjectURL(rec.media[0]);
+                        img.src = trackObjectUrl(URL.createObjectURL(rec.media[0]));
                         cell.prepend(img);
                     }
                 } else {
@@ -3092,6 +3111,7 @@ async function renderGridCalendar() {
 // --- INIT ---
 // --- TIMELINE LOGIC (Replaces Gallery) ---
 async function initGalleryView() {
+    revokeActiveObjectUrls(); // ギャラリー表示前に解放
     const records = await getAllRecords();
     // 日付降順（新しい順）にソート
     records.sort((a, b) => (b.dateStr > a.dateStr ? 1 : -1));
@@ -3145,7 +3165,7 @@ async function initGalleryView() {
         images.forEach((blob) => {
             const img = document.createElement('img');
             img.className = 'timeline-photo';
-            img.src = URL.createObjectURL(blob);
+            img.src = trackObjectUrl(URL.createObjectURL(blob));
             
             // 画像タップで詳細へ
             img.onclick = async () => {
@@ -3428,6 +3448,18 @@ class BioSim {
         if (isFull) {
             window.addEventListener('resize', () => this.resize());
             this.canvas.addEventListener('pointerdown', (e) => this.handleTap(e));
+        } else {
+            // Mini mode: Intersection Observer for battery saving
+            this.observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        this.start();
+                    } else {
+                        this.stop();
+                    }
+                });
+            }, { threshold: 0.1 });
+            this.observer.observe(this.canvas);
         }
 
         this.updateAlgae();
