@@ -3390,6 +3390,7 @@ class BioSim {
         this.skyEntities = [];
         this.bubbles = [];
         this.foods = [];
+        this.bugs = []; // ボウフラ・虫
         this.plants = [];
         this.floatingPlants = [];
         this.stars = [];
@@ -3661,13 +3662,26 @@ class BioSim {
         if (s.container === 'black') baseColor = '#37474f';
         else if (s.container === 'glass') baseColor = '#e1f5fe';
 
+        // --- 水温による色変化 (Alert Colors) ---
+        const temp = this.envState.waterTemp;
+        let tempOverlayColor = null;
+        let tempAlpha = 0;
+
+        if (temp <= 10) {
+            // 低温: 氷のような冷たい青
+            tempOverlayColor = '#00bcd4';
+            tempAlpha = Math.min(0.4, (11 - temp) * 0.05); 
+        } else if (temp >= 30) {
+            // 高温: 危険な赤/オレンジ
+            tempOverlayColor = '#ff5722';
+            tempAlpha = Math.min(0.4, (temp - 29) * 0.08);
+        }
+
         if (this.isFull) {
             // Water Gradient
             const grad = this.ctx.createLinearGradient(0, this.horizonY, 0, this.height);
-            // 藻レベルが高いと水が緑に濁る
             const turbidity = this.algaeLevel * 0.4;
             const waterTop = this.envState.timeOfDay === 'night' ? '#1a237e' : '#b3e5fc';
-            const algaeGreen = '#558b2f';
             
             grad.addColorStop(0, waterTop);
             grad.addColorStop(1, this.envState.timeOfDay === 'night' ? '#000000' : baseColor);
@@ -3675,12 +3689,21 @@ class BioSim {
             this.ctx.fillStyle = grad;
             this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
             
+            // Algae Overlay
             if(this.algaeLevel > 0.1) {
                 this.ctx.fillStyle = `rgba(85, 139, 47, ${turbidity})`;
                 this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
             }
+
+            // Temp Warning Overlay
+            if (tempOverlayColor && tempAlpha > 0) {
+                this.ctx.fillStyle = tempOverlayColor;
+                this.ctx.globalAlpha = tempAlpha;
+                this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
+                this.ctx.globalAlpha = 1.0;
+            }
             
-            // Draw Algae Spots (Moss on glass)
+            // Draw Algae Spots
             this.algaeSpots.forEach(spot => {
                 if(spot.y > this.horizonY) {
                     this.ctx.fillStyle = `rgba(51, 105, 30, ${spot.alpha})`;
@@ -3697,9 +3720,17 @@ class BioSim {
             this.ctx.beginPath(); this.ctx.arc(this.cx, this.cy, this.r, 0, Math.PI*2); this.ctx.clip();
             this.ctx.fillStyle = baseColor;
             this.ctx.fill();
+            // Algae
             if(this.algaeLevel > 0.1) {
                 this.ctx.fillStyle = `rgba(85, 139, 47, ${this.algaeLevel * 0.3})`;
                 this.ctx.fill();
+            }
+            // Temp Warning
+            if (tempOverlayColor && tempAlpha > 0) {
+                this.ctx.fillStyle = tempOverlayColor;
+                this.ctx.globalAlpha = tempAlpha;
+                this.ctx.fill();
+                this.ctx.globalAlpha = 1.0;
             }
         }
     }
@@ -3780,7 +3811,20 @@ class BioSim {
             this.ctx.beginPath(); this.ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); this.ctx.fill();
         }
 
-        // 6. Animals (Sorted by scale/Y for depth)
+        // 6. Bugs (Natural Events)
+        // メダカがいる場合のみ、たまに虫が発生
+        const hasFish = this.entities.some(e => e instanceof BioFish);
+        if (hasFish && this.isFull && Math.random() < 0.005) {
+             this.bugs.push(new BioBug(this));
+        }
+        for(let i=this.bugs.length-1; i>=0; i--) {
+            let b = this.bugs[i];
+            b.update(this);
+            b.draw(this.ctx);
+            if (b.dead) this.bugs.splice(i, 1);
+        }
+
+        // 7. Animals (Sorted by scale/Y for depth)
         this.entities.sort((a,b) => (a.pos.y - b.pos.y));
         this.entities.forEach(e => {
             e.update(this);
@@ -3804,12 +3848,29 @@ class BioFish {
         this.angle = 0;
         this.color = Math.random() > 0.5 ? '#f4511e' : '#ffb74d';
         this.tailPhase = Math.random() * 10;
-    }
-    update(sim) {
-        // Condition Factor
-        const cond = sim.envState.condition || 1.0;
         
-        // Food Attraction
+        // Interaction State
+        this.interactionMode = null; // 'mate', 'chase' etc.
+        this.interactionTarget = null;
+        this.interactionTimer = 0;
+    }
+
+    update(sim) {
+        const cond = sim.envState.condition || 1.0;
+        const margin = 20;
+
+        // 0. Interaction Reset
+        if (this.interactionTimer > 0) {
+            this.interactionTimer--;
+            if (this.interactionTimer <= 0) {
+                this.interactionMode = null;
+                this.interactionTarget = null;
+            }
+        }
+
+        let hasTarget = false;
+
+        // 1. Food Attraction (Highest Priority)
         if (sim.foods.length > 0) {
             let closest = null; let minDst = 9999;
             sim.foods.forEach(f => {
@@ -3818,17 +3879,68 @@ class BioFish {
             });
             if (closest && minDst < 400) {
                 const angle = Math.atan2(closest.y - this.pos.y, closest.x - this.pos.x);
-                this.vel.x += Math.cos(angle) * 0.2 * cond;
-                this.vel.y += Math.sin(angle) * 0.2 * cond;
+                this.vel.x += Math.cos(angle) * 0.25 * cond;
+                this.vel.y += Math.sin(angle) * 0.25 * cond;
+                hasTarget = true;
             }
         }
 
-        // Random Swim
+        // 2. Bug Hunting (New)
+        if (!hasTarget && sim.bugs.length > 0) {
+            let closestBug = null; let minBugDst = 9999;
+            sim.bugs.forEach(b => {
+                const d = Math.hypot(b.x - this.pos.x, b.y - this.pos.y);
+                if (d < minBugDst) { minBugDst = d; closestBug = b; }
+            });
+            
+            if (closestBug && minBugDst < 300) {
+                const angle = Math.atan2(closestBug.y - this.pos.y, closestBug.x - this.pos.x);
+                this.vel.x += Math.cos(angle) * 0.2 * cond;
+                this.vel.y += Math.sin(angle) * 0.2 * cond;
+                hasTarget = true;
+                
+                // Eat bug
+                if (minBugDst < 10) closestBug.dead = true;
+            }
+        }
+
+        // 3. Social Interaction (Play/Mate) (New)
+        if (!hasTarget && sim.isFull && !this.interactionMode && Math.random() < 0.005 * cond) {
+            // Find nearby mate
+            const mate = sim.entities.find(e => 
+                e !== this && 
+                e instanceof BioFish && 
+                Math.hypot(e.pos.x - this.pos.x, e.pos.y - this.pos.y) < 100
+            );
+            if (mate) {
+                this.interactionMode = 'mate';
+                this.interactionTarget = mate;
+                this.interactionTimer = 120; // 2 seconds interaction
+            }
+        }
+
+        if (this.interactionMode === 'mate' && this.interactionTarget) {
+             const tx = this.interactionTarget.pos.x;
+             const ty = this.interactionTarget.pos.y;
+             const d = Math.hypot(tx - this.pos.x, ty - this.pos.y);
+             
+             // Circle around or follow
+             if (d > 30) {
+                 const angle = Math.atan2(ty - this.pos.y, tx - this.pos.x);
+                 this.vel.x += Math.cos(angle) * 0.15 * cond;
+                 this.vel.y += Math.sin(angle) * 0.15 * cond;
+             } else {
+                 // Spin
+                 this.vel.x += (Math.random()-0.5) * 0.5;
+                 this.vel.y += (Math.random()-0.5) * 0.5;
+             }
+        }
+
+        // 4. Random Swim (Default)
         this.vel.x += (Math.random()-0.5) * 0.1 * cond;
         this.vel.y += (Math.random()-0.5) * 0.1 * cond;
 
         // Bounds & Physics
-        const margin = 20;
         if (this.pos.x < -margin) this.vel.x += 0.1;
         if (this.pos.x > sim.width + margin) this.vel.x -= 0.1;
         if (this.pos.y < this.minY) this.vel.y += 0.1;
@@ -3842,8 +3954,8 @@ class BioFish {
         this.pos.y += this.vel.y;
         this.angle = Math.atan2(this.vel.y, this.vel.x);
         
-        // Random Dash Event
-        if (sim.isFull && Math.random() < 0.001 * cond) {
+        // Random Dash
+        if (!this.interactionMode && sim.isFull && Math.random() < 0.001 * cond) {
             this.vel.x *= 4;
             this.vel.y *= 4;
         }
@@ -3860,10 +3972,20 @@ class BioFish {
         ctx.scale(scale, scale);
         ctx.fillStyle = this.color;
         ctx.beginPath(); ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI*2); ctx.fill();
-        // Tail
-        const tailSpeed = (Math.hypot(this.vel.x, this.vel.y) * 0.5) + 0.1;
+        
+        // Tail Animation
+        let tailSpeed = (Math.hypot(this.vel.x, this.vel.y) * 0.5) + 0.1;
+        if (this.interactionMode === 'mate') tailSpeed *= 3; // Excited vibration
+        
         const tailY = Math.sin(Date.now()*0.02*tailSpeed + this.tailPhase) * 3;
         ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(-14, tailY - 3); ctx.lineTo(-14, tailY + 3); ctx.fill();
+        
+        // Love Heart (Interaction Visual)
+        if (this.interactionMode === 'mate' && Math.random() < 0.1) {
+            ctx.fillStyle = '#e91e63';
+            ctx.fillRect(0, -8, 2, 2); 
+        }
+
         ctx.restore();
     }
 }
@@ -3875,6 +3997,7 @@ class BioShrimp {
         this.vel = {x: 0, y: 0};
         this.state = 'walk';
         this.timer = 0;
+        this.playTimer = 0;
     }
     update(sim) {
         const cond = sim.envState.condition || 1.0;
@@ -3886,12 +4009,24 @@ class BioShrimp {
         if(this.pos.y > floor) { this.pos.y = floor; this.vel.y = 0; this.vel.x *= 0.9; }
 
         this.timer++;
+        this.playTimer--;
+
+        // Social Play check
+        if (this.playTimer <= 0 && sim.isFull && Math.random() < 0.01) {
+            const partner = sim.entities.find(e => e !== this && e instanceof BioShrimp && Math.abs(e.pos.x - this.pos.x) < 30);
+            if (partner) {
+                this.playTimer = 60;
+                this.state = 'play';
+                this.vel.y = -3; // High Jump together
+            }
+        }
+
         if(this.state === 'walk' && this.timer > 100 && Math.random() < 0.05 * cond) {
             this.vel.y = -2.0 - Math.random();
             this.vel.x = (Math.random()-0.5) * 3;
             this.state = 'jump';
             this.timer = 0;
-        } else if (this.state === 'jump' && this.pos.y >= floor) {
+        } else if ((this.state === 'jump' || this.state === 'play') && this.pos.y >= floor) {
             this.state = 'walk';
         }
         if(this.pos.x < 0) { this.pos.x = 0; this.vel.x *= -1; }
@@ -3902,9 +4037,52 @@ class BioShrimp {
         ctx.save();
         ctx.translate(this.pos.x, this.pos.y);
         if(this.vel.x < 0) ctx.scale(-1 * scale, scale); else ctx.scale(scale, scale);
-        ctx.fillStyle = 'rgba(100, 181, 246, 0.7)';
+        
+        // Color change slightly during play
+        ctx.fillStyle = this.state === 'play' ? 'rgba(66, 165, 245, 0.9)' : 'rgba(100, 181, 246, 0.7)';
+        
         ctx.beginPath();
         ctx.moveTo(5, 0); ctx.quadraticCurveTo(0, -5, -5, 0); ctx.quadraticCurveTo(0, -2, 5, 0); ctx.fill();
+        ctx.restore();
+    }
+}
+
+class BioBug {
+    constructor(sim) {
+        this.sim = sim;
+        this.type = Math.random() > 0.6 ? 'floater' : 'larva';
+        this.x = Math.random() * sim.width;
+        this.y = this.type === 'floater' 
+            ? sim.horizonY 
+            : sim.horizonY + Math.random() * (sim.height - sim.horizonY) * 0.5;
+        this.dead = false;
+        this.phase = Math.random() * 10;
+    }
+    update(sim) {
+        if (this.type === 'floater') {
+             this.x += Math.sin(sim.time + this.phase) * 0.2;
+        } else {
+             // Larva wiggle
+             this.y += (Math.random() - 0.4) * 0.5;
+             this.x += (Math.random() - 0.5) * 1.0;
+        }
+    }
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.fillStyle = '#5d4037';
+        if (this.type === 'floater') {
+            ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI*2); ctx.fill();
+            // Wings/Legs
+            ctx.beginPath(); ctx.moveTo(-3,-1); ctx.lineTo(3,-1); ctx.stroke();
+        } else {
+            // Wiggling larva
+            const w = Math.sin(this.sim.time * 0.5 + this.phase) * 3;
+            ctx.beginPath(); 
+            ctx.moveTo(0, -3); 
+            ctx.quadraticCurveTo(w, 0, 0, 3); 
+            ctx.stroke();
+        }
         ctx.restore();
     }
 }
