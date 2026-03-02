@@ -3353,7 +3353,7 @@ async function renderEventStatsSummary(start, end) {
     note.textContent = `${start} 〜 ${end} / 記録日数: ${filtered.length}日`;
 }
 
-// --- PHYSICS BIO SIM (Digital Twin) ---
+// --- ADVANCED BIO SIM (Digital Twin) ---
 class BioSim {
     constructor(canvasId, isFull = false) {
         this.canvas = document.getElementById(canvasId);
@@ -3362,11 +3362,21 @@ class BioSim {
         this.ctx = this.canvas.getContext('2d');
         
         this.entities = [];
+        this.skyEntities = [];
         this.bubbles = [];
         this.foods = [];
-        this.time = 0;
         this.plants = [];
+        this.floatingPlants = [];
+        this.time = 0;
         this.isRunning = false;
+
+        // Environmental State
+        this.envState = {
+            timeOfDay: 'day', // day, sunset, night
+            weather: 'clear', // clear, rain
+            condition: 1.0,   // 0.5 (bad) to 1.5 (good)
+            waterTemp: 20
+        };
 
         this.resize();
         if (isFull) {
@@ -3381,6 +3391,7 @@ class BioSim {
     start() {
         if (!this.isRunning) {
             this.isRunning = true;
+            this.updateEnvironment();
             requestAnimationFrame(this.loop);
         }
     }
@@ -3395,96 +3406,204 @@ class BioSim {
             this.height = window.innerHeight;
             this.canvas.width = this.width;
             this.canvas.height = this.height;
-            this.cx = this.width / 2;
-            this.cy = this.height / 2;
+            this.horizonY = this.height * 0.35; // 35% Sky
         } else {
             this.width = 120;
             this.height = 120;
             this.canvas.width = this.width;
             this.canvas.height = this.height;
-            this.cx = 60;
-            this.cy = 60;
-            this.r = 54;
+            this.horizonY = 0; // Mini mode has no sky
+            this.cx = this.width / 2;
+            this.cy = this.height / 2;
+            this.r = this.width / 2;
         }
+    }
+
+    updateEnvironment() {
+        const now = new Date();
+        const hour = now.getHours();
+        
+        // Time of Day
+        if (hour >= 6 && hour < 16) this.envState.timeOfDay = 'day';
+        else if (hour >= 16 && hour < 19) this.envState.timeOfDay = 'sunset';
+        else this.envState.timeOfDay = 'night';
+
+        // Weather (Basic mapping from state if available)
+        const wCode = state.tempEntry.weatherCode || 0;
+        this.envState.weather = (wCode >= 50 || wCode === 3) ? 'rain' : 'clear';
+
+        // Water Temp & Condition
+        const wTemp = state.tempEntry.waterTemp;
+        this.envState.waterTemp = wTemp || 20;
+        // Calc Condition: Ideal 20-26. Too cold/hot makes them sluggish.
+        let cond = 1.0;
+        if (wTemp < 10) cond = 0.5;
+        else if (wTemp > 30) cond = 0.6;
+        else if (wTemp >= 20 && wTemp <= 26) cond = 1.3;
+        
+        if (this.envState.timeOfDay === 'night') cond *= 0.7; // Sleepy at night
+        this.envState.condition = cond;
     }
 
     syncWithSettings() {
         const s = state.settings;
         this.entities = [];
         this.foods = [];
+        this.skyEntities = [];
+        this.updateEnvironment();
 
-        // Background
-        this.bgColor = '#f1f8e9';
-        if (s.container === 'black') this.bgColor = '#37474f';
-        if (s.container === 'white') this.bgColor = '#fafafa';
-        if (s.container === 'pot') this.bgColor = '#795548';
-        if (s.container === 'glass') this.bgColor = '#e1f5fe';
-
-        // Plants
+        // --- Plants (Submerged) ---
         this.plants = [];
         const subLevel = s.submerged_plant_level || 'none';
-        const plantCount = subLevel === 'high' ? 8 : subLevel === 'medium' ? 5 : subLevel === 'low' ? 2 : 0;
-        
+        const plantCount = subLevel === 'high' ? 12 : subLevel === 'medium' ? 6 : subLevel === 'low' ? 3 : 0;
         for(let i=0; i<plantCount; i++) {
+            // Pseudo-3D placement: scale depends on Y (lower is closer)
+            const y = this.isFull ? this.horizonY + Math.random() * (this.height - this.horizonY) : 120;
+            const scale = this.isFull ? 0.5 + ((y - this.horizonY) / (this.height - this.horizonY)) * 1.5 : 1;
+            
             this.plants.push({
-                x: (this.isFull ? this.width : 120) * (0.2 + 0.6 * Math.random()),
-                h: (this.isFull ? this.height * 0.4 : 40) * (0.8 + 0.4 * Math.random()),
+                x: Math.random() * this.width,
+                y: y,
+                h: (this.isFull ? 60 : 30) * (0.8 + 0.4 * Math.random()) * scale,
                 color: ['#a5d6a7', '#81c784', '#66bb6a'][Math.floor(Math.random()*3)],
-                phase: Math.random() * Math.PI * 2
+                phase: Math.random() * Math.PI * 2,
+                scale: scale
             });
         }
+        this.plants.sort((a,b) => a.y - b.y); // Draw order
 
-        // Fish
-        let fishCount = Math.min(15, parseInt(s.medaka_count) || 0);
-        if (fishCount < 0) fishCount = 0;
-        for(let i=0; i<fishCount; i++) {
-            this.entities.push(new BioFish(this));
+        // --- Floating Plants ---
+        this.floatingPlants = [];
+        const floatLevel = s.floating_plant_level || 'none';
+        const floatCount = floatLevel === 'high' ? 15 : floatLevel === 'medium' ? 8 : floatLevel === 'low' ? 3 : 0;
+        if (this.isFull) {
+            for(let i=0; i<floatCount; i++) {
+                this.floatingPlants.push({
+                    x: Math.random() * this.width,
+                    y: this.horizonY + Math.random() * (this.height * 0.1), // Near horizon
+                    rx: 10 + Math.random() * 15,
+                    ry: 3 + Math.random() * 3,
+                    color: '#66bb6a'
+                });
+            }
         }
+
+        // --- Animals ---
+        // Fish
+        let fishCount = Math.min(20, parseInt(s.medaka_count) || 0);
+        for(let i=0; i<fishCount; i++) this.entities.push(new BioFish(this));
 
         // Shrimp
-        const shrimpCount = parseInt(s.shrimp_count) || 0;
-        if (shrimpCount > 0) {
-            const showShrimp = Math.min(5, shrimpCount);
-            for(let i=0; i<showShrimp; i++) this.entities.push(new BioShrimp(this));
-        }
+        const shrimpCount = Math.min(10, parseInt(s.shrimp_count) || 0);
+        for(let i=0; i<shrimpCount; i++) this.entities.push(new BioShrimp(this));
+
+        // Snails
+        const snailCount = Math.min(5, parseInt(s.snail_count) || 0);
+        for(let i=0; i<snailCount; i++) this.entities.push(new BioSnail(this));
     }
 
     handleTap(e) {
         const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
-        this.addFood(x, y);
+        if (y > this.horizonY) {
+            this.addFood(x, y);
+        }
     }
 
     addFood(x, y) {
         this.foods.push({x, y, vy: 0, r: 3, age: 0});
     }
 
+    drawSky() {
+        const grad = this.ctx.createLinearGradient(0, 0, 0, this.horizonY);
+        if (this.envState.timeOfDay === 'day') {
+            grad.addColorStop(0, this.envState.weather==='rain' ? '#90a4ae' : '#4fc3f7');
+            grad.addColorStop(1, this.envState.weather==='rain' ? '#cfd8dc' : '#e1f5fe');
+        } else if (this.envState.timeOfDay === 'sunset') {
+            grad.addColorStop(0, '#3e2723');
+            grad.addColorStop(0.6, '#ff7043');
+            grad.addColorStop(1, '#ffcc80');
+        } else {
+            grad.addColorStop(0, '#0d47a1');
+            grad.addColorStop(1, '#1565c0');
+        }
+        this.ctx.fillStyle = grad;
+        this.ctx.fillRect(0, 0, this.width, this.horizonY);
+
+        // Sun/Moon
+        this.ctx.fillStyle = this.envState.timeOfDay === 'night' ? '#fff176' : '#fff';
+        this.ctx.globalAlpha = 0.8;
+        this.ctx.beginPath();
+        const orbX = this.width * 0.8;
+        const orbY = this.horizonY * 0.3;
+        this.ctx.arc(orbX, orbY, this.isFull ? 30 : 10, 0, Math.PI*2);
+        this.ctx.fill();
+        this.ctx.globalAlpha = 1.0;
+
+        // Rain
+        if (this.envState.weather === 'rain') {
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+            this.ctx.lineWidth = 1;
+            for(let i=0; i<10; i++) {
+                const rx = Math.random() * this.width;
+                const ry = Math.random() * this.horizonY;
+                this.ctx.beginPath(); this.ctx.moveTo(rx, ry); this.ctx.lineTo(rx-2, ry+10); this.ctx.stroke();
+            }
+        }
+    }
+
+    drawWater() {
+        const s = state.settings;
+        let baseColor = '#f1f8e9';
+        if (s.container === 'black') baseColor = '#37474f';
+        else if (s.container === 'glass') baseColor = '#e1f5fe';
+
+        if (this.isFull) {
+            // Water Gradient
+            const grad = this.ctx.createLinearGradient(0, this.horizonY, 0, this.height);
+            grad.addColorStop(0, this.envState.timeOfDay === 'night' ? '#1a237e' : '#b3e5fc');
+            grad.addColorStop(1, this.envState.timeOfDay === 'night' ? '#000000' : baseColor);
+            this.ctx.fillStyle = grad;
+            this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
+        } else {
+            // Mini mode simple
+            this.ctx.clearRect(0,0,this.width,this.height);
+            this.ctx.save();
+            this.ctx.beginPath(); this.ctx.arc(this.cx, this.cy, this.r, 0, Math.PI*2); this.ctx.clip();
+            this.ctx.fillStyle = baseColor; this.ctx.fill();
+        }
+    }
+
     loop() {
         if (!this.isRunning) return;
         this.time += 0.05;
         
+        // 1. Draw Backgrounds
         if (this.isFull) {
-            this.ctx.fillStyle = this.bgColor;
-            this.ctx.fillRect(0, 0, this.width, this.height);
+            this.drawSky();
+            this.drawWater();
         } else {
-            this.ctx.clearRect(0,0,this.width,this.height);
-            this.ctx.save();
-            this.ctx.beginPath();
-            this.ctx.arc(this.cx, this.cy, this.r, 0, Math.PI*2);
-            this.ctx.clip();
-            if (this.bgColor !== '#f1f8e9') {
-                this.ctx.fillStyle = this.bgColor;
-                this.ctx.fill();
-            }
+            this.drawWater();
         }
 
+        // 2. Plants
+        // Floating Plants (Horizon)
+        if (this.isFull) {
+            this.ctx.fillStyle = '#4caf50';
+            this.floatingPlants.forEach(fp => {
+                this.ctx.beginPath();
+                this.ctx.ellipse(fp.x, fp.y, fp.rx, fp.ry, 0, 0, Math.PI*2);
+                this.ctx.fill();
+            });
+        }
+        // Submerged Plants
         this.plants.forEach(p => {
-            const sway = Math.sin(this.time * 0.5 + p.phase) * (this.isFull ? 10 : 3);
+            const sway = Math.sin(this.time * 0.5 + p.phase) * (this.isFull ? 10 * p.scale : 3);
             const baseX = p.x;
-            const baseY = this.isFull ? this.height : 115;
+            const baseY = p.y;
             this.ctx.strokeStyle = p.color;
-            this.ctx.lineWidth = this.isFull ? 6 : 3;
+            this.ctx.lineWidth = (this.isFull ? 6 : 3) * p.scale;
             this.ctx.lineCap = 'round';
             this.ctx.beginPath();
             this.ctx.moveTo(baseX, baseY);
@@ -3492,9 +3611,21 @@ class BioSim {
             this.ctx.stroke();
         });
 
+        // 3. Sky Events (Full only)
+        if (this.isFull) {
+            // Random spawn
+            if (Math.random() < 0.005) this.skyEntities.push(new BioSkyEntity(this));
+            for (let i = this.skyEntities.length - 1; i >= 0; i--) {
+                this.skyEntities[i].update(this);
+                this.skyEntities[i].draw(this.ctx);
+                if (this.skyEntities[i].dead) this.skyEntities.splice(i, 1);
+            }
+        }
+
+        // 4. Foods
         for (let i = this.foods.length - 1; i >= 0; i--) {
             let f = this.foods[i];
-            f.y += 1.5;
+            f.y += 1.5; 
             f.x += Math.sin(this.time + f.y*0.1) * 0.5;
             f.age++;
             this.ctx.fillStyle = '#ffcc80';
@@ -3502,6 +3633,7 @@ class BioSim {
             if (f.y > this.height + 10 || f.age > 600) this.foods.splice(i, 1);
         }
 
+        // 5. Bubbles
         if(Math.random() < (this.isFull ? 0.1 : 0.03)) {
             this.bubbles.push({
                 x: Math.random() * this.width, 
@@ -3514,11 +3646,13 @@ class BioSim {
             let b = this.bubbles[i];
             b.y -= b.v;
             b.x += Math.sin(this.time + b.y*0.1) * 0.3;
-            if(b.y < -10) { this.bubbles.splice(i,1); continue; }
+            if(b.y < (this.isFull ? this.horizonY : -10)) { this.bubbles.splice(i,1); continue; }
             this.ctx.fillStyle = 'rgba(255,255,255,0.4)';
             this.ctx.beginPath(); this.ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); this.ctx.fill();
         }
 
+        // 6. Animals (Sorted by scale/Y for depth)
+        this.entities.sort((a,b) => (a.pos.y - b.pos.y));
         this.entities.forEach(e => {
             e.update(this);
             e.draw(this.ctx);
@@ -3532,71 +3666,75 @@ class BioSim {
 class BioFish {
     constructor(sim) {
         this.sim = sim;
+        this.minY = sim.isFull ? sim.horizonY + 20 : 20;
         this.pos = {
-            x: sim.isFull ? Math.random()*sim.width : 60 + (Math.random()-0.5)*40, 
-            y: sim.isFull ? Math.random()*sim.height : 60 + (Math.random()-0.5)*40
+            x: Math.random() * sim.width,
+            y: this.minY + Math.random() * (sim.height - this.minY)
         };
-        this.vel = {x: (Math.random()-0.5)*1.5, y: (Math.random()-0.5)*1.5};
+        this.vel = {x: (Math.random()-0.5), y: (Math.random()-0.5)};
         this.angle = 0;
         this.color = Math.random() > 0.5 ? '#f4511e' : '#ffb74d';
         this.tailPhase = Math.random() * 10;
-        this.size = sim.isFull ? 1.5 : 0.8;
     }
     update(sim) {
+        // Condition Factor
+        const cond = sim.envState.condition || 1.0;
+        
+        // Food Attraction
         if (sim.foods.length > 0) {
-            let closest = null;
-            let minDst = 9999;
+            let closest = null; let minDst = 9999;
             sim.foods.forEach(f => {
                 const d = Math.hypot(f.x - this.pos.x, f.y - this.pos.y);
                 if (d < minDst) { minDst = d; closest = f; }
             });
-            if (closest && minDst < 300) {
+            if (closest && minDst < 400) {
                 const angle = Math.atan2(closest.y - this.pos.y, closest.x - this.pos.x);
-                this.vel.x += Math.cos(angle) * 0.15;
-                this.vel.y += Math.sin(angle) * 0.15;
+                this.vel.x += Math.cos(angle) * 0.2 * cond;
+                this.vel.y += Math.sin(angle) * 0.2 * cond;
             }
         }
 
-        this.vel.x += (Math.random()-0.5)*0.1;
-        this.vel.y += (Math.random()-0.5)*0.1;
-        
-        if (sim.isFull) {
-            if (this.pos.x < 0) this.vel.x += 0.2;
-            if (this.pos.x > sim.width) this.vel.x -= 0.2;
-            if (this.pos.y < 0) this.vel.y += 0.2;
-            if (this.pos.y > sim.height) this.vel.y -= 0.2;
-        } else {
-            const d = Math.hypot(this.pos.x - sim.cx, this.pos.y - sim.cy);
-            if(d > sim.r - 10) {
-                const angleToCenter = Math.atan2(sim.cy - this.pos.y, sim.cx - this.pos.x);
-                this.vel.x += Math.cos(angleToCenter) * 0.08;
-                this.vel.y += Math.sin(angleToCenter) * 0.08;
-            }
-        }
+        // Random Swim
+        this.vel.x += (Math.random()-0.5) * 0.1 * cond;
+        this.vel.y += (Math.random()-0.5) * 0.1 * cond;
+
+        // Bounds & Physics
+        const margin = 20;
+        if (this.pos.x < -margin) this.vel.x += 0.1;
+        if (this.pos.x > sim.width + margin) this.vel.x -= 0.1;
+        if (this.pos.y < this.minY) this.vel.y += 0.1;
+        if (this.pos.y > sim.height - margin) this.vel.y -= 0.1;
 
         const speed = Math.hypot(this.vel.x, this.vel.y);
-        const maxSpeed = sim.isFull ? 3 : 1.2;
+        const maxSpeed = (sim.isFull ? 2.5 : 1.2) * cond;
         if(speed > maxSpeed) { this.vel.x *= 0.95; this.vel.y *= 0.95; }
 
         this.pos.x += this.vel.x;
         this.pos.y += this.vel.y;
         this.angle = Math.atan2(this.vel.y, this.vel.x);
+        
+        // Random Dash Event
+        if (sim.isFull && Math.random() < 0.001 * cond) {
+            this.vel.x *= 4;
+            this.vel.y *= 4;
+        }
     }
     draw(ctx) {
+        // 3D Scale simulation
+        const scale = this.sim.isFull 
+            ? 0.5 + ((this.pos.y - this.sim.horizonY) / (this.sim.height - this.sim.horizonY)) * 1.5
+            : 0.8;
+
         ctx.save();
         ctx.translate(this.pos.x, this.pos.y);
         ctx.rotate(this.angle);
-        ctx.scale(this.size, this.size);
+        ctx.scale(scale, scale);
         ctx.fillStyle = this.color;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI*2);
-        ctx.fill();
-        const tailY = Math.sin(Date.now()*0.015 + this.tailPhase) * 3;
-        ctx.beginPath();
-        ctx.moveTo(-8, 0);
-        ctx.lineTo(-14, tailY - 3);
-        ctx.lineTo(-14, tailY + 3);
-        ctx.fill();
+        ctx.beginPath(); ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI*2); ctx.fill();
+        // Tail
+        const tailSpeed = (Math.hypot(this.vel.x, this.vel.y) * 0.5) + 0.1;
+        const tailY = Math.sin(Date.now()*0.02*tailSpeed + this.tailPhase) * 3;
+        ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(-14, tailY - 3); ctx.lineTo(-14, tailY + 3); ctx.fill();
         ctx.restore();
     }
 }
@@ -3604,57 +3742,105 @@ class BioFish {
 class BioShrimp {
     constructor(sim) {
         this.sim = sim;
-        this.pos = {x: sim.isFull ? Math.random()*sim.width : 60, y: sim.isFull ? sim.height-10 : 100};
-        this.vel = {x: 0.5, y: 0};
+        this.pos = {x: Math.random()*sim.width, y: sim.height};
+        this.vel = {x: 0, y: 0};
         this.state = 'walk';
         this.timer = 0;
-        this.size = sim.isFull ? 1.5 : 1;
     }
     update(sim) {
+        const cond = sim.envState.condition || 1.0;
         this.vel.y += 0.05;
-        this.pos.x += this.vel.x;
-        this.pos.y += this.vel.y;
+        this.pos.x += this.vel.x * cond;
+        this.pos.y += this.vel.y * cond;
 
-        const floor = sim.isFull ? sim.height - 10 : 105;
-        if(this.pos.y > floor) {
-            this.pos.y = floor;
-            this.vel.y = 0;
-            this.vel.x *= 0.9;
-        }
+        const floor = sim.height - 10;
+        if(this.pos.y > floor) { this.pos.y = floor; this.vel.y = 0; this.vel.x *= 0.9; }
 
         this.timer++;
-        if(this.state === 'walk' && this.timer > 100 && Math.random() < 0.05) {
+        if(this.state === 'walk' && this.timer > 100 && Math.random() < 0.05 * cond) {
             this.vel.y = -2.0 - Math.random();
             this.vel.x = (Math.random()-0.5) * 3;
             this.state = 'jump';
             this.timer = 0;
         } else if (this.state === 'jump' && this.pos.y >= floor) {
             this.state = 'walk';
-        } else if (this.state === 'walk') {
-            if(Math.random() < 0.1) this.vel.x = (Math.random()-0.5) * 0.5;
         }
+        if(this.pos.x < 0) { this.pos.x = 0; this.vel.x *= -1; }
+        if(this.pos.x > sim.width) { this.pos.x = sim.width; this.vel.x *= -1; }
+    }
+    draw(ctx) {
+        const scale = this.sim.isFull ? 1.5 : 1;
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        if(this.vel.x < 0) ctx.scale(-1 * scale, scale); else ctx.scale(scale, scale);
+        ctx.fillStyle = 'rgba(100, 181, 246, 0.7)';
+        ctx.beginPath();
+        ctx.moveTo(5, 0); ctx.quadraticCurveTo(0, -5, -5, 0); ctx.quadraticCurveTo(0, -2, 5, 0); ctx.fill();
+        ctx.restore();
+    }
+}
 
-        if(this.pos.x < 10) { this.pos.x = 10; this.vel.x *= -1; }
-        const limitW = sim.isFull ? sim.width - 10 : 100;
-        if(this.pos.x > limitW) { this.pos.x = limitW; this.vel.x *= -1; }
+class BioSnail {
+    constructor(sim) {
+        this.sim = sim;
+        this.pos = {x: Math.random()*sim.width, y: Math.random()*sim.height};
+        this.angle = Math.random() * Math.PI * 2;
+    }
+    update(sim) {
+        // Snails are very slow, unaffected by much
+        if (sim.isFull) {
+            this.pos.x += Math.cos(this.angle) * 0.1;
+            this.pos.y += Math.sin(this.angle) * 0.1;
+            // Random turn
+            if (Math.random() < 0.01) this.angle += (Math.random()-0.5);
+            // Bounds (stick to screen)
+            if (this.pos.x < 0 || this.pos.x > sim.width) this.angle += Math.PI;
+            if (this.pos.y < sim.horizonY || this.pos.y > sim.height) this.angle += Math.PI;
+        }
+    }
+    draw(ctx) {
+        if (!this.sim.isFull) return; // Only visible in full screen on "glass"
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = '#8d6e63';
+        ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI*2); ctx.fill(); // Shell
+        ctx.fillStyle = '#d7ccc8';
+        ctx.beginPath(); ctx.arc(6, 0, 4, 0, Math.PI*2); ctx.fill(); // Head
+        ctx.restore();
+    }
+}
+
+class BioSkyEntity {
+    constructor(sim) {
+        this.sim = sim;
+        this.type = Math.random() > 0.5 ? 'bird' : 'dragonfly';
+        this.pos = {x: -20, y: Math.random() * sim.horizonY * 0.8};
+        this.vel = {x: 2 + Math.random()*2, y: (Math.random()-0.5)*0.5};
+        this.dead = false;
+        this.wingPhase = 0;
+    }
+    update(sim) {
+        this.pos.x += this.vel.x;
+        this.pos.y += this.vel.y;
+        this.wingPhase += 0.5;
+        if (this.pos.x > sim.width + 50) this.dead = true;
     }
     draw(ctx) {
         ctx.save();
         ctx.translate(this.pos.x, this.pos.y);
-        if(this.vel.x < 0) ctx.scale(-1 * this.size, this.size); 
-        else ctx.scale(this.size, this.size);
-        
-        ctx.fillStyle = 'rgba(100, 181, 246, 0.7)';
-        ctx.beginPath();
-        ctx.moveTo(5, 0);
-        ctx.quadraticCurveTo(0, -5, -5, 0);
-        ctx.quadraticCurveTo(0, -2, 5, 0);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(100, 181, 246, 0.7)';
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(-3,0); ctx.lineTo(-3,3); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,3); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(3,0); ctx.lineTo(3,3); ctx.stroke();
+        ctx.fillStyle = this.type === 'bird' ? '#333' : '#e64a19';
+        if (this.type === 'bird') {
+            // V shape
+            const wing = Math.sin(this.wingPhase) * 5;
+            ctx.beginPath(); ctx.moveTo(-5, -wing); ctx.lineTo(0, 0); ctx.lineTo(5, -wing); ctx.stroke();
+        } else {
+            // Dragonfly line
+            ctx.fillRect(-5, 0, 10, 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            const wing = Math.abs(Math.sin(this.wingPhase)) * 8;
+            ctx.fillRect(-2, -wing, 4, wing*2);
+        }
         ctx.restore();
     }
 }
