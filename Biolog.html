@@ -1505,8 +1505,23 @@ const state = {
         bio_count: '',
         plant_status: ''
     },
-    tempEntry: { files: [], weather: null, temp: null, waterTemp: null }
+    tempEntry: { files: [], weather: null, temp: null, waterTemp: null },
+    lastCleaningTimestamp: Date.now() // Default to now, updated on load
 };
+
+async function updateAlgaeState() {
+    const all = await getAllRecords();
+    if (!all || all.length === 0) return;
+    // 日付の新しい順にソート
+    all.sort((a,b) => b.timestamp - a.timestamp);
+    // 「🧽 掃除」が含まれる最新の記録を探す
+    const lastClean = all.find(r => r.events && r.events.includes('🧽 掃除'));
+    state.lastCleaningTimestamp = lastClean ? lastClean.timestamp : (Date.now() - 1000*60*60*24*3); // 記録なしなら3日前仮定
+    
+    // シミュレーターに反映
+    if (window.miniBioSim) window.miniBioSim.updateAlgae();
+    if (window.fullBioSim) window.fullBioSim.updateAlgae();
+}
 
 // --- DATABASE (IndexedDB) ---
 const DB_NAME = 'biolog_db';
@@ -1992,6 +2007,11 @@ async function toggleCareEvent(label) {
     renderCareEventChips(rec.events);
     document.getElementById('detailTimestamp').textContent = `イベント保存: ${new Date().toLocaleTimeString()}`;
     await renderCalendar();
+    
+    // 掃除イベントなら藻の状態を更新
+    if (label === '🧽 掃除') {
+        await updateAlgaeState();
+    }
 }
 
 async function getRecentHistoryForAiPrompt(baseDate, days = 30) {
@@ -2633,6 +2653,11 @@ async function saveEntry() {
         await saveRecord(record, { appendMedia: true });
         closeModal();
         
+        // 掃除イベントが含まれていれば更新
+        if (record.events && record.events.includes('🧽 掃除')) {
+            await updateAlgaeState();
+        }
+
         state.selectedDate = new Date();
         state.currentDate = new Date();
         renderCalendar();
@@ -3367,8 +3392,12 @@ class BioSim {
         this.foods = [];
         this.plants = [];
         this.floatingPlants = [];
+        this.stars = [];
+        this.clouds = [];
+        this.algaeSpots = [];
         this.time = 0;
         this.isRunning = false;
+        this.algaeLevel = 0; // 0.0 to 1.0
 
         // Environmental State
         this.envState = {
@@ -3384,8 +3413,32 @@ class BioSim {
             this.canvas.addEventListener('pointerdown', (e) => this.handleTap(e));
         }
 
+        this.updateAlgae();
         this.syncWithSettings();
         this.loop = this.loop.bind(this);
+    }
+
+    updateAlgae() {
+        const now = Date.now();
+        const lastClean = state.lastCleaningTimestamp || now;
+        const diffDays = (now - lastClean) / (1000 * 60 * 60 * 24);
+        // 14日でMaxレベル
+        this.algaeLevel = Math.min(1.0, Math.max(0, diffDays / 14));
+        this.generateAlgaeSpots();
+    }
+
+    generateAlgaeSpots() {
+        this.algaeSpots = [];
+        // 画面全体に散らばる藻の汚れ（レベルに応じて数と濃さが増える）
+        const count = Math.floor(20 + this.algaeLevel * 100);
+        for(let i=0; i<count; i++) {
+            this.algaeSpots.push({
+                x: Math.random() * this.width,
+                y: Math.random() * this.height,
+                r: 2 + Math.random() * 20,
+                alpha: Math.random() * 0.3 * this.algaeLevel
+            });
+        }
     }
 
     start() {
@@ -3416,6 +3469,29 @@ class BioSim {
             this.cx = this.width / 2;
             this.cy = this.height / 2;
             this.r = this.width / 2;
+        }
+        this.generateSkyObjects();
+        this.generateAlgaeSpots();
+    }
+
+    generateSkyObjects() {
+        this.stars = [];
+        this.clouds = [];
+        if (this.isFull) {
+            // Stars
+            for(let i=0; i<50; i++) {
+                this.stars.push({
+                    x: Math.random() * this.width,
+                    y: Math.random() * this.horizonY,
+                    r: Math.random() * 1.5,
+                    blinkSpeed: 0.05 + Math.random() * 0.1,
+                    phase: Math.random() * Math.PI * 2
+                });
+            }
+            // Clouds
+            for(let i=0; i<5; i++) {
+                this.clouds.push(new BioCloud(this));
+            }
         }
     }
 
@@ -3517,38 +3593,64 @@ class BioSim {
 
     drawSky() {
         const grad = this.ctx.createLinearGradient(0, 0, 0, this.horizonY);
-        if (this.envState.timeOfDay === 'day') {
-            grad.addColorStop(0, this.envState.weather==='rain' ? '#90a4ae' : '#4fc3f7');
-            grad.addColorStop(1, this.envState.weather==='rain' ? '#cfd8dc' : '#e1f5fe');
-        } else if (this.envState.timeOfDay === 'sunset') {
-            grad.addColorStop(0, '#3e2723');
-            grad.addColorStop(0.6, '#ff7043');
-            grad.addColorStop(1, '#ffcc80');
+        const tod = this.envState.timeOfDay;
+
+        if (tod === 'day') {
+            grad.addColorStop(0, this.envState.weather==='rain' ? '#78909c' : '#29b6f6');
+            grad.addColorStop(1, this.envState.weather==='rain' ? '#cfd8dc' : '#b3e5fc');
+        } else if (tod === 'sunset') {
+            grad.addColorStop(0, '#4a148c');
+            grad.addColorStop(0.4, '#d81b60');
+            grad.addColorStop(1, '#ffeb3b');
         } else {
-            grad.addColorStop(0, '#0d47a1');
-            grad.addColorStop(1, '#1565c0');
+            grad.addColorStop(0, '#000000');
+            grad.addColorStop(0.5, '#0d47a1');
+            grad.addColorStop(1, '#1a237e');
         }
         this.ctx.fillStyle = grad;
         this.ctx.fillRect(0, 0, this.width, this.horizonY);
 
+        // Stars (Night only)
+        if (tod === 'night') {
+            this.ctx.fillStyle = '#ffffff';
+            this.stars.forEach(star => {
+                const alpha = 0.3 + 0.7 * Math.abs(Math.sin(this.time * star.blinkSpeed + star.phase));
+                this.ctx.globalAlpha = alpha;
+                this.ctx.beginPath();
+                this.ctx.arc(star.x, star.y, star.r, 0, Math.PI*2);
+                this.ctx.fill();
+            });
+            this.ctx.globalAlpha = 1.0;
+        }
+
         // Sun/Moon
-        this.ctx.fillStyle = this.envState.timeOfDay === 'night' ? '#fff176' : '#fff';
-        this.ctx.globalAlpha = 0.8;
+        this.ctx.fillStyle = tod === 'night' ? '#fff9c4' : '#fffde7';
+        this.ctx.shadowBlur = tod === 'night' ? 20 : 50;
+        this.ctx.shadowColor = tod === 'night' ? '#fff59d' : '#ffeb3b';
+        
         this.ctx.beginPath();
-        const orbX = this.width * 0.8;
-        const orbY = this.horizonY * 0.3;
-        this.ctx.arc(orbX, orbY, this.isFull ? 30 : 10, 0, Math.PI*2);
+        const orbX = this.width * 0.85;
+        const orbY = tod === 'sunset' ? this.horizonY * 0.8 : this.horizonY * 0.25;
+        this.ctx.arc(orbX, orbY, this.isFull ? 35 : 12, 0, Math.PI*2);
         this.ctx.fill();
-        this.ctx.globalAlpha = 1.0;
+        this.ctx.shadowBlur = 0;
+
+        // Clouds (Day/Sunset)
+        if (tod !== 'night' && this.isFull) {
+            this.clouds.forEach(cloud => {
+                cloud.update(this);
+                cloud.draw(this.ctx, tod === 'sunset');
+            });
+        }
 
         // Rain
         if (this.envState.weather === 'rain') {
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-            this.ctx.lineWidth = 1;
-            for(let i=0; i<10; i++) {
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+            this.ctx.lineWidth = 1.5;
+            for(let i=0; i<15; i++) {
                 const rx = Math.random() * this.width;
                 const ry = Math.random() * this.horizonY;
-                this.ctx.beginPath(); this.ctx.moveTo(rx, ry); this.ctx.lineTo(rx-2, ry+10); this.ctx.stroke();
+                this.ctx.beginPath(); this.ctx.moveTo(rx, ry); this.ctx.lineTo(rx-3, ry+15); this.ctx.stroke();
             }
         }
     }
@@ -3562,16 +3664,43 @@ class BioSim {
         if (this.isFull) {
             // Water Gradient
             const grad = this.ctx.createLinearGradient(0, this.horizonY, 0, this.height);
-            grad.addColorStop(0, this.envState.timeOfDay === 'night' ? '#1a237e' : '#b3e5fc');
+            // 藻レベルが高いと水が緑に濁る
+            const turbidity = this.algaeLevel * 0.4;
+            const waterTop = this.envState.timeOfDay === 'night' ? '#1a237e' : '#b3e5fc';
+            const algaeGreen = '#558b2f';
+            
+            grad.addColorStop(0, waterTop);
             grad.addColorStop(1, this.envState.timeOfDay === 'night' ? '#000000' : baseColor);
+            
             this.ctx.fillStyle = grad;
             this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
+            
+            if(this.algaeLevel > 0.1) {
+                this.ctx.fillStyle = `rgba(85, 139, 47, ${turbidity})`;
+                this.ctx.fillRect(0, this.horizonY, this.width, this.height - this.horizonY);
+            }
+            
+            // Draw Algae Spots (Moss on glass)
+            this.algaeSpots.forEach(spot => {
+                if(spot.y > this.horizonY) {
+                    this.ctx.fillStyle = `rgba(51, 105, 30, ${spot.alpha})`;
+                    this.ctx.beginPath();
+                    this.ctx.arc(spot.x, spot.y, spot.r, 0, Math.PI*2);
+                    this.ctx.fill();
+                }
+            });
+
         } else {
-            // Mini mode simple
+            // Mini mode
             this.ctx.clearRect(0,0,this.width,this.height);
             this.ctx.save();
             this.ctx.beginPath(); this.ctx.arc(this.cx, this.cy, this.r, 0, Math.PI*2); this.ctx.clip();
-            this.ctx.fillStyle = baseColor; this.ctx.fill();
+            this.ctx.fillStyle = baseColor;
+            this.ctx.fill();
+            if(this.algaeLevel > 0.1) {
+                this.ctx.fillStyle = `rgba(85, 139, 47, ${this.algaeLevel * 0.3})`;
+                this.ctx.fill();
+            }
         }
     }
 
@@ -3612,9 +3741,9 @@ class BioSim {
         });
 
         // 3. Sky Events (Full only)
-        if (this.isFull) {
-            // Random spawn
-            if (Math.random() < 0.005) this.skyEntities.push(new BioSkyEntity(this));
+        if (this.isFull && this.envState.timeOfDay !== 'night') {
+            // Random spawn increased freq
+            if (Math.random() < 0.02) this.skyEntities.push(new BioSkyEntity(this));
             for (let i = this.skyEntities.length - 1; i >= 0; i--) {
                 this.skyEntities[i].update(this);
                 this.skyEntities[i].draw(this.ctx);
@@ -3787,13 +3916,12 @@ class BioSnail {
         this.angle = Math.random() * Math.PI * 2;
     }
     update(sim) {
-        // Snails are very slow, unaffected by much
+        // Snails crawl on glass (algae eater)
         if (sim.isFull) {
-            this.pos.x += Math.cos(this.angle) * 0.1;
-            this.pos.y += Math.sin(this.angle) * 0.1;
-            // Random turn
-            if (Math.random() < 0.01) this.angle += (Math.random()-0.5);
-            // Bounds (stick to screen)
+            const speed = 0.15 + (sim.algaeLevel * 0.2); // Faster when hungry/dirty
+            this.pos.x += Math.cos(this.angle) * speed;
+            this.pos.y += Math.sin(this.angle) * speed;
+            if (Math.random() < 0.02) this.angle += (Math.random()-0.5);
             if (this.pos.x < 0 || this.pos.x > sim.width) this.angle += Math.PI;
             if (this.pos.y < sim.horizonY || this.pos.y > sim.height) this.angle += Math.PI;
         }
@@ -3815,33 +3943,54 @@ class BioSkyEntity {
     constructor(sim) {
         this.sim = sim;
         this.type = Math.random() > 0.5 ? 'bird' : 'dragonfly';
-        this.pos = {x: -20, y: Math.random() * sim.horizonY * 0.8};
-        this.vel = {x: 2 + Math.random()*2, y: (Math.random()-0.5)*0.5};
+        this.pos = {x: -30, y: Math.random() * sim.horizonY * 0.7};
+        this.vel = {x: 2 + Math.random()*2, y: (Math.random()-0.5)*0.3};
         this.dead = false;
         this.wingPhase = 0;
     }
     update(sim) {
         this.pos.x += this.vel.x;
-        this.pos.y += this.vel.y;
-        this.wingPhase += 0.5;
+        this.pos.y += this.vel.y + Math.sin(sim.time * 0.1) * 0.2;
+        this.wingPhase += 0.4;
         if (this.pos.x > sim.width + 50) this.dead = true;
     }
     draw(ctx) {
         ctx.save();
         ctx.translate(this.pos.x, this.pos.y);
-        ctx.fillStyle = this.type === 'bird' ? '#333' : '#e64a19';
         if (this.type === 'bird') {
-            // V shape
-            const wing = Math.sin(this.wingPhase) * 5;
-            ctx.beginPath(); ctx.moveTo(-5, -wing); ctx.lineTo(0, 0); ctx.lineTo(5, -wing); ctx.stroke();
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            const wing = Math.sin(this.wingPhase) * 8;
+            ctx.beginPath(); ctx.moveTo(-8, -wing); ctx.lineTo(0, 0); ctx.lineTo(8, -wing); ctx.stroke();
         } else {
-            // Dragonfly line
-            ctx.fillRect(-5, 0, 10, 2);
-            ctx.fillStyle = 'rgba(255,255,255,0.5)';
-            const wing = Math.abs(Math.sin(this.wingPhase)) * 8;
-            ctx.fillRect(-2, -wing, 4, wing*2);
+            ctx.fillStyle = '#e64a19';
+            ctx.fillRect(-6, 0, 12, 2); // Body
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            const wing = Math.abs(Math.sin(this.wingPhase)) * 10;
+            ctx.fillRect(-4, -wing, 3, wing*2); // Front wing
+            ctx.fillRect(1, -wing*0.8, 3, wing*1.6); // Back wing
         }
         ctx.restore();
+    }
+}
+
+class BioCloud {
+    constructor(sim) {
+        this.x = Math.random() * sim.width;
+        this.y = Math.random() * (sim.horizonY * 0.6);
+        this.w = 60 + Math.random() * 80;
+        this.speed = 0.1 + Math.random() * 0.2;
+    }
+    update(sim) {
+        this.x += this.speed;
+        if (this.x > sim.width + 100) this.x = -100;
+    }
+    draw(ctx, isSunset) {
+        ctx.fillStyle = isSunset ? 'rgba(255, 204, 188, 0.6)' : 'rgba(255, 255, 255, 0.7)';
+        ctx.beginPath();
+        ctx.ellipse(this.x, this.y, this.w, this.w*0.4, 0, 0, Math.PI*2);
+        ctx.ellipse(this.x+this.w*0.5, this.y-10, this.w*0.6, this.w*0.4, 0, 0, Math.PI*2);
+        ctx.fill();
     }
 }
 
@@ -3897,6 +4046,9 @@ window.onload = async () => {
 
     await initDB();
     loadSettings();
+    // 初期藻レベル計算
+    await updateAlgaeState();
+    
     // Settings loaded, sync visuals
     if(window.miniBioSim) window.miniBioSim.syncWithSettings();
     if(window.fullBioSim) window.fullBioSim.syncWithSettings();
