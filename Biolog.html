@@ -490,6 +490,11 @@
         background: #f8f9f8; border: 1px solid var(--border);
         padding: 10px;
         border-radius: 8px;
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    .env-info:active {
+        background-color: #e0e0e0;
     }
     .env-item { display: flex; align-items: center; gap: 4px; }
 
@@ -1095,7 +1100,6 @@
         <div class="top-actions" role="tablist" aria-label="画面切り替え">
             <button class="tab-btn active" type="button" onclick="switchTab('record')">記録</button>
             <button class="tab-btn" type="button" onclick="switchTab('photos')">写真</button>
-            <button class="tab-btn" type="button" onclick="switchTab('stats')">統計</button>
             <button class="tab-btn" type="button" onclick="switchTab('settings')">設定</button>
         </div>
     </div>
@@ -1108,6 +1112,7 @@
             <div style="display:flex; align-items:center; gap:8px;">
                 <span class="current-month" id="calendarMonthLabel">202X年 X月</span>
                 <button class="icon-btn" onclick="openCalendarModal()" style="font-size:20px; padding:4px; width:auto; height:auto;" aria-label="カレンダーを開く">📅</button>
+                <button class="icon-btn" onclick="switchTab('stats')" style="font-size:20px; padding:4px; width:auto; height:auto;" aria-label="統計を開く">📈</button>
             </div>
             <button class="icon-btn" id="nextMonth">&gt;</button>
         </div>
@@ -1127,10 +1132,11 @@
 
                 <div class="media-grid" id="detailMedia"></div>
 
-                <div class="env-info">
+                <div class="env-info" onclick="refreshWeatherForSelectedDate()" title="タップして天気情報を再取得">
                     <div class="env-item"><span id="detailWeatherIcon">🌤</span> <span id="detailWeather">--</span></div>
                     <div class="env-item">🌡 <span id="detailTemp">--</span>℃ <span style="font-size:12px; opacity:0.8; margin-left:4px;">(H:<span id="detailMaxTemp">--</span> / L:<span id="detailMinTemp">--</span>)</span></div>
                     <div class="env-item">💧 <span id="detailWaterTemp">--</span>℃ (H:<span id="detailMaxWaterTemp">--</span> / L:<span id="detailMinWaterTemp">--</span>) (推定)</div>
+                    <div style="width:100%; font-size:10px; color:var(--accent); text-align:right; margin-top:4px;">タップで再取得 ↻</div>
                 </div>
                 
                 <div class="care-dashboard" id="careDashboard">
@@ -1187,6 +1193,10 @@
     </div>
 
     <div id="view-stats" class="view-section">
+        <div class="flex-row" style="align-items:center; margin-bottom:10px; padding-left:4px;">
+            <button class="icon-btn" onclick="switchTab('record')" style="font-size:18px; width:32px; height:32px; background:#fff; border:1px solid var(--border); margin-right:8px;" aria-label="戻る">⬅</button>
+            <h3 style="margin:0; font-size:18px; color:var(--text-main);">統計データ</h3>
+        </div>
         <div class="setting-section">
             <div class="setting-title">📊 気温・水温グラフ</div>
             <div class="calendar-controls" style="margin-bottom:15px; justify-content:center; gap:10px;">
@@ -2357,12 +2367,72 @@ function getWeatherLabel(code) {
     return "雨/雷";
 }
 
+async function refreshWeatherForSelectedDate() {
+    if (!confirm('表示中の日付の天気・気温データを再取得して上書きしますか？')) return;
+
+    const dateStr = formatDate(state.selectedDate);
+    const lat = state.settings.lat;
+    const lng = state.settings.lng;
+
+    const wEl = document.getElementById('detailWeather');
+    if (wEl) wEl.textContent = '取得中...';
+
+    try {
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&start_date=${dateStr}&end_date=${dateStr}&daily=weathercode,temperature_2m_max,temperature_2m_min&timezone=auto`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!data.daily || !data.daily.time || data.daily.time.length === 0) {
+            throw new Error('データが見つかりませんでした');
+        }
+
+        const maxTemp = data.daily.temperature_2m_max[0];
+        const minTemp = data.daily.temperature_2m_min[0];
+        const weatherCode = data.daily.weathercode[0];
+        const avgTemp = round1((maxTemp + minTemp) / 2);
+        const weatherLabel = getWeatherLabel(weatherCode);
+
+        const waterTemp = calculateWaterTemp(avgTemp, maxTemp, minTemp);
+        const maxWaterTemp = calculateWaterTemp(maxTemp, maxTemp, minTemp);
+        const minWaterTemp = calculateWaterTemp(minTemp, maxTemp, minTemp);
+
+        let rec = await getRecord(dateStr);
+        if (!rec) {
+             rec = {
+                dateStr: dateStr,
+                timestamp: Date.now(),
+                media: [],
+                memo: '',
+                events: []
+            };
+        }
+        
+        rec.weather = weatherLabel;
+        rec.temp = avgTemp;
+        rec.maxTemp = maxTemp;
+        rec.minTemp = minTemp;
+        rec.waterTemp = waterTemp;
+        rec.maxWaterTemp = maxWaterTemp;
+        rec.minWaterTemp = minWaterTemp;
+        rec.timestamp = Date.now();
+
+        await saveRecord(rec);
+        await selectDate(state.selectedDate);
+        alert('天気情報を更新しました');
+
+    } catch (e) {
+        console.error(e);
+        alert('取得失敗: ' + e.message);
+        await selectDate(state.selectedDate);
+    }
+}
+
 // --- UI FUNCTIONS ---
 function switchTab(tabName) {
-    // Header tabs: Record, Photos, Stats, Settings
-    const tabs = ['record', 'photos', 'stats', 'settings'];
+    // Header tabs: Record, Photos, Settings (stats is hidden)
+    const tabs = ['record', 'photos', 'settings'];
     const index = tabs.indexOf(tabName);
-    if (index === -1) return;
+    // if (index === -1) return; // Allow navigating to 'stats' or others
 
     const headerBtns = document.querySelectorAll('.header-top .tab-btn');
     headerBtns.forEach(b => b.classList.remove('active'));
