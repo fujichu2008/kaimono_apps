@@ -1926,7 +1926,18 @@
     </div>
   </section>
 
-    <section class="screen" id="screenHome">
+      <section class="screen" id="screenHome">
+    <div class="panel topbar">
+      <div class="brand">
+        <div class="brand-badge">❓</div>
+        <div>
+          <h1>ヘルプ / ステータス算出</h1>
+          <p>KPIが戦闘力へどう変換されるか確認できます</p>
+        </div>
+      </div>
+      <button class="pill" id="btnHomeHelp">KPIヘルプ</button>
+    </div>
+
     <div class="homeGrid">
 
       <div class="panel mapCard">
@@ -4089,52 +4100,161 @@ function syncExternalMapSelection(cityId){
   });
 }
 
+function measureMunicipalityShape(shapes){
+  const list = Array.isArray(shapes) ? shapes.filter(Boolean) : [shapes].filter(Boolean);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("xmlns", ns);
+  svg.setAttribute("width", "0");
+  svg.setAttribute("height", "0");
+  svg.style.position = "absolute";
+  svg.style.left = "-99999px";
+  svg.style.top = "-99999px";
+  svg.style.overflow = "visible";
+  svg.style.pointerEvents = "none";
+
+  const root = document.createElementNS(ns, "g");
+
+  list.forEach(shape => {
+    if(!shape || !shape.path) return;
+    const wrapper = document.createElementNS(ns, "g");
+    if(shape.prefTransform) wrapper.setAttribute("transform", shape.prefTransform);
+
+    const node = document.createElementNS(ns, shape.tag === "polygon" ? "polygon" : "path");
+    if(shape.tag === "polygon"){
+      node.setAttribute("points", shape.path);
+    }else{
+      node.setAttribute("d", shape.path);
+    }
+    if(shape.pathTransform) node.setAttribute("transform", shape.pathTransform);
+
+    wrapper.appendChild(node);
+    root.appendChild(wrapper);
+  });
+
+  svg.appendChild(root);
+  document.body.appendChild(svg);
+
+  let bbox = { x:0, y:0, width:100, height:100 };
+  try{
+    const b = root.getBBox();
+    if(b && isFinite(b.x) && isFinite(b.y) && isFinite(b.width) && isFinite(b.height) && b.width > 0 && b.height > 0){
+      bbox = b;
+    }
+  }catch(e){}
+
+  if(svg.parentNode) svg.parentNode.removeChild(svg);
+
+  const baseSize = Math.max(bbox.width, bbox.height, 60);
+  const pad = Math.max(10, baseSize * 0.16);
+  const width = Math.max(60, bbox.width + pad * 2);
+  const height = Math.max(60, bbox.height + pad * 2);
+
+  return {
+    viewBox: `${bbox.x - pad} ${bbox.y - pad} ${width} ${height}`,
+    labelX: bbox.x + bbox.width / 2,
+    labelY: bbox.y + bbox.height / 2,
+    labelSize: Math.max(24, Math.min(width, height) * 0.34)
+  };
+}
+
 function getMunicipalityShape(id){
   const mapCodeById = Object.fromEntries(PREFECTURE_SEEDS.map(s => [s.id, s.code]));
   const code = mapCodeById[id];
   const label = (byId[id]?.emblem) || "県";
   const host = $("#extMapHost");
   const prefEl = code && host ? host.querySelector(`.prefecture[data-code="${code}"]`) : null;
+
   if(prefEl){
-    const pathEl = prefEl.querySelector("path, polygon");
-    if(pathEl){
-      const d = pathEl.getAttribute("d") || pathEl.getAttribute("points");
-      const tag = pathEl.tagName.toLowerCase();
-      const vb = prefEl.ownerSVGElement?.getAttribute("viewBox") || "0 0 360 420";
-      if(d){
-        return { path:d, viewBox:vb, label, tag };
-      }
+    const prefTransform = prefEl.getAttribute("transform") || "";
+    const shapes = Array.from(prefEl.querySelectorAll("path, polygon"))
+      .map(node => ({
+        path: node.getAttribute("d") || node.getAttribute("points") || "",
+        tag: node.tagName.toLowerCase(),
+        prefTransform,
+        pathTransform: node.getAttribute("transform") || ""
+      }))
+      .filter(shape => !!shape.path);
+
+    if(shapes.length){
+      const measured = measureMunicipalityShape(shapes);
+      return {
+        shapes,
+        viewBox: measured.viewBox,
+        label,
+        labelX: measured.labelX,
+        labelY: measured.labelY,
+        labelSize: measured.labelSize
+      };
     }
   }
-  return { path:"M20 20 L80 20 L80 80 L20 80 Z", viewBox:"0 0 100 100", label, tag:"path" };
+
+  return {
+    shapes:[{
+      path:"M20 20 L80 20 L80 80 L20 80 Z",
+      tag:"path",
+      prefTransform:"",
+      pathTransform:""
+    }],
+    viewBox:"0 0 100 100",
+    label,
+    labelX:50,
+    labelY:52,
+    labelSize:32
+  };
 }
+
 
 
 function renderLogo(targetEl, municipal){
   targetEl.innerHTML = "";
   const shape = getMunicipalityShape(municipal.id);
-  const baseShape = shape.tag === "polygon"
-    ? `<polygon class="geoBase" points="${shape.path}"></polygon>`
-    : `<path class="geoBase" d="${shape.path}"></path>`;
-  const glowShape = shape.tag === "polygon"
-    ? `<polygon class="geoGlow" points="${shape.path}"></polygon>`
-    : `<path class="geoGlow" d="${shape.path}"></path>`;
+  const shapes = Array.isArray(shape.shapes) && shape.shapes.length
+    ? shape.shapes
+    : [{
+        path: shape.path || "M20 20 L80 20 L80 80 L20 80 Z",
+        tag: shape.tag || "path",
+        prefTransform: shape.prefTransform || "",
+        pathTransform: shape.pathTransform || ""
+      }];
+
+  const gradientId = `geoFill_${municipal.id || "default"}`;
+
+  const makeShapeTags = (cls, extraAttr = "") => {
+    return shapes.map(part => {
+      const transformAttr = part.pathTransform ? ` transform="${part.pathTransform}"` : "";
+      const inner = part.tag === "polygon"
+        ? `<polygon class="${cls}" points="${part.path}"${transformAttr} ${extraAttr}></polygon>`
+        : `<path class="${cls}" d="${part.path}"${transformAttr} ${extraAttr}></path>`;
+      return part.prefTransform
+        ? `<g transform="${part.prefTransform}">${inner}</g>`
+        : inner;
+    }).join("");
+  };
+
+  const baseShape = makeShapeTags("geoBase");
+  const glowShape = makeShapeTags("geoGlow", `style="fill:url(#${gradientId});"`);
+  const labelX = Number.isFinite(shape.labelX) ? shape.labelX : 50;
+  const labelY = Number.isFinite(shape.labelY) ? shape.labelY : 52;
+  const labelSize = Number.isFinite(shape.labelSize) ? shape.labelSize : 32;
+
   targetEl.innerHTML = `
     <div class="geoMark" aria-label="${municipal.name} 地図アイコン">
       <svg viewBox="${shape.viewBox}" role="img" aria-hidden="true">
         <defs>
-          <linearGradient id="geoFill" x1="0" y1="0" x2="1" y2="1">
+          <linearGradient id="${gradientId}" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stop-color="#6fe4ff"></stop>
             <stop offset="100%" stop-color="#ffd77a"></stop>
           </linearGradient>
         </defs>
         ${baseShape}
         ${glowShape}
-        <text class="geoLabel" x="50%" y="52%">${municipal.emblem || shape.label}</text>
+        <text class="geoLabel" x="${labelX}" y="${labelY}" font-size="${labelSize}">${municipal.emblem || shape.label}</text>
       </svg>
     </div>
   `;
 }
+
 
 function inferSkillFx(skill, attacker){
   const fxMap = {
@@ -5195,19 +5315,32 @@ function animateSummonMeleeStrike(side, unit, damage, isGuard = false){
     const buddy = side === "player" ? $("#playerSummonBuddy") : $("#enemySummonBuddy");
     const defender = side === "player" ? $("#fighterEnemy") : $("#fighterPlayer");
     const impact = $("#impact");
-    const screen = $("#gameScreen").getBoundingClientRect();
-    if(!buddy || !defender || !impact){ resolve(); return; }
+    const screenEl = $("#gameScreen");
+    if(!buddy || !defender || !impact || !screenEl){ resolve(); return; }
 
+    const screen = screenEl.getBoundingClientRect();
     const buddyRect = buddy.getBoundingClientRect();
     const defRect = defender.getBoundingClientRect();
-    const dxRaw = (defRect.left + defRect.width / 2) - (buddyRect.left + buddyRect.width / 2);
-    const dyRaw = (defRect.top + defRect.height * 0.48) - (buddyRect.top + buddyRect.height / 2);
-    const dx = clamp(dxRaw * 0.58, side === "player" ? 34 : -240, side === "player" ? 240 : -34);
-    const dy = clamp(dyRaw * 0.52, -120, 120);
+    const dir = side === "player" ? 1 : -1;
 
-    buddy.style.transition = "transform .34s cubic-bezier(.18,.84,.24,1), filter .20s ease";
-    buddy.style.zIndex = "11";
-    buddy.style.transform = `translate(${dx}px, ${dy}px) scale(1.22)`;
+    const dxRaw = (defRect.left + defRect.width * 0.50) - (buddyRect.left + buddyRect.width * 0.50) - dir * 48;
+    const dyRaw = (defRect.top + defRect.height * 0.50) - (buddyRect.top + buddyRect.height * 0.50);
+
+    const dx = clamp(dxRaw, dir > 0 ? 46 : -260, dir > 0 ? 260 : -46);
+    const dy = clamp(dyRaw, -140, 140);
+
+    buddy.classList.remove("follow");
+    buddy.style.transition = "transform .12s ease, filter .12s ease";
+    buddy.style.zIndex = "15";
+    buddy.style.filter = "brightness(1.32) saturate(1.18) drop-shadow(0 0 22px rgba(255,255,255,.26))";
+    buddy.style.transform = `translate(${-dir * 14}px, 8px) scale(.94) rotate(${-dir * 10}deg)`;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        buddy.style.transition = "transform .28s cubic-bezier(.18,.84,.24,1), filter .18s ease";
+        buddy.style.transform = `translate(${dx}px, ${dy}px) scale(1.34) rotate(${dir * 16}deg)`;
+      });
+    });
 
     setTimeout(() => {
       defender.classList.add("hit");
@@ -5216,18 +5349,28 @@ function animateSummonMeleeStrike(side, unit, damage, isGuard = false){
       impact.classList.remove("pop");
       void impact.offsetWidth;
       impact.classList.add("pop");
-      showFloat(isGuard ? "guard" : "damage", `-${damage}`, defRect.left - screen.left + defRect.width/2 - 22, defRect.top - screen.top + 18);
-    }, 240);
+      showFloat(
+        isGuard ? "guard" : "damage",
+        `-${damage}`,
+        defRect.left - screen.left + defRect.width/2 - 22,
+        defRect.top - screen.top + 18
+      );
+    }, 250);
+
+    setTimeout(() => {
+      buddy.style.transition = "transform .24s cubic-bezier(.22,.74,.24,1), filter .18s ease";
+      buddy.style.transform = `translate(${dir * 10}px, -2px) scale(1.02) rotate(${dir * 4}deg)`;
+      defender.classList.remove("hit");
+      impact.classList.remove("pop");
+    }, 430);
 
     setTimeout(() => {
       buddy.style.transform = "";
-      defender.classList.remove("hit");
-      impact.classList.remove("pop");
-      setTimeout(() => {
-        buddy.style.transition = "";
-        buddy.style.zIndex = "";
-        resolve();
-      }, 120);
+      buddy.style.filter = "";
+      buddy.style.transition = "";
+      buddy.style.zIndex = "";
+      if(unit?.summonRemain > 0) buddy.classList.add("follow");
+      resolve();
     }, 760);
   });
 }
@@ -5250,25 +5393,23 @@ async function runSummonAction(side){
     action = owner.summon.actions.find(a => a.type === "buff") || action;
   }
 
-  if(action.type === "attack"){
+    if(action.type === "attack"){
     const basePower = action.power + Math.round((owner.kpi?.culture || 0) * 0.03) + Math.round((owner.kpi?.tourism || 0) * 0.02);
     const damage = calcDamage(owner, target, basePower, "summon");
     target.hp = clamp(target.hp - damage, 0, target.maxHp);
     const hitMp = recoverMp(target, hitMpGain(target, damage, "summon") + (target.hitMpGainBase || 0) * 0.25);
 
-        appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動。「${action.name}」！`);
-    appendLog(`→ ${owner.summon.name}が自ら前へ飛び出し、${target.name}へ ${damage} ダメージ。`);
-    appendLog(`→ ${target.name}は被弾でMP +${hitMp}。`);
-    recordBattleEvent(side, `召喚必殺: ${action.name}`, `${owner.summon.name}が突撃し、${target.name}へ${damage}ダメージ。被弾側MP+${hitMp}。`);
+    appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動。「${action.name}」！`);
+    appendLog(`→ ${owner.summon.name}は一度身を引いてから、${target.name}へ一直線に飛び込んだ。`);
+    appendLog(`→ 接触と同時に ${damage} ダメージ。${target.name}は被弾でMP +${hitMp}。`);
+    recordBattleEvent(side, `召喚必殺: ${action.name}`, `${owner.summon.name}が自ら飛び込み、${target.name}へ${damage}ダメージ。被弾側MP+${hitMp}。`);
     BattleAudio.sfx("summon", { ...owner.summon, ownerId: owner.id, style: owner.summon?.style || "", entrance: owner.summon?.entrance || "", actionType: action.type || "attack", actionName: action.name || "" });
 
-    await Promise.all([
-      playSummonActionCinematic(owner, action),
-      animateSummonMeleeStrike(side, owner, damage, !!target.guardType)
-    ]);
+    await animateSummonMeleeStrike(side, owner, damage, !!target.guardType);
+    await new Promise(r => setTimeout(r, 90));
 
     if(target.guardType){
-      appendLog(`→ ${target.name}は召喚獣の一撃を受けて防御体勢が崩れた。`);
+      appendLog(`→ ${target.name}は召喚獣の体当たりで防御体勢が崩れた。`);
       target.guardType = null;
       target.guarding = false;
     }
@@ -6415,6 +6556,40 @@ $("#btnTitleAbout").addEventListener("click", async () => {
   );
 });
 
+const KPI_HELP_TEXT = `都道府県バトル / KPI→戦闘ステータス対応
+
+■ 主要ステータスの作られ方
+・体力: 人口 + 農業 + 自然 + 地域補正
+・魔力: 文化 + 観光 + 年収 + 研究 + 地域補正
+・攻撃: 経済 + 工業 + 年収 + 地域補正
+・防御: インフラ + 人口 + 工業 + 自然 + 地域補正
+・機動: インフラ + 研究 + 人口 + 観光 + 地域補正
+・文化: 文化 + 観光 + 自然 + 地域補正
+
+■ 戦闘中にさらに使われるKPI
+・最大HP: 体力・防御・人口が大きく影響
+・最大MP: 魔力・文化・年収・研究が影響
+・ATB速度: 機動に加え、インフラ・研究・人口・観光が影響
+・通常攻撃/特技火力: 攻撃に加え、経済・工業・文化・機動が影響
+・召喚支援: 文化・観光・研究が高いほど有利
+・持久力/自然回復: 農業・自然・人口が高いほど有利
+
+■ 見方のコツ
+・都市型: 人口/経済/研究が高く、機動・魔力寄り
+・工業型: 経済/工業が高く、攻撃寄り
+・自然型: 農業/自然が高く、体力・持久寄り
+・歴史文化型: 文化/観光が高く、魔力・召喚寄り
+
+※ 実際には都道府県ごとの固有特性、召喚、戦場効果でも補正されます。`;
+
+const btnHomeHelp = $("#btnHomeHelp");
+if(btnHomeHelp){
+  btnHomeHelp.addEventListener("click", async () => {
+    await MenuAudio.start().catch(()=>{});
+    alert(KPI_HELP_TEXT);
+  });
+}
+
 renderDetail(state.selectedId);
 loadExternalJapanMap();
 state.enemyId = chooseEnemy(state.selectedId);
@@ -6460,17 +6635,20 @@ document.addEventListener("visibilitychange", () => {
 
 
 
+
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "12d1f90d64ab3a4463bea768e47abc1e",
   "createdAt": "2026-03-08T01:12:10.287Z",
   "schema": 2,
   "title": "都道府県バトル - Prefectural Fantasy",
-  "savedAt": "2026-03-09T12:49:35.659Z",
-  "aiInstruction": "最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\n最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\n最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\nゲーム開始時の、戦闘場所をカメラがぐるっと一周するような動的なモーションを入れること。\n\n自分のATBが100％になったら、コマンドを入力するまで、相手のATB進行を一時ストップする\n\n防御の「ふるさと納税」以外コマンドをタップすると、ゲームが進行しなくなる。\n\n見切りと、防御陣形を選択したとき、画面がこんな感じになり、閉じるを押すまでゲームが進行しない。選択したらそれに基づき防御行動をとり自動でゲーム進行するように。\n\n通常攻撃するときの間を少し長く。\n\n各攻撃、特技、また召喚するときの効果音をもっと大きくはっきりさせて。",
-  "comment": "最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\n最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\n最初にメニューに出てくるとき、北海道固定ではなく、どこかの都道府県をランダムで表示する。\n\nゲーム開始時の、戦闘場所をカメラがぐるっと一周するような動的なモーションを入れること。\n\n自分のATBが100％になったら、コマンドを入力するまで、相手のATB進行を一時ストップする\n\n防御の「ふるさと納税」以外コマンドをタップすると、ゲームが進行しなくなる。\n\n見切りと、防御陣形を選択したとき、画面がこんな感じになり、閉じるを押すまでゲームが進行しない。選択したらそれに基づき防御行動をとり自動でゲーム進行するように。\n\n通常攻撃するときの間を少し長く。\n\n各攻撃、特技、また召喚するときの効果音をもっと大きくはっきりさせて。",
+  "savedAt": "2026-03-09T22:23:57.869Z",
+  "aiInstruction": "戦闘画面の都道府県キャラで、都道府県の形が表示されません。\n\nこんな表示になってしまう",
+  "comment": "戦闘画面の都道府県キャラで、都道府県の形が表示されません。\n\nこんな表示になってしまう",
   "sourceMode": "project",
-  "runId": "197ddee9a7b4353b02edcb7c96bc5397"
+  "runId": "b5210c5662eca1605093fb9ac28b445f"
 }
 </script>
 </body>
