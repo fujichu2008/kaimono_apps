@@ -1,3 +1,12 @@
+<!--
+変更点要約:
+- MPを「徐々に溜まって消費する資源」に再設計
+- 戦闘開始MPを最大値の30〜40%へ圧縮
+- 通常攻撃・防御・被弾でMP回復する循環を追加
+- 必殺技コストを軽技/中技/大技で再調整
+- 3つ目の大技はBurst条件付きに変更
+- 演出/UI/世界観は極力維持し、戦闘バランスのみ改善
+-->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -6,6 +15,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <title>都道府県バトル - Prefectural Fantasy</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.2.2/abcjs-audio.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.2.2/abcjs-basic-min.js"></script>
 <style>
   :root{
     --bg:#050814;
@@ -457,13 +468,158 @@
       radial-gradient(circle at 50% 14%, rgba(111,228,255,.10), transparent 42%);
     opacity:.8;
   }
-  .gameScreen:after{
+    .gameScreen:after{
     content:"";position:absolute;left:0;right:0;bottom:0;height:46%;pointer-events:none;
     background:
       linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.10) 18%, rgba(0,0,0,.28) 100%);
   }
 
+  .battleIntroOverlay{
+    position:absolute;inset:0;z-index:20;pointer-events:none;overflow:hidden;
+    opacity:0;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(255,255,255,.18), rgba(255,255,255,0) 26%),
+      radial-gradient(circle at 20% 24%, rgba(111,228,255,.18), transparent 26%),
+      radial-gradient(circle at 82% 20%, rgba(162,124,255,.16), transparent 24%),
+      radial-gradient(circle at 50% 78%, rgba(255,215,122,.12), transparent 24%),
+      linear-gradient(180deg, rgba(4,8,20,.06), rgba(4,8,20,.36) 58%, rgba(4,8,20,.72));
+    backdrop-filter:blur(0px);
+    transform:scale(1.18);
+    transform-origin:center center;
+  }
+  .battleIntroOverlay::before,
+  .battleIntroOverlay::after{
+    content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;
+  }
+  .battleIntroOverlay::before{
+    width:140vmax;height:140vmax;
+    border:1px solid rgba(111,228,255,.18);
+    box-shadow:0 0 38px rgba(111,228,255,.12), inset 0 0 42px rgba(111,228,255,.06);
+    background:repeating-radial-gradient(circle at center, rgba(255,255,255,.045) 0 2px, transparent 2px 22px);
+    opacity:.0;
+  }
+  .battleIntroOverlay::after{
+    width:84vmax;height:84vmax;
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:0 0 24px rgba(255,255,255,.10), inset 0 0 28px rgba(255,215,122,.05);
+    opacity:.0;
+  }
+  .battleIntroLabel{
+    position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.82);
+    z-index:21;pointer-events:none;opacity:0;
+    min-width:min(80vw,560px);
+    padding:16px 22px;border-radius:22px;text-align:center;
+    background:linear-gradient(180deg, rgba(8,12,24,.56), rgba(8,12,24,.24));
+    border:1px solid rgba(255,255,255,.12);
+    box-shadow:0 24px 60px rgba(0,0,0,.30), inset 0 0 30px rgba(255,255,255,.04);
+    backdrop-filter:blur(16px);
+  }
+  .battleIntroLabel b{
+    display:block;font-size:clamp(20px,4vw,40px);letter-spacing:.14em;color:#eef7ff;
+    text-shadow:0 0 18px rgba(111,228,255,.20), 0 0 28px rgba(0,0,0,.22);
+  }
+  .battleIntroLabel span{
+    display:block;margin-top:8px;font-size:12px;font-weight:800;letter-spacing:.16em;color:#d9e6ff;opacity:.92;
+  }
+  .gameScreen.introPlaying{
+    perspective:1600px;
+    transform-style:preserve-3d;
+  }
+  .gameScreen.introPlaying .stageBackdrop,
+  .gameScreen.introPlaying .arenaFloor,
+  .gameScreen.introPlaying .ritualCircle,
+  .gameScreen.introPlaying .sigilLine,
+  .gameScreen.introPlaying .fighter,
+  .gameScreen.introPlaying .statusWrap,
+  .gameScreen.introPlaying .commandWrap,
+  .gameScreen.introPlaying .gameScreenInnerTopFade{
+    animation:battleIntroWorldSpin 1.9s cubic-bezier(.18,.84,.24,1) forwards;
+    transform-origin:center center;
+    will-change:transform, filter, opacity;
+  }
+  .gameScreen.introPlaying .stageBackdrop{animation-duration:1.95s}
+  .gameScreen.introPlaying .arenaFloor,
+  .gameScreen.introPlaying .ritualCircle,
+  .gameScreen.introPlaying .sigilLine{animation-duration:1.85s}
+  .gameScreen.introPlaying .fighter.player{animation-name:battleIntroWorldSpinLeft;animation-duration:1.92s}
+  .gameScreen.introPlaying .fighter.enemy{animation-name:battleIntroWorldSpinRight;animation-duration:1.92s}
+  .gameScreen.introPlaying .statusWrap.player{animation-name:battleIntroHudLeft;animation-duration:1.72s}
+  .gameScreen.introPlaying .statusWrap.enemy{animation-name:battleIntroHudRight;animation-duration:1.72s}
+  .gameScreen.introPlaying .commandWrap{animation-name:battleIntroHudBottom;animation-duration:1.72s}
+  .gameScreen.introPlaying .battleIntroOverlay{
+    animation:battleIntroOverlayFlash 1.9s cubic-bezier(.18,.84,.24,1) forwards;
+  }
+  .gameScreen.introPlaying .battleIntroOverlay::before{
+    animation:battleIntroRing1 1.9s cubic-bezier(.18,.84,.24,1) forwards;
+  }
+  .gameScreen.introPlaying .battleIntroOverlay::after{
+    animation:battleIntroRing2 1.9s cubic-bezier(.18,.84,.24,1) forwards;
+  }
+  .gameScreen.introPlaying .battleIntroLabel{
+    animation:battleIntroLabelIn 1.9s cubic-bezier(.18,.84,.24,1) forwards;
+  }
+  @keyframes battleIntroWorldSpin{
+    0%{transform:translateZ(-320px) rotateY(0deg) rotateX(14deg) scale(1.30);filter:blur(10px) saturate(1.18) brightness(.86);opacity:.18}
+    16%{transform:translateZ(-120px) rotateY(84deg) rotateX(10deg) scale(1.18);filter:blur(7px) saturate(1.16) brightness(.94);opacity:.45}
+    38%{transform:translateZ(24px) rotateY(194deg) rotateX(6deg) scale(1.10);filter:blur(4px) saturate(1.12) brightness(1.02);opacity:.82}
+    64%{transform:translateZ(60px) rotateY(300deg) rotateX(2deg) scale(1.03);filter:blur(1.5px) saturate(1.06) brightness(1.08);opacity:1}
+    82%{transform:translateZ(16px) rotateY(346deg) rotateX(0deg) scale(1.01);filter:blur(.6px) saturate(1.02) brightness(1.04);opacity:1}
+    100%{transform:translateZ(0) rotateY(360deg) rotateX(0deg) scale(1);filter:blur(0) saturate(1) brightness(1);opacity:1}
+  }
+  @keyframes battleIntroWorldSpinLeft{
+    0%{transform:translateZ(-340px) translateX(-120px) rotateY(-30deg) rotateX(16deg) scale(1.36);filter:blur(10px);opacity:.10}
+    24%{transform:translateZ(-80px) translateX(34px) rotateY(110deg) rotateX(8deg) scale(1.16);filter:blur(6px);opacity:.72}
+    58%{transform:translateZ(48px) translateX(18px) rotateY(262deg) rotateX(2deg) scale(1.04);filter:blur(1.2px);opacity:1}
+    100%{transform:translateZ(0) translateX(0) rotateY(360deg) rotateX(0deg) scale(.96);filter:blur(0);opacity:1}
+  }
+  @keyframes battleIntroWorldSpinRight{
+    0%{transform:translateZ(-340px) translateX(120px) rotateY(30deg) rotateX(16deg) scale(1.08);filter:blur(10px);opacity:.10}
+    24%{transform:translateZ(-80px) translateX(-34px) rotateY(250deg) rotateX(8deg) scale(.92);filter:blur(6px);opacity:.72}
+    58%{transform:translateZ(48px) translateX(-18px) rotateY(98deg) rotateX(2deg) scale(.80);filter:blur(1.2px);opacity:1}
+    100%{transform:translateZ(0) translateX(0) rotateY(0deg) rotateX(0deg) scale(.74);filter:blur(0);opacity:1}
+  }
+  @keyframes battleIntroHudLeft{
+    0%{transform:translateX(-80px) translateY(-20px) scale(.84);opacity:0;filter:blur(8px)}
+    52%{transform:translateX(-18px) translateY(-2px) scale(.95);opacity:.58;filter:blur(3px)}
+    100%{transform:none;opacity:1;filter:blur(0)}
+  }
+  @keyframes battleIntroHudRight{
+    0%{transform:translateX(80px) translateY(-20px) scale(.84);opacity:0;filter:blur(8px)}
+    52%{transform:translateX(18px) translateY(-2px) scale(.95);opacity:.58;filter:blur(3px)}
+    100%{transform:none;opacity:1;filter:blur(0)}
+  }
+  @keyframes battleIntroHudBottom{
+    0%{transform:translateY(60px) scale(.88);opacity:0;filter:blur(10px)}
+    54%{transform:translateY(12px) scale(.96);opacity:.66;filter:blur(3px)}
+    100%{transform:none;opacity:1;filter:blur(0)}
+  }
+  @keyframes battleIntroOverlayFlash{
+    0%{opacity:0;transform:scale(1.24);backdrop-filter:blur(12px)}
+    18%{opacity:1}
+    52%{opacity:.96;transform:scale(1.08);backdrop-filter:blur(6px)}
+    100%{opacity:0;transform:scale(1);backdrop-filter:blur(0px)}
+  }
+  @keyframes battleIntroRing1{
+    0%{opacity:0;transform:translate(-50%,-50%) scale(.24) rotate(0deg)}
+    18%{opacity:.86}
+    72%{opacity:.44;transform:translate(-50%,-50%) scale(1.02) rotate(250deg)}
+    100%{opacity:0;transform:translate(-50%,-50%) scale(1.28) rotate(360deg)}
+  }
+  @keyframes battleIntroRing2{
+    0%{opacity:0;transform:translate(-50%,-50%) scale(.14) rotate(0deg)}
+    24%{opacity:.72}
+    76%{opacity:.34;transform:translate(-50%,-50%) scale(.96) rotate(-220deg)}
+    100%{opacity:0;transform:translate(-50%,-50%) scale(1.14) rotate(-360deg)}
+  }
+  @keyframes battleIntroLabelIn{
+    0%{opacity:0;transform:translate(-50%,-50%) scale(.76) translateY(28px);filter:blur(8px)}
+    24%{opacity:1;transform:translate(-50%,-50%) scale(1.02) translateY(0);filter:blur(0)}
+    60%{opacity:1;transform:translate(-50%,-50%) scale(1.00) translateY(0);filter:blur(0)}
+    100%{opacity:0;transform:translate(-50%,-50%) scale(.96) translateY(-18px);filter:blur(4px)}
+  }
+
       .stageBackdrop{
+
     position:absolute;left:0;right:0;bottom:45%;height:31%;pointer-events:none;z-index:1;overflow:hidden;
   }
   .stageBackdrop::before,
@@ -769,17 +925,85 @@
   }
   .unitTop h3{margin:0;font-size:14px;line-height:1.2}
   .unitTop small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
-  .badge{
+    .badge{
     font-size:10px;font-weight:900;padding:5px 8px;border-radius:999px;
     background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.08);
     white-space:nowrap;
   }
-  .gaugeRow{
+  .statusBadges{
+    display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 8px;
+  }
+  .statusMini{
+    font-size:9px;font-weight:900;line-height:1;
+    padding:5px 7px;border-radius:999px;
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.10);
+    color:#eaf4ff;
+    box-shadow:0 4px 12px rgba(0,0,0,.16);
+  }
+  .statusMini.freeze{background:rgba(170,220,255,.12);border-color:rgba(170,220,255,.28)}
+  .statusMini.confusion{background:rgba(255,214,122,.12);border-color:rgba(255,214,122,.26)}
+  .statusMini.logistic{background:rgba(255,148,112,.12);border-color:rgba(255,148,112,.28)}
+  .statusMini.congestion{background:rgba(162,124,255,.12);border-color:rgba(162,124,255,.28)}
+  .statusMini.guard{background:rgba(106,220,167,.12);border-color:rgba(106,220,167,.28)}
+  .statusMini.debuff{background:rgba(255,126,150,.12);border-color:rgba(255,126,150,.28)}
+
+    .gaugeRow{
     display:grid;grid-template-columns:28px 1fr auto;gap:8px;align-items:center;margin:7px 0;
     font-size:11px;
   }
   .gaugeRow span{color:var(--muted)}
   .gaugeRow b{font-size:11px}
+
+  .atbSlimRow{
+    margin:0 0 8px;
+  }
+  .atbSlimLabel{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:5px;
+    font-size:9px;font-weight:900;letter-spacing:.08em;color:var(--muted);
+    text-transform:uppercase;
+  }
+  .atbSlimLabel .readyText{
+    opacity:0;transform:translateY(2px);
+    transition:opacity .22s ease, transform .22s ease;
+    color:#fff7cf;
+    text-shadow:0 0 10px rgba(255,215,122,.28);
+  }
+  .atbSlimRow.ready .readyText{
+    opacity:1;transform:none;
+  }
+  .atbTrack{
+    position:relative;
+    height:6px;
+    border-radius:999px;
+    overflow:hidden;
+    background:rgba(255,255,255,.09);
+    border:1px solid rgba(255,255,255,.08);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.02);
+  }
+  .atbFill{
+    height:100%;width:0%;border-radius:999px;
+    background:linear-gradient(90deg, rgba(111,228,255,.92), rgba(162,124,255,.92));
+    box-shadow:0 0 10px rgba(111,228,255,.20);
+    transition:width .12s linear, filter .18s ease, box-shadow .18s ease;
+  }
+  .atbFill.ready{
+    background:linear-gradient(90deg, #ff6b6b 0%, #ffd93d 18%, #6bff95 36%, #6fe4ff 54%, #7c8cff 72%, #d66bff 100%);
+    background-size:220% 100%;
+    box-shadow:0 0 12px rgba(255,255,255,.36), 0 0 22px rgba(111,228,255,.30), 0 0 30px rgba(255,215,122,.22);
+    filter:saturate(1.18) brightness(1.12);
+    animation:atbRainbowFlow 1.3s linear infinite, atbReadyPulse 1s ease-in-out infinite;
+  }
+  @keyframes atbRainbowFlow{
+    0%{background-position:0% 50%}
+    100%{background-position:220% 50%}
+  }
+  @keyframes atbReadyPulse{
+    0%,100%{box-shadow:0 0 10px rgba(255,255,255,.24), 0 0 18px rgba(111,228,255,.20), 0 0 24px rgba(255,215,122,.16)}
+    50%{box-shadow:0 0 14px rgba(255,255,255,.42), 0 0 26px rgba(111,228,255,.34), 0 0 36px rgba(255,215,122,.26)}
+  }
+
 
   .fighter{
     position:absolute;display:flex;flex-direction:column;align-items:center;z-index:4;
@@ -789,9 +1013,17 @@
     .fighter.player{left:5%;bottom:35%;transform:translateZ(0) scale(.96)}
   .fighter.enemy{right:4%;bottom:44%;transform:translateZ(0) scale(.74)}
 
-  .fighter.hit{animation:hitShake .34s ease}
+    .fighter.hit{animation:hitShake .34s ease}
   .fighter.attack.player{animation:advanceP .52s ease}
   .fighter.attack.enemy{animation:advanceE .52s ease}
+  .fighter.defeated{
+    animation:defeatCollapse 1.15s cubic-bezier(.2,.8,.2,1) forwards;
+    pointer-events:none;
+    filter:drop-shadow(0 28px 36px rgba(0,0,0,.50));
+  }
+  .fighter.defeated .char{
+    animation:none !important;
+  }
   @keyframes advanceP{0%,100%{transform:scale(1.00) translateX(0)}40%{transform:scale(1.00) translateX(38px)}}
   @keyframes advanceE{0%,100%{transform:scale(.78) translateX(0)}40%{transform:scale(.78) translateX(-38px)}}
   @keyframes hitShake{
@@ -801,6 +1033,14 @@
     60%{transform:translateX(-6px)}
     80%{transform:translateX(6px)}
   }
+  @keyframes defeatCollapse{
+    0%{opacity:1;transform:translateZ(0) rotate(0deg) scale(1)}
+    18%{opacity:1;transform:translateY(2px) rotate(-2deg) scale(.99)}
+    42%{opacity:1;transform:translateY(16px) rotate(8deg) scale(.96)}
+    72%{opacity:.96;transform:translateY(56px) rotate(20deg) scale(.90)}
+    100%{opacity:.84;transform:translateY(108px) rotate(28deg) scale(.82)}
+  }
+
 
   .char{
     position:relative;width:182px;height:236px;display:grid;place-items:center;
@@ -918,8 +1158,16 @@
     white-space:nowrap;font-size:10px;font-weight:800;color:#dce8ff;
     text-shadow:0 2px 8px rgba(0,0,0,.45);
   }
-  .summonBuddy.player.follow{animation:summonFloatP 2.8s ease-in-out infinite}
+    .summonBuddy.player.follow{animation:summonFloatP 2.8s ease-in-out infinite}
   .summonBuddy.enemy.follow{animation:summonFloatE 3.1s ease-in-out infinite}
+  .summonBuddy.enter-skyfall{animation:summonEnterSkyfall .82s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.enter-sea{animation:summonEnterSea .72s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.enter-warp{animation:summonEnterWarp .66s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.enter-gate{animation:summonEnterGate .74s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.enter-groundbreak{animation:summonEnterGroundbreak .84s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.enter-dash,
+  .summonBuddy.enter-neon{animation:summonEnterDash .58s cubic-bezier(.14,.84,.22,1) forwards}
+  .summonBuddy.exit-quick{animation:summonExitQuick .34s ease forwards}
   @keyframes summonFloatP{
     0%,100%{transform:translateY(0) scale(1)}
     50%{transform:translateY(-6px) translateX(4px) scale(1.03)}
@@ -927,6 +1175,40 @@
   @keyframes summonFloatE{
     0%,100%{transform:translateY(0) scale(1)}
     50%{transform:translateY(-7px) translateX(-4px) scale(1.03)}
+  }
+  @keyframes summonEnterSkyfall{
+    0%{opacity:0;transform:translateY(-140px) scale(.28) rotate(-18deg);filter:blur(8px)}
+    58%{opacity:1;transform:translateY(10px) scale(1.12) rotate(8deg);filter:blur(0)}
+    100%{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}
+  }
+  @keyframes summonEnterSea{
+    0%{opacity:0;transform:translateY(56px) scale(.52);filter:blur(5px)}
+    60%{opacity:1;transform:translateY(-8px) scale(1.08)}
+    100%{opacity:1;transform:translateY(0) scale(1)}
+  }
+  @keyframes summonEnterWarp{
+    0%{opacity:0;transform:scale(.12) rotate(-180deg);filter:blur(10px)}
+    62%{opacity:1;transform:scale(1.12) rotate(10deg);filter:blur(0)}
+    100%{opacity:1;transform:scale(1) rotate(0deg)}
+  }
+  @keyframes summonEnterGate{
+    0%{opacity:0;transform:translateY(-24px) scale(.34);filter:brightness(1.8) blur(5px)}
+    58%{opacity:1;transform:translateY(4px) scale(1.1);filter:brightness(1.1) blur(0)}
+    100%{opacity:1;transform:translateY(0) scale(1);filter:brightness(1)}
+  }
+  @keyframes summonEnterGroundbreak{
+    0%{opacity:0;transform:translateY(72px) scale(.22);filter:blur(5px)}
+    38%{opacity:1;transform:translateY(-12px) scale(1.14)}
+    100%{opacity:1;transform:translateY(0) scale(1)}
+  }
+  @keyframes summonEnterDash{
+    0%{opacity:0;transform:translateX(-120px) scale(.54) skewX(-18deg);filter:blur(6px)}
+    72%{opacity:1;transform:translateX(8px) scale(1.06) skewX(0deg);filter:blur(0)}
+    100%{opacity:1;transform:translateX(0) scale(1)}
+  }
+  @keyframes summonExitQuick{
+    0%{opacity:1;transform:translateY(0) scale(1)}
+    100%{opacity:0;transform:translateY(10px) scale(.88)}
   }
 
   .effectBeam,.impact,.damageFloat,.guardFloat{
@@ -1573,9 +1855,13 @@
     .unitTop h3{font-size:12px}
     .unitTop small{font-size:10px}
     .badge{font-size:9px;padding:4px 7px}
-    .gaugeRow{grid-template-columns:22px 1fr auto;gap:6px;margin:6px 0;font-size:10px}
+        .gaugeRow{grid-template-columns:22px 1fr auto;gap:6px;margin:6px 0;font-size:10px}
     .gaugeRow b{font-size:10px}
+    .atbSlimRow{margin:0 0 7px}
+    .atbSlimLabel{font-size:8px;margin-bottom:4px}
+    .atbTrack{height:5px}
             .fighter.player{left:-2%;bottom:35%;transform:scale(.76)}
+
     .fighter.enemy{right:-2%;bottom:43%;transform:scale(.56)}
     .char{width:144px;height:188px}
     .charCore{width:118px;height:156px}
@@ -1687,12 +1973,15 @@
               <div class="sectionTitle">主要KPI</div>
               <div class="stats" id="detailKpis"></div>
             </div>
-            <div>
+                        <div>
+              <div class="sectionTitle">固有特性</div>
+              <div class="list" id="detailPassive"></div>
               <div class="sectionTitle">固有必殺技</div>
               <div class="list" id="detailSkills"></div>
               <div class="sectionTitle">召喚</div>
               <div class="list" id="detailSummon"></div>
             </div>
+
           </div>
 
         </div>
@@ -1710,8 +1999,11 @@
     <div class="gameScreen" id="gameScreen">
       <button class="battleCloseBtn" id="btnBattleClose" aria-label="戦闘を終了して戻る">×</button>
 
-            <div class="gameScreenInnerTopFade"></div>
+                  <div class="gameScreenInnerTopFade"></div>
+      <div class="battleIntroOverlay" id="battleIntroOverlay"></div>
+      <div class="battleIntroLabel" id="battleIntroLabel"><b>幻想戦場、展開</b><span>BATTLE FIELD DEPLOYMENT</span></div>
       <div class="stageBackdrop" id="stageBackdrop">
+
         <div class="stageSkyMotion"></div>
         <div class="stageLandmark"></div>
         <div class="stageFrontMotion"></div>
@@ -1725,34 +2017,48 @@
 
       <div class="statusWrap enemy">
         <div class="unitHud enemy">
-          <div class="unitTop">
+                    <div class="unitTop">
             <div>
               <h3 id="enemyName">横浜市</h3>
               <small id="enemyRole">港都の交易魔装騎士</small>
             </div>
             <div class="badge" id="enemyStatusBadge">通常</div>
           </div>
-                    <div class="gaugeRow"><span>体力</span><div class="bar"><div class="fill" id="eHp"></div></div><b id="eHpText">0/0</b></div>
+          <div class="statusBadges" id="enemyStatusBadges"></div>
+
+                              <div class="atbSlimRow" id="eAtbRow">
+            <div class="atbSlimLabel"><span>ATB</span><span class="readyText">READY</span></div>
+            <div class="atbTrack"><div class="atbFill" id="eAtb"></div></div>
+            <b id="eAtbText" class="hidden"></b>
+          </div>
+          <div class="gaugeRow"><span>体力</span><div class="bar"><div class="fill" id="eHp"></div></div><b id="eHpText">0/0</b></div>
           <div class="gaugeRow"><span>魔力</span><div class="bar"><div class="fill" id="eMp"></div></div><b id="eMpText">0/0</b></div>
           <div class="gaugeRow"><span>必殺</span><div class="bar"><div class="fill" id="eBurst"></div></div><b id="eBurstText">0%</b></div>
-          <div class="gaugeRow"><span>ATB</span><div class="bar"><div class="fill" id="eAtb"></div></div><b id="eAtbText">0%</b></div>
+
 
         </div>
       </div>
 
       <div class="statusWrap player">
         <div class="unitHud player">
-          <div class="unitTop">
+                    <div class="unitTop">
             <div>
               <h3 id="playerName">札幌市</h3>
               <small id="playerRole">氷都の術戦司令</small>
             </div>
             <div class="badge" id="playerStatusBadge">通常</div>
           </div>
-                    <div class="gaugeRow"><span>体力</span><div class="bar"><div class="fill" id="pHp"></div></div><b id="pHpText">0/0</b></div>
+          <div class="statusBadges" id="playerStatusBadges"></div>
+
+                              <div class="atbSlimRow" id="pAtbRow">
+            <div class="atbSlimLabel"><span>ATB</span><span class="readyText">READY</span></div>
+            <div class="atbTrack"><div class="atbFill" id="pAtb"></div></div>
+            <b id="pAtbText" class="hidden"></b>
+          </div>
+          <div class="gaugeRow"><span>体力</span><div class="bar"><div class="fill" id="pHp"></div></div><b id="pHpText">0/0</b></div>
           <div class="gaugeRow"><span>魔力</span><div class="bar"><div class="fill" id="pMp"></div></div><b id="pMpText">0/0</b></div>
           <div class="gaugeRow"><span>必殺</span><div class="bar"><div class="fill" id="pBurst"></div></div><b id="pBurstText">0%</b></div>
-          <div class="gaugeRow"><span>ATB</span><div class="bar"><div class="fill" id="pAtb"></div></div><b id="pAtbText">0%</b></div>
+
 
         </div>
       </div>
@@ -1834,9 +2140,10 @@
               <b>サブコマンド</b>
               <span id="skillMenuHint">必殺技を選択</span>
             </div>
-            <button class="skillBtn" id="skillBtn0"></button>
+                        <button class="skillBtn" id="skillBtn0"></button>
             <button class="skillBtn" id="skillBtn1"></button>
             <button class="skillBtn" id="skillBtn2"></button>
+            <button class="skillBtn" id="skillBtn3"></button>
             <button class="skillBtn" id="skillCancel">閉じる</button>
           </div>
           <div class="battleLog" id="battleLog">地図から選ばれた自治体が幻想戦場へ降り立った……</div>
@@ -1968,8 +2275,129 @@ function getRegion(code){
   return "okinawa";
 }
 
+const PASSIVE_LIBRARY = {
+  hokkaido:{ name:"北の大地の循環", text:"HP35%以下で行動後に自然回復。", type:"low_hp_regen", values:{ threshold:0.35, healRate:0.08 } },
+  aomori:{ name:"ねぶたの勢い", text:"戦闘開始時にBurst上昇。", type:"start_burst", values:{ burst:16 } },
+  iwate:{ name:"南部鉄壁", text:"被弾時に低確率で軽減。", type:"chip_guard", values:{ reduction:0.10 } },
+  miyagi:{ name:"杜の都オペレーション", text:"戦闘開始時にMPを少量回復。", type:"start_mp", values:{ mp:10 } },
+  akita:{ name:"雪国の粘り", text:"HP50%以下で被弾時にBurst増加。", type:"hurt_burst", values:{ threshold:0.5, burst:10 } },
+  yamagata:{ name:"果樹の滋養", text:"行動後にMPを少量回復。", type:"action_mp", values:{ mp:5 } },
+  fukushima:{ name:"再生の意志", text:"行動後に低HPなら回復。", type:"low_hp_regen", values:{ threshold:0.45, healRate:0.06 } },
+  ibaraki:{ name:"研究学園ジャミング", text:"与ダメ時に相手ATBを少し下げる。", type:"hit_atb_down", values:{ atbDown:12 } },
+  tochigi:{ name:"内陸安定線", text:"防御時の軽減がやや高い。", type:"guard_plus", values:{ reduction:0.06 } },
+  gunma:{ name:"からっ風加速", text:"戦闘開始時にATB上昇。", type:"start_atb", values:{ atb:18 } },
+  saitama:{ name:"堅実防衛網", text:"常時ダメージを小さく軽減。", type:"steady_guard", values:{ reduction:0.08 } },
+  chiba:{ name:"湾岸フロー", text:"召喚中はsummonATBが速い。", type:"summon_haste", values:{ rate:1.18 } },
+  tokyo:{ name:"首都圏クロック", text:"戦闘開始時にATBが大きく上昇。", type:"start_atb", values:{ atb:34 } },
+  kanagawa:{ name:"港都の反射神経", text:"見切り時の軽減がさらに高い。", type:"insight_plus", values:{ reduction:0.08 } },
+  niigata:{ name:"穀倉ストック", text:"行動後にMPを少量回復。", type:"action_mp", values:{ mp:6 } },
+  toyama:{ name:"薬都の整備", text:"状態異常の残りターンが伸びにくい。", type:"status_resist", values:{ resist:1 } },
+  ishikawa:{ name:"工芸の格", text:"戦闘開始時にBurst上昇。", type:"start_burst", values:{ burst:12 } },
+  fukui:{ name:"精密観測", text:"必殺技でBurst消費時の倍率が少し高い。", type:"burst_amp", values:{ rate:1.08 } },
+  yamanashi:{ name:"果樹補給線", text:"低HP時の回復量がやや高い。", type:"low_hp_regen", values:{ threshold:0.40, healRate:0.09 } },
+  nagano:{ name:"高原冷却", text:"凍結を受けると1ターン短縮されやすい。", type:"status_resist", values:{ resist:1 } },
+  gifu:{ name:"山城の受け", text:"初回被ダメを軽減。", type:"first_hit_guard", values:{ reduction:0.22 } },
+  shizuoka:{ name:"均衡物流", text:"行動後にATBを少し得る。", type:"action_atb", values:{ atb:8 } },
+  aichi:{ name:"量産ライン追撃", text:"通常攻撃後に低威力追撃が発生。", type:"double_strike_basic", values:{ rate:0.70, powerRate:0.42 } },
+  mie:{ name:"神宮の静護", text:"初回被ダメを軽減。", type:"first_hit_guard", values:{ reduction:0.18 } },
+  shiga:{ name:"湖国防壁", text:"常時ダメージを小さく軽減。", type:"steady_guard", values:{ reduction:0.06 } },
+  kyoto:{ name:"千年結界", text:"初回被ダメを大きく軽減。", type:"first_hit_guard", values:{ reduction:0.35 } },
+  osaka:{ name:"商都ボルテージ", text:"行動後にBurstが増えやすい。", type:"action_burst", values:{ burst:10 } },
+  hyogo:{ name:"多港連結", text:"召喚中はsummonATBが速い。", type:"summon_haste", values:{ rate:1.15 } },
+  nara:{ name:"古都の静圧", text:"戦闘開始時に防御補正。", type:"guard_plus", values:{ reduction:0.05 } },
+  wakayama:{ name:"海山回生", text:"行動後にHPを少量回復。", type:"turn_regen", values:{ healRate:0.04 } },
+  tottori:{ name:"砂丘回避", text:"見切り時の通常攻撃回避補正。", type:"insight_plus", values:{ reduction:0.06 } },
+  shimane:{ name:"神話の後押し", text:"戦闘開始時にMPとBurst上昇。", type:"start_mix", values:{ mp:8, burst:8 } },
+  okayama:{ name:"晴れの安定", text:"行動後にATBを少し得る。", type:"action_atb", values:{ atb:7 } },
+  hiroshima:{ name:"再起の灯", text:"HP40%以下で被弾後に回復。", type:"hurt_regen", values:{ threshold:0.40, healRate:0.05 } },
+  yamaguchi:{ name:"西端ゲート", text:"与ダメ時に相手summonATBも少し下げる。", type:"hit_logistic_down", values:{ summonAtbDown:12 } },
+  tokushima:{ name:"阿波リズム", text:"行動後にBurst増加。", type:"action_burst", values:{ burst:8 } },
+  kagawa:{ name:"高密度動作", text:"戦闘開始時にATB上昇。", type:"start_atb", values:{ atb:20 } },
+  ehime:{ name:"柑橘ヒール", text:"行動後にHPを少量回復。", type:"turn_regen", values:{ healRate:0.04 } },
+  kochi:{ name:"豪快一気", text:"通常攻撃の与Burstがやや高い。", type:"basic_burst", values:{ burst:6 } },
+  fukuoka:{ name:"中枢回転", text:"戦闘開始時にATBとMP上昇。", type:"start_mix", values:{ atb:18, mp:8 } },
+  saga:{ name:"器用な差し込み", text:"与ダメ時に低確率で相手ATB減少。", type:"hit_atb_down", values:{ atbDown:8 } },
+  nagasaki:{ name:"異文化補給", text:"召喚中はMP回復量が少し増える。", type:"summon_mp", values:{ mp:4 } },
+  kumamoto:{ name:"城壁根性", text:"初回被ダメ軽減。", type:"first_hit_guard", values:{ reduction:0.20 } },
+  oita:{ name:"温泉静養", text:"行動後にHPを少量回復。", type:"turn_regen", values:{ healRate:0.05 } },
+  miyazaki:{ name:"日向加速", text:"戦闘開始時にATB上昇。", type:"start_atb", values:{ atb:16 } },
+  kagoshima:{ name:"火の国ボルテージ", text:"行動後にBurst増加。", type:"action_burst", values:{ burst:9 } },
+  okinawa:{ name:"南海の助勢", text:"召喚の威力と持続を強化。", type:"summon_boost", values:{ powerRate:1.18, durationPlus:1 } }
+};
+
+function getPassiveProfile(seed){
+  return PASSIVE_LIBRARY[seed.id] || { name:`${seed.name}の地力`, text:"行動後にごく小さくBurst上昇。", type:"action_burst", values:{ burst:4 } };
+}
+
+function enrichSkillEffects(seed, skills){
+  const themeDefault = {
+    nature: [
+      { inflictStatus:"freeze", statusTurns:1, statusChance:0.45 },
+      { selfSlowTurns:1, selfSlowRate:0.86 },
+      { burstBoostCost:16, burstBoostRate:1.20 }
+    ],
+    urban: [
+      { inflictStatus:"congestion", statusTurns:2, statusChance:0.55 },
+      { noGuardTurns:1 },
+      { burstBoostCost:18, burstBoostRate:1.24 }
+    ],
+    industrial: [
+      { inflictStatus:"logistic", statusTurns:2, statusChance:0.55 },
+      { selfSlowTurns:1, selfSlowRate:0.78 },
+      { burstBoostCost:20, burstBoostRate:1.26, noGuardTurns:1 }
+    ],
+    historic: [
+      { inflictStatus:"confusion", statusTurns:2, statusChance:0.50 },
+      { },
+      { burstBoostCost:14, burstBoostRate:1.18 }
+    ]
+  };
+
+  const override = {
+    hokkaido:[
+      { inflictStatus:"freeze", statusTurns:2, statusChance:0.70 },
+      { selfSlowTurns:1, selfSlowRate:0.84 },
+      { burstBoostCost:18, burstBoostRate:1.24 }
+    ],
+    tokyo:[
+      { inflictStatus:"congestion", statusTurns:2, statusChance:0.72 },
+      { noGuardTurns:1 },
+      { burstBoostCost:24, burstBoostRate:1.34, inflictStatus:"congestion", statusTurns:2, statusChance:0.70 }
+    ],
+    aichi:[
+      { inflictStatus:"logistic", statusTurns:2, statusChance:0.68 },
+      { selfSlowTurns:1, selfSlowRate:0.72 },
+      { burstBoostCost:20, burstBoostRate:1.30, noGuardTurns:1 }
+    ],
+    kyoto:[
+      { inflictStatus:"confusion", statusTurns:2, statusChance:0.62 },
+      { },
+      { burstBoostCost:16, burstBoostRate:1.22 }
+    ],
+    osaka:[
+      { inflictStatus:"confusion", statusTurns:1, statusChance:0.58 },
+      { noGuardTurns:1 },
+      { burstBoostCost:18, burstBoostRate:1.28 }
+    ],
+    ibaraki:[
+      { inflictStatus:"congestion", statusTurns:1, statusChance:0.45 },
+      { selfSlowTurns:1, selfSlowRate:0.82 },
+      { burstBoostCost:16, burstBoostRate:1.20, inflictStatus:"logistic", statusTurns:2, statusChance:0.52 }
+    ],
+    okinawa:[
+      { inflictStatus:"congestion", statusTurns:1, statusChance:0.35 },
+      { },
+      { burstBoostCost:14, burstBoostRate:1.18 }
+    ]
+  };
+
+  const effs = override[seed.id] || themeDefault[seed.themeStyle] || [{},{},{}];
+  return skills.map((sk, i) => ({ ...sk, effect: sk.effect || effs[i] || {} }));
+}
+
 function getUniqueSkillSet(seed, region, kpi, powers){
   const defs = {
+
     hokkaido: [
       { name:"ジンギスカン・ブリザード", text:"熱々なのに吹雪。羊群と雪煙で相手の判断力を奪う。", fxType:"snow" },
       { name:"大地まるごと雪まつり砲", text:"巨大雪像級の圧で押しつぶす、観光とスケールの物量技。", fxType:"festival" },
@@ -2214,15 +2642,93 @@ function getUniqueSkillSet(seed, region, kpi, powers){
   ];
 
   const raw = defs[seed.id] || fallback;
-  return raw.map((item, i) => ({
-    name: item.name,
-    power: powers[i],
-    cost: [14, 18, 24][i],
-    text: item.text,
-    fxType: item.fxType,
-    maxUses: i === 2 ? 1 : 2,
-    uses: i === 2 ? 1 : 2
-  }));
+    return raw.map((item, i) => {
+    const power = powers[i];
+    const tier = i === 0 ? "light" : (i === 1 ? "mid" : "ultimate");
+    const cost = i === 0
+      ? clamp(Math.round(14 + power * 0.10), 16, 22)
+      : i === 1
+        ? clamp(Math.round(22 + power * 0.18), 28, 38)
+        : clamp(Math.round(34 + power * 0.34), 46, 60);
+    return {
+      name: item.name,
+      power,
+      cost,
+      tier,
+      burstNeed: i === 2 ? 60 : 0,
+      text: item.text,
+      fxType: item.fxType,
+      maxUses: i === 2 ? 1 : 2,
+      uses: i === 2 ? 1 : 2
+    };
+  });
+}
+
+function getStatusSkill(seed, region, kpi){
+  const defs = {
+    hokkaido:{ name:"流氷ヘイスト", text:"白銀の巡りで自軍のATBを加速する。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    aomori:{ name:"りんご酸スロウ", text:"甘酸っぱい幻惑で敵のATBを鈍らせる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.88 } },
+    iwate:{ name:"南部毒霧", text:"重厚な気配がじわじわ体力を削る。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.84 } },
+    miyagi:{ name:"杜の都ヘイスト", text:"都市オペレーションで味方行動を早める。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    akita:{ name:"なまはげスロウ", text:"威圧で敵の動きを止める。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    yamagata:{ name:"果樹園ポイズン", text:"芳香に紛れた継続ダメージを与える。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    fukushima:{ name:"再生ヘイスト", text:"立て直しの意思で自軍の回転を高める。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    ibaraki:{ name:"研究学園スロウ", text:"解析妨害で敵ATBを低下させる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    tochigi:{ name:"いちご毒香", text:"甘い香りに乗せて継続ダメージを与える。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    gunma:{ name:"からっ風ヘイスト", text:"乾いた追い風でATBを加速する。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    saitama:{ name:"通勤スロウ", text:"過密動線で敵のテンポを崩す。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.88 } },
+    chiba:{ name:"房総しおかぜポイズン", text:"潮風がじわじわ相手を蝕む。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.8 } },
+    tokyo:{ name:"首都高ヘイスト", text:"都市の高速循環で自軍ATBを大幅加速。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    kanagawa:{ name:"湾岸スロウ", text:"港湾渋滞で敵ATB速度を落とす。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    niigata:{ name:"雪国じわ毒", text:"冷気が継続的にHPを削る。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.84 } },
+    toyama:{ name:"薬都ヘイスト", text:"整備された供給で自軍の行動を早める。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    ishikawa:{ name:"雅スロウ", text:"見惚れるほどの美で敵の反応を遅らせる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.86 } },
+    fukui:{ name:"恐竜ポイズン", text:"太古の圧がじわじわ効いてくる。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    yamanashi:{ name:"ワインヘイスト", text:"芳醇な高揚でATB速度を高める。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    nagano:{ name:"高原スロウ", text:"冷涼な空気で敵の動きを鈍らせる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.88 } },
+    gifu:{ name:"山霧ポイズン", text:"深山の霧が継続ダメージを与える。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.84 } },
+    shizuoka:{ name:"お茶ヘイスト", text:"澄んだ覚醒で行動速度を上げる。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    aichi:{ name:"量産スロウ", text:"供給網妨害で敵のATB回転を落とす。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    mie:{ name:"伊勢毒香", text:"神秘的な香気が体力を削り続ける。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    shiga:{ name:"湖上ヘイスト", text:"湖の循環で自軍行動を整流化する。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    kyoto:{ name:"千年スロウ", text:"時の重みで敵のATBを遅くする。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    osaka:{ name:"なんでやねん毒舌", text:"笑いに紛れた継続ダメージ。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    hyogo:{ name:"五国ヘイスト", text:"多様性の連結で味方の回転力を上げる。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    nara:{ name:"鹿スロウ", text:"ゆるく見えて敵の足を止める。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.86 } },
+    wakayama:{ name:"みかんポイズン", text:"柑橘の刺激が継続的にHPを削る。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    tottori:{ name:"砂丘ヘイスト", text:"砂上機動でATB速度を高める。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    shimane:{ name:"神話スロウ", text:"古き力が敵時間を鈍らせる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.88 } },
+    okayama:{ name:"白桃ポイズン", text:"上品な甘さに紛れて体力を蝕む。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.8 } },
+    hiroshima:{ name:"再起ヘイスト", text:"立ち上がる意志でATB速度を上げる。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    yamaguchi:{ name:"海峡スロウ", text:"要衝の詰まりで敵の流れを止める。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.88 } },
+    tokushima:{ name:"阿波ポイズン", text:"踊るように継続ダメージを刻む。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    kagawa:{ name:"うどんヘイスト", text:"高密度の回転で行動が速まる。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    ehime:{ name:"柑橘スロウ", text:"やわらかな香りで敵ATBを鈍らせる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.86 } },
+    kochi:{ name:"土佐毒潮", text:"太平洋の荒波がじわじわ削る。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.84 } },
+    fukuoka:{ name:"博多ヘイスト", text:"都市の勢いで自軍のATBを加速。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    saga:{ name:"有田スロウ", text:"精密な間合いで敵のテンポを崩す。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.86 } },
+    nagasaki:{ name:"港街ポイズン", text:"湿った海風が継続ダメージを生む。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.82 } },
+    kumamoto:{ name:"火の国ヘイスト", text:"熱量で味方の行動速度を押し上げる。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    oita:{ name:"地獄スロウ", text:"湯煙地獄で敵ATB速度を下げる。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.9 } },
+    miyazaki:{ name:"南国ポイズン", text:"陽光に焼かれるような継続ダメージ。", effect:{ inflictStatus:"poison", statusTurns:3, statusChance:0.8 } },
+    kagoshima:{ name:"火山ヘイスト", text:"噴き上がる勢いでATBを加速する。", effect:{ selfStatus:"haste", selfStatusTurns:2 } },
+    okinawa:{ name:"潮風スロウ", text:"南海のうねりで敵のテンポを落とす。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.86 } }
+  };
+
+  const def = defs[seed.id] || { name:`${seed.name}状態異常術`, text:"ご当地の個性を宿した状態異常特技。", effect:{ inflictStatus:"slow", statusTurns:2, statusChance:0.85 } };
+    const tacticalPower = clamp(Math.round(10 + (kpi.culture || 0) * 0.05 + (kpi.tourism || 0) * 0.04 + (kpi.research || 0) * 0.03), 12, 24);
+  return {
+    name: def.name,
+    power: tacticalPower,
+    cost: clamp(Math.round(16 + tacticalPower * 0.20), 18, 24),
+    tier: "tactical",
+    burstNeed: 0,
+    text: def.text,
+    fxType: seed.themeStyle === "nature" ? "aurora" : (seed.themeStyle === "historic" ? "gold" : (seed.themeStyle === "industrial" ? "industrial" : "metro")),
+    maxUses: 2,
+    uses: 2,
+    effect: def.effect
+  };
 }
 
 function getSummonProfile(seed, region, kpi){
@@ -2407,10 +2913,11 @@ function makePrefectureData(seed){
   };
   const [dom1, dom2, dom3] = dominantKpi.map(k => kpiLabelMap[k] || k);
 
-    const skill1Power = clamp(Math.round(18 + kpi[dominantKpi[0]] * 0.16 + kpi[dominantKpi[1]] * 0.05), 20, 34);
+      const skill1Power = clamp(Math.round(18 + kpi[dominantKpi[0]] * 0.16 + kpi[dominantKpi[1]] * 0.05), 20, 34);
   const skill2Power = clamp(Math.round(22 + kpi[dominantKpi[1]] * 0.15 + kpi.infrastructure * 0.05), 24, 38);
   const skill3Power = clamp(Math.round(27 + kpi[dominantKpi[2]] * 0.12 + kpi.economy * 0.06 + kpi.culture * 0.05), 29, 44);
   const uniqueSkills = getUniqueSkillSet(seed, region, kpi, [skill1Power, skill2Power, skill3Power]);
+  const statusSkill = getStatusSkill(seed, region, kpi);
 
   const urbanPressure = kpi.population * 0.34 + kpi.economy * 0.30 + kpi.income * 0.18 + kpi.infrastructure * 0.18;
   const localAppeal = kpi.tourism * 0.26 + kpi.agriculture * 0.26 + kpi.nature * 0.20 + kpi.culture * 0.16 + kpi.industry * 0.06 + kpi.research * 0.06;
@@ -2428,7 +2935,7 @@ function makePrefectureData(seed){
     100
   );
 
-  return {
+    return {
     id: seed.id,
     name: seed.name,
     prefecture: seed.name,
@@ -2438,12 +2945,13 @@ function makePrefectureData(seed){
     description: `${seed.name}は${seed.flavor} 人口、経済、平均年収、観光、産業、研究、文化など複数KPIを総合戦力へ変換して戦う。`,
     flavor: seed.flavor,
     emblem: seed.emblem,
-        symbolImage: "",
+    symbolImage: "",
     furusatoIndex,
     kpi,
     stats,
-        skills: uniqueSkills,
-        summon: (() => {
+    passive: getPassiveProfile(seed),
+        skills: enrichSkillEffects(seed, [...uniqueSkills, statusSkill]),
+    summon: (() => {
       const summonProfile = getSummonProfile(seed, region, kpi);
       return {
         name: summonProfile.name,
@@ -2459,6 +2967,7 @@ function makePrefectureData(seed){
     })()
   };
 }
+
 
 
 const MUNICIPALITIES = PREFECTURE_SEEDS.map(makePrefectureData);
@@ -2480,11 +2989,13 @@ function normalizeMunicipalityData(item){
       population:60,economy:60,income:60,tourism:60,industry:60,
       agriculture:60,research:60,infrastructure:60,culture:60,nature:60
     },
-    stats: item.stats || { 体力:60, 魔力:60, 攻撃:60, 防御:60, 機動:60, 文化:60 },
+        stats: item.stats || { 体力:60, 魔力:60, 攻撃:60, 防御:60, 機動:60, 文化:60 },
+    passive: item.passive || { name:"地力", text:"行動後にBurst微増。", type:"action_burst", values:{ burst:4 } },
     skills: Array.isArray(item.skills) ? item.skills.slice(0,3) : [],
     summon: item.summon || { name:"地域守護召喚", emoji:"★", duration:3, power:12, effectText:"支援効果" }
   };
 }
+
 
 
 const DATA = MUNICIPALITIES.map(normalizeMunicipalityData);
@@ -2651,7 +3162,7 @@ function updateStageInfo(stageEffect){
 
 
 const state = {
-  selectedId: "hokkaido",
+  selectedId: pick(DATA).id,
   enemyId: "tokyo",
     battle: null,
   result: null,
@@ -2674,7 +3185,794 @@ function updateTitleScreen(){
   }
 }
 
-const BattleAudio=(()=>{let ctx=null,master=null,musicGain=null,sfxGain=null,delay=null,delayFb=null,reverb=null,isBgm=false,step=0,nextTime=0,timer=null,noiseBuf=null;const tempo=156,SEQ=512;const tracks={kick:[],snare:[],hihat:[],crash:[],bass:[],arp:[],pad:[],lead:[]};const NOTE={"C":0,"C#":1,"D":2,"D#":3,"E":4,"F":5,"F#":6,"G":7,"G#":8,"A":9,"A#":10,"B":11},REV=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];function noteToFreq(note){if(!note)return 0;const key=note.slice(0,-1),oct=parseInt(note.slice(-1),10),idx=NOTE[key],semi=idx+oct*12,a4=9+4*12;return 440*Math.pow(2,(semi-a4)/12)}function chordNotes(root,type,oct){const key=root.slice(0,-1),idx=NOTE[key];let ints=[0,4,7];if(type==="m")ints=[0,3,7];else if(type==="7")ints=[0,4,7,10];else if(type==="maj7")ints=[0,4,7,11];else if(type==="dim")ints=[0,3,6];return ints.map(v=>{const n=idx+v,s=Math.floor(n/12);return REV[n%12]+(oct+s)})}function noiseBuffer(){const b=ctx.createBuffer(1,ctx.sampleRate*2,ctx.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;return b}function impulse(sec=2.2,decay=2.2){const len=Math.floor(ctx.sampleRate*sec),b=ctx.createBuffer(2,len,ctx.sampleRate);for(let c=0;c<2;c++){const d=b.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay)}return b}function init(){if(ctx)return;const AC=window.AudioContext||window.webkitAudioContext;ctx=new AC();master=ctx.createGain();musicGain=ctx.createGain();sfxGain=ctx.createGain();master.gain.value=.84;musicGain.gain.value=.40;sfxGain.gain.value=.92;delay=ctx.createDelay();delay.delayTime.value=.24;delayFb=ctx.createGain();delayFb.gain.value=.22;delay.connect(delayFb);delayFb.connect(delay);reverb=ctx.createConvolver();reverb.buffer=impulse();musicGain.connect(delay);delay.connect(master);musicGain.connect(reverb);reverb.connect(master);musicGain.connect(master);sfxGain.connect(master);master.connect(ctx.destination);noiseBuf=noiseBuffer();compose()}function compose(){Object.keys(tracks).forEach(k=>tracks[k]=new Array(SEQ).fill(null));const PROG=[{root:"E2",type:"m"},{root:"F2",type:"maj"},{root:"E2",type:"m"},{root:"B1",type:"7"},{root:"E2",type:"m"},{root:"C2",type:"maj"},{root:"D2",type:"maj"},{root:"E2",type:"m"},{root:"E2",type:"m"},{root:"G2",type:"maj"},{root:"F#2",type:"dim"},{root:"B1",type:"7"},{root:"C2",type:"maj7"},{root:"D2",type:"maj"},{root:"E2",type:"m"},{root:"E2",type:"m"},{root:"C2",type:"maj7"},{root:"B1",type:"m"},{root:"A1",type:"m"},{root:"B1",type:"7"},{root:"F#2",type:"dim"},{root:"B1",type:"7"},{root:"E2",type:"m"},{root:"C2",type:"maj"},{root:"A1",type:"m"},{root:"B1",type:"7"},{root:"E2",type:"m"},{root:"B1",type:"7"},{root:"C2",type:"maj"},{root:"D2",type:"maj"},{root:"B1",type:"7"},{root:"E2",type:"m"}];const leadBars=[[['B4',4],['C5',4],['B4',4],['A4',4]],[['C5',4],['D5',4],['C5',4],['A4',4]],[['B4',4],['G4',4],['A4',4],['B4',4]],[['D5',4],['C5',4],['B4',4],['A4',4]],[['E5',4],['G5',2],['F#5',2],['E5',4],['B4',4]],[['G5',4],['E5',4],['D5',4],['C5',4]],[['A4',4],['D5',4],['F#5',4],['E5',4]],[['E5',4],['G5',2],['A5',2],['B5',4],['A5',4]],[['G5',4],['E5',4],['B4',4],['E5',4]],[['B5',4],['A5',4],['G5',4],['D5',4]],[['A5',4],['F#5',4],['E5',4],['C5',4]],[['D#5',4],['F#5',4],['A5',4],['B5',4]],[['E5',8],['G5',8]],[['F#5',8],['A5',8]],[['G5',4],['B5',4],['A5',4],['G5',4]],[['E5',8],['D5',8]],[['E5',8],['G5',8]],[['F#5',4],['D5',4],['B4',8]],[['C5',4],['E5',4],['A5',8]],[['F#5',4],['A5',4],['B5',8]],[['A5',2],['C6',2],['B5',2],['A5',2],['F#5',4],['A5',4]],[['B5',2],['D#6',2],['F#6',4],['D#6',4],['B5',4]],[['G6',4],['F#6',4],['E6',4],['B5',4]],[['G5',4],['E5',4],['C5',4],['G4',4]],[['A5',4],['C6',4],['E6',4],['C6',4]],[['F#5',4],['A5',4],['B5',4],['D6',4]],[['E6',4],['G6',2],['F#6',2],['E6',4],['B5',4]],[['D#6',4],['F#6',4],['A6',4],['B6',4]],[['G5',4],['E5',4],['D5',4],['C5',4]],[['A5',4],['F#5',4],['E5',4],['D5',4]],[['D#5',4],['F#5',4],['A5',4],['B5',4]],[['E5',8],['B5',4],['E6',4]]];for(let bar=0;bar<32;bar++){const chord=PROG[bar],section=bar<4?'INTRO':bar<12?'A':bar<20?'B':bar<28?'C':'OUT';for(let s=0;s<16;s++){const i=bar*16+s;if(s===0||s===10)tracks.kick[i]=1;if(section==='A'&&s===3)tracks.kick[i]=1;if(section==='C'&&(s===3||s===14))tracks.kick[i]=1;if(s===4||s===12)tracks.snare[i]=1;if(bar===3&&s>=10)tracks.snare[i]=1;if(bar===27&&s%2===0)tracks.snare[i]=1;tracks.hihat[i]=section==='INTRO'?(s%4===0?.45:0):(section==='B'?(s%2===0?.62:.2):(s%2===0?.82:.34));if(s===0&&[0,4,12,20,28,31].includes(bar))tracks.crash[i]=1;if(section==='INTRO'){if(s===0||s===8)tracks.bass[i]=chord.root}else if(section==='B'){if([0,6,8,12].includes(s))tracks.bass[i]=chord.root}else{if([0,2,3,4,6,8,10,11,12,14].includes(s))tracks.bass[i]=chord.root}const arp=chordNotes(chord.root,chord.type,3),arpIdx=section==='C'?(s%arp.length):([0,1,2,1][s%4]);tracks.arp[i]=arp[arpIdx%arp.length];if(s===0)tracks.pad[i]=chordNotes(chord.root,chord.type,4)}let pos=0;(leadBars[bar]||[]).forEach(ev=>{const idx=bar*16+pos;if(idx<SEQ)tracks.lead[idx]={note:ev[0],len:ev[1]};pos+=ev[1]})}}function pulseOsc(t,freq,type='sawtooth',gain=.2,dur=.18,filterFreq=2200,target=260,bus=musicGain){const o=ctx.createOscillator(),g=ctx.createGain(),f=ctx.createBiquadFilter();o.type=type;o.frequency.value=freq;f.type='lowpass';f.frequency.setValueAtTime(filterFreq,t);f.frequency.exponentialRampToValueAtTime(Math.max(80,target),t+dur);g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);o.connect(f);f.connect(g);g.connect(bus);o.start(t);o.stop(t+dur+.02)}function playKick(t){const o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';o.frequency.setValueAtTime(120,t);o.frequency.exponentialRampToValueAtTime(48,t+.12);g.gain.setValueAtTime(.95,t);g.gain.exponentialRampToValueAtTime(.001,t+.28);o.connect(g);g.connect(musicGain);o.start(t);o.stop(t+.3)}function playSnare(t,v=.7){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter(),o=ctx.createOscillator(),og=ctx.createGain();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=900;g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.001,t+.18);o.type='triangle';o.frequency.value=190;og.gain.setValueAtTime(.25,t);og.gain.exponentialRampToValueAtTime(.001,t+.1);n.connect(f);f.connect(g);g.connect(musicGain);o.connect(og);og.connect(musicGain);n.start(t);o.start(t);n.stop(t+.2);o.stop(t+.12)}function playHihat(t,v=.3){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=6400;g.gain.setValueAtTime(v*.34,t);g.gain.exponentialRampToValueAtTime(.001,t+.05);n.connect(f);f.connect(g);g.connect(musicGain);n.start(t);n.stop(t+.07)}function playCrash(t){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=3200;g.gain.setValueAtTime(.45,t);g.gain.exponentialRampToValueAtTime(.001,t+1.8);n.connect(f);f.connect(g);g.connect(musicGain);n.start(t);n.stop(t+1.9)}function playBass(t,note){pulseOsc(t,noteToFreq(note),'sawtooth',.34,.28,1400,90)}function playArp(t,note){const o=ctx.createOscillator(),g=ctx.createGain(),p=ctx.createStereoPanner();o.type='triangle';o.frequency.value=noteToFreq(note);p.pan.value=Math.sin(t*4)*.6;g.gain.setValueAtTime(.14,t);g.gain.exponentialRampToValueAtTime(.001,t+.18);o.connect(g);g.connect(p);p.connect(musicGain);o.start(t);o.stop(t+.2)}function playPad(t,notes){const dur=16*.25*(60/tempo);notes.forEach((n,i)=>{const o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain();o1.type='sawtooth';o2.type='sawtooth';o1.frequency.value=noteToFreq(n);o2.frequency.value=noteToFreq(n)*(i%2===0?1.002:0.998);f.type='lowpass';f.frequency.value=1200;g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.06,t+.7);g.gain.setValueAtTime(.06,t+dur-.7);g.gain.linearRampToValueAtTime(.001,t+dur);o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);o1.start(t);o2.start(t);o1.stop(t+dur);o2.stop(t+dur)})}function playLead(t,obj){const freq=noteToFreq(obj.note),dur=obj.len*.25*(60/tempo),o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain(),lfo=ctx.createOscillator(),lg=ctx.createGain();o1.type='sawtooth';o2.type='square';o1.frequency.value=freq;o2.frequency.value=freq;o2.detune.value=5;f.type='lowpass';f.frequency.setValueAtTime(820,t);f.frequency.linearRampToValueAtTime(3200,t+.08);g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.24,t+.04);g.gain.setValueAtTime(.24,t+dur-.09);g.gain.linearRampToValueAtTime(.001,t+dur);lfo.frequency.value=6;lg.gain.value=8;lfo.connect(lg);lg.connect(o1.frequency);lg.connect(o2.frequency);o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);lfo.start(t);o1.start(t);o2.start(t);lfo.stop(t+dur);o1.stop(t+dur);o2.stop(t+dur)}function scheduleOne(i,t){if(tracks.kick[i])playKick(t);if(tracks.snare[i])playSnare(t);if(tracks.hihat[i])playHihat(t,tracks.hihat[i]);if(tracks.crash[i])playCrash(t);if(tracks.bass[i])playBass(t,tracks.bass[i]);if(tracks.arp[i])playArp(t,tracks.arp[i]);if(tracks.pad[i])playPad(t,tracks.pad[i]);if(tracks.lead[i])playLead(t,tracks.lead[i])}function scheduler(){if(!isBgm||!ctx)return;while(nextTime<ctx.currentTime+.1){scheduleOne(step%SEQ,nextTime);nextTime+=.25*(60/tempo);step++}timer=window.setTimeout(scheduler,25)}async function ensure(){init();if(ctx.state==='suspended')await ctx.resume()}async function enterBattle(){await ensure();playBgm();sfx('battleStart')}function playBgm(){if(!ctx||isBgm)return;isBgm=true;step=0;nextTime=ctx.currentTime+.08;musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(.001,ctx.currentTime);musicGain.gain.linearRampToValueAtTime(.40,ctx.currentTime+.9);scheduler()}function stopBgm(fade=.35){if(!ctx)return;isBgm=false;clearTimeout(timer);musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);musicGain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+fade)}function leaveBattle(){if(!ctx)return;stopBgm(.28)}function tone(t,freq,type='square',gain=.18,dur=.16,toFreq=null,targetGain=.001,bus=sfxGain,filterFreq=4200){const o=ctx.createOscillator(),g=ctx.createGain(),f=ctx.createBiquadFilter();o.type=type;o.frequency.setValueAtTime(freq,t);if(toFreq)o.frequency.exponentialRampToValueAtTime(toFreq,t+dur);f.type='lowpass';f.frequency.value=filterFreq;g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(targetGain,t+dur);o.connect(f);f.connect(g);g.connect(bus);o.start(t);o.stop(t+dur+.02)}function dualTone(t,f1,f2,type1='sawtooth',type2='square',gain=.12,dur=.14,to1=null,to2=null){tone(t,f1,type1,gain,dur,to1,.001,sfxGain,3800);tone(t,f2,type2,gain*.82,dur,to2,.001,sfxGain,4200)}function chordStab(t,notes,type='triangle',gain=.08,dur=.24){notes.forEach((note,i)=>tone(t+(i*0.008),noteToFreq(note),type,gain,dur,null,.001,sfxGain,3600))}function noiseHit(t,gain=.2,dur=.12,hp=900,lp=9000){const n=ctx.createBufferSource(),g=ctx.createGain(),f1=ctx.createBiquadFilter(),f2=ctx.createBiquadFilter();n.buffer=noiseBuf;f1.type='highpass';f1.frequency.value=hp;f2.type='lowpass';f2.frequency.value=lp;g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);n.connect(f1);f1.connect(f2);f2.connect(g);g.connect(sfxGain);n.start(t);n.stop(t+dur+.02)}function laserSweep(t,start=1200,end=220,dur=.18,gain=.12,type='sawtooth'){tone(t,start,type,gain,dur,end,.001,sfxGain,4800)}function subBoom(t,freq=70,dur=.22,gain=.2){tone(t,freq,'sine',gain,dur,34,.001,sfxGain,1200)}function ping(t,freq=880,dur=.12,gain=.09){tone(t,freq,'sine',gain,dur,freq*1.22,.001,sfxGain,5200)}function shimmer(t,root='C5'){const seq=chordNotes(root,'maj7',5);seq.forEach((n,i)=>ping(t+i*.055,noteToFreq(n),.16,.06))}function inferSkillFamily(meta={}){const type=(meta.fxType||'').toLowerCase();if(['fire','crimson'].includes(type))return 'fire';if(['snow','aurora'].includes(type))return 'ice';if(['earth','industrial'].includes(type))return 'earth';if(['festival','gold','harvest'].includes(type))return 'festival';if(['port','metro'].includes(type))return 'tech';return 'basic'}function playAttack(){const t=ctx.currentTime+.005;subBoom(t,92,.16,.14);laserSweep(t+.02,860,180,.11,.08,'square');noiseHit(t+.03,.06,.05,2200,9000)}function playGuard(){const t=ctx.currentTime+.005;chordStab(t,['D4','A4','D5'],'triangle',.07,.18);tone(t+.04,260,'sine',.08,.22,180,.001,sfxGain,3000);ping(t+.09,740,.12,.05)}function playHeal(){const t=ctx.currentTime+.005;chordStab(t,['C5','E5','G5'],'sine',.06,.24);ping(t+.07,880,.18,.08);ping(t+.16,1174,.22,.08);shimmer(t+.06,'C5')}function playBattleStart(){const t=ctx.currentTime+.005;chordStab(t,['E4','B4','E5'],'sawtooth',.06,.18);subBoom(t+.04,82,.24,.16);noiseHit(t+.08,.05,.08,1800,7000)}function playVictory(){const t=ctx.currentTime+.005;chordStab(t,['C5','E5','G5'],'triangle',.08,.18);chordStab(t+.16,['E5','G5','C6'],'triangle',.08,.22);chordStab(t+.34,['G5','C6','E6'],'sine',.08,.34);shimmer(t+.18,'C5')}function playSummon(meta={}){const t=ctx.currentTime+.005;const entrance=(meta.entrance||'').toLowerCase();const style=(meta.style||'').toLowerCase();if(entrance==='groundbreak'){subBoom(t,64,.34,.24);subBoom(t+.08,52,.34,.22);noiseHit(t+.05,.14,.22,280,2200);chordStab(t+.12,['C3','G3','C4'],'sawtooth',.07,.28);return}if(entrance==='warp'){laserSweep(t,2200,140,.22,.11,'sawtooth');ping(t+.03,980,.11,.06);ping(t+.08,1320,.12,.06);chordStab(t+.11,['E5','B5','E6'],'triangle',.05,.18);return}if(entrance==='sea'||entrance==='splash'){noiseHit(t,.10,.18,500,2600);tone(t+.03,220,'sine',.08,.28,140,.001,sfxGain,2600);ping(t+.14,760,.13,.05);return}if(entrance==='gate'||style==='guardian'){chordStab(t,['D4','A4','D5'],'triangle',.08,.26);chordStab(t+.12,['F4','A4','D5'],'sine',.06,.34);ping(t+.18,1240,.16,.05);return}if(entrance==='dash'||entrance==='neon'||style==='tech'){laserSweep(t,1800,260,.16,.10,'square');laserSweep(t+.05,2400,420,.18,.08,'sawtooth');subBoom(t+.07,86,.16,.10);return}if(entrance==='snow'){shimmer(t,'D5');noiseHit(t+.03,.05,.16,3200,9000);tone(t+.06,540,'triangle',.07,.26,280,.001,sfxGain,3400);return}chordStab(t,['A4','C5','E5'],'triangle',.07,.18);laserSweep(t+.04,1400,220,.18,.08,'sawtooth');noiseHit(t+.08,.05,.12,1200,7000)}function playSkill(meta={}){const t=ctx.currentTime+.005;const family=inferSkillFamily(meta);const attackerId=(meta.attackerId||'').toLowerCase();if(attackerId==='osaka'){noiseHit(t,.08,.09,1600,9000);ping(t+.03,988,.08,.05);ping(t+.08,1318,.09,.05);subBoom(t+.09,72,.18,.16);return}if(attackerId==='tokyo'){laserSweep(t,2600,220,.18,.12,'sawtooth');laserSweep(t+.05,3200,480,.14,.09,'square');subBoom(t+.10,68,.16,.12);return}if(attackerId==='kyoto'){chordStab(t,['E5','A5','C6'],'triangle',.08,.26);shimmer(t+.04,'A5');return}if(attackerId==='hokkaido'){shimmer(t,'D5');noiseHit(t+.04,.05,.16,3600,10000);subBoom(t+.12,64,.18,.10);return}if(family==='fire'){subBoom(t,66,.24,.22);noiseHit(t+.03,.14,.16,500,2800);laserSweep(t+.07,980,120,.14,.10,'sawtooth');return}if(family==='ice'){shimmer(t,'D5');tone(t+.04,720,'sine',.08,.26,420,.001,sfxGain,4200);noiseHit(t+.06,.04,.14,4200,11000);return}if(family==='earth'){subBoom(t,58,.28,.24);subBoom(t+.07,42,.22,.18);noiseHit(t+.04,.12,.18,220,1800);return}if(family==='festival'){chordStab(t,['C5','E5','G5'],'triangle',.08,.16);ping(t+.06,1046,.09,.06);ping(t+.12,1318,.09,.06);noiseHit(t+.08,.05,.06,1800,9000);return}if(family==='tech'){laserSweep(t,2000,260,.16,.10,'square');laserSweep(t+.04,2400,620,.12,.08,'sawtooth');ping(t+.10,1568,.10,.04);return}subBoom(t,84,.18,.12);laserSweep(t+.03,1200,180,.12,.08,'square')}async function sfx(name,meta={}){await ensure();if(name==='attack')return playAttack();if(name==='guard')return playGuard();if(name==='heal')return playHeal();if(name==='summon')return playSummon(meta);if(name==='victory')return playVictory();if(name==='skill')return playSkill(meta);if(name==='battleStart')return playBattleStart()}return{enterBattle,leaveBattle,stopBgm,sfx}})();
+function playBattleStartIntro(playerUnit, enemyUnit, stageEffect){
+  return new Promise(resolve => {
+    const screen = $("#gameScreen");
+    const overlay = $("#battleIntroOverlay");
+    const label = $("#battleIntroLabel");
+    if(!screen || !overlay || !label){
+      resolve();
+      return;
+    }
+
+    const titleMain = label.querySelector("b");
+    const titleSub = label.querySelector("span");
+    if(titleMain){
+      titleMain.textContent = `${stageEffect?.name || "幻想戦場"} 展開`;
+    }
+    if(titleSub){
+      titleSub.textContent = `${playerUnit?.name || "PLAYER"} VS ${enemyUnit?.name || "ENEMY"}`;
+    }
+
+    screen.classList.remove("introPlaying");
+    overlay.style.opacity = "";
+    label.style.opacity = "";
+    void screen.offsetWidth;
+
+    screen.classList.add("introPlaying");
+
+    const end = () => {
+      screen.classList.remove("introPlaying");
+      resolve();
+    };
+
+    clearTimeout(playBattleStartIntro._timer);
+    playBattleStartIntro._timer = setTimeout(end, 1950);
+  });
+}
+
+
+
+const SummonTheme = (() => {
+let ready = false;
+let active = false;
+let visualObj = null;
+let synth = null;
+let loopTimer = null;
+const LOOP_MS = 49500;
+const abcString = `
+%%abc-charset utf-8
+X:1
+T:Cataclysm (Modern Epic)
+C:Gemini AI
+M:4/4
+L:1/16
+Q:1/4=175
+K:Cm
+%%MIDI program 1 48  % String Ensemble (Fast)
+%%MIDI program 2 60  % French Horn (Epic Brass)
+%%MIDI program 3 52  % Choir Aahs
+%%MIDI channel 4 10  % Drums on Channel 10
+%%score (1) (2) (3) (4)
+%
+% --- DEFINITIONS ---
+V:1 name="Strings" clef=treble
+V:2 name="Horns" clef=treble
+V:3 name="Choir" clef=treble
+V:4 name="Percussion" clef=bass
+%
+% [Bars 1-4] INTRO: The Impact (Tutti)
+P:Intro
+[V:1] [C,4G,4C4] z12 | [C,4G,4C4] z12 | CGEc g e' c' g CGEc g e' c' g | =B,G,Dg f d' b g =B,G,Dg f d' b g |
+[V:2] [C4G4c4] z12 | [C4G4c4] z12 | z16 | z16 |
+[V:3] [C8G8c8] z8 | [C8G8c8] z8 | z16 | z16 |
+[V:4] [C,,8A,,8] z8 | [C,,8A,,8] z8 | C,,4 C,,4 C,,4 C,,4 | C,,4 C,,4 C,,4 C,,4 |
+%
+% [Bars 5-12] SECTION A: The Modern Ostinato (Driving Rhythm)
+P:Assault
+[V:1] c2G2 c2d2 e2c2 G2E2 | F2A2 c2f2 a2f2 c2A2 | G2B2 d2g2 b2g2 d2B2 | c2G2 E2C2 G,2C2 E2G2 |
+[V:2] C16- | C8 F8 | G16 | C16 |
+[V:3] [C16E16G16] | [C16F16A16] | [D16G16=B16] | [C16E16G16] |
+[V:4] C,,4 D,,4 C,,4 D,,2C,,2 | C,,4 D,,4 C,,4 D,,2D,,2 | C,,4 D,,4 C,,4 D,,4 | C,,4 C,,4 C,,2C,,2 C,,4 |
+[V:1] _A2c2 f2a2 c'2a2 f2c2 | =A2c2 f2a2 c'2a2 f2c2 | =B,2D2 G2=B2 d2g2 b2d'2 | c'2g2 e2c2 g2e2 c2G2 |
+[V:2] _A16 | =A16 | =B16 | c16 |
+[V:3] [_A,16C16F16] | [=A,16C16F16] | [G,16=B,16D16] | [G,16c16e16] |
+[V:4] C,,4 D,,2C,,2 C,,4 D,,4 | C,,4 D,,4 C,,4 D,,2D,,2 | C,,4 D,,4 C,,2C,,2 D,,4 | C,,2C,,2 D,,2D,,2 F,,4 A,,4 |
+%
+% [Bars 13-20] SECTION B: Heroic Brass Melody (The "Trailer" Sound)
+P:Rise
+[V:1] g4 c'4 g4 e4 | f4 a4 c'4 a4 | g4 b4 d'4 b4 | c'4 g4 e4 c4 |
+[V:2] [E16G16c16] | [F16A16c16] | [G16=B16d16] | [E16G16c16] |
+[V:3] z16 | z16 | z16 | z16 |
+[V:4] C,,4 z4 C,,4 D,,4 | C,,4 z4 C,,4 D,,4 | C,,4 z4 C,,4 D,,4 | C,,4 D,,4 C,,4 D,,4 |
+[V:1] _a4 c'4 f'4 c'4 | g4 c'4 e'4 c'4 | ^f4 a4 d'4 a4 | =f4 b4 d'4 b4 |
+[V:2] [c16_e16_a16] | [c16e16g16] | [c16d16^f16] | [=B16d16g16] |
+[V:3] z16 | z16 | z16 | z16 |
+[V:4] C,,8 D,,8 | C,,8 D,,8 | C,,8 D,,8 | C,,4 C,,4 C,,4 C,,4 |
+%
+% [Bars 21-28] SECTION C: Tension & Chaos (Diminished Runs)
+P:Chaos
+[V:1] (3cde (3def (3efg (3fga (3gab (3abc' (3bc'd' (3c'd'e' | f'16 | ^f'16 | g'16 |
+[V:2] c16 | d16 | ^d16 | e16 |
+[V:3] [C16E16G16] | [D16F16A16] | [^D16^F16A16] | [E16G16=B16] |
+[V:4] D,,2D,,2 D,,2D,,2 D,,2D,,2 D,,2D,,2 | D,,4 z4 z8 | D,,4 z4 z8 | A,,2A,,2 A,,2A,,2 A,,2A,,2 A,,2A,,2 |
+[V:1] _a'4 f'4 c'4 _a4 | =a'4 ^f'4 d'4 =a4 | b'4 g'4 d'4 =b4 | c''4 g'4 e'4 c'4 |
+[V:2] f16 | ^f16 | g16 | g16 |
+[V:3] [F16_A16c16] | [^F16=A16d16] | [G16=B16d16] | [c16e16g16] |
+[V:4] C,,4 D,,4 C,,4 D,,4 | C,,4 D,,4 C,,4 D,,4 | C,,4 C,,4 C,,4 C,,4 | F,,16 |
+%
+% [Bars 29-35] OUTRO: Apocalyptic Finish
+P:Finale
+[V:1] [C4G4c4e4] z4 [C4G4c4e4] z4 | [C4A4c4f4] z4 [C4A4c4f4] z4 | gfe^d efg^f | g=abc' d'e'f'g' |
+[V:2] [C4E4G4] z12 | [C4F4A4] z12 | [G8=B8] z8 | [G8=B8] z8 |
+[V:3] C,4 z4 G,4 z4 | C,4 z4 A,4 z4 | G,16 | G,16 |
+[V:4] C,,4 A,,4 C,,4 A,,4 | C,,4 A,,4 C,,4 A,,4 | C,,4 C,,4 C,,4 C,,4 | D,,2D,,2 D,,2D,,2 D,,2D,,2 D,,2D,,2 |
+[V:1] [c'16e'16g'16c''16] | z16 | [C,16G,16C16G16c16] |]
+[V:2] [E16G16c16] | z16 | [C16E16G16] |]
+[V:3] [C,16G,16C16] | z16 | [C,16G,16] |]
+[V:4] A,,16 | A,,4 z12 | A,,16 |]
+`;
+
+function ensureHost(){
+  let host = document.getElementById('summonThemeHost');
+  if(host) return host;
+  host = document.createElement('div');
+  host.id = 'summonThemeHost';
+  host.style.position = 'fixed';
+  host.style.left = '-99999px';
+  host.style.top = '-99999px';
+  host.style.width = '1px';
+  host.style.height = '1px';
+  host.style.overflow = 'hidden';
+  host.innerHTML = '<div id="summonThemePaper"></div>';
+  document.body.appendChild(host);
+  return host;
+}
+
+async function ensureReady(){
+  if(ready) return true;
+  if(!window.ABCJS || !ABCJS.renderAbc || !ABCJS.synth || !ABCJS.synth.CreateSynth) return false;
+  ensureHost();
+  const rendered = ABCJS.renderAbc('summonThemePaper', abcString, {
+    responsive: 'resize',
+    scale: 0.8,
+    staffwidth: 760
+  });
+  if(!rendered || !rendered[0]) return false;
+  visualObj = rendered[0];
+  synth = new ABCJS.synth.CreateSynth();
+  await synth.init({ visualObj });
+  if(typeof synth.prime === 'function') await synth.prime();
+  ready = true;
+  return true;
+}
+
+async function playOnce(){
+  if(!synth) return false;
+  try{
+    if(typeof synth.stop === 'function') synth.stop();
+  }catch(e){}
+  try{
+    if(typeof synth.start === 'function'){
+      await synth.start();
+      return true;
+    }
+  }catch(e){
+    console.warn('SummonTheme start failed:', e);
+  }
+  return false;
+}
+
+async function startLoop(){
+  const ok = await ensureReady();
+  if(!ok) return false;
+  stopLoop();
+  active = true;
+  const started = await playOnce();
+  if(!started){
+    active = false;
+    return false;
+  }
+  loopTimer = setInterval(() => {
+    if(!active) return;
+    playOnce().catch(err => console.warn('SummonTheme loop failed:', err));
+  }, LOOP_MS);
+  return true;
+}
+
+function stopLoop(){
+  active = false;
+  if(loopTimer){
+    clearInterval(loopTimer);
+    loopTimer = null;
+  }
+  try{
+    if(synth && typeof synth.stop === 'function') synth.stop();
+  }catch(e){}
+  try{
+    if(synth && typeof synth.pause === 'function') synth.pause();
+  }catch(e){}
+}
+
+return {
+  ensureReady,
+  startLoop,
+  stopLoop,
+  get active(){ return active; }
+};
+})();
+
+const BattleAudio=(()=>{
+let ctx=null,master=null,musicGain=null,sfxGain=null,delay=null,delayFb=null,reverb=null;
+let isBgm=false,step=0,nextTime=0,timer=null,noiseBuf=null;
+let bgmMode='normal';
+const tempoNormal=156;
+const tempoSummon=168;
+const NOTE={"C":0,"C#":1,"D":2,"D#":3,"E":4,"F":5,"F#":6,"G":7,"G#":8,"A":9,"A#":10,"B":11},REV=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const tracksNormal={kick:[],snare:[],hihat:[],crash:[],bass:[],arp:[],pad:[],lead:[]};
+const tracksSummon={kick:[],snare:[],hihat:[],crash:[],bass:[],arp:[],pad:[],lead:[],choir:[],brass:[]};
+const SEQ_NORMAL=512;
+const SEQ_SUMMON=560;
+
+function noteToFreq(note){if(!note)return 0;const key=note.slice(0,-1),oct=parseInt(note.slice(-1),10),idx=NOTE[key],semi=idx+oct*12,a4=9+4*12;return 440*Math.pow(2,(semi-a4)/12)}
+function chordNotes(root,type,oct){const key=root.slice(0,-1),idx=NOTE[key];let ints=[0,4,7];if(type==='m')ints=[0,3,7];else if(type==='7')ints=[0,4,7,10];else if(type==='maj7')ints=[0,4,7,11];else if(type==='dim')ints=[0,3,6];else if(type==='sus2')ints=[0,2,7];else if(type==='m7')ints=[0,3,7,10];return ints.map(v=>{const n=idx+v,s=Math.floor(n/12);return REV[n%12]+(oct+s)})}
+function noiseBuffer(){const b=ctx.createBuffer(1,ctx.sampleRate*2,ctx.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;return b}
+function impulse(sec=2.2,decay=2.2){const len=Math.floor(ctx.sampleRate*sec),b=ctx.createBuffer(2,len,ctx.sampleRate);for(let c=0;c<2;c++){const d=b.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay)}return b}
+function init(){
+  if(ctx)return;
+  const AC=window.AudioContext||window.webkitAudioContext;
+  ctx=new AC();
+  master=ctx.createGain();
+  musicGain=ctx.createGain();
+  sfxGain=ctx.createGain();
+  master.gain.value=.84;
+  musicGain.gain.value=.40;
+  sfxGain.gain.value=.92;
+  delay=ctx.createDelay();
+  delay.delayTime.value=.24;
+  delayFb=ctx.createGain();
+  delayFb.gain.value=.22;
+  delay.connect(delayFb);
+  delayFb.connect(delay);
+  reverb=ctx.createConvolver();
+  reverb.buffer=impulse();
+  musicGain.connect(delay);
+  delay.connect(master);
+  musicGain.connect(reverb);
+  reverb.connect(master);
+  musicGain.connect(master);
+  sfxGain.connect(master);
+  master.connect(ctx.destination);
+  noiseBuf=noiseBuffer();
+  composeNormal();
+  composeSummon();
+}
+function composeNormal(){
+  Object.keys(tracksNormal).forEach(k=>tracksNormal[k]=new Array(SEQ_NORMAL).fill(null));
+  const PROG=[{root:'E2',type:'m'},{root:'F2',type:'maj'},{root:'E2',type:'m'},{root:'B1',type:'7'},{root:'E2',type:'m'},{root:'C2',type:'maj'},{root:'D2',type:'maj'},{root:'E2',type:'m'},{root:'E2',type:'m'},{root:'G2',type:'maj'},{root:'F#2',type:'dim'},{root:'B1',type:'7'},{root:'C2',type:'maj7'},{root:'D2',type:'maj'},{root:'E2',type:'m'},{root:'E2',type:'m'},{root:'C2',type:'maj7'},{root:'B1',type:'m'},{root:'A1',type:'m'},{root:'B1',type:'7'},{root:'F#2',type:'dim'},{root:'B1',type:'7'},{root:'E2',type:'m'},{root:'C2',type:'maj'},{root:'A1',type:'m'},{root:'B1',type:'7'},{root:'E2',type:'m'},{root:'B1',type:'7'},{root:'C2',type:'maj'},{root:'D2',type:'maj'},{root:'B1',type:'7'},{root:'E2',type:'m'}];
+  const leadBars=[[['B4',4],['C5',4],['B4',4],['A4',4]],[['C5',4],['D5',4],['C5',4],['A4',4]],[['B4',4],['G4',4],['A4',4],['B4',4]],[['D5',4],['C5',4],['B4',4],['A4',4]],[['E5',4],['G5',2],['F#5',2],['E5',4],['B4',4]],[['G5',4],['E5',4],['D5',4],['C5',4]],[['A4',4],['D5',4],['F#5',4],['E5',4]],[['E5',4],['G5',2],['A5',2],['B5',4],['A5',4]],[['G5',4],['E5',4],['B4',4],['E5',4]],[['B5',4],['A5',4],['G5',4],['D5',4]],[['A5',4],['F#5',4],['E5',4],['C5',4]],[['D#5',4],['F#5',4],['A5',4],['B5',4]],[['E5',8],['G5',8]],[['F#5',8],['A5',8]],[['G5',4],['B5',4],['A5',4],['G5',4]],[['E5',8],['D5',8]],[['E5',8],['G5',8]],[['F#5',4],['D5',4],['B4',8]],[['C5',4],['E5',4],['A5',8]],[['F#5',4],['A5',4],['B5',8]],[['A5',2],['C6',2],['B5',2],['A5',2],['F#5',4],['A5',4]],[['B5',2],['D#6',2],['F#6',4],['D#6',4],['B5',4]],[['G6',4],['F#6',4],['E6',4],['B5',4]],[['G5',4],['E5',4],['C5',4],['G4',4]],[['A5',4],['C6',4],['E6',4],['C6',4]],[['F#5',4],['A5',4],['B5',4],['D6',4]],[['E6',4],['G6',2],['F#6',2],['E6',4],['B5',4]],[['D#6',4],['F#6',4],['A6',4],['B6',4]],[['G5',4],['E5',4],['D5',4],['C5',4]],[['A5',4],['F#5',4],['E5',4],['D5',4]],[['D#5',4],['F#5',4],['A5',4],['B5',4]],[['E5',8],['B5',4],['E6',4]]];
+  for(let bar=0;bar<32;bar++){
+    const chord=PROG[bar],section=bar<4?'INTRO':bar<12?'A':bar<20?'B':bar<28?'C':'OUT';
+    for(let s=0;s<16;s++){
+      const i=bar*16+s;
+      if(s===0||s===10)tracksNormal.kick[i]=1;
+      if(section==='A'&&s===3)tracksNormal.kick[i]=1;
+      if(section==='C'&&(s===3||s===14))tracksNormal.kick[i]=1;
+      if(s===4||s===12)tracksNormal.snare[i]=1;
+      if(bar===3&&s>=10)tracksNormal.snare[i]=1;
+      if(bar===27&&s%2===0)tracksNormal.snare[i]=1;
+      tracksNormal.hihat[i]=section==='INTRO'?(s%4===0?.45:0):(section==='B'?(s%2===0?.62:.2):(s%2===0?.82:.34));
+      if(s===0&&[0,4,12,20,28,31].includes(bar))tracksNormal.crash[i]=1;
+      if(section==='INTRO'){
+        if(s===0||s===8)tracksNormal.bass[i]=chord.root;
+      }else if(section==='B'){
+        if([0,6,8,12].includes(s))tracksNormal.bass[i]=chord.root;
+      }else{
+        if([0,2,3,4,6,8,10,11,12,14].includes(s))tracksNormal.bass[i]=chord.root;
+      }
+      const arp=chordNotes(chord.root,chord.type,3),arpIdx=section==='C'?(s%arp.length):([0,1,2,1][s%4]);
+      tracksNormal.arp[i]=arp[arpIdx%arp.length];
+      if(s===0)tracksNormal.pad[i]=chordNotes(chord.root,chord.type,4);
+    }
+    let pos=0;
+    (leadBars[bar]||[]).forEach(ev=>{const idx=bar*16+pos;if(idx<SEQ_NORMAL)tracksNormal.lead[idx]={note:ev[0],len:ev[1]};pos+=ev[1]});
+  }
+}
+function composeSummon(){
+  Object.keys(tracksSummon).forEach(k => tracksSummon[k] = new Array(SEQ_SUMMON).fill(null));
+
+  const chordMap = {
+    Cm:['C4','Eb4','G4'],
+    Fm:['F4','Ab4','C5'],
+    G:['G4','B4','D5'],
+    G7:['G4','B4','D5','F5'],
+    Ab:['Ab4','C5','Eb5'],
+    Adim:['A4','C5','Eb5'],
+    Bdim:['B4','D5','F5'],
+    Cmaj:['C4','E4','G4'],
+    F:['F4','A4','C5'],
+    Dm:['D4','F4','A4'],
+    Em:['E4','G4','B4'],
+    Bb:['Bb4','D5','F5']
+  };
+
+  const bars = [
+    {
+      brass:[['C5',4],['C5',2],['C5',2],['C5',4]],
+      strings:[['C5',8]],
+      harp:['C4','Eb4','G4','C5','Eb5','G5','C6','G5','Eb5','C5','G4','Eb4','C4','G4','Eb5','C5'],
+      bass:[['C2',2],['C2',2],['C2',2],['C2',2]],
+      choir:['C4','G4','C5']
+    },
+    {
+      brass:[['C5',4],['C5',2],['C5',2],['C5',4]],
+      strings:[['C5',8]],
+      harp:['C4','Eb4','G4','C5','Eb5','G5','C6','G5','Eb5','C5','G4','Eb4','C4','G4','Eb5','C5'],
+      bass:[['C2',2],['C2',2],['C2',2],['C2',2]],
+      choir:['C4','G4','C5']
+    },
+    {
+      brass:[['C5',2],['D5',2],['E5',2],['G5',2]],
+      strings:[['C4',2],['Dm',2],['Cmaj',2],['G',2]],
+      harp:['C4','Eb4','G4','C5','C4','F4','A4','C5','C4','G4','B4','D5','C4','E4','G4','C5'],
+      bass:[['C2',2],['F2',2],['G2',2],['E2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['F5',1],['E5',1],['D5',1],['C5',1],['B4',2],['G4',2]],
+      strings:[['F',2],['Cmaj',2],['Dm',2],['G',2]],
+      harp:['F4','A4','C5','F5','G4','B4','D5','G5','G4','B4','D5','G5','G4','B4','D5','F5'],
+      bass:[['F2',2],['G2',2],['G2',2],['G2',2]],
+      choir:['G3','B3','D4']
+    },
+
+    {
+      brass:[['C5',4],['G4',2],['C5',2],['C5',4]],
+      strings:[['Cmaj',2],['Cmaj',2],['Cmaj',2],['Cmaj',2]],
+      harp:['C4','G4','Eb5','C5','C4','G4','Eb5','C5','C4','G4','Eb5','C5','C4','G4','Eb5','C5'],
+      bass:[['C2',2],['C3',2],['C2',2],['C3',2]],
+      choir:['C4','Eb4','G4']
+    },
+    {
+      brass:[['Eb5',3],['C5',1],['B4',2],['G4',2]],
+      strings:[['Fm',2],['Fm',2],['G',2],['G',2]],
+      harp:['Eb4','Ab4','F5','D5','B4','G4','D5','B4','Eb4','Ab4','F5','D5','B4','G4','D5','B4'],
+      bass:[['F2',2],['F3',2],['G2',2],['G3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['C5',4],['E5',2],['G5',2],['G5',4]],
+      strings:[['Cmaj',2],['Cmaj',2],['Cmaj',2],['Cmaj',2]],
+      harp:['C4','G4','E5','C5','E4','G4','C5','E5','C4','G4','E5','C5','E4','G4','C5','E5'],
+      bass:[['C2',2],['C3',2],['C2',2],['C3',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['F5',2],['Eb5',2],['B4',2],['G4',2]],
+      strings:[['Fm',2],['Fm',2],['Dm',2],['Dm',2]],
+      harp:['F4','Ab4','D5','Bb4','F4','Ab4','D5','Bb4','D4','G4','B4','D5','D4','G4','B4','D5'],
+      bass:[['F2',2],['F3',2],['G2',2],['G3',2]],
+      choir:['G3','B3','D4']
+    },
+    {
+      brass:[['C5',4],['G4',2],['C5',2],['C5',4]],
+      strings:[['Cmaj',2],['Cmaj',2],['Cmaj',2],['Cmaj',2]],
+      harp:['C4','G4','Eb5','C5','C4','G4','Eb5','C5','C4','G4','Eb5','C5','C4','G4','Eb5','C5'],
+      bass:[['C2',2],['C3',2],['C2',2],['C3',2]],
+      choir:['C4','Eb4','G4']
+    },
+    {
+      brass:[['Eb5',3],['C5',1],['B4',2],['G4',2]],
+      strings:[['Fm',2],['Fm',2],['G',2],['G',2]],
+      harp:['Eb4','Ab4','F5','D5','B4','G4','D5','B4','Eb4','Ab4','F5','D5','B4','G4','D5','B4'],
+      bass:[['F2',2],['F3',2],['G2',2],['G3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['C5',2],['E5',2],['G5',2],['C6',2]],
+      strings:[['Cmaj',2],['Cmaj',2],['Cmaj',2],['Cmaj',2]],
+      harp:['C4','G4','E5','C5','G5','E5','C5','G4','C4','G4','E5','C5','G5','E5','C5','G4'],
+      bass:[['C2',2],['C3',2],['C2',2],['C3',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['B5',2],['G5',2],['F5',2],['D5',2]],
+      strings:[['G',2],['G',2],['G',2],['G',2]],
+      harp:['D4','G4','B4','D5','D4','G4','B4','D5','D4','G4','B4','D5','D4','G4','B4','D5'],
+      bass:[['G2',2],['G3',2],['G2',2],['G3',2]],
+      choir:['G3','B3','D4']
+    },
+
+    {
+      brass:[['E5',6],['D5',2]],
+      strings:[['Cmaj',4],['Bb',4]],
+      harp:['G4','E5','C6','G5','F5','D5','Bb5','F5','G4','E5','C6','G5','F5','D5','Bb5','F5'],
+      bass:[['C3',2],['E3',2],['G3',2],['G2',2]],
+      choir:['C4','G4','C5']
+    },
+    {
+      brass:[['C5',6],['B4',2]],
+      strings:[['A4',4],['G4',4]],
+      harp:['E4','C5','A5','E5','E4','C5','A5','E5','E4','B4','G5','E5','E4','B4','G5','E5'],
+      bass:[['A2',2],['C3',2],['E3',2],['E2',2]],
+      choir:['A3','C4','E4']
+    },
+    {
+      brass:[['A4',2],['C5',2],['F5',2],['A5',2]],
+      strings:[['F5',8]],
+      harp:['F4','C5','A5','F5','F4','C5','A5','F5','C5','A5','F6','C6','C5','A5','F6','C6'],
+      bass:[['F2',2],['A2',2],['C3',2],['F3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['G5',2],['F5',2],['E5',2],['D5',2]],
+      strings:[['C5',8]],
+      harp:['G4','E5','C6','G5','G4','E5','C6','G5','G4','E5','C6','G5','G4','E5','C6','G5'],
+      bass:[['C3',2],['E3',2],['G3',2],['C4',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['E5',6],['D5',2]],
+      strings:[['Cmaj',4],['Bb',4]],
+      harp:['G4','E5','C6','G5','F5','D5','Bb5','F5','G4','E5','C6','G5','F5','D5','Bb5','F5'],
+      bass:[['C3',2],['E3',2],['G3',2],['G2',2]],
+      choir:['C4','G4','C5']
+    },
+    {
+      brass:[['C5',6],['B4',2]],
+      strings:[['A4',4],['G4',4]],
+      harp:['E4','C5','A5','E5','E4','C5','A5','E5','E4','B4','G5','E5','E4','B4','G5','E5'],
+      bass:[['A2',2],['C3',2],['E3',2],['E2',2]],
+      choir:['A3','C4','E4']
+    },
+    {
+      brass:[['A4',2],['C5',2],['F5',2],['A5',2]],
+      strings:[['F5',8]],
+      harp:['F4','C5','A5','F5','F4','C5','A5','F5','C5','A5','F6','C6','C5','A5','F6','C6'],
+      bass:[['F2',2],['A2',2],['C3',2],['F3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['Bb5',4],['G5',4]],
+      strings:[['Bb',4],['G',4]],
+      harp:['G4','Bb4','D5','G5','G4','Bb4','D5','G5','G4','Bb4','D5','G5','G4','Bb4','D5','G5'],
+      bass:[['G2',2],['B2',2],['D3',2],['G3',2]],
+      choir:['G3','B3','D4']
+    },
+
+    {
+      brass:[['C6',4],['G5',4]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6'],
+      bass:[['C2',2],['C3',2],['B1',2],['B2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['Ab5',2],['F5',2],['C5',2],['F5',2]],
+      strings:[['C5',4],['F5',4]],
+      harp:['Ab4','C5','F5','Ab5','Ab4','C5','F5','Ab5','Ab4','C5','F5','Ab5','Ab4','C5','F5','Ab5'],
+      bass:[['Ab1',2],['A1',2],['F2',2],['F3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['G5',4],['E5',4]],
+      strings:[['C5',4],['G5',4]],
+      harp:['G4','C5','E5','G5','G4','C5','E5','G5','G4','C5','E5','G5','G4','C5','E5','G5'],
+      bass:[['C2',2],['C3',2],['G1',2],['G2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['D5',2],['B4',2],['G4',2],['B4',2]],
+      strings:[['G4',4],['G4',4]],
+      harp:['Bb4','D5','G5','Bb5','Bb4','D5','G5','Bb5','Bb4','D5','G5','Bb5','Bb4','D5','G5','Bb5'],
+      bass:[['G1',2],['G2',2],['F1',2],['F2',2]],
+      choir:['G3','Bb3','D4']
+    },
+    {
+      brass:[['C6',4],['G5',4]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6'],
+      bass:[['C2',2],['C3',2],['B1',2],['B2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['Ab5',2],['C6',2],['F6',2],['Ab6',2]],
+      strings:[['C5',4],['F5',4]],
+      harp:['Ab4','C5','F5','Ab5','C5','F5','Ab5','C6','Ab4','C5','F5','Ab5','C5','F5','Ab5','C6'],
+      bass:[['Ab1',2],['A1',2],['F2',2],['F3',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['G6',4],['E6',4]],
+      strings:[['C6',8]],
+      harp:['C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6'],
+      bass:[['C2',2],['C3',2],['G1',2],['G2',2]],
+      choir:['C4','E4','C5']
+    },
+    {
+      brass:[['D6',4],['Bb5',4]],
+      strings:[['G5',8]],
+      harp:['D5','G5','Bb5','D6','D5','G5','Bb5','D6','D5','G5','Bb5','D6','D5','G5','Bb5','D6'],
+      bass:[['G1',2],['G2',2],['G1',2],['G2',2]],
+      choir:['G3','Bb3','D4']
+    },
+
+    {
+      brass:[['C6',2],['C6',2],['G5',2],['C6',2]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6'],
+      bass:[['C2',2],['C2',2],['C2',2],['C2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['Eb6',3],['C6',1],['B5',2],['G5',2]],
+      strings:[['Fm',4],['G7',4]],
+      harp:['Eb5','Ab5','F6','D6','B5','G5','D6','B5','Eb5','Ab5','F6','D6','B5','G5','D6','B5'],
+      bass:[['F2',2],['F2',2],['G2',2],['G2',2]],
+      choir:['F4','Ab4','C5']
+    },
+    {
+      brass:[['C6',2],['E6',2],['G6',2],['C7',2]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','E5','G5','C6','E6','C5','G5','E6','C6','E5','G5','C6','E6'],
+      bass:[['C2',2],['C2',2],['C2',2],['C2',2]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['B5',2],['G5',2],['F5',2],['D5',2]],
+      strings:[['G7',8]],
+      harp:['D5','G5','B5','D6','D5','G5','B5','D6','D5','G5','B5','D6','D5','G5','B5','D6'],
+      bass:[['G2',2],['G2',2],['G2',2],['G2',2]],
+      choir:['G3','B3','D4','F4']
+    },
+    {
+      brass:[['C6',2],['G5',2],['C6',2],['E6',2]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6','C5','G5','E6','C6'],
+      bass:[['C2',4],['C2',4]],
+      choir:['C4','E4','G4']
+    },
+    {
+      brass:[['C6',2],['A5',2],['C6',2],['F6',2]],
+      strings:[['F5',8]],
+      harp:['F5','A5','C6','F6','F5','A5','C6','F6','F5','A5','C6','F6','F5','A5','C6','F6'],
+      bass:[['C2',4],['C2',4]],
+      choir:['F4','A4','C5']
+    },
+    {
+      brass:[['G5',2],['B5',2],['D6',2],['G6',2]],
+      strings:[['G5',8]],
+      harp:['G5','B5','D6','G6','G5','B5','D6','G6','G5','B5','D6','G6','G5','B5','D6','G6'],
+      bass:[['G2',4],['G2',4]],
+      choir:['G4','B4','D5','F5']
+    },
+    {
+      brass:[['C6',8]],
+      strings:[['C5',8]],
+      harp:['C5','G5','E6','C6','G5','E5','C5','G4','C5','G5','E6','C6','G5','E5','C5','G4'],
+      bass:[['C2',8]],
+      choir:['C4','E4','G4','C5']
+    }
+  ];
+
+  const placeVoice = (arr, barIndex, seq) => {
+    let stepPos = 0;
+    seq.forEach(([value, len]) => {
+      const idx = barIndex * 16 + stepPos;
+      if(idx < SEQ_SUMMON) arr[idx] = value;
+      stepPos += len;
+    });
+  };
+
+  const placeHarp = (barIndex, notes) => {
+    notes.forEach((note, s) => {
+      const idx = barIndex * 16 + s;
+      if(idx < SEQ_SUMMON) tracksSummon.arp[idx] = note;
+    });
+  };
+
+  bars.forEach((bar, barIndex) => {
+    for(let s = 0; s < 16; s++){
+      const i = barIndex * 16 + s;
+      const intro = barIndex < 4;
+      const main = barIndex >= 4 && barIndex < 12;
+      const dev = barIndex >= 12 && barIndex < 20;
+      const climax = barIndex >= 20 && barIndex < 28;
+      const outro = barIndex >= 28;
+
+      if(intro){
+        if(s === 0){ tracksSummon.kick[i] = 1; tracksSummon.crash[i] = 1; }
+        if(barIndex >= 2 && s % 4 === 0) tracksSummon.hihat[i] = 0.24;
+      }else if(main){
+        if(s === 0 || s === 8) tracksSummon.kick[i] = 1;
+        if(s === 4 || s === 12) tracksSummon.snare[i] = 0.88;
+        if(s % 2 === 0) tracksSummon.hihat[i] = 0.50;
+        if((barIndex === 4 || barIndex === 8) && s === 0) tracksSummon.crash[i] = 1;
+      }else if(dev){
+        if(s === 0 || s === 8) tracksSummon.kick[i] = 1;
+        if(s === 4 || s === 12) tracksSummon.snare[i] = 0.78;
+        if(s % 2 === 0) tracksSummon.hihat[i] = 0.38;
+      }else if(climax){
+        if(s === 0 || s === 6 || s === 10) tracksSummon.kick[i] = 1;
+        if(s === 4 || s === 12) tracksSummon.snare[i] = 1;
+        if(s % 2 === 0) tracksSummon.hihat[i] = 0.72;
+        if((barIndex === 20 || barIndex === 24) && s === 0) tracksSummon.crash[i] = 1;
+      }else if(outro){
+        if(s === 0 || s === 8) tracksSummon.kick[i] = 1;
+        if((barIndex === 28 || barIndex === 34) && s === 0) tracksSummon.crash[i] = 1;
+        if(barIndex < 34 && s % 4 === 0) tracksSummon.hihat[i] = 0.28;
+      }
+    }
+
+    placeVoice(tracksSummon.lead, barIndex, bar.brass);
+    placeHarp(barIndex, bar.harp);
+    placeVoice(tracksSummon.bass, barIndex, bar.bass);
+
+    if(bar.strings) placeVoice(tracksSummon.brass, barIndex, bar.strings);
+    if(bar.choir) tracksSummon.choir[barIndex * 16] = bar.choir;
+
+    const padChord = Array.isArray(bar.strings?.[0]?.[0])
+      ? bar.strings[0][0]
+      : (typeof bar.strings?.[0]?.[0] === 'string' && chordMap[bar.strings[0][0]] ? chordMap[bar.strings[0][0]] : null);
+
+    if(bar.strings && bar.strings[0]){
+      const first = bar.strings[0][0];
+      if(Array.isArray(first)){
+        tracksSummon.pad[barIndex * 16] = first;
+      }else if(typeof first === 'string'){
+        tracksSummon.pad[barIndex * 16] = chordMap[first] || [first];
+      }
+    }
+  });
+}
+function getTempo(){return bgmMode==='summon'?tempoSummon:tempoNormal}
+function getSeqLen(){return bgmMode==='summon'?SEQ_SUMMON:SEQ_NORMAL}
+function getTracks(){return bgmMode==='summon'?tracksSummon:tracksNormal}
+function pulseOsc(t,freq,type='sawtooth',gain=.2,dur=.18,filterFreq=2200,target=260,bus=musicGain){const o=ctx.createOscillator(),g=ctx.createGain(),f=ctx.createBiquadFilter();o.type=type;o.frequency.value=freq;f.type='lowpass';f.frequency.setValueAtTime(filterFreq,t);f.frequency.exponentialRampToValueAtTime(Math.max(80,target),t+dur);g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);o.connect(f);f.connect(g);g.connect(bus);o.start(t);o.stop(t+dur+.02)}
+function playKick(t,mode='normal'){const o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';o.frequency.setValueAtTime(mode==='summon'?108:120,t);o.frequency.exponentialRampToValueAtTime(mode==='summon'?40:48,t+.12);g.gain.setValueAtTime(mode==='summon'?1.08:.95,t);g.gain.exponentialRampToValueAtTime(.001,t+.30);o.connect(g);g.connect(musicGain);o.start(t);o.stop(t+.32)}
+function playSnare(t,v=.7,mode='normal'){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter(),o=ctx.createOscillator(),og=ctx.createGain();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=mode==='summon'?720:900;g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.001,t+(mode==='summon'?.24:.18));o.type='triangle';o.frequency.value=mode==='summon'?150:190;og.gain.setValueAtTime(mode==='summon'?.32:.25,t);og.gain.exponentialRampToValueAtTime(.001,t+.12);n.connect(f);f.connect(g);g.connect(musicGain);o.connect(og);og.connect(musicGain);n.start(t);o.start(t);n.stop(t+.24);o.stop(t+.14)}
+function playHihat(t,v=.3){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=6400;g.gain.setValueAtTime(v*.34,t);g.gain.exponentialRampToValueAtTime(.001,t+.05);n.connect(f);f.connect(g);g.connect(musicGain);n.start(t);n.stop(t+.07)}
+function playCrash(t,mode='normal'){const n=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter();n.buffer=noiseBuf;f.type='highpass';f.frequency.value=mode==='summon'?2400:3200;g.gain.setValueAtTime(mode==='summon'?.60:.45,t);g.gain.exponentialRampToValueAtTime(.001,t+(mode==='summon'?2.2:1.8));n.connect(f);f.connect(g);g.connect(musicGain);n.start(t);n.stop(t+(mode==='summon'?2.25:1.9))}
+function playBass(t,note,mode='normal'){pulseOsc(t,noteToFreq(note),mode==='summon'?'square':'sawtooth',mode==='summon'?.40:.34,mode==='summon'?.34:.28,mode==='summon'?1100:1400,mode==='summon'?70:90)}
+function playArp(t,note,mode='normal'){const o=ctx.createOscillator(),g=ctx.createGain(),p=ctx.createStereoPanner();o.type=mode==='summon'?'sawtooth':'triangle';o.frequency.value=noteToFreq(note);p.pan.value=Math.sin(t*4)*.6;g.gain.setValueAtTime(mode==='summon'?.10:.14,t);g.gain.exponentialRampToValueAtTime(.001,t+(mode==='summon'?.22:.18));o.connect(g);g.connect(p);p.connect(musicGain);o.start(t);o.stop(t+(mode==='summon'?.24:.2))}
+function playPad(t,notes,mode='normal'){
+  const dur=16*.25*(60/getTempo());
+  notes.forEach((n,i)=>{
+    const o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain();
+    o1.type=mode==='summon'?'sawtooth':'sawtooth';
+    o2.type=mode==='summon'?'triangle':'sawtooth';
+    o1.frequency.value=noteToFreq(n);
+    o2.frequency.value=noteToFreq(n)*(i%2===0?1.002:0.998);
+    f.type='lowpass';
+    f.frequency.value=mode==='summon'?760:1200;
+    g.gain.setValueAtTime(.001,t);
+    g.gain.linearRampToValueAtTime(mode==='summon'?.085:.06,t+(mode==='summon'?.95:.7));
+    g.gain.setValueAtTime(mode==='summon'?.085:.06,t+dur-(mode==='summon'?.95:.7));
+    g.gain.linearRampToValueAtTime(.001,t+dur);
+    o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);
+    o1.start(t);o2.start(t);o1.stop(t+dur);o2.stop(t+dur);
+  })
+}
+function playLead(t,obj,mode='normal'){
+  const freq=noteToFreq(obj.note),dur=obj.len*.25*(60/getTempo()),o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain(),lfo=ctx.createOscillator(),lg=ctx.createGain();
+  o1.type=mode==='summon'?'triangle':'sawtooth';
+  o2.type=mode==='summon'?'square':'square';
+  o1.frequency.value=freq;
+  o2.frequency.value=freq;
+  o2.detune.value=mode==='summon'?3:5;
+  f.type='lowpass';
+  f.frequency.setValueAtTime(mode==='summon'?980:820,t);
+  f.frequency.linearRampToValueAtTime(mode==='summon'?2100:3200,t+.10);
+  g.gain.setValueAtTime(.001,t);
+  g.gain.linearRampToValueAtTime(mode==='summon'?.16:.24,t+.05);
+  g.gain.setValueAtTime(mode==='summon'?.16:.24,t+dur-.11);
+  g.gain.linearRampToValueAtTime(.001,t+dur);
+  lfo.frequency.value=mode==='summon'?4.2:6;
+  lg.gain.value=mode==='summon'?3.5:8;
+  lfo.connect(lg);lg.connect(o1.frequency);lg.connect(o2.frequency);
+  o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);
+  lfo.start(t);o1.start(t);o2.start(t);lfo.stop(t+dur);o1.stop(t+dur);o2.stop(t+dur)
+}
+function playChoir(t,notes){
+  const dur=16*.25*(60/getTempo());
+  notes.forEach((n,i)=>{
+    const o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain();
+    o1.type='sine';
+    o2.type='triangle';
+    o1.frequency.value=noteToFreq(n)*(i===0?1:0.5);
+    o2.frequency.value=o1.frequency.value*1.0015;
+    f.type='lowpass';
+    f.frequency.value=840;
+    g.gain.setValueAtTime(.001,t);
+    g.gain.linearRampToValueAtTime(.072,t+.62);
+    g.gain.setValueAtTime(.072,t+dur-.52);
+    g.gain.linearRampToValueAtTime(.001,t+dur);
+    o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);
+    o1.start(t);o2.start(t);o1.stop(t+dur);o2.stop(t+dur);
+  })
+}
+function playBrass(t,notes){
+  const dur=8*.25*(60/getTempo());
+  notes.forEach((n,i)=>{
+    const o1=ctx.createOscillator(),o2=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain();
+    o1.type='sawtooth';
+    o2.type='square';
+    o1.frequency.value=noteToFreq(n);
+    o2.frequency.value=noteToFreq(n)*1.0026;
+    f.type='lowpass';
+    f.frequency.value=780;
+    g.gain.setValueAtTime(.001,t);
+    g.gain.linearRampToValueAtTime(.11,t+.10);
+    g.gain.setValueAtTime(.11,t+dur-.16);
+    g.gain.linearRampToValueAtTime(.001,t+dur);
+    o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);
+    o1.start(t);o2.start(t);o1.stop(t+dur);o2.stop(t+dur);
+  })
+}
+function scheduleOne(i,t){const tr=getTracks();const mode=bgmMode;if(tr.kick[i])playKick(t,mode);if(tr.snare[i])playSnare(t,tr.snare[i],mode);if(tr.hihat[i])playHihat(t,tr.hihat[i]);if(tr.crash[i])playCrash(t,mode);if(tr.bass[i])playBass(t,tr.bass[i],mode);if(tr.arp[i])playArp(t,tr.arp[i],mode);if(tr.pad[i])playPad(t,tr.pad[i],mode);if(tr.lead[i])playLead(t,tr.lead[i],mode);if(mode==='summon'&&tr.choir[i])playChoir(t,tr.choir[i]);if(mode==='summon'&&tr.brass[i])playBrass(t,tr.brass[i])}
+function scheduler(){if(!isBgm||!ctx)return;const stepDur=.25*(60/getTempo());while(nextTime<ctx.currentTime+.1){scheduleOne(step%getSeqLen(),nextTime);nextTime+=stepDur;step++}timer=window.setTimeout(scheduler,25)}
+async function ensure(){init();if(ctx.state==='suspended')await ctx.resume()}
+async function enterBattle(){await ensure();SummonTheme.stopLoop();bgmMode='normal';playBgm();sfx('battleStart')}
+function playBgm(){if(!ctx||isBgm)return;isBgm=true;step=0;nextTime=ctx.currentTime+.08;musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(.001,ctx.currentTime);musicGain.gain.linearRampToValueAtTime(.40,ctx.currentTime+.9);scheduler()}
+function stopBgm(fade=.35){if(!ctx)return;isBgm=false;clearTimeout(timer);musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);musicGain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+fade)}
+async function setSummonMode(on){
+  if(!ctx)return;
+
+  if(on){
+    if(bgmMode==='external_summon') return;
+    try{
+      await ensure();
+      stopBgm(.16);
+      const started = await SummonTheme.startLoop();
+      if(started){
+        bgmMode='external_summon';
+        return;
+      }
+    }catch(err){
+      console.warn('SummonTheme unavailable, fallback to internal summon BGM:', err);
+    }
+
+    const next='summon';
+    if(next===bgmMode)return;
+    bgmMode=next;
+    step=0;
+    nextTime=ctx.currentTime+.06;
+    musicGain.gain.cancelScheduledValues(ctx.currentTime);
+    musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);
+    musicGain.gain.linearRampToValueAtTime(.48,ctx.currentTime+.22);
+    if(!isBgm) playBgm();
+    return;
+  }
+
+  SummonTheme.stopLoop();
+  if(bgmMode==='external_summon'){
+    bgmMode='normal';
+    playBgm();
+    return;
+  }
+
+  const next='normal';
+  if(next===bgmMode)return;
+  bgmMode=next;
+  step=0;
+  nextTime=ctx.currentTime+.06;
+  musicGain.gain.cancelScheduledValues(ctx.currentTime);
+  musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);
+  musicGain.gain.linearRampToValueAtTime(.40,ctx.currentTime+.22);
+  if(!isBgm) playBgm();
+}
+function leaveBattle(){if(!ctx)return;SummonTheme.stopLoop();bgmMode='normal';stopBgm(.28)}
+function tone(t,freq,type='square',gain=.18,dur=.16,toFreq=null,targetGain=.001,bus=sfxGain,filterFreq=4200){const o=ctx.createOscillator(),g=ctx.createGain(),f=ctx.createBiquadFilter();o.type=type;o.frequency.setValueAtTime(freq,t);if(toFreq)o.frequency.exponentialRampToValueAtTime(toFreq,t+dur);f.type='lowpass';f.frequency.value=filterFreq;g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(targetGain,t+dur);o.connect(f);f.connect(g);g.connect(bus);o.start(t);o.stop(t+dur+.02)}
+function dualTone(t,f1,f2,type1='sawtooth',type2='square',gain=.12,dur=.14,to1=null,to2=null){tone(t,f1,type1,gain,dur,to1,.001,sfxGain,3800);tone(t,f2,type2,gain*.82,dur,to2,.001,sfxGain,4200)}
+function chordStab(t,notes,type='triangle',gain=.08,dur=.24){notes.forEach((note,i)=>tone(t+(i*0.008),noteToFreq(note),type,gain,dur,null,.001,sfxGain,3600))}
+function noiseHit(t,gain=.2,dur=.12,hp=900,lp=9000){const n=ctx.createBufferSource(),g=ctx.createGain(),f1=ctx.createBiquadFilter(),f2=ctx.createBiquadFilter();n.buffer=noiseBuf;f1.type='highpass';f1.frequency.value=hp;f2.type='lowpass';f2.frequency.value=lp;g.gain.setValueAtTime(gain,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);n.connect(f1);f1.connect(f2);f2.connect(g);g.connect(sfxGain);n.start(t);n.stop(t+dur+.02)}
+function laserSweep(t,start=1200,end=220,dur=.18,gain=.12,type='sawtooth'){tone(t,start,type,gain,dur,end,.001,sfxGain,4800)}
+function subBoom(t,freq=70,dur=.22,gain=.2){tone(t,freq,'sine',gain,dur,34,.001,sfxGain,1200)}
+function ping(t,freq=880,dur=.12,gain=.09){tone(t,freq,'sine',gain,dur,freq*1.22,.001,sfxGain,5200)}
+function shimmer(t,root='C5'){const seq=chordNotes(root,'maj7',5);seq.forEach((n,i)=>ping(t+i*.055,noteToFreq(n),.16,.06))}
+function inferSkillFamily(meta={}){const type=(meta.fxType||'').toLowerCase();if(['fire','crimson'].includes(type))return 'fire';if(['snow','aurora'].includes(type))return 'ice';if(['earth','industrial'].includes(type))return 'earth';if(['festival','gold','harvest'].includes(type))return 'festival';if(['port','metro'].includes(type))return 'tech';return 'basic'}
+function playAttack(){const t=ctx.currentTime+.005;subBoom(t,96,.20,.22);subBoom(t+.035,58,.16,.12);laserSweep(t+.012,1450,220,.12,.11,'square');laserSweep(t+.040,980,140,.10,.08,'sawtooth');noiseHit(t+.028,.11,.08,1600,8200);noiseHit(t+.072,.06,.05,3200,10000);ping(t+.060,740,.08,.04);ping(t+.095,560,.07,.03)}
+function playGuard(){const t=ctx.currentTime+.005;chordStab(t,['D4','A4','D5'],'triangle',.07,.18);tone(t+.04,260,'sine',.08,.22,180,.001,sfxGain,3000);ping(t+.09,740,.12,.05)}
+function playHeal(){const t=ctx.currentTime+.005;chordStab(t,['C5','E5','G5'],'sine',.06,.24);ping(t+.07,880,.18,.08);ping(t+.16,1174,.22,.08);shimmer(t+.06,'C5')}
+function playBattleStart(){const t=ctx.currentTime+.005;chordStab(t,['E4','B4','E5'],'sawtooth',.06,.18);subBoom(t+.04,82,.24,.16);noiseHit(t+.08,.05,.08,1800,7000)}
+function playVictory(){const t=ctx.currentTime+.005;chordStab(t,['C5','E5','G5'],'triangle',.08,.18);chordStab(t+.16,['E5','G5','C6'],'triangle',.08,.22);chordStab(t+.34,['G5','C6','E6'],'sine',.08,.34);shimmer(t+.18,'C5')}
+function playSummon(meta={}){const t=ctx.currentTime+.005;const entrance=(meta.entrance||'').toLowerCase();const style=(meta.style||'').toLowerCase();const ownerId=(meta.ownerId||meta.attackerId||'').toLowerCase();if(ownerId==='osaka'){noiseHit(t,.13,.16,1200,9000);ping(t+.03,988,.10,.06);ping(t+.07,1318,.12,.06);ping(t+.11,1568,.13,.05);subBoom(t+.08,72,.26,.18);laserSweep(t+.02,1600,220,.20,.10,'square');return}if(ownerId==='tokyo'){laserSweep(t,2800,180,.26,.13,'sawtooth');laserSweep(t+.04,3400,420,.22,.10,'square');subBoom(t+.09,70,.22,.16);noiseHit(t+.06,.08,.10,2000,9600);chordStab(t+.10,['E5','B5','E6'],'triangle',.05,.20);return}if(ownerId==='hokkaido'){shimmer(t,'D5');noiseHit(t+.03,.08,.18,3400,11000);subBoom(t+.11,62,.24,.12);tone(t+.06,480,'triangle',.08,.28,240,.001,sfxGain,3600);return}if(ownerId==='aichi'){subBoom(t,62,.34,.26);subBoom(t+.07,48,.30,.22);noiseHit(t+.04,.16,.18,260,2200);laserSweep(t+.10,900,160,.18,.10,'sawtooth');chordStab(t+.14,['C3','G3','C4'],'sawtooth',.08,.28);return}if(entrance==='groundbreak'){subBoom(t,64,.34,.24);subBoom(t+.08,52,.34,.22);noiseHit(t+.05,.14,.22,280,2200);laserSweep(t+.10,760,120,.16,.08,'sawtooth');chordStab(t+.12,['C3','G3','C4'],'sawtooth',.07,.28);return}if(entrance==='warp'){laserSweep(t,2200,140,.22,.11,'sawtooth');laserSweep(t+.05,2800,300,.18,.08,'square');ping(t+.03,980,.11,.06);ping(t+.08,1320,.12,.06);noiseHit(t+.07,.06,.08,2200,9800);chordStab(t+.11,['E5','B5','E6'],'triangle',.05,.18);return}if(entrance==='sea'||entrance==='splash'){noiseHit(t,.12,.20,500,2600);tone(t+.03,220,'sine',.09,.30,140,.001,sfxGain,2600);tone(t+.06,180,'sine',.07,.24,120,.001,sfxGain,2200);ping(t+.14,760,.13,.05);noiseHit(t+.16,.05,.06,3000,11000);return}if(entrance==='gate'||style==='guardian'){chordStab(t,['D4','A4','D5'],'triangle',.09,.28);chordStab(t+.12,['F4','A4','D5'],'sine',.07,.34);ping(t+.18,1240,.16,.05);shimmer(t+.08,'D5');return}if(entrance==='dash'||entrance==='neon'||style==='tech'){laserSweep(t,1800,260,.16,.10,'square');laserSweep(t+.05,2400,420,.18,.08,'sawtooth');laserSweep(t+.09,2800,620,.12,.06,'square');subBoom(t+.07,86,.16,.10);noiseHit(t+.06,.05,.05,2600,9800);return}if(entrance==='snow'){shimmer(t,'D5');noiseHit(t+.03,.05,.16,3200,9000);tone(t+.06,540,'triangle',.07,.26,280,.001,sfxGain,3400);subBoom(t+.10,64,.18,.10);return}chordStab(t,['A4','C5','E5'],'triangle',.07,.18);laserSweep(t+.04,1400,220,.18,.08,'sawtooth');noiseHit(t+.08,.05,.12,1200,7000);subBoom(t+.09,70,.16,.10)}
+function playSkill(meta={}){const t=ctx.currentTime+.005;const family=inferSkillFamily(meta);const attackerId=(meta.attackerId||'').toLowerCase();if(attackerId==='osaka'){noiseHit(t,.12,.11,1200,9800);noiseHit(t+.06,.08,.08,2600,11000);ping(t+.03,988,.10,.06);ping(t+.08,1318,.11,.06);ping(t+.13,1568,.12,.05);subBoom(t+.09,70,.24,.18);laserSweep(t+.02,1700,180,.20,.11,'square');return}if(attackerId==='tokyo'){laserSweep(t,2800,200,.22,.14,'sawtooth');laserSweep(t+.04,3400,480,.18,.10,'square');laserSweep(t+.09,2200,320,.16,.08,'sawtooth');subBoom(t+.10,66,.22,.16);noiseHit(t+.06,.07,.10,2200,9800);return}if(attackerId==='kyoto'){chordStab(t,['E5','A5','C6'],'triangle',.10,.28);shimmer(t+.04,'A5');ping(t+.16,1760,.16,.05);return}if(attackerId==='hokkaido'){shimmer(t,'D5');noiseHit(t+.04,.07,.18,3600,11000);subBoom(t+.12,62,.22,.12);tone(t+.05,620,'triangle',.08,.30,260,.001,sfxGain,3600);return}if(attackerId==='aichi'){subBoom(t,62,.30,.24);subBoom(t+.06,48,.24,.18);noiseHit(t+.04,.15,.18,280,2400);laserSweep(t+.09,920,120,.16,.10,'sawtooth');noiseHit(t+.12,.05,.06,2600,9800);return}if(attackerId==='hiroshima'){chordStab(t,['E4','A4','C5'],'triangle',.09,.24);shimmer(t+.05,'E5');subBoom(t+.11,68,.20,.12);noiseHit(t+.10,.05,.08,2600,9800);return}if(family==='fire'){subBoom(t,66,.28,.24);subBoom(t+.05,48,.20,.14);noiseHit(t+.03,.16,.18,500,2800);laserSweep(t+.07,980,120,.16,.11,'sawtooth');noiseHit(t+.10,.05,.05,2600,9600);return}if(family==='ice'){shimmer(t,'D5');tone(t+.04,720,'sine',.09,.30,420,.001,sfxGain,4200);noiseHit(t+.06,.05,.16,4200,11000);subBoom(t+.12,60,.18,.10);return}if(family==='earth'){subBoom(t,58,.32,.26);subBoom(t+.07,42,.24,.20);noiseHit(t+.04,.14,.20,220,1800);laserSweep(t+.11,500,110,.12,.06,'triangle');return}if(family==='festival'){chordStab(t,['C5','E5','G5'],'triangle',.10,.18);ping(t+.06,1046,.10,.06);ping(t+.12,1318,.11,.06);ping(t+.17,1568,.11,.05);noiseHit(t+.08,.06,.07,1800,9000);subBoom(t+.10,74,.18,.12);return}if(family==='tech'){laserSweep(t,2200,260,.18,.11,'square');laserSweep(t+.04,2800,620,.15,.09,'sawtooth');laserSweep(t+.08,3400,800,.11,.06,'square');ping(t+.10,1568,.10,.05);noiseHit(t+.09,.04,.05,2400,9800);return}subBoom(t,84,.20,.14);laserSweep(t+.03,1200,180,.14,.09,'square');noiseHit(t+.06,.05,.06,2000,9000)}
+async function sfx(name,meta={}){await ensure();if(name==='attack')return playAttack();if(name==='guard')return playGuard();if(name==='heal')return playHeal();if(name==='summon')return playSummon(meta);if(name==='victory')return playVictory();if(name==='skill')return playSkill(meta);if(name==='battleStart')return playBattleStart()}
+return{enterBattle,leaveBattle,stopBgm,setSummonMode,sfx}
+})();
+
+const MenuAudio=(()=>{let audioCtx=null,masterGain=null,musicGain=null,delay=null,delayFb=null,reverb=null,schedulerTimer=null,isPlaying=false,step=0,nextTime=0,noiseBuf=null;const tempo=96,lookAheadSec=.12,loopBars=16,seqLen=loopBars*16,stepDur=.25*(60/tempo);const tracks={bass:[],arp:[],pad:[],lead:[],sparkle:[]};const NOTE={"C":0,"C#":1,"D":2,"D#":3,"E":4,"F":5,"F#":6,"G":7,"G#":8,"A":9,"A#":10,"B":11};const REV=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];function noteToFreq(note){if(!note)return 0;const key=note.slice(0,-1),oct=parseInt(note.slice(-1),10),idx=NOTE[key],semi=idx+oct*12,a4=9+4*12;return 440*Math.pow(2,(semi-a4)/12)}function chordNotes(root,type,oct){const key=root.slice(0,-1),idx=NOTE[key];let ints=[0,4,7];if(type==="m")ints=[0,3,7];else if(type==="maj7")ints=[0,4,7,11];else if(type==="m7")ints=[0,3,7,10];else if(type==="sus2")ints=[0,2,7];return ints.map(v=>{const n=idx+v,s=Math.floor(n/12);return REV[n%12]+(oct+s)})}function createNoiseBuffer(){const b=audioCtx.createBuffer(1,audioCtx.sampleRate*2,audioCtx.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;return b}function createImpulse(sec=2.8,decay=2.4){const len=Math.floor(audioCtx.sampleRate*sec),b=audioCtx.createBuffer(2,len,audioCtx.sampleRate);for(let c=0;c<2;c++){const d=b.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay)}return b}function compose(){Object.keys(tracks).forEach(k=>tracks[k]=new Array(seqLen).fill(null));const prog=[{root:"E3",type:"maj7"},{root:"C#3",type:"m7"},{root:"A2",type:"maj7"},{root:"B2",type:"sus2"},{root:"E3",type:"maj7"},{root:"G#2",type:"m7"},{root:"C#3",type:"m7"},{root:"B2",type:"sus2"},{root:"A2",type:"maj7"},{root:"E3",type:"maj7"},{root:"F#2",type:"m7"},{root:"B2",type:"sus2"},{root:"C#3",type:"m7"},{root:"A2",type:"maj7"},{root:"E3",type:"maj7"},{root:"B2",type:"sus2"}];const leadBars=[[['B4',8],['G#4',4],['F#4',4]],[['G#4',8],['E4',4],['C#4',4]],[['E4',8],['F#4',4],['G#4',4]],[['F#4',8],['E4',4],['B3',4]],[['B4',8],['C#5',4],['G#4',4]],[['E5',8],['C#5',4],['B4',4]],[['G#4',8],['E4',4],['F#4',4]],[['E4',12],['B3',4]],[['C#5',8],['B4',4],['G#4',4]],[['E5',8],['C#5',4],['B4',4]],[['A4',8],['G#4',4],['F#4',4]],[['F#4',8],['E4',4],['B3',4]],[['G#4',8],['B4',4],['C#5',4]],[['E5',8],['C#5',4],['B4',4]],[['G#4',8],['F#4',4],['E4',4]],[['E4',16]]];for(let bar=0;bar<loopBars;bar++){const chord=prog[bar],arpSet=chordNotes(chord.root,chord.type,4),padSet=chordNotes(chord.root,chord.type,5),bassRoot=chord.root;for(let s=0;s<16;s++){const i=bar*16+s;if(s===0)tracks.pad[i]=padSet;if([0,4,8,12].includes(s))tracks.bass[i]=bassRoot;const arpPattern=[0,1,2,1,3,1,2,1];if(s%2===0)tracks.arp[i]=arpSet[arpPattern[(s/2)%arpPattern.length]%arpSet.length];if(s===2||s===10)tracks.sparkle[i]=arpSet[(s===2?3:2)%arpSet.length]}let pos=0;leadBars[bar].forEach(ev=>{const idx=bar*16+pos;if(idx<seqLen)tracks.lead[idx]={note:ev[0],len:ev[1]};pos+=ev[1]})}}async function ensure(){if(!audioCtx){const AC=window.AudioContext||window.webkitAudioContext;audioCtx=new AC();masterGain=audioCtx.createGain();musicGain=audioCtx.createGain();delay=audioCtx.createDelay();delayFb=audioCtx.createGain();reverb=audioCtx.createConvolver();masterGain.gain.value=.9;musicGain.gain.value=.0001;delay.delayTime.value=.26;delayFb.gain.value=.24;delay.connect(delayFb);delayFb.connect(delay);reverb.buffer=createImpulse();musicGain.connect(delay);musicGain.connect(reverb);musicGain.connect(masterGain);delay.connect(masterGain);reverb.connect(masterGain);masterGain.connect(audioCtx.destination);noiseBuf=createNoiseBuffer();compose()}if(audioCtx.state==='suspended')await audioCtx.resume()}function playPad(t,notes){const dur=16*stepDur;notes.forEach((n,idx)=>{const o1=audioCtx.createOscillator(),o2=audioCtx.createOscillator(),g=audioCtx.createGain(),f=audioCtx.createBiquadFilter();o1.type='sawtooth';o2.type='triangle';o1.frequency.value=noteToFreq(n);o2.frequency.value=noteToFreq(n)*(idx%2===0?1.002:.998);f.type='lowpass';f.frequency.value=1400;g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(.040,t+.8);g.gain.setValueAtTime(.040,t+dur-.9);g.gain.linearRampToValueAtTime(.0001,t+dur);o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);o1.start(t);o2.start(t);o1.stop(t+dur);o2.stop(t+dur)})}function playBass(t,note){const o=audioCtx.createOscillator(),g=audioCtx.createGain(),f=audioCtx.createBiquadFilter();o.type='triangle';o.frequency.setValueAtTime(noteToFreq(note),t);f.type='lowpass';f.frequency.setValueAtTime(420,t);g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(.12,t+.03);g.gain.exponentialRampToValueAtTime(.0001,t+.42);o.connect(f);f.connect(g);g.connect(musicGain);o.start(t);o.stop(t+.45)}function playArp(t,note){const o=audioCtx.createOscillator(),g=audioCtx.createGain(),f=audioCtx.createBiquadFilter(),p=audioCtx.createStereoPanner();o.type='triangle';o.frequency.value=noteToFreq(note);f.type='lowpass';f.frequency.value=2600;p.pan.value=Math.sin(t*1.8)*.42;g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(.055,t+.02);g.gain.exponentialRampToValueAtTime(.0001,t+.18);o.connect(f);f.connect(g);g.connect(p);p.connect(musicGain);o.start(t);o.stop(t+.2)}function playLead(t,obj){const dur=obj.len*stepDur,freq=noteToFreq(obj.note),o1=audioCtx.createOscillator(),o2=audioCtx.createOscillator(),g=audioCtx.createGain(),f=audioCtx.createBiquadFilter(),lfo=audioCtx.createOscillator(),lg=audioCtx.createGain();o1.type='sine';o2.type='triangle';o1.frequency.value=freq;o2.frequency.value=freq*2;o2.detune.value=4;f.type='lowpass';f.frequency.setValueAtTime(2200,t);f.frequency.linearRampToValueAtTime(1400,t+dur);lfo.frequency.value=5.2;lg.gain.value=5;lfo.connect(lg);lg.connect(o1.frequency);g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(.075,t+.04);g.gain.setValueAtTime(.075,t+dur-.08);g.gain.linearRampToValueAtTime(.0001,t+dur);o1.connect(f);o2.connect(f);f.connect(g);g.connect(musicGain);lfo.start(t);o1.start(t);o2.start(t);lfo.stop(t+dur);o1.stop(t+dur);o2.stop(t+dur)}function playSparkle(t,note){const n=audioCtx.createBufferSource(),ng=audioCtx.createGain(),nf=audioCtx.createBiquadFilter(),o=audioCtx.createOscillator(),g=audioCtx.createGain();n.buffer=noiseBuf;nf.type='highpass';nf.frequency.value=5000;ng.gain.setValueAtTime(.0001,t);ng.gain.linearRampToValueAtTime(.020,t+.01);ng.gain.exponentialRampToValueAtTime(.0001,t+.12);o.type='sine';o.frequency.value=noteToFreq(note);g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(.040,t+.01);g.gain.exponentialRampToValueAtTime(.0001,t+.24);n.connect(nf);nf.connect(ng);ng.connect(musicGain);o.connect(g);g.connect(musicGain);n.start(t);n.stop(t+.14);o.start(t);o.stop(t+.25)}function scheduleStep(i,t){if(tracks.pad[i])playPad(t,tracks.pad[i]);if(tracks.bass[i])playBass(t,tracks.bass[i]);if(tracks.arp[i])playArp(t,tracks.arp[i]);if(tracks.lead[i])playLead(t,tracks.lead[i]);if(tracks.sparkle[i])playSparkle(t,tracks.sparkle[i])}function scheduler(){if(!isPlaying||!audioCtx)return;while(nextTime<audioCtx.currentTime+lookAheadSec){scheduleStep(step%seqLen,nextTime);nextTime+=stepDur;step++}schedulerTimer=window.setTimeout(scheduler,25)}async function start(){await ensure();if(isPlaying)return;isPlaying=true;step=0;nextTime=audioCtx.currentTime+.06;musicGain.gain.cancelScheduledValues(audioCtx.currentTime);musicGain.gain.setValueAtTime(.0001,audioCtx.currentTime);musicGain.gain.linearRampToValueAtTime(.42,audioCtx.currentTime+.8);scheduler()}function stop(fade=.45){if(!audioCtx)return;isPlaying=false;clearTimeout(schedulerTimer);schedulerTimer=null;musicGain.gain.cancelScheduledValues(audioCtx.currentTime);musicGain.gain.setValueAtTime(Math.max(.0001,musicGain.gain.value),audioCtx.currentTime);musicGain.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+fade)}return{start,stop,get playing(){return isPlaying}}})();
 
 
 
@@ -2690,8 +3988,44 @@ function showToast(msg){
   showToast._t = setTimeout(() => el.classList.remove("show"), 1700);
 }
 
+function recoverMp(unit, amount){
+  const gain = Math.max(0, Math.round(amount || 0));
+  if(gain <= 0) return 0;
+  const before = Math.round(unit.mp || 0);
+  unit.mp = clamp((unit.mp || 0) + gain, 0, unit.maxMp || 0);
+  return Math.max(0, Math.round(unit.mp) - before);
+}
+
+function hitMpGain(unit, damage, mode = "basic"){
+  const ratio = Math.max(0, damage) / Math.max(1, unit.maxHp || 1);
+  const base = mode === "skill" ? 6 : (mode === "summon" ? 5 : 4);
+  return clamp(
+    Math.round(base + (unit.stats?.魔力 || 0) * 0.020 + (unit.stats?.文化 || 0) * 0.015 + ratio * 22),
+    3,
+    mode === "skill" ? 12 : 10
+  );
+}
+
+function skillBurstRequirement(skill, index){
+  if(!skill) return 0;
+  if(skill.tier === "ultimate" || index === 2) return skill.burstNeed || 60;
+  return skill.burstNeed || 0;
+}
+
+function canUseSkill(unit, skill, index){
+  if(!skill || !unit) return false;
+  if(typeof skill.uses === "number" && skill.uses <= 0) return false;
+  if((unit.mp || 0) < (skill.cost || 0)) return false;
+  return (unit.burst || 0) >= skillBurstRequirement(skill, index);
+}
+
 function switchScreen(id){
   $$(".screen").forEach(el => el.classList.toggle("active", el.id === id));
+  if(id === "screenBattle"){
+    MenuAudio.stop(.35);
+  }else if(id === "screenTitle" || id === "screenHome" || id === "screenResult"){
+    MenuAudio.start().catch(()=>{});
+  }
 }
 
 function chooseEnemy(excludeId){
@@ -2885,13 +4219,71 @@ const PREF_SKILL_CINEMATICS = {
   okinawa:{ key:"resortgalaxy", accent:"aurora", icons:["🌺","🌊","🦁"], words:["RYUKYU","RESORT","WAVE"] }
 };
 
+function getSkillVisualDuration(skill){
+  return skill?.tier === "ultimate" ? 3000 : 1500;
+}
+
+function getSkillKeywordPayload(skill, attacker){
+  const text = `${skill?.name || ""} ${skill?.text || ""}`;
+  const payload = { icons:[], words:[], motif:"generic" };
+
+  const rules = [
+    { test:/自動車|量産|工場|製造|ライン|assembly/i, motif:"cars", icons:["🚗","🚙","🚚"], words:["PRODUCTION","MACHINE","RUSH"] },
+    { test:/電車|首都|都市|メトロ|レーザー|研究|物流|高速/i, motif:"metro", icons:["🏙️","🚇","🛰️"], words:["METRO","SCAN","OVERDRIVE"] },
+    { test:/雪|氷|吹雪|流氷|オーロラ/i, motif:"snow", icons:["❄️","🧊","🌨️"], words:["SNOW","AURORA","BLIZZARD"] },
+    { test:/海|港|波|渦潮|潮|湾|サーフ/i, motif:"wave", icons:["🌊","⚓","🛳️"], words:["HARBOR","TIDE","WAVE"] },
+    { test:/火山|マグマ|地獄|火|炎/i, motif:"fire", icons:["🔥","🌋","💥"], words:["MAGMA","BURST","INFERNO"] },
+    { test:/祭|踊|ねぶた|パレード|花火|たこ焼き|屋台/i, motif:"festival", icons:["🏮","🎆","🎉"], words:["FESTIVAL","PARADE","CARNIVAL"] },
+    { test:/城|神話|神宮|古都|大仏|千年|雅|結界/i, motif:"ancient", icons:["🏯","⛩️","✨"], words:["ANCIENT","SANCTUM","MYSTIC"] },
+    { test:/りんご|桃|みかん|茶|米|果樹|ぶどう|メロン|うどん|ラーメン|牛たん|豚/i, motif:"harvest", icons:["🍎","🍑","🍊"], words:["HARVEST","LOCAL","DELUXE"] },
+    { test:/砂丘|大地|山|恐竜|城壁|地震/i, motif:"earth", icons:["🏔️","🪨","🌍"], words:["EARTH","IMPACT","PRESS"] }
+  ];
+
+  const hit = rules.find(rule => rule.test.test(text));
+  if(hit){
+    payload.motif = hit.motif;
+    payload.icons = hit.icons.slice();
+    payload.words = hit.words.slice();
+  }
+
+  if(attacker?.id === "osaka"){
+    payload.motif = "takoyaki";
+    payload.icons = ["🐙","🌉","🎤"];
+    payload.words = ["DOTONBORI","COMEDY","RUSH"];
+  }else if(attacker?.id === "tokyo"){
+    payload.motif = "megacity";
+    payload.icons = ["🏙️","🗼","🚇"];
+    payload.words = ["CAPITAL","GRID","OVERLOAD"];
+  }else if(attacker?.id === "hokkaido"){
+    payload.motif = "snowfall";
+    payload.icons = ["❄️","🐑","🧊"];
+    payload.words = ["AURORA","SNOWFIELD","BEHEMOTH"];
+  }else if(attacker?.id === "aichi"){
+    payload.motif = "cars";
+    payload.icons = ["🚗","🏭","⚙️"];
+    payload.words = ["ASSEMBLY","LINE","RUSH"];
+  }
+
+  return payload;
+}
+
 function getSkillSceneProfile(attacker, skill){
   const fx = inferSkillFx(skill, attacker);
-  return PREF_SKILL_CINEMATICS[attacker?.id] || {
+  const base = PREF_SKILL_CINEMATICS[attacker?.id] || {
     key:"genericnova",
     accent:fx.accent || "aqua",
     icons:[attacker?.emblem || "★","⚔️","✨"],
     words:[attacker?.name || "PREFECTURE","FANTASIA","BURST"]
+  };
+  const payload = getSkillKeywordPayload(skill, attacker);
+  return {
+    ...base,
+    accent: base.accent || fx.accent || "aqua",
+    skillName: skill?.name || "必殺技",
+    duration: getSkillVisualDuration(skill),
+    motif: payload.motif,
+    icons: payload.icons?.length ? payload.icons : base.icons,
+    words: payload.words?.length ? payload.words : base.words
   };
 }
 
@@ -2904,33 +4296,92 @@ function escapeHtml(str){
     .replace(/'/g,"&#39;");
 }
 
-function buildSceneHtml(profile){
+function buildSceneHtml(profile, visualDurationMs = 1500, delayMs = 650){
+  const durSec = Math.max(0.9, visualDurationMs / 1000);
+  const delaySec = Math.max(0, delayMs / 1000);
+  const anim = (name, mul = 1, extra = "cubic-bezier(.16,.84,.24,1)") => `animation:${name} ${(durSec * mul).toFixed(2)}s ${extra} ${delaySec.toFixed(2)}s forwards;`;
+  const animEase = (name, mul = 1) => `animation:${name} ${(durSec * mul).toFixed(2)}s ease ${delaySec.toFixed(2)}s forwards;`;
+
   const icons = (profile.icons || []).map((icon, i) => {
     const left = [12, 46, 78, 24, 64][i % 5];
     const top = [18, 56, 28, 74, 42][i % 5];
     const rot = [-18, 8, 16, -10, 20][i % 5];
-    return `<div class="skillFxSceneIcon" style="left:${left}%;top:${top}%;transform:translate(-50%,-50%) rotate(${rot}deg)">${escapeHtml(icon)}</div>`;
+    return `<div class="skillFxSceneIcon" style="left:${left}%;top:${top}%;transform:translate(-50%,-50%) rotate(${rot}deg);${anim('sceneRise', 1.0)}">${escapeHtml(icon)}</div>`;
   }).join("");
+
   const words = (profile.words || []).map((word, i) => {
     const left = [18, 50, 82][i % 3];
     const top = [22, 74, 44][i % 3];
-    return `<div class="skillFxSceneWord" style="left:${left}%;top:${top}%">${escapeHtml(word)}</div>`;
+    return `<div class="skillFxSceneWord" style="left:${left}%;top:${top}%;${anim('sceneWordDrift', 1.0)}">${escapeHtml(word)}</div>`;
   }).join("");
 
-  const layer = (cls, inner, extra='') => `<div class="skillFxSceneLayer ${cls}" ${extra}>${inner}</div>`;
-  const panel = `<div class="skillFxScenePanel" style="left:10%;top:16%;width:80%;height:56%"></div>`;
-  const orb = `<div class="skillFxSceneOrb" style="left:50%;top:50%;transform:translate(-50%,-50%)"></div>`;
-  const beam = `<div class="skillFxSceneBeam"></div>`;
-  const railA = `<div class="skillFxSceneRail" style="left:-28%;top:28%;transform:rotate(-14deg)"></div>`;
-  const railB = `<div class="skillFxSceneRail" style="left:-28%;top:66%;transform:rotate(12deg)"></div>`;
-  const stamp = `<div class="skillFxSceneStamp" style="left:50%;top:50%;transform:translate(-50%,-50%)"></div>`;
-  const moon = `<div class="skillFxSceneMoon" style="right:10%;top:10%"></div>`;
-  const wave1 = `<div class="skillFxSceneWave" style="top:20%"></div>`;
-  const wave2 = `<div class="skillFxSceneWave" style="top:48%"></div>`;
-  const burstLines = Array.from({length:6}, (_,i)=>`<div class="skillFxSceneBurstLine" style="transform:translate(-50%,-50%) rotate(${i*30}deg)"></div>`).join("");
+  const layer = (cls, inner, style='') => `<div class="skillFxSceneLayer ${cls}" style="${animEase('sceneLayerFade', 1.08)}${style}">${inner}</div>`;
+  const panel = `<div class="skillFxScenePanel" style="left:10%;top:16%;width:80%;height:56%;${anim('scenePanelPop', 1.0)}"></div>`;
+  const orb = `<div class="skillFxSceneOrb" style="left:50%;top:50%;transform:translate(-50%,-50%);${anim('sceneOrbit', 1.0)}"></div>`;
+  const beam = `<div class="skillFxSceneBeam" style="${anim('sceneSweep', 0.95)}"></div>`;
+  const railA = `<div class="skillFxSceneRail" style="left:-28%;top:28%;transform:rotate(-14deg);${anim('sceneRailRun', 0.92)}"></div>`;
+  const railB = `<div class="skillFxSceneRail" style="left:-28%;top:66%;transform:rotate(12deg);${anim('sceneRailRun', 0.98)}"></div>`;
+  const stamp = `<div class="skillFxSceneStamp" style="left:50%;top:50%;transform:translate(-50%,-50%);${anim('sceneStampDrop', 1.0)}"></div>`;
+  const moon = `<div class="skillFxSceneMoon" style="right:10%;top:10%;${animEase('sceneMoonGlow', 1.0)}"></div>`;
+  const wave1 = `<div class="skillFxSceneWave" style="top:20%;${animEase('sceneWave', 1.0)}"></div>`;
+  const wave2 = `<div class="skillFxSceneWave" style="top:48%;${animEase('sceneWave', 1.06)}"></div>`;
+  const burstLines = Array.from({length:6}, (_,i)=>`<div class="skillFxSceneBurstLine" style="transform:translate(-50%,-50%) rotate(${i*30}deg);${animEase('sceneBurstLine', 0.86)}"></div>`).join("");
+
+  const takoyakiRain = Array.from({length:16}, (_,i)=>{
+    const left = [8,16,24,32,40,48,56,64,72,80,88,20,36,52,68,84][i];
+    const top = [-8,-18,-10,-22,-6,-16,-12,-20,-8,-18,-10,-24,-14,-22,-12,-20][i];
+    const rot = [-18,8,22,-10,14,-22,12,-14,18,-8,24,-16,10,-20,6,16][i];
+    const delay = delaySec + i * 0.03;
+    const dur = (durSec * 0.92 + (i % 4) * 0.08).toFixed(2);
+    return `<div class="skillFxSceneIcon" style="left:${left}%;top:${top}%;transform:translate(-50%,-50%) rotate(${rot}deg);animation:sceneFall ${dur}s cubic-bezier(.16,.84,.24,1) ${delay.toFixed(2)}s forwards;">🐙</div>`;
+  }).join("");
+
+  const carRush = Array.from({length:14}, (_,i)=>{
+    const left = -24 - (i % 4) * 16;
+    const top = 18 + (i % 4) * 14;
+    const delay = delaySec + i * 0.045;
+    const dur = (durSec * 0.95 + (i % 3) * 0.08).toFixed(2);
+    const car = i % 5 === 0 ? '🚚' : (i % 2 === 0 ? '🚗' : '🚙');
+    return `<div class="skillFxSceneIcon" style="left:${left}%;top:${top}%;transform:translate(-50%,-50%);animation:sceneRailRun ${dur}s cubic-bezier(.16,.84,.24,1) ${delay.toFixed(2)}s forwards;">${car}</div>`;
+  }).join("");
+
+  const snowBoulders = Array.from({length:12}, (_,i)=>{
+    const left = [12,20,28,36,44,52,60,68,76,84,32,64][i];
+    const top = [-10,-18,-6,-20,-8,-16,-12,-22,-10,-18,-26,-24][i];
+    const delay = delaySec + i * 0.035;
+    const dur = (durSec * 0.90).toFixed(2);
+    return `<div class="skillFxSceneIcon" style="left:${left}%;top:${top}%;transform:translate(-50%,-50%) rotate(${(i%2===0?-12:14)}deg);animation:sceneFall ${dur}s cubic-bezier(.16,.84,.24,1) ${delay.toFixed(2)}s forwards;">${i % 3 === 0 ? '🧊' : '❄️'}</div>`;
+  }).join("");
+
+  const skylineScan = `
+    <div class="skillFxScenePanel" style="left:8%;bottom:8%;width:84%;height:28%;border-radius:16px 16px 8px 8px;${anim('scenePanelPop', 0.92)}"></div>
+    <div class="skillFxSceneBeam" style="top:40%;transform:translateY(-50%) scaleX(.08) rotate(0deg);${anim('sceneSweep', 0.9)}"></div>
+    <div class="skillFxSceneIcon" style="left:18%;top:56%;font-size:66px;${anim('sceneRise', 0.96)}">🏢</div>
+    <div class="skillFxSceneIcon" style="left:34%;top:50%;font-size:84px;${anim('sceneRise', 1.00)}">🏙️</div>
+    <div class="skillFxSceneIcon" style="left:52%;top:46%;font-size:98px;${anim('sceneRise', 1.02)}">🗼</div>
+    <div class="skillFxSceneIcon" style="left:70%;top:52%;font-size:82px;${anim('sceneRise', 0.98)}">🏢</div>
+    <div class="skillFxSceneIcon" style="left:84%;top:58%;font-size:60px;${anim('sceneRise', 0.94)}">🚇</div>
+  `;
+
+  const genericExtras = {
+    cars: carRush,
+    takoyaki: takoyakiRain,
+    megacity: skylineScan,
+    snowfall: snowBoulders,
+    metro: `${railA}${railB}${beam}`,
+    wave: `${wave1}${wave2}`,
+    fire: `${burstLines}${beam}`,
+    festival: `${burstLines}${icons}`,
+    ancient: `${moon}${stamp}`,
+    harvest: `${panel}${icons}`,
+    earth: `${stamp}${burstLines}`,
+    generic: ""
+  };
+
+  const motifExtras = genericExtras[profile.motif || 'generic'] || "";
 
   const map = {
-    snowfall: layer('scene-fall', `${icons}${words}${wave1}`),
+    snowfall: layer('scene-fall', `${snowBoulders}${words}${wave1}`),
     lanternmarch: layer('scene-rise', `${icons}${panel}${words}`),
     ironstamp: layer('scene-stamp', `${stamp}${icons}${words}`),
     neonrail: layer('scene-rail', `${railA}${railB}${icons}${words}`),
@@ -2942,7 +4393,7 @@ function buildSceneHtml(profile){
     onsensurge: layer('scene-wave', `${wave1}${wave2}${icons}${words}`),
     rushgrid: layer('scene-rail', `${railA}${railB}${beam}${words}`),
     seaworldwave: layer('scene-wave', `${wave1}${wave2}${icons}${words}`),
-    megacityscan: layer('scene-panel', `${panel}${railA}${railB}${beam}${words}`),
+    megacityscan: layer('scene-panel', `${skylineScan}${railA}${railB}${words}`),
     harborholo: layer('scene-orbit', `${orb}${icons}${words}${wave2}`),
     riceavalanche: layer('scene-fall', `${icons}${words}${panel}`),
     alpinepharma: layer('scene-orbit', `${orb}${icons}${words}`),
@@ -2952,11 +4403,11 @@ function buildSceneHtml(profile){
     highlandaura: layer('scene-orbit', `${orb}${moon}${icons}${words}`),
     mountainseal: layer('scene-stamp', `${stamp}${panel}${icons}${words}`),
     teastream: layer('scene-wave', `${wave1}${beam}${icons}${words}`),
-    assemblyline: layer('scene-rail', `${railA}${railB}${panel}${icons}${words}`),
+    assemblyline: layer('scene-rail', `${carRush}${railA}${railB}${panel}${words}`),
     shrinesea: layer('scene-wave', `${wave1}${panel}${icons}${words}`),
     lakepulse: layer('scene-orbit', `${orb}${wave1}${icons}${words}`),
     courtlyscreen: layer('scene-panel', `${panel}${moon}${icons}${words}`),
-    neoncomedystorm: layer('scene-spin', `${icons}${railA}${railB}${words}`),
+    neoncomedystorm: layer('scene-fall', `${takoyakiRain}${railA}${railB}${words}`),
     federationwave: layer('scene-wave', `${wave1}${wave2}${panel}${icons}${words}`),
     buddhaslam: layer('scene-stamp', `${stamp}${moon}${icons}${words}`),
     citrusprayer: layer('scene-rise', `${icons}${moon}${words}${wave2}`),
@@ -2979,7 +4430,10 @@ function buildSceneHtml(profile){
     resortgalaxy: layer('scene-moon', `${moon}${orb}${wave1}${icons}${words}`),
     genericnova: layer('scene-burstline', `${burstLines}${icons}${words}`)
   };
-  return map[profile.key] || map.genericnova;
+
+  const base = map[profile.key] || map.genericnova;
+  if(!motifExtras) return base;
+  return `${base}${layer('scene-panel', motifExtras, 'mix-blend-mode:screen;')}`;
 }
 
 function playSkillCinematic(attacker, skill){
@@ -2991,18 +4445,51 @@ function playSkillCinematic(attacker, skill){
 
     const profile = getSkillSceneProfile(attacker, skill);
     const fx = inferSkillFx({ ...skill, fxType: profile.accent || skill?.fxType }, attacker);
+    const visualDuration = getSkillVisualDuration(skill);
+    const titleLead = 650;
+    const totalDuration = titleLead + visualDuration + 220;
+
     overlay.className = `skillFxOverlay ${fx.cls}`;
     title.textContent = skill?.name || "必殺技";
-    scene.innerHTML = buildSceneHtml(profile);
+    scene.innerHTML = buildSceneHtml(profile, visualDuration, titleLead);
+
+    const backdrop = overlay.querySelector('.skillFxBackdrop');
+    const ring = overlay.querySelector('.skillFxRing');
+    const burst = overlay.querySelector('.skillFxBurst');
+    const particles = overlay.querySelector('.skillFxParticles');
+    const slash = overlay.querySelector('.skillFxSlash');
+
+    if(backdrop) backdrop.style.animationDuration = `${(titleLead / 1000 + 0.55).toFixed(2)}s`;
+    if(ring) ring.style.animationDuration = `${(titleLead / 1000 + 0.75).toFixed(2)}s`;
+    if(burst) burst.style.animationDuration = `${(titleLead / 1000 + 0.70).toFixed(2)}s`;
+    if(particles) particles.style.animationDuration = `${(titleLead / 1000 + 0.78).toFixed(2)}s`;
+    if(slash) slash.style.animationDuration = `${(titleLead / 1000 + 0.42).toFixed(2)}s`;
+    if(title) title.style.animationDuration = `${(titleLead / 1000).toFixed(2)}s`;
+
     void overlay.offsetWidth;
     overlay.classList.add("show", "play", "long");
 
     setTimeout(() => {
+      title.style.opacity = "0";
+      title.style.transition = "opacity .18s ease";
+    }, titleLead - 120);
+
+    setTimeout(() => {
       overlay.className = "skillFxOverlay";
-      title.textContent = "";
+      if(backdrop) backdrop.style.animationDuration = "";
+      if(ring) ring.style.animationDuration = "";
+      if(burst) burst.style.animationDuration = "";
+      if(particles) particles.style.animationDuration = "";
+      if(slash) slash.style.animationDuration = "";
+      if(title){
+        title.textContent = "";
+        title.style.opacity = "";
+        title.style.transition = "";
+        title.style.animationDuration = "";
+      }
       scene.innerHTML = "";
       resolve();
-    }, 3000);
+    }, totalDuration);
   });
 }
 
@@ -3043,13 +4530,30 @@ function renderDetail(id){
       <div class="num">${v}</div>
     </div>
   `).join("");
-  $("#detailSkills").innerHTML = m.skills.map(sk => `
-    <div class="skillCard">
-      <b>${sk.name}</b>
-      <p>威力 ${sk.power} / 消費 ${sk.cost}</p>
-      <p>${sk.text}</p>
+    $("#detailPassive").innerHTML = `
+    <div class="summonCard">
+      <b>${m.passive?.name || "固有特性"}</b>
+      <p>${m.passive?.text || "-"}</p>
+      <p>type: ${m.passive?.type || "-"}</p>
     </div>
-  `).join("");
+  `;
+
+  $("#detailSkills").innerHTML = m.skills.map(sk => {
+    const fx = sk.effect || {};
+    const side = [];
+    if(fx.inflictStatus) side.push(`状態異常: ${fx.inflictStatus}`);
+    if(fx.selfSlowTurns) side.push(`使用後ATB低下 ${fx.selfSlowTurns}T`);
+    if(fx.noGuardTurns) side.push(`使用後防御不能 ${fx.noGuardTurns}T`);
+    if(fx.burstBoostCost) side.push(`Burst消費強化 ${fx.burstBoostCost}`);
+    return `
+      <div class="skillCard">
+        <b>${sk.name}</b>
+        <p>威力 ${sk.power} / 消費 ${sk.cost}</p>
+        <p>${sk.text}</p>
+        <p>${side.length ? side.join(" / ") : "副作用なし"}</p>
+      </div>
+    `;
+  }).join("");
 
   $("#detailSummon").innerHTML = `
     <div class="summonCard">
@@ -3060,36 +4564,52 @@ function renderDetail(id){
 }
 
 
+
 function calcBattleUnit(m){
   const s = m.stats;
   const k = m.kpi || {};
   const maxHp = Math.round((120 + s.体力 * 3.0 + s.防御 * 1.1 + (k.population || 0) * 0.45) * 1.16);
-  const maxMp = Math.round(44 + s.魔力 * 1.75 + s.文化 * 0.5 + (k.income || 0) * 0.18 + (k.research || 0) * 0.12);
+  const maxMp = Math.round(30 + s.魔力 * 1.08 + s.文化 * 0.30 + (k.income || 0) * 0.10 + (k.research || 0) * 0.08);
+  const initialMpRate = clamp(0.30 + (s.文化 * 0.00055) + (k.research || 0) * 0.00035 + (k.tourism || 0) * 0.00015, 0.30, 0.40);
+  const initialMp = Math.round(maxMp * initialMpRate);
   const summonSupport = clamp(Math.round(5 + s.文化 * 0.05 + s.魔力 * 0.04 + (k.tourism || 0) * 0.03), 7, 15);
   const summonBurstGain = clamp(Math.round(6 + s.文化 * 0.03 + (k.culture || 0) * 0.03), 7, 12);
-    const skills = structuredClone(m.skills).map((sk, i) => ({
+  const basicMpGain = clamp(Math.round(3 + s.魔力 * 0.020 + (k.infrastructure || 0) * 0.010), 4, 8);
+  const defendMpGain = clamp(Math.round(basicMpGain + 4 + s.文化 * 0.015 + (k.research || 0) * 0.020), 8, 15);
+  const skills = structuredClone(m.skills).map((sk, i) => ({
     ...sk,
     maxUses: typeof sk.maxUses === "number" ? sk.maxUses : (i === 2 ? 1 : 2),
-    uses: typeof sk.uses === "number" ? sk.uses : (i === 2 ? 1 : 2)
+    uses: typeof sk.uses === "number" ? sk.uses : (i === 2 ? 1 : 2),
+    effect: sk.effect || {},
+    tier: sk.tier || (i === 0 ? "light" : (i === 1 ? "mid" : (i === 2 ? "ultimate" : "tactical"))),
+    burstNeed: typeof sk.burstNeed === "number" ? sk.burstNeed : (i === 2 ? 60 : 0)
   }));
 
-    return {
+  return {
     id: m.id,
     name: m.name,
     prefecture: m.prefecture,
     role: m.role,
     themeStyle: m.themeStyle,
     emblem: m.emblem,
-        symbolImage: m.symbolImage,
+    symbolImage: m.symbolImage,
     furusatoIndex: typeof m.furusatoIndex === "number" ? m.furusatoIndex : 50,
     kpi: structuredClone(m.kpi || {}),
     stats: structuredClone(m.stats),
+    passive: structuredClone(m.passive || null),
+    passiveState: { firstHitUsed:false, summonBoosted:false },
+        statuses: { freeze:0, confusion:0, logistic:0, congestion:0, haste:0, slow:0, poison:0 },
+    statusGuardLock: 0,
+    selfSlowTurns: 0,
+    selfSlowRate: 1,
+    guardType: null,
     skills,
     summon: structuredClone(m.summon),
     maxHp,
     hp: maxHp,
     maxMp,
-    mp: maxMp,
+    mp: initialMp,
+    initialMpRate,
     burst: 0,
     atb: 0,
     atbReady: false,
@@ -3101,12 +4621,159 @@ function calcBattleUnit(m){
     critRate: clamp(Math.round(((k.tourism || 0) * 0.10 + (k.culture || 0) * 0.08 + (k.research || 0) * 0.05) / 3), 3, 16),
     sustain: clamp(Math.round(((k.agriculture || 0) * 0.10 + (k.nature || 0) * 0.08 + (k.population || 0) * 0.05) / 3), 2, 12),
     guardPower: clamp(Math.round(((k.infrastructure || 0) * 0.16 + (k.industry || 0) * 0.08) / 2), 4, 18),
-    defendMpGain: clamp(Math.round(6 + s.魔力 * 0.03 + (k.research || 0) * 0.03), 7, 12),
+    basicMpGain,
+    hitMpGainBase: clamp(Math.round(3 + s.魔力 * 0.015 + s.文化 * 0.012), 3, 7),
+    defendMpGain,
     defendBurstGain: clamp(Math.round(12 + s.文化 * 0.04), 12, 18),
     summonSupport,
     summonBurstGain
   };
 }
+
+const STATUS_META = {
+  freeze:{ label:"凍結", cls:"freeze" },
+  confusion:{ label:"混乱", cls:"confusion" },
+  logistic:{ label:"物流停滞", cls:"logistic" },
+  congestion:{ label:"過密", cls:"congestion" },
+  haste:{ label:"ヘイスト", cls:"guard" },
+  slow:{ label:"スロウ", cls:"debuff" },
+  poison:{ label:"毒", cls:"debuff" }
+};
+
+function logPassive(unit, side, detail){
+  appendLog(`→ 固有特性「${unit.passive?.name || "特性"}」発動: ${detail}`);
+  recordBattleEvent(side, `固有特性: ${unit.passive?.name || "特性"}`, detail);
+}
+
+function addStatus(target, key, turns, sourceLabel, side){
+  if(!STATUS_META[key]) return;
+  const next = clamp(Math.max(target.statuses[key] || 0, turns), 0, 2);
+  if(next <= 0) return;
+  target.statuses[key] = next;
+  appendLog(`→ ${target.name}に${STATUS_META[key].label} ${next}T。`);
+  recordBattleEvent(side, `${sourceLabel}`, `${target.name}に${STATUS_META[key].label} ${next}T付与。`);
+}
+
+function tickUnitStatuses(unit){
+  if(unit.statuses.poison > 0){
+    const poisonDmg = clamp(Math.round(unit.maxHp * 0.055 + unit.stats.体力 * 0.08), 18, Math.round(unit.maxHp * 0.12));
+    unit.hp = clamp(unit.hp - poisonDmg, 0, unit.maxHp);
+    appendLog(`→ ${unit.name}は毒で ${poisonDmg} ダメージ。`);
+  }
+
+  Object.keys(unit.statuses).forEach(key => {
+    if(unit.statuses[key] > 0){
+      unit.statuses[key] -= 1;
+      if(unit.statuses[key] === 0){
+        appendLog(`→ ${unit.name}の${STATUS_META[key].label}が解除。`);
+      }
+    }
+  });
+  if(unit.statusGuardLock > 0){
+    unit.statusGuardLock -= 1;
+    if(unit.statusGuardLock === 0) appendLog(`→ ${unit.name}は再び防御可能になった。`);
+  }
+  if(unit.selfSlowTurns > 0){
+    unit.selfSlowTurns -= 1;
+    if(unit.selfSlowTurns === 0){
+      unit.selfSlowRate = 1;
+      appendLog(`→ ${unit.name}の行動硬直が解けた。`);
+    }
+  }
+}
+
+function renderStatusBadges(unit, hostId){
+  const host = document.getElementById(hostId);
+  if(!host || !unit) return;
+  const chips = [];
+  if(unit.guardType === "formation") chips.push(`<span class="statusMini guard">防御陣形</span>`);
+  if(unit.guardType === "insight") chips.push(`<span class="statusMini guard">見切り</span>`);
+  if(unit.statusGuardLock > 0) chips.push(`<span class="statusMini debuff">防御不能 ${unit.statusGuardLock}T</span>`);
+  if(unit.selfSlowTurns > 0) chips.push(`<span class="statusMini debuff">硬直 ${unit.selfSlowTurns}T</span>`);
+  Object.entries(unit.statuses).forEach(([k,v]) => {
+    if(v > 0){
+      chips.push(`<span class="statusMini ${STATUS_META[k].cls}">${STATUS_META[k].label} ${v}T</span>`);
+    }
+  });
+  host.innerHTML = chips.join("");
+}
+
+function applyPassiveTrigger(unit, opponent, eventName, side, meta = {}){
+  if(!unit?.passive) return;
+  const p = unit.passive;
+  const v = p.values || {};
+
+  if(eventName === "battleStart"){
+    if(p.type === "start_atb"){
+      unit.atb = clamp(unit.atb + (v.atb || 0), 0, 100);
+      logPassive(unit, side, `ATB +${v.atb || 0}`);
+    }else if(p.type === "start_burst"){
+      gainBurst(unit, v.burst || 0);
+      logPassive(unit, side, `Burst +${v.burst || 0}`);
+    }else if(p.type === "start_mp"){
+      unit.mp = clamp(unit.mp + (v.mp || 0), 0, unit.maxMp);
+      logPassive(unit, side, `MP +${v.mp || 0}`);
+    }else if(p.type === "start_mix"){
+      if(v.atb) unit.atb = clamp(unit.atb + v.atb, 0, 100);
+      if(v.mp) unit.mp = clamp(unit.mp + v.mp, 0, unit.maxMp);
+      if(v.burst) gainBurst(unit, v.burst);
+      logPassive(unit, side, `初期強化`);
+    }else if(p.type === "guard_plus"){
+      unit.guardPower += Math.round((v.reduction || 0) * 100 * 0.6);
+      logPassive(unit, side, `防御性能上昇`);
+    }else if(p.type === "summon_boost" && !unit.passiveState.summonBoosted){
+      unit.summon.power = Math.round(unit.summon.power * (v.powerRate || 1));
+      unit.summon.duration += v.durationPlus || 0;
+      unit.passiveState.summonBoosted = true;
+      logPassive(unit, side, `召喚強化`);
+    }
+  }
+
+  if(eventName === "actionEnd"){
+    if(p.type === "low_hp_regen" && unit.hp / unit.maxHp <= (v.threshold || 0.35)){
+      const heal = Math.min(Math.round(unit.maxHp * (v.healRate || 0.06)), unit.maxHp - unit.hp);
+      if(heal > 0){ unit.hp += heal; logPassive(unit, side, `HP ${heal}回復`); }
+    }else if(p.type === "turn_regen"){
+      const heal = Math.min(Math.round(unit.maxHp * (v.healRate || 0.04)), unit.maxHp - unit.hp);
+      if(heal > 0){ unit.hp += heal; logPassive(unit, side, `HP ${heal}回復`); }
+    }else if(p.type === "action_mp"){
+      const add = v.mp || 4;
+      unit.mp = clamp(unit.mp + add, 0, unit.maxMp);
+      logPassive(unit, side, `MP +${add}`);
+    }else if(p.type === "action_burst"){
+      gainBurst(unit, v.burst || 6);
+      logPassive(unit, side, `Burst +${v.burst || 6}`);
+    }else if(p.type === "action_atb"){
+      unit.atb = clamp(unit.atb + (v.atb || 6), 0, 100);
+      if(unit.atb >= 100) unit.atbReady = true;
+      logPassive(unit, side, `ATB +${v.atb || 6}`);
+    }
+  }
+
+  if(eventName === "receiveHit"){
+    if(p.type === "first_hit_guard" && !unit.passiveState.firstHitUsed){
+      unit.passiveState.firstHitUsed = true;
+    }else if(p.type === "hurt_burst" && unit.hp / unit.maxHp <= (v.threshold || 0.5)){
+      gainBurst(unit, v.burst || 8);
+      logPassive(unit, side, `被弾でBurst +${v.burst || 8}`);
+    }else if(p.type === "hurt_regen" && unit.hp / unit.maxHp <= (v.threshold || 0.4)){
+      const heal = Math.min(Math.round(unit.maxHp * (v.healRate || 0.04)), unit.maxHp - unit.hp);
+      if(heal > 0){ unit.hp += heal; logPassive(unit, side, `被弾後HP ${heal}回復`); }
+    }
+  }
+
+  if(eventName === "dealHit"){
+    if(p.type === "hit_atb_down"){
+      opponent.atb = clamp(opponent.atb - (v.atbDown || 8), 0, 100);
+      opponent.atbReady = opponent.atb >= 100;
+      logPassive(unit, side, `${opponent.name}のATB -${v.atbDown || 8}`);
+    }else if(p.type === "hit_logistic_down"){
+      opponent.summonAtb = clamp(opponent.summonAtb - (v.summonAtbDown || 10), 0, 100);
+      logPassive(unit, side, `${opponent.name}のsummonATB -${v.summonAtbDown || 10}`);
+    }
+  }
+}
+
 
 
 
@@ -3131,7 +4798,7 @@ function openSkillMenu(open, mode = state.subMenuMode || "burst"){
   $("#skillMenuHint").textContent = !open
     ? "待機中"
     : mode === "defense"
-      ? "防御行動を選択 / 選択中はATB停止"
+      ? "防御・見切り・回復を選択 / 選択中はATB停止"
       : "必殺技を選択 / 選択中はATB停止";
   $("#battleLog").style.display = open ? "none" : "block";
   if(open && state.battle) populateSkillMenu(state.battle.player);
@@ -3140,42 +4807,64 @@ function openSkillMenu(open, mode = state.subMenuMode || "burst"){
 
 function populateSkillMenu(unit){
   const mode = state.subMenuMode || "burst";
-  const buttons = [$("#skillBtn0"), $("#skillBtn1"), $("#skillBtn2")];
+  const buttons = [$("#skillBtn0"), $("#skillBtn1"), $("#skillBtn2"), $("#skillBtn3")];
 
   if(mode === "defense"){
     const meta = getFurusatoMeta(unit);
     const defs = [
       {
         title: "防御陣形",
-        sub: `次の被ダメージを大幅軽減 / MP+${unit.defendMpGain || 0} / Burst+${unit.defendBurstGain || 0}`,
-        disabled: !!state.battle?.over || state.acting || unit.guarding
+        sub: `次の被ダメージ軽減 / MP+${unit.defendMpGain || 0} / Burst+${unit.defendBurstGain || 0}`,
+        disabled: !!state.battle?.over || state.acting || !!unit.guardType || unit.statusGuardLock > 0,
+        action: "guardFormation"
+      },
+      {
+        title: "見切り",
+        sub: `通常攻撃・召喚に強い / 必殺には弱い / 混乱中は不安定`,
+        disabled: !!state.battle?.over || state.acting || !!unit.guardType || unit.statusGuardLock > 0,
+        action: "guardInsight"
       },
       {
         title: "ふるさと納税",
         sub: `HP ${meta.heal} 回復 / MP ${meta.mpCost} 消費 / 還元指数 ${meta.score}`,
-        disabled: !!state.battle?.over || state.acting || unit.mp < meta.mpCost || unit.hp >= unit.maxHp
-      },
-      {
-        title: "防衛方針",
-        sub: "都市集中が強い県ほど回復が小さく、地方寄りの県ほど大きく回復する。",
-        disabled: true
+        disabled: !!state.battle?.over || state.acting || unit.mp < meta.mpCost || unit.hp >= unit.maxHp,
+        action: "furusato"
       }
     ];
 
     buttons.forEach((btn, i) => {
       const item = defs[i];
-      btn.innerHTML = `<b>${item.title}</b><small>${item.sub}</small>`;
-      btn.disabled = item.disabled;
-      btn.dataset.action = i === 0 ? "guard" : (i === 1 ? "furusato" : "info");
+      if(item){
+        btn.style.display = "flex";
+        btn.innerHTML = `<b>${item.title}</b><small>${item.sub}</small>`;
+        btn.disabled = item.disabled;
+        btn.dataset.action = item.action;
+      }else{
+        btn.style.display = "none";
+        btn.innerHTML = "";
+        btn.disabled = true;
+        btn.dataset.action = "";
+      }
     });
     return;
   }
 
+  buttons.forEach(btn => {
+    btn.style.display = "flex";
+    btn.innerHTML = "";
+    btn.disabled = true;
+    btn.dataset.action = "";
+  });
+
     unit.skills.forEach((sk, i) => {
     const btn = buttons[i];
+    if(!btn) return;
     const remain = typeof sk.uses === "number" ? `${sk.uses}/${sk.maxUses}` : "-";
-    btn.innerHTML = `<b>${sk.name}</b><small>${sk.text} / 威力 ${sk.power} / 消費魔力 ${sk.cost} / 残回数 ${remain}</small>`;
-    btn.disabled = !!state.battle?.over || state.acting || unit.mp < sk.cost || (typeof sk.uses === "number" && sk.uses <= 0);
+    const burstNeed = skillBurstRequirement(sk, i);
+    const tierLabel = sk.tier === "ultimate" ? "大技" : (sk.tier === "mid" ? "中技" : (sk.tier === "light" ? "軽技" : "補助"));
+    const burstText = burstNeed > 0 ? ` / Burst ${burstNeed}+` : "";
+    btn.innerHTML = `<b>${sk.name} [${tierLabel}]</b><small>${sk.text} / 威力 ${sk.power} / 消費魔力 ${sk.cost}${burstText} / 残回数 ${remain}</small>`;
+    btn.disabled = !!state.battle?.over || state.acting || !canUseSkill(unit, sk, i);
     btn.dataset.action = `skill:${i}`;
   });
 }
@@ -3183,23 +4872,27 @@ function populateSkillMenu(unit){
 function handleSubMenuAction(index){
   const mode = state.subMenuMode || "burst";
   if(mode === "defense"){
-    if(index === 0) return performGuard("player");
-    if(index === 1) return performFurusatoAid("player");
+    if(index === 0) return performGuard("player", "formation");
+    if(index === 1) return performGuard("player", "insight");
+    if(index === 2) return performFurusatoAid("player");
     return;
   }
   return performSkill("player", index);
 }
 
+
 async function startBattle(playerId, enemyId){
+  MenuAudio.stop(.28);
   await BattleAudio.enterBattle();
   const p = calcBattleUnit(byId[playerId]);
   const e = calcBattleUnit(byId[enemyId]);
   const stageEffect = decideStageEffect(playerId, enemyId);
   state.enemyId = enemyId;
   state.result = null;
-  state.battle = { player:p, enemy:e, turn:1, over:false, stageEffect, history:[] };
-
-
+    state.battle = { player:p, enemy:e, turn:1, over:false, stageEffect, history:[] };
+  BattleAudio.setSummonMode(false);
+  applyPassiveTrigger(p, e, "battleStart", "player");
+  applyPassiveTrigger(e, p, "battleStart", "enemy");
 
   const battleTitleSubEl = $("#battleTitleSub");
   if(battleTitleSubEl) battleTitleSubEl.textContent = `${p.name} vs ${e.name}`;
@@ -3217,27 +4910,36 @@ async function startBattle(playerId, enemyId){
   renderLogo($("#playerLogoOrb"), p);
   renderLogo($("#enemyLogoOrb"), e);
 
-    p.atb = 42;
+  p.atb = 42;
   e.atb = 24;
   p.atbReady = false;
   e.atbReady = false;
 
-    applyStageVisual(stageEffect);
+  applyStageVisual(stageEffect);
   updateStageInfo(stageEffect);
-        $("#battleLog").innerHTML = `${p.name}が出撃。対するは${e.name}。<br>自治体の特色を宿した戦いが始まる。<br>戦場は「${stageEffect.name}」。 ${stageEffect.desc}<br>ATBゲージが満ちた側から行動可能。<br>戦闘テンポはやや落ち着き、通常攻撃だけでは押し切りにくい。防御・召喚・必殺の判断が重要。`;
+  $("#battleLog").innerHTML = `${p.name}が出撃。対するは${e.name}。<br>自治体の特色を宿した戦いが始まる。<br>戦場は「${stageEffect.name}」。 ${stageEffect.desc}<br>ATBゲージが満ちた側から行動可能。<br>戦闘テンポはやや落ち着き、通常攻撃だけでは押し切りにくい。防御・召喚・必殺の判断が重要。`;
   if(stageEffect.id === "snow") appendLog("→ 雪原の影響で全体の機動が低下している。");
   if(stageEffect.id === "port") appendLog("→ 港湾の追い風で召喚と機動が強まる。");
   if(stageEffect.id === "industrial") appendLog("→ 工都の圧力で打撃性能が底上げされる。");
   if(stageEffect.id === "koto") appendLog("→ 古都結界の霊脈がスキル行使を後押しする。");
   if(stageEffect.id === "peace") appendLog("→ 平和祈念地の加護が被害を和らげる。");
   if(stageEffect.id === "diet") appendLog("→ 国会議事堂前の緊張感で必殺ゲージの伸びが増す。");
-    openSkillMenu(false);
+
+  openSkillMenu(false);
+  state.atbPaused = true;
   switchScreen("screenBattle");
-    updateBattleUI();
+  updateBattleUI();
+
+  await playBattleStartIntro(p, e, stageEffect);
+
   appendLog(`→ ${p.name}のATB速度: ${atbSpeed(p).toFixed(2)} / ${e.name}のATB速度: ${atbSpeed(e).toFixed(2)}`);
   recordBattleEvent("system", "戦闘開始", `戦場: ${stageEffect.name} / ${p.name} vs ${e.name}`);
+
+  state.atbPaused = false;
+  updateBattleUI();
   startAtbLoop();
 }
+
 
 
 
@@ -3297,8 +4999,12 @@ function setBurst(fill, text, value){
 function setAtb(fill, text, value){
   const pct = clamp(value, 0, 100);
   fill.style.width = pct + "%";
-  text.textContent = `${Math.round(pct)}%`;
+  fill.classList.toggle("ready", pct >= 100);
+  const row = fill.closest(".atbSlimRow");
+  if(row) row.classList.toggle("ready", pct >= 100);
+  if(text) text.textContent = "";
 }
+
 
 function updateSummonBuddy(side, unit){
 
@@ -3307,7 +5013,9 @@ function updateSummonBuddy(side, unit){
   if(unit.summonRemain > 0){
     el.textContent = unit.summon?.emoji || "★";
     el.dataset.name = `${unit.summon?.name || "召喚"} ${unit.summonRemain}T`;
-    el.classList.add("show", "follow");
+    if(!el.classList.contains("enter-skyfall") && !el.classList.contains("enter-sea") && !el.classList.contains("enter-warp") && !el.classList.contains("enter-gate") && !el.classList.contains("enter-groundbreak") && !el.classList.contains("enter-dash") && !el.classList.contains("enter-neon")){
+      el.classList.add("show", "follow");
+    }
     el.style.filter = unit.summon?.style === "mecha"
       ? "drop-shadow(0 0 18px rgba(255,136,88,.35))"
       : unit.summon?.style === "guardian"
@@ -3316,7 +5024,7 @@ function updateSummonBuddy(side, unit){
           ? "drop-shadow(0 0 18px rgba(111,228,255,.35))"
           : "drop-shadow(0 0 18px rgba(106,220,167,.30))";
   }else{
-    el.classList.remove("show", "follow");
+    el.classList.remove("show", "follow", "enter-skyfall", "enter-sea", "enter-warp", "enter-gate", "enter-groundbreak", "enter-dash", "enter-neon", "exit-quick");
     el.dataset.name = "";
     el.textContent = "";
     el.style.filter = "";
@@ -3369,28 +5077,30 @@ function playSummonCinematic(unit, phase = "enter"){
             ? "radial-gradient(circle at center, rgba(120,208,255,.26), rgba(40,120,180,.18) 36%, rgba(4,8,20,.94) 100%)"
             : mode === "gate"
               ? "radial-gradient(circle at center, rgba(255,215,122,.26), rgba(140,104,40,.18) 36%, rgba(4,8,20,.94) 100%)"
-              : mode === "dash"
+              : mode === "dash" || mode === "neon"
                 ? "radial-gradient(circle at center, rgba(255,214,122,.24), rgba(255,96,132,.16) 36%, rgba(4,8,20,.94) 100%)"
                 : mode === "snow"
                   ? "radial-gradient(circle at center, rgba(210,240,255,.26), rgba(86,124,188,.18) 36%, rgba(4,8,20,.94) 100%)"
                   : phase === "enter"
                     ? "radial-gradient(circle at center, rgba(144,255,228,.24), rgba(111,228,255,.16) 36%, rgba(4,8,20,.94) 100%)"
-                    : "radial-gradient(circle at center, rgba(255,255,255,.16), rgba(4,8,20,.12) 36%, rgba(4,8,20,.94) 100%)";
+                    : "radial-gradient(circle at center, rgba(255,255,255,.10), rgba(4,8,20,.10) 36%, rgba(4,8,20,.94) 100%)";
     }
     if(burst){
       burst.style.transform = mode === "groundbreak"
-        ? "scale(.56) rotate(0deg)"
+        ? "scale(.64) rotate(0deg)"
         : mode === "warp"
           ? "scale(.48) rotate(90deg)"
           : mode === "sea"
-            ? "scale(.58) rotate(-10deg)"
-            : "scale(.52) rotate(0deg)";
+            ? "scale(.60) rotate(-10deg)"
+            : mode === "skyfall"
+              ? "scale(.62) rotate(0deg)"
+              : "scale(.52) rotate(0deg)";
     }
     if(slash){
       slash.style.transform = mode === "gate"
         ? "translateX(0) scaleX(.16) skewX(0deg)"
-        : mode === "dash"
-          ? "translateX(-46%) scaleX(.18) skewX(-28deg)"
+        : mode === "dash" || mode === "neon"
+          ? "translateX(-46%) scaleX(.22) skewX(-28deg)"
           : mode === "warp"
             ? "translateX(0) scaleX(.12) skewX(0deg)"
             : "translateX(-30%) scaleX(.4) skewX(-18deg)";
@@ -3406,7 +5116,103 @@ function playSummonCinematic(unit, phase = "enter"){
       if(slash) slash.style.transform = "";
       title.textContent = "";
       resolve();
-    }, phase === "enter" ? 2000 : 1700);
+    }, phase === "enter" ? 1850 : 620);
+  });
+}
+
+function getSummonActionSceneProfile(unit, action){
+  const style = unit?.summon?.style || "spirit";
+  const actionType = action?.type || "attack";
+  const profiles = {
+    spirit:{ attack:"resortgalaxy", heal:"orangecascade", buff:"citrusprayer", bicker:"whirlpooldance" },
+    tech:{ attack:"megacityscan", heal:"neonrail", buff:"nightmarketdash", bicker:"rushgrid" },
+    guardian:{ attack:"courtlyscreen", heal:"phoenixbell", buff:"mythicmoon", bicker:"buddhaslam" },
+    mecha:{ attack:"assemblyline", heal:"castleeruption", buff:"straitbreaker", bicker:"dinosaurdrop" }
+  };
+  const accentByStyle = { spirit:"aurora", tech:"metro", guardian:"gold", mecha:"industrial" };
+  const accentByType = { attack:accentByStyle[style] || "aurora", heal:"verdant", buff:"gold", bicker:"crimson" };
+  const iconByStyle = {
+    spirit:[unit?.summon?.emoji || "✨","🌊","🌿"],
+    tech:[unit?.summon?.emoji || "🛰️","⚡","🏙️"],
+    guardian:[unit?.summon?.emoji || "🛡️","✨","🏯"],
+    mecha:[unit?.summon?.emoji || "🤖","⚙️","🔥"]
+  };
+  const label = action?.name ? action.name.toUpperCase().slice(0, 18) : "ACTION";
+  return {
+    key:(profiles[style] && profiles[style][actionType]) || "genericnova",
+    accent:accentByType[actionType] || accentByStyle[style] || "aurora",
+    icons:iconByStyle[style] || ["★","✨","⚔️"],
+    words:[
+      (unit?.summon?.name || "SUMMON").toUpperCase().slice(0, 18),
+      label,
+      actionType === "attack" ? "ASSAULT" : actionType === "heal" ? "RECOVERY" : actionType === "buff" ? "SUPPORT" : "CHAOS"
+    ]
+  };
+}
+
+function playSummonActionCinematic(unit, action){
+  return new Promise(resolve => {
+    const overlay = $("#skillFxOverlay");
+    const title = $("#skillFxTitle");
+    const scene = $("#skillFxScene");
+    if(!overlay || !title || !scene || !unit?.summon || !action){ resolve(); return; }
+
+    const profile = getSummonActionSceneProfile(unit, action);
+    overlay.className = `skillFxOverlay fx-${profile.accent}`;
+    title.textContent = `${unit.summon.name} - ${action.name}`;
+    scene.innerHTML = buildSceneHtml(profile);
+
+    void overlay.offsetWidth;
+    overlay.classList.add("show", "play", "long");
+
+    setTimeout(() => {
+      overlay.className = "skillFxOverlay";
+      title.textContent = "";
+      scene.innerHTML = "";
+      resolve();
+    }, 1700);
+  });
+}
+
+function animateSummonMeleeStrike(side, unit, damage, isGuard = false){
+  return new Promise(resolve => {
+    const buddy = side === "player" ? $("#playerSummonBuddy") : $("#enemySummonBuddy");
+    const defender = side === "player" ? $("#fighterEnemy") : $("#fighterPlayer");
+    const impact = $("#impact");
+    const screen = $("#gameScreen").getBoundingClientRect();
+    if(!buddy || !defender || !impact){ resolve(); return; }
+
+    const buddyRect = buddy.getBoundingClientRect();
+    const defRect = defender.getBoundingClientRect();
+    const dxRaw = (defRect.left + defRect.width / 2) - (buddyRect.left + buddyRect.width / 2);
+    const dyRaw = (defRect.top + defRect.height * 0.48) - (buddyRect.top + buddyRect.height / 2);
+    const dx = clamp(dxRaw * 0.58, side === "player" ? 34 : -240, side === "player" ? 240 : -34);
+    const dy = clamp(dyRaw * 0.52, -120, 120);
+
+    buddy.style.transition = "transform .34s cubic-bezier(.18,.84,.24,1), filter .20s ease";
+    buddy.style.zIndex = "11";
+    buddy.style.transform = `translate(${dx}px, ${dy}px) scale(1.22)`;
+
+    setTimeout(() => {
+      defender.classList.add("hit");
+      impact.style.left = `${defRect.left - screen.left + defRect.width/2 - 9}px`;
+      impact.style.top = `${defRect.top - screen.top + defRect.height/2 - 9}px`;
+      impact.classList.remove("pop");
+      void impact.offsetWidth;
+      impact.classList.add("pop");
+      showFloat(isGuard ? "guard" : "damage", `-${damage}`, defRect.left - screen.left + defRect.width/2 - 22, defRect.top - screen.top + 18);
+    }, 240);
+
+    setTimeout(() => {
+      buddy.style.transform = "";
+      defender.classList.remove("hit");
+      impact.classList.remove("pop");
+      setTimeout(() => {
+        buddy.style.transition = "";
+        buddy.style.zIndex = "";
+        resolve();
+      }, 120);
+    }, 760);
   });
 }
 
@@ -3428,29 +5234,44 @@ async function runSummonAction(side){
     action = owner.summon.actions.find(a => a.type === "buff") || action;
   }
 
-    if(action.type === "attack"){
+  if(action.type === "attack"){
     const basePower = action.power + Math.round((owner.kpi?.culture || 0) * 0.03) + Math.round((owner.kpi?.tourism || 0) * 0.02);
     const damage = calcDamage(owner, target, basePower, "summon");
     target.hp = clamp(target.hp - damage, 0, target.maxHp);
-        appendLog(`→ 召喚獣 ${owner.summon.name} が独立行動。「${action.name}」！ ${damage}ダメージ。`);
-    recordBattleEvent(side, `召喚追撃: ${action.name}`, `${owner.summon.name}が${target.name}へ${damage}ダメージ。`);
-    await animateSummonStrike(side, damage, target.guarding);
+    const hitMp = recoverMp(target, hitMpGain(target, damage, "summon") + (target.hitMpGainBase || 0) * 0.25);
 
-    if(target.guarding){
-      appendLog(`→ ${target.name}は召喚獣の一撃も防御で軽減した。`);
+        appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動。「${action.name}」！`);
+    appendLog(`→ ${owner.summon.name}が自ら前へ飛び出し、${target.name}へ ${damage} ダメージ。`);
+    appendLog(`→ ${target.name}は被弾でMP +${hitMp}。`);
+    recordBattleEvent(side, `召喚必殺: ${action.name}`, `${owner.summon.name}が突撃し、${target.name}へ${damage}ダメージ。被弾側MP+${hitMp}。`);
+    BattleAudio.sfx("summon", { ...owner.summon, ownerId: owner.id, style: owner.summon?.style || "", entrance: owner.summon?.entrance || "", actionType: action.type || "attack", actionName: action.name || "" });
+
+    await Promise.all([
+      playSummonActionCinematic(owner, action),
+      animateSummonMeleeStrike(side, owner, damage, !!target.guardType)
+    ]);
+
+    if(target.guardType){
+      appendLog(`→ ${target.name}は召喚獣の一撃を受けて防御体勢が崩れた。`);
+      target.guardType = null;
       target.guarding = false;
     }
     if(target.hp <= 0){
       finishBattle(owner, target);
       return;
     }
+
   }else if(action.type === "bicker"){
     const selfDamage = clamp((action.selfDamage || 18) + Math.round(Math.random() * 8) - 2, 12, 30);
     owner.hp = clamp(owner.hp - selfDamage, 0, owner.maxHp);
     if(action.burst) gainBurst(owner, action.burst);
-        appendLog(`→ 召喚獣 ${owner.summon.name} が独立行動……のはずが「${action.name}」発生。`);
+
+        appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動……のはずが「${action.name}」で暴発。`);
     appendLog(`→ ${action.text} ${owner.name}が巻き込まれて ${selfDamage} ダメージ。`);
-    recordBattleEvent(side, `召喚暴発: ${action.name}`, `${owner.summon.name}の仲違いで${owner.name}が${selfDamage}ダメージ。`);
+    recordBattleEvent(side, `召喚暴発: ${action.name}`, `${owner.summon.name}の暴発で${owner.name}が${selfDamage}ダメージ。`);
+    BattleAudio.sfx("summon", { ...owner.summon, ownerId: owner.id, style: owner.summon?.style || "", entrance: owner.summon?.entrance || "", actionType: action.type || "bicker", actionName: action.name || "" });
+
+    await playSummonActionCinematic(owner, action);
 
     const ownerFighter = side === "player" ? $("#fighterPlayer") : $("#fighterEnemy");
     const rect = ownerFighter.getBoundingClientRect();
@@ -3463,13 +5284,18 @@ async function runSummonAction(side){
       finishBattle(target, owner);
       return;
     }
+
   }else if(action.type === "heal"){
     const heal = clamp((action.heal || 32) + Math.round(owner.stats.文化 * 0.20), 28, 68);
     const actual = Math.min(heal, owner.maxHp - owner.hp);
     owner.hp = clamp(owner.hp + actual, 0, owner.maxHp);
     if(action.burst) gainBurst(owner, action.burst);
-        appendLog(`→ 召喚獣 ${owner.summon.name} が独立行動。「${action.name}」。${owner.name}の体力が${actual}回復。`);
+
+        appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動。「${action.name}」。${owner.name}の体力が${actual}回復。`);
     recordBattleEvent(side, `召喚回復: ${action.name}`, `${owner.summon.name}が${owner.name}を${actual}回復。`);
+    BattleAudio.sfx("summon", { ...owner.summon, ownerId: owner.id, style: owner.summon?.style || "", entrance: owner.summon?.entrance || "", actionType: action.type || "heal", actionName: action.name || "" });
+
+    await playSummonActionCinematic(owner, action);
     if(actual > 0) await playHealCinematic(actual);
 
   }else if(action.type === "buff"){
@@ -3477,10 +5303,13 @@ async function runSummonAction(side){
     owner.summonShield = Math.max(owner.summonShield || 0, action.shield || 0.12);
     if(action.burst) gainBurst(owner, action.burst);
     if(action.mp) owner.mp = clamp(owner.mp + action.mp, 0, owner.maxMp);
-        appendLog(`→ 召喚獣 ${owner.summon.name} が独立行動。「${action.name}」。${action.text}`);
-    recordBattleEvent(side, `召喚支援: ${action.name}`, `${owner.summon.name}が支援行動。${action.text}`);
-  }
 
+        appendLog(`→ 召喚獣 ${owner.summon.name} が必殺行動。「${action.name}」。${action.text}`);
+    recordBattleEvent(side, `召喚支援: ${action.name}`, `${owner.summon.name}が支援行動。${action.text}`);
+    BattleAudio.sfx("summon", { ...owner.summon, ownerId: owner.id, style: owner.summon?.style || "", entrance: owner.summon?.entrance || "", actionType: action.type || "buff", actionName: action.name || "" });
+
+    await playSummonActionCinematic(owner, action);
+  }
 
   updateBattleUI();
 }
@@ -3549,7 +5378,6 @@ async function runSummonTurn(side){
 }
 
 function updateBattleUI(){
-
   const b = state.battle;
   if(!b) return;
   setGauge($("#pHp"), $("#pHpText"), b.player.hp, b.player.maxHp);
@@ -3561,19 +5389,26 @@ function updateBattleUI(){
   setBurst($("#eBurst"), $("#eBurstText"), b.enemy.burst);
   setAtb($("#eAtb"), $("#eAtbText"), b.enemy.atb);
 
-  $("#playerStatusBadge").textContent = state.atbPaused ? "選択中" : (b.player.atbReady ? "行動可能" : (b.player.summonRemain > 0 ? `召喚中 ${b.player.summonRemain}T` : (b.player.guarding ? "防御" : "通常")));
-  $("#enemyStatusBadge").textContent = state.atbPaused ? "停止" : (b.enemy.atbReady ? "行動可能" : (b.enemy.summonRemain > 0 ? `召喚中 ${b.enemy.summonRemain}T` : (b.enemy.guarding ? "防御" : "通常")));
+  const playerCommandHold = b.player.atbReady && !state.acting && !b.over;
 
+  $("#playerStatusBadge").textContent = state.atbPaused ? "選択中" : (b.player.atbReady ? "入力待ち" : (b.player.summonRemain > 0 ? `召喚中 ${b.player.summonRemain}T` : (b.player.guardType === "formation" ? "防御陣形" : (b.player.guardType === "insight" ? "見切り" : "通常"))));
+  $("#enemyStatusBadge").textContent = state.atbPaused ? "停止" : (playerCommandHold ? "待機" : (b.enemy.atbReady ? "行動可能" : (b.enemy.summonRemain > 0 ? `召喚中 ${b.enemy.summonRemain}T` : (b.enemy.guardType === "formation" ? "防御陣形" : (b.enemy.guardType === "insight" ? "見切り" : "通常")))));
+
+  renderStatusBadges(b.player, "playerStatusBadges");
+  renderStatusBadges(b.enemy, "enemyStatusBadges");
   updateSummonBuddy("player", b.player);
   updateSummonBuddy("enemy", b.enemy);
 
-  const playerCanAct = b.player.atbReady && !state.acting && !b.over;
+    const playerCanAct = b.player.atbReady && !state.acting && !b.over;
+  const hasUsableSkill = b.player.skills.some((sk, i) => canUseSkill(b.player, sk, i));
+  const playerCanSummon = playerCanAct && b.player.summonRemain <= 0 && b.player.mp >= 32 && b.player.burst >= 35;
   $("#cmdFight").disabled = !playerCanAct;
-  $("#cmdGuard").disabled = !playerCanAct || b.player.guarding;
-  $("#cmdSummon").disabled = !playerCanAct || b.player.summonRemain > 0 || b.player.mp < 24;
-  $("#cmdBurst").disabled = !playerCanAct;
+  $("#cmdGuard").disabled = !playerCanAct;
+  $("#cmdSummon").disabled = !playerCanSummon;
+  $("#cmdBurst").disabled = !playerCanAct || !hasUsableSkill;
   populateSkillMenu(b.player);
 }
+
 
 
 function appendLog(msg){
@@ -3730,9 +5565,15 @@ function atbSpeed(unit){
   const heavyPenalty = Math.max(0, (industry - research) * 0.00035);
   const regionalVariance = ((population + research + tourism) - (nature * 0.55)) * 0.00022;
 
-  const base = 0.305 + statBase + kpiBase + regionalVariance - terrainPenalty - heavyPenalty;
+  let base = 0.305 + statBase + kpiBase + regionalVariance - terrainPenalty - heavyPenalty;
   const rate = state.battle && state.battle.stageEffect ? state.battle.stageEffect.atbRate : 1;
-  return clamp(base * rate, 0.42, 1.62);
+  base *= rate;
+  if(unit.statuses.freeze > 0) base *= 0.72;
+  if(unit.statuses.slow > 0) base *= 0.74;
+  if(unit.statuses.haste > 0) base *= 1.28;
+  if(unit.selfSlowTurns > 0) base *= unit.selfSlowRate || 0.82;
+  if(unit.passive?.type === "start_atb" && unit.id === "tokyo") base *= 1.06;
+  return clamp(base, 0.42, 1.92);
 }
 
 function summonAtbSpeed(unit){
@@ -3740,9 +5581,13 @@ function summonAtbSpeed(unit){
   const culture = unit.kpi?.culture || 0;
   const tourism = unit.kpi?.tourism || 0;
   const research = unit.kpi?.research || 0;
-  const summonBias = (culture * 0.0022) + (tourism * 0.0014) + (research * 0.0011);
-  return clamp(ownerSpeed * 0.72 + summonBias, 0.48, 1.38);
+  const summonBias = (culture * 0.0018) + (tourism * 0.0011) + (research * 0.0009);
+  let speed = ownerSpeed * 0.64 + summonBias;
+  if(unit.statuses.logistic > 0) speed *= 0.60;
+  if(unit.passive?.type === "summon_haste" && unit.summonRemain > 0) speed *= (unit.passive.values?.rate || 1.15);
+  return clamp(speed, 0.40, 1.28);
 }
+
 function stageDamageModifier(mode){
   const effect = state.battle && state.battle.stageEffect ? state.battle.stageEffect : null;
   if(!effect || !effect.damageRate) return 1;
@@ -3754,21 +5599,37 @@ function startAtbLoop(){
     const b = state.battle;
     if(!b || b.over || state.acting || state.atbPaused) return;
 
-    [b.player, b.enemy].forEach(unit => {
-      if(!unit.atbReady){
-        unit.atb = clamp(unit.atb + atbSpeed(unit), 0, 100);
-        if(unit.atb >= 100){
-          unit.atb = 100;
-          unit.atbReady = true;
-        }
-      }
+    const playerCommandHold = b.player.atbReady && !state.acting;
 
-      if(unit.summonRemain > 0){
-        unit.summonAtb = clamp(unit.summonAtb + summonAtbSpeed(unit), 0, 100);
-      }else{
-        unit.summonAtb = 0;
+    if(!b.player.atbReady){
+      b.player.atb = clamp(b.player.atb + atbSpeed(b.player), 0, 100);
+      if(b.player.atb >= 100){
+        b.player.atb = 100;
+        b.player.atbReady = true;
       }
-    });
+    }
+
+    if(!playerCommandHold && !b.enemy.atbReady){
+      b.enemy.atb = clamp(b.enemy.atb + atbSpeed(b.enemy), 0, 100);
+      if(b.enemy.atb >= 100){
+        b.enemy.atb = 100;
+        b.enemy.atbReady = true;
+      }
+    }
+
+    if(b.player.summonRemain > 0){
+      b.player.summonAtb = clamp(b.player.summonAtb + summonAtbSpeed(b.player), 0, 100);
+    }else{
+      b.player.summonAtb = 0;
+    }
+
+    if(b.enemy.summonRemain > 0){
+      if(!playerCommandHold){
+        b.enemy.summonAtb = clamp(b.enemy.summonAtb + summonAtbSpeed(b.enemy), 0, 100);
+      }
+    }else{
+      b.enemy.summonAtb = 0;
+    }
 
     updateBattleUI();
 
@@ -3776,12 +5637,12 @@ function startAtbLoop(){
       runSummonTurn("player");
       return;
     }
-    if(b.enemy.summonRemain > 0 && b.enemy.summonAtb >= 100 && !b.over && !state.acting && !state.atbPaused){
+    if(!playerCommandHold && b.enemy.summonRemain > 0 && b.enemy.summonAtb >= 100 && !b.over && !state.acting && !state.atbPaused){
       runSummonTurn("enemy");
       return;
     }
 
-    if(b.enemy.atbReady && !b.over && !state.acting && !state.atbPaused){
+    if(!playerCommandHold && b.enemy.atbReady && !b.over && !state.acting && !state.atbPaused){
       enemyTurn();
     }
   }, 70);
@@ -3793,8 +5654,29 @@ function stopAtbLoop(){
   }
 }
 
+function queueNextBattleFlow(side){
+  const b = state.battle;
+  if(!b || b.over) return;
 
-function calcDamage(attacker, defender, skillPower, mode="normal"){
+  updateBattleUI();
+
+  if(side === "player"){
+    setTimeout(() => {
+      const now = state.battle;
+      if(!now || now.over || state.acting || state.atbPaused) return;
+
+      if(now.enemy.summonRemain > 0 && now.enemy.summonAtb >= 100){
+        runSummonTurn("enemy");
+        return;
+      }
+      if(now.enemy.atbReady){
+        enemyTurn();
+      }
+    }, 180);
+  }
+}
+
+function calcDamage(attacker, defender, skillPower, mode="normal", skillMeta = null){
   const atkBuff = attacker.summonAtkBuff || 0;
   const shield = defender.summonShield || 0;
   const atkBase = (attacker.stats.攻撃 + atkBuff) * 0.70 + attacker.stats.文化 * 0.24 + attacker.stats.機動 * 0.18 + (attacker.kpi?.economy || 0) * 0.16 + (attacker.kpi?.industry || 0) * 0.18;
@@ -3809,13 +5691,40 @@ function calcDamage(attacker, defender, skillPower, mode="normal"){
   if(mode === "skill") damage *= 1.14;
   if(mode === "summon") damage = (skillPower * 1.62 + attacker.stats.文化 * 0.15 + (attacker.kpi?.tourism || 0) * 0.08 + Math.random() * 4) * summonBonus;
   if(crit) damage *= 1.18;
+
+  if(skillMeta?.burstBoostCost && attacker.burst >= skillMeta.burstBoostCost){
+    attacker.burst = clamp(attacker.burst - skillMeta.burstBoostCost, 0, 100);
+    damage *= skillMeta.burstBoostRate || 1.18;
+    appendLog(`→ Burst ${skillMeta.burstBoostCost} を消費して威力上昇。`);
+  }
+
   damage *= stageDamageModifier(mode);
-  if(defender.guarding) damage *= clamp(0.40 - (defender.guardPower || 0) * 0.006, 0.24, 0.40);
+
+  if(defender.passive?.type === "first_hit_guard" && !defender.passiveState.firstHitUsed){
+    damage *= (1 - (defender.passive.values?.reduction || 0.2));
+    defender.passiveState.firstHitUsed = true;
+  }
+  if(defender.passive?.type === "steady_guard") damage *= (1 - (defender.passive.values?.reduction || 0.06));
+  if(defender.passive?.type === "chip_guard") damage *= (1 - (defender.passive.values?.reduction || 0.08));
+
+  if(defender.guardType === "formation"){
+    damage *= clamp(0.38 - (defender.guardPower || 0) * 0.006 - ((defender.passive?.type === "guard_plus") ? (defender.passive.values?.reduction || 0.04) : 0), 0.18, 0.40);
+    if(defender.statuses.confusion > 0 && Math.random() < 0.35) damage *= 1.18;
+  }else if(defender.guardType === "insight"){
+    if(mode === "basic" || mode === "summon"){
+      damage *= clamp(0.20 - ((defender.passive?.type === "insight_plus") ? (defender.passive.values?.reduction || 0.05) : 0), 0.08, 0.22);
+      if(defender.statuses.confusion > 0 && Math.random() < 0.45) damage *= 1.55;
+    }else if(mode === "skill"){
+      damage *= 1.16;
+    }
+  }
+
   if(shield > 0) damage *= (1 - shield);
 
   const minDamage = mode === "basic" ? 4 : (mode === "summon" ? 6 : 9);
   return Math.max(minDamage, Math.round(damage));
 }
+
 
 
 
@@ -3889,32 +5798,45 @@ async function performBasicAttack(side){
   updateBattleUI();
   BattleAudio.sfx("attack");
 
-  const damage = calcDamage(attacker, defender, 14 + Math.round(attacker.stats.攻撃 * 0.06), "basic");
+    const damage = calcDamage(attacker, defender, 14 + Math.round(attacker.stats.攻撃 * 0.06), "basic");
   defender.hp = clamp(defender.hp - damage, 0, defender.maxHp);
-  gainBurst(attacker, 18);
+  gainBurst(attacker, 18 + ((attacker.passive?.type === "basic_burst") ? (attacker.passive.values?.burst || 0) : 0));
   gainBurst(defender, 11);
+  const atkMpGain = recoverMp(attacker, (attacker.basicMpGain || 4) + Math.round(damage * 0.012));
+  const hitMp = recoverMp(defender, hitMpGain(defender, damage, "basic") + (defender.hitMpGainBase || 0) * 0.35);
 
-    appendLog(`【${attacker.name}】たたかう。 ${damage}ダメージ。`);
-  appendLog(`→ 通常攻撃は牽制とBurst回収向き。決め手は必殺・召喚・守りの選択。`);
-  recordBattleEvent(side, "たたかう", `${attacker.name}が通常攻撃。${defender.name}へ${damage}ダメージ。`);
-  await animateStrike(side, damage, defender.guarding);
+  appendLog(`【${attacker.name}】たたかう。 ${damage}ダメージ。`);
+  appendLog(`→ 通常攻撃は牽制とMP回収向き。${attacker.name}のMP +${atkMpGain} / ${defender.name}は被弾でMP +${hitMp}。`);
+  recordBattleEvent(side, "たたかう", `${attacker.name}が通常攻撃。${defender.name}へ${damage}ダメージ。攻撃側MP+${atkMpGain} / 被弾側MP+${hitMp}。`);
+  await animateStrike(side, damage, !!defender.guardType);
 
+  applyPassiveTrigger(defender, attacker, "receiveHit", side === "player" ? "enemy" : "player", { mode:"basic", damage });
+  applyPassiveTrigger(attacker, defender, "dealHit", side, { mode:"basic", damage });
 
-  if(defender.guarding){
-    appendLog(`→ ${defender.name}は防御でダメージを大きく軽減した。`);
+  if(attacker.passive?.type === "double_strike_basic" && Math.random() < (attacker.passive.values?.rate || 0.55) && defender.hp > 0){
+    const follow = Math.max(4, Math.round(damage * (attacker.passive.values?.powerRate || 0.36)));
+    defender.hp = clamp(defender.hp - follow, 0, defender.maxHp);
+    appendLog(`→ 固有特性「${attacker.passive.name}」で追撃 ${follow}ダメージ。`);
+    recordBattleEvent(side, `固有特性: ${attacker.passive.name}`, `${attacker.name}が通常攻撃後に追撃。${follow}ダメージ。`);
+  }
+
+  if(defender.guardType){
+    appendLog(`→ ${defender.name}の${defender.guardType === "formation" ? "防御陣形" : "見切り"}が解けた。`);
+    defender.guardType = null;
     defender.guarding = false;
   }
 
-  await afterAction(side);
-  state.acting = false; updateBattleUI();
+    await afterAction(side);
+  state.acting = false;
+  queueNextBattleFlow(side);
 }
 
-async function performGuard(side){
+async function performGuard(side, mode = "formation"){
   const b = state.battle;
   if(!b || b.over || state.acting) return;
 
   const unit = side === "player" ? b.player : b.enemy;
-  if(!unit.atbReady) return;
+  if(!unit.atbReady || unit.statusGuardLock > 0) return;
 
   state.acting = true;
   consumeAtb(unit);
@@ -3922,22 +5844,61 @@ async function performGuard(side){
   BattleAudio.sfx("guard");
 
   unit.guarding = true;
-  const mpGain = unit.defendMpGain || 8;
+  unit.guardType = mode;
+    const mpGainBase = unit.defendMpGain || 10;
+  const mpPenalty = unit.statuses.congestion > 0 ? 3 : 0;
+  const mpGain = Math.max(3, mpGainBase - mpPenalty + ((unit.passive?.type === "summon_mp" && unit.summonRemain > 0) ? (unit.passive.values?.mp || 0) : 0));
   const burstGain = unit.defendBurstGain || 14;
-  unit.mp = clamp(unit.mp + mpGain, 0, unit.maxMp);
-  gainBurst(unit, burstGain + 2);
-    appendLog(`【${unit.name}】防御体勢。次の被ダメージを大きく軽減する。`);
-  appendLog(`→ 守りを固め、魔力が${mpGain}回復。Burstも上昇。テンポ調整後は防御の価値が高い。`);
-  recordBattleEvent(side, "防御陣形", `${unit.name}が防御。MP+${mpGain} / Burst上昇。次の被ダメージ軽減。`);
+  const actualMpGain = recoverMp(unit, mpGain);
+  gainBurst(unit, mode === "insight" ? burstGain - 2 : burstGain + 2);
 
+  appendLog(`【${unit.name}】${mode === "formation" ? "防御陣形" : "見切り"}。`);
+  appendLog(`→ ${mode === "formation" ? "安定して被ダメ軽減。" : "通常攻撃と召喚に強いが、必殺には弱い。"} 通常攻撃より多めにMP +${actualMpGain}。`);
+  recordBattleEvent(side, mode === "formation" ? "防御陣形" : "見切り", `${unit.name}が${mode === "formation" ? "防御陣形" : "見切り"}。MP+${actualMpGain}。`);
 
   await new Promise(r => setTimeout(r, 260));
-  if(side === "player" && !b.over){
-    state.acting = false; updateBattleUI();
-    setTimeout(enemyTurn, 260);
+    if(side === "player" && !b.over){
+    state.acting = false;
+    queueNextBattleFlow(side);
     return;
   }
-  state.acting = false; updateBattleUI();
+  state.acting = false;
+  queueNextBattleFlow(side);
+}
+
+
+function animateSummonBuddyEntrance(side, unit){
+  return new Promise(resolve => {
+    const el = side === "player" ? $("#playerSummonBuddy") : $("#enemySummonBuddy");
+    if(!el || !unit?.summon){ resolve(); return; }
+    const mode = unit.summon.entrance || "warp";
+    const cls = `enter-${mode}`;
+    el.classList.remove("show", "follow", "enter-skyfall", "enter-sea", "enter-warp", "enter-gate", "enter-groundbreak", "enter-dash", "enter-neon", "exit-quick");
+    el.textContent = unit.summon?.emoji || "★";
+    el.dataset.name = `${unit.summon?.name || "召喚"} ${unit.summonRemain}T`;
+    void el.offsetWidth;
+    el.classList.add("show", cls);
+    setTimeout(() => {
+      el.classList.remove(cls);
+      el.classList.add("follow");
+      resolve();
+    }, mode === "groundbreak" || mode === "skyfall" ? 860 : 620);
+  });
+}
+
+function animateSummonBuddyExit(side){
+  return new Promise(resolve => {
+    const el = side === "player" ? $("#playerSummonBuddy") : $("#enemySummonBuddy");
+    if(!el){ resolve(); return; }
+    el.classList.remove("follow", "enter-skyfall", "enter-sea", "enter-warp", "enter-gate", "enter-groundbreak", "enter-dash", "enter-neon");
+    el.classList.add("exit-quick");
+    setTimeout(() => {
+      el.classList.remove("exit-quick", "show");
+      el.dataset.name = "";
+      el.textContent = "";
+      resolve();
+    }, 340);
+  });
 }
 
 async function performSummon(side){
@@ -3951,7 +5912,7 @@ async function performSummon(side){
   state.atbPaused = true;
   consumeAtb(unit);
   updateBattleUI();
-    BattleAudio.sfx("summon", { ...unit.summon, ownerId: unit.id, ownerTheme: unit.themeStyle });
+  BattleAudio.sfx("summon", { ...unit.summon, ownerId: unit.id, ownerTheme: unit.themeStyle });
 
   if(unit.summonRemain > 0){
     if(side === "player") showToast("すでに県の守護幻影を召喚中です");
@@ -3959,31 +5920,43 @@ async function performSummon(side){
     state.acting = false; updateBattleUI();
     return;
   }
-  if(unit.mp < 24){
-    if(side === "player") showToast("召喚に必要な魔力が足りません");
+  if(unit.mp < 32){
+    if(side === "player") showToast("召喚には魔力32が必要です");
+    state.atbPaused = false;
+    state.acting = false; updateBattleUI();
+    return;
+  }
+  if(unit.burst < 35){
+    if(side === "player") showToast("召喚にはBurst 35以上が必要です");
     state.atbPaused = false;
     state.acting = false; updateBattleUI();
     return;
   }
 
-  spendMp(unit, 24);
+  spendMp(unit, 32);
+  unit.burst = clamp(unit.burst - 35, 0, 100);
   unit.summonRemain = unit.summon.duration;
-  unit.summonAtb = 38 + rand(22);
+  unit.summonAtb = 24 + rand(16);
   unit.summonAtkBuff = 0;
   unit.summonShield = 0;
-  gainBurst(unit, 24);
-  unit.hp = clamp(unit.hp + unit.summonSupport, 0, unit.maxHp);
+  const summonEntryHeal = Math.max(1, Math.round((unit.summonSupport || 0) * 0.5));
+  unit.hp = clamp(unit.hp + summonEntryHeal, 0, unit.maxHp);
   updateBattleUI();
-    appendLog(`【${unit.name}】召喚「${unit.summon.name}」発動！`);
-  appendLog(`→ ${unit.summon.duration}ターン伴走。独自ATBで攻撃・支援・特技を行う。`);
-  recordBattleEvent(side, `召喚: ${unit.summon.name}`, `${unit.name}が召喚を実行。${unit.summon.duration}ターン伴走。`);
-  await playSummonCinematic(unit, "enter");
+  appendLog(`【${unit.name}】召喚「${unit.summon.name}」発動！`);
+  appendLog(`→ MP32とBurst35を支払って切り札を投入。${unit.summon.duration}ターン伴走し、出現直後の体力回復は ${summonEntryHeal}。`);
+  recordBattleEvent(side, `召喚: ${unit.summon.name}`, `${unit.name}がMP32・Burst35を消費して召喚。${unit.summon.duration}ターン伴走。初動回復 ${summonEntryHeal}。`);
+    await Promise.all([
+    playSummonCinematic(unit, "enter"),
+    animateSummonBuddyEntrance(side, unit)
+  ]);
 
+  BattleAudio.setSummonMode(true);
 
   await afterAction(side, true);
   state.atbPaused = false;
   state.acting = false; updateBattleUI();
 }
+
 
 async function performFurusatoAid(side){
   const b = state.battle;
@@ -4008,7 +5981,7 @@ async function performFurusatoAid(side){
   openSkillMenu(false);
 
   spendMp(unit, meta.mpCost);
-  const currentHp = Number(unit.hp);
+    const currentHp = Number(unit.hp);
   const heal = Math.min(meta.heal, unit.maxHp - currentHp);
   const targetHp = clamp(currentHp + heal, 0, unit.maxHp);
   gainBurst(unit, 10 + Math.round(meta.score * 0.05));
@@ -4024,7 +5997,7 @@ async function performFurusatoAid(side){
     animateGaugeValue(unit, "hp", targetHp, 900)
   ]);
 
-  const stageLog = b.stageEffect && b.stageEffect.endTurn ? b.stageEffect.endTurn(unit, side === "player" ? b.enemy : b.player) : null;
+    const stageLog = b.stageEffect && b.stageEffect.endTurn ? b.stageEffect.endTurn(unit, side === "player" ? b.enemy : b.player) : null;
   if(stageLog) appendLog(stageLog);
 
   if(side === "enemy" && !b.over){
@@ -4033,7 +6006,7 @@ async function performFurusatoAid(side){
   }
 
   state.acting = false;
-  updateBattleUI();
+  queueNextBattleFlow(side);
 }
 
 async function performSkill(side, index){
@@ -4045,12 +6018,17 @@ async function performSkill(side, index){
   const skill = attacker.skills[index];
   if(!skill) return;
 
-  if(typeof skill.uses === "number" && skill.uses <= 0){
+    if(typeof skill.uses === "number" && skill.uses <= 0){
     if(side === "player") showToast("その必殺技はもう使い切っています");
     return;
   }
+  const burstNeed = skillBurstRequirement(skill, index);
   if(attacker.mp < skill.cost){
     if(side === "player") showToast("魔力が足りません");
+    return;
+  }
+  if(attacker.burst < burstNeed){
+    if(side === "player") showToast(`この技にはBurst ${burstNeed}以上が必要です`);
     return;
   }
 
@@ -4063,24 +6041,49 @@ async function performSkill(side, index){
   spendMp(attacker, skill.cost);
   if(typeof skill.uses === "number") skill.uses = Math.max(0, skill.uses - 1);
 
-      appendLog(`【${attacker.name}】${skill.name} 発動！`);
-  appendLog(`→ 専用演出展開中。ATBは停止。残回数 ${skill.uses}/${skill.maxUses}。`);
-    BattleAudio.sfx("skill", { ...skill, attackerId: attacker.id, themeStyle: attacker.themeStyle, prefecture: attacker.prefecture, summonStyle: attacker.summon?.style || "" });
+  appendLog(`【${attacker.name}】${skill.name} 発動！`);
+  appendLog(`→ 専用演出展開中。ATBは停止。残回数 ${skill.uses}/${skill.maxUses}${burstNeed > 0 ? ` / Burst条件 ${burstNeed}+` : ""}。`);
+  BattleAudio.sfx("skill", { ...skill, attackerId: attacker.id, themeStyle: attacker.themeStyle, prefecture: attacker.prefecture, summonStyle: attacker.summon?.style || "" });
   await playSkillCinematic(attacker, skill);
 
-  const damage = calcDamage(attacker, defender, skill.power, "skill");
+  const fx = skill.effect || {};
+  const damage = calcDamage(attacker, defender, skill.power, "skill", fx);
   defender.hp = clamp(defender.hp - damage, 0, defender.maxHp);
 
   gainBurst(attacker, 30);
   gainBurst(defender, 16);
+  const hitMp = recoverMp(defender, hitMpGain(defender, damage, "skill") + (defender.hitMpGainBase || 0) * 0.45);
 
-    appendLog(`→ ${damage}ダメージ。ご当地必殺が戦況を大きく動かす。`);
-  recordBattleEvent(side, skill.name, `${attacker.name}が「${skill.name}」を使用。${defender.name}へ${damage}ダメージ。`);
-  await animateStrike(side, damage, defender.guarding);
+  appendLog(`→ ${damage}ダメージ。ご当地必殺が戦況を大きく動かす。`);
+  appendLog(`→ ${defender.name}は被弾でMP +${hitMp}。`);
+  recordBattleEvent(side, skill.name, `${attacker.name}が「${skill.name}」を使用。${defender.name}へ${damage}ダメージ。被弾側MP+${hitMp}。`);
+  await animateStrike(side, damage, !!defender.guardType);
 
+    if(fx.inflictStatus && Math.random() < (fx.statusChance || 0.45) && defender.hp > 0){
+    addStatus(defender, fx.inflictStatus, fx.statusTurns || 1, skill.name, side);
+  }
+  if(fx.selfStatus){
+    addStatus(attacker, fx.selfStatus, fx.selfStatusTurns || 1, skill.name, side);
+    appendLog(`→ ${attacker.name}に${STATUS_META[fx.selfStatus]?.label || fx.selfStatus} ${fx.selfStatusTurns || 1}T。`);
+  }
+  if(fx.selfSlowTurns){
+    attacker.selfSlowTurns = Math.max(attacker.selfSlowTurns, fx.selfSlowTurns);
+    attacker.selfSlowRate = fx.selfSlowRate || 0.82;
+    appendLog(`→ ${attacker.name}は使用後の反動でATB速度低下 ${fx.selfSlowTurns}T。`);
+    recordBattleEvent(side, `${skill.name}反動`, `${attacker.name}のATB速度が低下。`);
+  }
+  if(fx.noGuardTurns){
+    attacker.statusGuardLock = Math.max(attacker.statusGuardLock, fx.noGuardTurns);
+    appendLog(`→ ${attacker.name}は使用後 ${fx.noGuardTurns}T 防御不能。`);
+    recordBattleEvent(side, `${skill.name}反動`, `${attacker.name}は${fx.noGuardTurns}T防御不能。`);
+  }
 
-  if(defender.guarding){
-    appendLog(`→ ${defender.name}は防御で被害を抑えた。`);
+  applyPassiveTrigger(defender, attacker, "receiveHit", side === "player" ? "enemy" : "player", { mode:"skill", damage });
+  applyPassiveTrigger(attacker, defender, "dealHit", side, { mode:"skill", damage });
+
+  if(defender.guardType){
+    appendLog(`→ ${defender.name}の${defender.guardType === "formation" ? "防御陣形" : "見切り"}が解けた。`);
+    defender.guardType = null;
     defender.guarding = false;
   }
 
@@ -4088,10 +6091,12 @@ async function performSkill(side, index){
     appendLog(`${attacker.name}の必殺ゲージが最大。次の攻撃が強化される。`);
   }
 
-  await afterAction(side);
+    await afterAction(side);
   state.atbPaused = false;
-  state.acting = false; updateBattleUI();
+  state.acting = false;
+  queueNextBattleFlow(side);
 }
+
 
 async function afterAction(side){
   const b = state.battle;
@@ -4107,14 +6112,14 @@ async function afterAction(side){
   }
 
     if(attacker.summonRemain > 0){
-    const mpGain = 5 + Math.round((attacker.kpi?.income || 0) * 0.02);
+    let mpGain = 3 + Math.round((attacker.kpi?.income || 0) * 0.015);
+    if(attacker.statuses.congestion > 0) mpGain = Math.max(1, mpGain - 3);
+    if(attacker.passive?.type === "summon_mp") mpGain += Math.max(1, Math.round((attacker.passive.values?.mp || 0) * 0.5));
     const heal = Math.min(attacker.summonSupport || 0, attacker.maxHp - attacker.hp);
     attacker.mp = clamp(attacker.mp + mpGain, 0, attacker.maxMp);
-    if(heal > 0){
-      attacker.hp = clamp(attacker.hp + heal, 0, attacker.maxHp);
-    }
+    if(heal > 0){ attacker.hp = clamp(attacker.hp + heal, 0, attacker.maxHp); }
     gainBurst(attacker, attacker.summonBurstGain || 8);
-    appendLog(`→ 召喚伴走支援で${attacker.name}の魔力が${mpGain}回復${heal > 0 ? `、体力が${heal}回復` : ""}。`);
+    appendLog(`→ 召喚伴走支援で${attacker.name}の魔力が${mpGain}回復${heal > 0 ? `、体力が${heal}回復` : ""}。切り札だけに継戦補助はやや控えめ。`);
   }
 
   if(defender.hp <= 0){
@@ -4128,19 +6133,31 @@ async function afterAction(side){
     appendLog(`→ ${attacker.name}は地域基盤KPIにより体力を${sustainHeal}回復。`);
   }
 
+  applyPassiveTrigger(attacker, defender, "actionEnd", side);
+
   const stageLog = stageEffect && stageEffect.endTurn ? stageEffect.endTurn(attacker, defender) : null;
   if(stageLog) appendLog(stageLog);
 
   if(attacker.summonRemain > 0){
     attacker.summonRemain = Math.max(0, attacker.summonRemain - 1);
-    if(attacker.summonRemain === 0){
+            if(attacker.summonRemain === 0){
       attacker.summonAtkBuff = 0;
       attacker.summonShield = 0;
-      appendLog(`→ 召喚「${attacker.summon.name}」は最後の力を残して帰還を始める。`);
-      await playSummonCinematic(attacker, "exit");
-      appendLog(`→ ${attacker.summon.name}は派手な余韻を残し、元の世界へ帰っていった。`);
+      appendLog(`→ 召喚「${attacker.summon.name}」の加護が薄れていく。`);
+      await Promise.all([
+        playSummonCinematic(attacker, "exit"),
+        animateSummonBuddyExit(side)
+      ]);
+      BattleAudio.setSummonMode(false);
+      appendLog(`→ ${attacker.summon.name}は素早く退いた。通常戦闘曲へ復帰。`);
       updateBattleUI();
     }
+  }
+
+    tickUnitStatuses(attacker);
+  if(attacker.hp <= 0){
+    finishBattle(defender, attacker);
+    return;
   }
 
   if(side === "enemy" && !b.over){
@@ -4148,6 +6165,7 @@ async function afterAction(side){
     appendLog(`--- ターン ${b.turn} ---`);
   }
 }
+
 
 
 
@@ -4161,30 +6179,34 @@ async function enemyTurn(){
 
   const hpRate = e.hp / e.maxHp;
   const burstReady = e.burst >= 100;
-  const usable = e.skills
+    const usable = e.skills
     .map((sk,i) => ({sk,i}))
-    .filter(x => e.mp >= x.sk.cost && (typeof x.sk.uses !== "number" || x.sk.uses > 0));
-  const furusatoMeta = getFurusatoMeta(e);
+    .filter(x => canUseSkill(e, x.sk, x.i));
+    const furusatoMeta = getFurusatoMeta(e);
 
   if(hpRate < 0.34 && e.mp >= furusatoMeta.mpCost && e.hp < e.maxHp && Math.random() < 0.64){
     await performFurusatoAid("enemy");
     return;
   }
 
-  if(!e.guarding && ((hpRate < 0.38) || (e.mp < 18 && usable.length === 0)) && Math.random() < 0.58){
-    await performGuard("enemy");
+  if(!e.guardType && ((hpRate < 0.38) || (e.mp < 18 && usable.length === 0)) && Math.random() < 0.32){
+    await performGuard("enemy", "formation");
+    return;
+  }
+  if(!e.guardType && p.atbReady && Math.random() < 0.18){
+    await performGuard("enemy", "insight");
     return;
   }
 
-  if(e.summonRemain === 0 && e.mp >= 24 && (e.stats.文化 + e.stats.魔力 > 140) && (hpRate < 0.82 || burstReady || p.hp / p.maxHp > 0.45) && Math.random() < 0.42){
+    if(e.summonRemain === 0 && e.mp >= 32 && e.burst >= 35 && (e.stats.文化 + e.stats.魔力 > 140) && (hpRate < 0.82 || burstReady || p.hp / p.maxHp > 0.45) && Math.random() < 0.42){
     await performSummon("enemy");
     return;
   }
 
-  const finisherReady = usable.filter(x => x.sk.maxUses === 1);
-  const regularReady = usable.filter(x => x.sk.maxUses !== 1);
+    const finisherReady = usable.filter(x => (x.sk.tier === "ultimate") || x.sk.maxUses === 1);
+  const regularReady = usable.filter(x => !((x.sk.tier === "ultimate") || x.sk.maxUses === 1));
 
-  if(finisherReady.length && burstReady && hpRate < 0.74 && p.hp / p.maxHp > 0.22 && Math.random() < 0.62){
+    if(finisherReady.length && hpRate < 0.74 && p.hp / p.maxHp > 0.22 && Math.random() < 0.62){
     const choice = finisherReady.sort((a,b) => b.sk.power - a.sk.power)[0];
     await performSkill("enemy", choice.i);
     return;
@@ -4202,13 +6224,9 @@ async function enemyTurn(){
     return;
   }
 
-  if(!e.guarding && hpRate < 0.55 && Math.random() < 0.22){
-    await performGuard("enemy");
-    return;
-  }
-
   await performBasicAttack("enemy");
 }
+
 
 function finishBattle(winner, loser){
   const b = state.battle;
@@ -4222,10 +6240,13 @@ function finishBattle(winner, loser){
   b.player.atbReady = false;
   b.enemy.atbReady = false;
   stopAtbLoop();
+  BattleAudio.setSummonMode(false);
   BattleAudio.stopBgm(.6);
   BattleAudio.sfx("victory");
   appendLog(`✨ ${winner.name} の勝利！ ${loser.name}は戦線を維持できなかった。`);
+  appendLog(`→ ${loser.name} が崩れ落ちる……`);
   recordBattleEvent(winner.id === b.player.id ? "player" : "enemy", "勝利", `${winner.name}が勝利。${loser.name}は戦線を維持できなかった。`);
+
   state.result = {
     winnerId: winner.id,
     winnerName: winner.name,
@@ -4240,23 +6261,41 @@ function finishBattle(winner, loser){
     history: (b.history || []).map((x, i) => ({ ...x, index: i })),
     turns: b.turn
   };
+
+  const loserEl = loser.id === b.player.id ? $("#fighterPlayer") : $("#fighterEnemy");
+  const winnerEl = winner.id === b.player.id ? $("#fighterPlayer") : $("#fighterEnemy");
+  if(loserEl){
+    loserEl.classList.remove("hit", "attack");
+    void loserEl.offsetWidth;
+    loserEl.classList.add("defeated");
+  }
+  if(winnerEl){
+    winnerEl.classList.remove("defeated");
+  }
+
   showToast(`${winner.name} が勝利`);
   updateBattleUI();
-  renderResultScreen(state.result);
-  switchScreen("screenResult");
+
+  setTimeout(() => {
+    if(loserEl) loserEl.classList.remove("defeated");
+    renderResultScreen(state.result);
+    switchScreen("screenResult");
+  }, 1350);
 }
 
 
 
 
-$("#btnRandomEnemy").addEventListener("click", () => {
 
+$("#btnRandomEnemy").addEventListener("click", async () => {
+  await MenuAudio.start().catch(()=>{});
   state.enemyId = chooseEnemy(state.selectedId);
   updateTitleScreen();
   showToast(`対戦相手: ${byId[state.enemyId].name}`);
 });
 
-$("#btnStartBattle").addEventListener("click", () => {
+$("#btnStartBattle").addEventListener("click", async () => {
+  await MenuAudio.start().catch(()=>{});
   if(!state.enemyId || state.enemyId === state.selectedId) state.enemyId = chooseEnemy(state.selectedId);
   startBattle(state.selectedId, state.enemyId);
 });
@@ -4265,9 +6304,11 @@ function leaveBattleToHome(){
   openSkillMenu(false);
   state.atbPaused = false;
   stopAtbLoop();
+  BattleAudio.setSummonMode(false);
   BattleAudio.leaveBattle();
   applyStageVisual(null);
   switchScreen("screenHome");
+  MenuAudio.start().catch(()=>{});
 }
 
 $("#btnBattleClose").addEventListener("click", () => {
@@ -4282,6 +6323,7 @@ $("#btnResultBackHome").addEventListener("click", () => {
   BattleAudio.leaveBattle();
   applyStageVisual(null);
   switchScreen("screenHome");
+  MenuAudio.start().catch(()=>{});
 });
 
 $("#btnResultReplay").addEventListener("click", () => {
@@ -4296,6 +6338,7 @@ $("#btnResultSelectNew").addEventListener("click", () => {
   BattleAudio.leaveBattle();
   applyStageVisual(null);
   switchScreen("screenHome");
+  MenuAudio.start().catch(()=>{});
 });
 
 
@@ -4316,6 +6359,7 @@ $("#skillCancel").addEventListener("click", () => openSkillMenu(false));
 $("#skillBtn0").addEventListener("click", () => handleSubMenuAction(0));
 $("#skillBtn1").addEventListener("click", () => handleSubMenuAction(1));
 $("#skillBtn2").addEventListener("click", () => handleSubMenuAction(2));
+$("#skillBtn3").addEventListener("click", () => handleSubMenuAction(3));
 
 const btnAbout = $("#btnAbout");
 if(btnAbout){
@@ -4333,12 +6377,14 @@ if(btnAbout){
   });
 }
 
-$("#btnTitleStart").addEventListener("click", () => {
+$("#btnTitleStart").addEventListener("click", async () => {
+  await MenuAudio.start().catch(()=>{});
   switchScreen("screenHome");
   showToast("都道府県選択へ");
 });
 
-$("#btnTitleAbout").addEventListener("click", () => {
+$("#btnTitleAbout").addEventListener("click", async () => {
+  await MenuAudio.start().catch(()=>{});
   alert(
 `Prefectural Fantasy
 
@@ -4357,9 +6403,30 @@ updateTitleScreen();
 showToast(`初期対戦候補: ${byId[state.enemyId].name}`);
 $("#btnStartBattle").textContent = "この都道府県で出撃";
 
+document.addEventListener("visibilitychange", () => {
+  if(document.hidden){
+    MenuAudio.stop(.2);
+  }else{
+    const active = document.querySelector(".screen.active")?.id;
+    if(active === "screenTitle" || active === "screenHome" || active === "screenResult"){
+      MenuAudio.start().catch(()=>{});
+    }
+  }
+});
+
 
 
 </script>
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -4378,11 +6445,11 @@ $("#btnStartBattle").textContent = "この都道府県で出撃";
   "createdAt": "2026-03-08T01:12:10.287Z",
   "schema": 2,
   "title": "都道府県バトル - Prefectural Fantasy",
-  "savedAt": "2026-03-08T08:30:05.416Z",
-  "aiInstruction": "召喚獣について。\n・さいたま：「ださいたま」をモチーフに、世間での埼玉のイメージを逆に生かしたものとし、それに相応しいわざを準備。\n・茨城県：「栃木県」を召喚できる（北関東田舎つながり）。仲が悪く、たまにいがみ合って逆に小ダメージを食らう。\n・栃木県：「茨城県」を召喚できる。同上。\nこれらについては、召喚のモチーフや、モーションも、おどけたユーモラスなものにすること。\n\nゲーム終了後、戦闘結果画面に移行する。\n戦闘結果画面では、グラフ一枚で、お互いのHPの推移を見せる。また、タップするとそのときくらったり与えた技の名前がわかる。\n\nメニュー移行のページ上部のヘッダ（ゲームタイトルの表示）は不要なので削除。戦闘画面では右上に小さく×ボタンで途中離脱できるようにしておくこと。\n\n動かなくなった。",
-  "comment": "召喚獣について。\n・さいたま：「ださいたま」をモチーフに、世間での埼玉のイメージを逆に生かしたものとし、それに相応しいわざを準備。\n・茨城県：「栃木県」を召喚できる（北関東田舎つながり）。仲が悪く、たまにいがみ合って逆に小ダメージを食らう。\n・栃木県：「茨城県」を召喚できる。同上。\nこれらについては、召喚のモチーフや、モーションも、おどけたユーモラスなものにすること。\n\nゲーム終了後、戦闘結果画面に移行する。\n戦闘結果画面では、グラフ一枚で、お互いのHPの推移を見せる。また、タップするとそのときくらったり与えた技の名前がわかる。\n\nメニュー移行のページ上部のヘッダ（ゲームタイトルの表示）は不要なので削除。戦闘画面では右上に小さく×ボタンで途中離脱できるようにしておくこと。\n\n動かなくなった。",
+  "savedAt": "2026-03-09T12:27:15.559Z",
+  "aiInstruction": "召喚獣戦のBGMを後で示すWEBオーディオの曲に入れ替える。そっくりそのまま移植し全く同じ音声出力とすること。",
+  "comment": "召喚獣戦のBGMを後で示すWEBオーディオの曲に入れ替える。そっくりそのまま移植し全く同じ音声出力とすること。",
   "sourceMode": "project",
-  "runId": "91c109239ab6fd128f520c82a4052c79"
+  "runId": "a850eae693e71ea64edb7611bc970c37"
 }
 </script>
 </body>
