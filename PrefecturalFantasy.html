@@ -4472,7 +4472,81 @@ V: 5 clef=perc name="Percussion" snm="Prc."
   async function ensureReady(){ if(ready)return true; if(!window.ABCJS||!ABCJS.synth)return false; ensureHost(); const r=ABCJS.renderAbc('kyotoThemePaper',abcString,{responsive:'resize'}); if(!r||!r[0])return false; synth=new ABCJS.synth.CreateSynth(); await synth.init({visualObj:r[0]}); await synth.prime(); ready=true; return true; }
   async function playOnce(){ if(!synth)return false; try{synth.stop();}catch(e){} try{await synth.start();return true;}catch(e){} return false; }
   async function startLoop(){ const ok=await ensureReady(); if(!ok)return false; stopLoop(); active=true; const s=await playOnce(); if(!s){active=false;return false;} loopTimer=setInterval(()=>{if(active)playOnce();},LOOP_MS); return true; }
-  function stopLoop(){ active=false; if(loopTimer){clearInterval(loopTimer);loopTimer=null;} try{if(synth)synth.stop();}catch(e){} }
+    function stopLoop(){ active=false; if(loopTimer){clearInterval(loopTimer);loopTimer=null;} try{if(synth)synth.stop();}catch(e){} }
+  return { startLoop, stopLoop };
+})();
+
+const KitakantoBossTheme = (() => {
+  let ctx, timerID, isPlaying = false, nextNoteTime = 0, currentStep = 0;
+  const BPM = 148, stepDuration = (60 / BPM) / 4, totalSteps = 368;
+  const getFreq = (note) => {
+    if(!note) return 0;
+    const notes = {'C':0, 'C#':1, 'D':2, 'D#':3, 'E':4, 'F':5, 'F#':6, 'G':7, 'G#':8, 'A':9, 'A#':10, 'BB':10, 'B':11};
+    let n = note.toUpperCase(), oct = parseInt(n.slice(-1)), key = n.slice(0, -1);
+    return 440 * Math.pow(2, (notes[key] + (oct + 1) * 12 - 69) / 12);
+  };
+  const melodyData = [['E4',2],['F4',2],['F#4',2],['G4',2],['G#4',2],['A4',2],['A#4',2],['B4',2],['c5',4],['B4',4],['A#4',4],['B4',4],['e5',16],['E4',4],[null,2],['E4',2],['G4',4],['E4',4],['A4',4],['G4',4],['A#4',8],['E4',4],[null,2],['E4',2],['B4',4],['A#4',4],['A4',4],['G4',4],['E4',8],['E4',4],[null,2],['E4',2],['G4',4],['E4',4],['A4',4],['G4',4],['A#4',8],['B4',2],[null,2],['A#4',2],[null,2],['A4',2],[null,2],['G4',2],[null,2],['E4',4],['G4',4],['e5',8],['g5',4],['e5',4],['B4',4],['e5',4],['d5',4],['B4',4],['G4',8],['A4',4],['B4',4],['c5',4],['d5',4],['B4',4],['A4',4],['G4',8],['g5',4],['e5',4],['B4',4],['e5',4],['d5',4],['B4',4],['A#4',8],['A4',4],['A#4',4],['B4',4],['c5',4],['c#5',4],['d5',4],['d#5',4],['e5',4],['E4',4],[null,2],['E4',2],['G4',4],['E4',4],['A4',4],['G4',4],['A#4',8],['B4',2],[null,2],['A#4',2],[null,2],['A4',2],[null,2],['G4',2],[null,2],['E4',4],['G4',4],['e5',8]];
+  const genBass = (note, times=16) => Array(times).fill([note, 1]);
+  const bassData = [...genBass('E2', 16),...genBass('B1', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('C2', 16),...genBass('D2', 16),...genBass('C2', 16),...genBass('D2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('C2', 16),...genBass('B1', 16),...genBass('C2', 16),...genBass('D2', 16),...genBass('E2', 16),...genBass('E2', 16),...genBass('C2', 16),...genBass('D2', 16)];
+  const arpData = [];
+  const addArp = (notes, times) => { for(let i=0; i<times; i++) notes.forEach(n => arpData.push([n, 1])); };
+  addArp(['E4','G4','B4','G4'], 4); addArp(['D#4','F#4','B4','F#4'], 4); addArp(['E4','G4','B4','G4'], 4); addArp(['E4','G4','B4','G4'], 16); addArp(['E4','G4','B4','G4'], 8); addArp(['C4','E4','G4','E4'], 4); addArp(['D4','F#4','A4','F#4'], 4); addArp(['C4','E4','G4','E4'], 4); addArp(['D4','F#4','A4','F#4'], 4); addArp(['E4','G4','B4','G4'], 8); addArp(['C4','E4','G4','E4'], 4); addArp(['D#4','F#4','B4','F#4'], 4); addArp(['C4','E4','G4','E4'], 4); addArp(['D4','F#4','A4','F#4'], 4); addArp(['E4','G4','B4','G4'], 8); addArp(['C4','E4','G4','E4'], 4); addArp(['D4','F#4','A4','F#4'], 4);
+  const expandTrack = (data) => {
+    let track = Array(totalSteps).fill(null), pos = 0;
+    data.forEach(item => { if(item[0]) track[pos] = { note: item[0], dur: item[1] }; pos += item[1]; });
+    return track;
+  };
+  const mTrack = expandTrack(melodyData), bTrack = expandTrack(bassData), aTrack = expandTrack(arpData);
+  const playTone = (freq, time, dur, type='square', vol=0.1) => {
+    let osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = type; osc.frequency.value = freq;
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(time); gain.gain.setValueAtTime(vol, time);
+    gain.gain.setTargetAtTime(0, time + (dur * stepDuration) - 0.02, 0.02);
+    osc.stop(time + (dur * stepDuration));
+  };
+  const playDrum = (time, type) => {
+    let osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    if(type === 'kick') {
+      osc.frequency.setValueAtTime(150, time); osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.3);
+      gain.gain.setValueAtTime(0.4, time); gain.gain.exponentialRampToValueAtTime(0.01, time + 0.3);
+      osc.start(time); osc.stop(time + 0.3);
+    } else {
+      let bSize = ctx.sampleRate * 0.1, buffer = ctx.createBuffer(1, bSize, ctx.sampleRate), data = buffer.getChannelData(0);
+      for (let i = 0; i < bSize; i++) data[i] = Math.random() * 2 - 1;
+      let noise = ctx.createBufferSource(); noise.buffer = buffer;
+      let nGain = ctx.createGain(), filter = ctx.createBiquadFilter();
+      filter.type = 'highpass'; filter.frequency.value = 1000;
+      noise.connect(nGain); nGain.connect(filter); filter.connect(ctx.destination);
+      nGain.gain.setValueAtTime(0.2, time); nGain.gain.exponentialRampToValueAtTime(0.01, time + 0.1);
+      noise.start(time);
+    }
+  };
+  function schedule() {
+    while (nextNoteTime < ctx.currentTime + 0.1) {
+      let step = currentStep % totalSteps;
+      if(mTrack[step]) playTone(getFreq(mTrack[step].note), nextNoteTime, mTrack[step].dur, 'square', 0.15);
+      if(bTrack[step]) playTone(getFreq(bTrack[step].note), nextNoteTime, bTrack[step].dur, 'sawtooth', 0.15);
+      if(aTrack[step]) playTone(getFreq(aTrack[step].note), nextNoteTime, aTrack[step].dur, 'square', 0.05);
+      if(step % 4 === 0 || step % 16 === 14) playDrum(nextNoteTime, 'kick');
+      if(step % 16 === 4 || step % 16 === 12) playDrum(nextNoteTime, 'snare');
+      nextNoteTime += stepDuration; currentStep++;
+    }
+    timerID = requestAnimationFrame(schedule);
+  }
+  async function startLoop() {
+    if(!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if(ctx.state === 'suspended') await ctx.resume();
+    if(isPlaying) return true;
+    isPlaying = true; currentStep = 0; nextNoteTime = ctx.currentTime + 0.1;
+    schedule(); return true;
+  }
+  function stopLoop() {
+    if(timerID) cancelAnimationFrame(timerID);
+    isPlaying = false;
+    if(ctx && ctx.state === 'running') ctx.suspend();
+  }
   return { startLoop, stopLoop };
 })();
 
@@ -4986,22 +5060,30 @@ function playBrass(t,notes){
 function scheduleOne(i,t){const tr=getTracks();const mode=bgmMode;if(tr.kick[i])playKick(t,mode);if(tr.snare[i])playSnare(t,tr.snare[i],mode);if(tr.hihat[i])playHihat(t,tr.hihat[i]);if(tr.crash[i])playCrash(t,mode);if(tr.bass[i])playBass(t,tr.bass[i],mode);if(tr.arp[i])playArp(t,tr.arp[i],mode);if(tr.pad[i])playPad(t,tr.pad[i],mode);if(tr.lead[i])playLead(t,tr.lead[i],mode);if(mode==='summon'&&tr.choir[i])playChoir(t,tr.choir[i]);if(mode==='summon'&&tr.brass[i])playBrass(t,tr.brass[i])}
 function scheduler(){if(!isBgm||!ctx)return;const stepDur=.25*(60/getTempo());while(nextTime<ctx.currentTime+.1){scheduleOne(step%getSeqLen(),nextTime);nextTime+=stepDur;step++}timer=window.setTimeout(scheduler,25)}
 async function ensure(){init();if(ctx.state==='suspended')await ctx.resume()}
-async function enterBattle(){await ensure();SummonTheme.stopLoop();NormalBattleTheme.stopLoop();if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();const lbl=document.getElementById("specialBgmLabel");if(lbl)lbl.style.display="none";bgmMode='external_battle';let started=false;if(state.playerId==="tokyo"||state.playerId==="shin_tokyo"||state.enemyId==="tokyo"||state.enemyId==="shin_tokyo"){started=await FinalBossTheme.startLoop();}else if(state.playerId==="kyoto"||state.enemyId==="kyoto"){started=await KyotoTheme.startLoop();if(lbl&&started){lbl.textContent="♪The Ancient Capital";lbl.style.display="block";}}else if(state.playerId==="ibaraki"||state.playerId==="tochigi"||state.enemyId==="ibaraki"||state.enemyId==="tochigi"){started=await KitakantoTheme.startLoop();if(lbl&&started){lbl.textContent="♪北関東のうた";lbl.style.display="block";}}else{started=await NormalBattleTheme.startLoop();}if(!started){bgmMode='normal';playBgm();}sfx('battleStart')}
+async function enterBattle(){await ensure();SummonTheme.stopLoop();NormalBattleTheme.stopLoop();if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();if(typeof KitakantoBossTheme!=='undefined')KitakantoBossTheme.stopLoop();if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();const lbl=document.getElementById("specialBgmLabel");if(lbl)lbl.style.display="none";bgmMode='external_battle';let started=false;if(state.playerId==="tokyo"||state.playerId==="shin_tokyo"||state.enemyId==="tokyo"||state.enemyId==="shin_tokyo"){started=await FinalBossTheme.startLoop();}else if(state.playerId==="kyoto"||state.enemyId==="kyoto"){started=await KyotoTheme.startLoop();if(lbl&&started){lbl.textContent="♪The Ancient Capital";lbl.style.display="block";}}else if(state.playerId==="ibaraki"||state.playerId==="tochigi"||state.enemyId==="ibaraki"||state.enemyId==="tochigi"){started=await KitakantoTheme.startLoop();if(lbl&&started){lbl.textContent="♪北関東のうた";lbl.style.display="block";}}else{started=await NormalBattleTheme.startLoop();}if(!started){bgmMode='normal';playBgm();}sfx('battleStart')}
 function playBgm(){if(!ctx||isBgm)return;isBgm=true;step=0;nextTime=ctx.currentTime+.08;musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(.001,ctx.currentTime);musicGain.gain.linearRampToValueAtTime(.40,ctx.currentTime+.9);scheduler()}
-function stopBgm(fade=.35){if(!ctx)return;isBgm=false;clearTimeout(timer);musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);musicGain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+fade);NormalBattleTheme.stopLoop();if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();if(typeof SummonTheme!=='undefined')SummonTheme.stopLoop();const lbl=document.getElementById("specialBgmLabel");if(lbl)lbl.style.display="none";}
+function stopBgm(fade=.35){if(!ctx)return;isBgm=false;clearTimeout(timer);musicGain.gain.cancelScheduledValues(ctx.currentTime);musicGain.gain.setValueAtTime(Math.max(.001,musicGain.gain.value),ctx.currentTime);musicGain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+fade);NormalBattleTheme.stopLoop();if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();if(typeof KitakantoBossTheme!=='undefined')KitakantoBossTheme.stopLoop();if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();if(typeof SummonTheme!=='undefined')SummonTheme.stopLoop();const lbl=document.getElementById("specialBgmLabel");if(lbl)lbl.style.display="none";}
 async function setSummonMode(on){
   if(!ctx)return;
 
       if(on){
                   if(bgmMode==='external_summon') return;
-      try{
-        await ensure();
-        stopBgm(.16);
-        NormalBattleTheme.stopLoop();
-        if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();
-        if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();
-        if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();
-        const started = await SummonTheme.startLoop();
+            try{
+        await ensure();
+        stopBgm(.16);
+        NormalBattleTheme.stopLoop();
+        if(typeof FinalBossTheme!=='undefined')FinalBossTheme.stopLoop();
+        if(typeof KitakantoTheme!=='undefined')KitakantoTheme.stopLoop();
+        if(typeof KitakantoBossTheme!=='undefined')KitakantoBossTheme.stopLoop();
+        if(typeof KyotoTheme!=='undefined')KyotoTheme.stopLoop();
+        let started = false;
+        const lbl = document.getElementById("specialBgmLabel");
+        if(state.playerId === "ibaraki" || state.playerId === "tochigi" || state.enemyId === "ibaraki" || state.enemyId === "tochigi"){
+          started = await KitakantoBossTheme.startLoop();
+          if(lbl && started){ lbl.textContent="♪北関東死闘編 [BOSS]"; lbl.style.display="block"; }
+        } else {
+          started = await SummonTheme.startLoop();
+        }
       if(started){
         bgmMode='external_summon';
         return;
@@ -5022,10 +5104,11 @@ async function setSummonMode(on){
     return;
   }
 
-        SummonTheme.stopLoop();
+                SummonTheme.stopLoop();
+        if(typeof KitakantoBossTheme!=='undefined')KitakantoBossTheme.stopLoop();
     if(bgmMode==='external_summon'){
     bgmMode='external_battle';
-                const lbl = document.getElementById("specialBgmLabel");
+                const lbl = document.getElementById("specialBgmLabel");
     if(state.playerId==="tokyo"||state.playerId==="shin_tokyo"||state.enemyId==="tokyo"||state.enemyId==="shin_tokyo"){
       FinalBossTheme.startLoop().then(started => {
         if(!started){ bgmMode='normal'; playBgm(); }
@@ -8140,14 +8223,15 @@ document.addEventListener("keydown", e => {
 
 
 function stopAllMusic() {
-  MenuAudio.stop(0.2);
-  if(NormalBattleTheme) NormalBattleTheme.stopLoop();
-  if(FinalBossTheme) FinalBossTheme.stopLoop();
-  if(typeof KitakantoTheme !== 'undefined') KitakantoTheme.stopLoop();
-  if(typeof KyotoTheme !== 'undefined') KyotoTheme.stopLoop();
-  if(SummonTheme) SummonTheme.stopLoop();
-  const lbl = document.getElementById("specialBgmLabel");
-  if(lbl) lbl.style.display = "none";
+  MenuAudio.stop(0.2);
+  if(NormalBattleTheme) NormalBattleTheme.stopLoop();
+  if(FinalBossTheme) FinalBossTheme.stopLoop();
+  if(typeof KitakantoTheme !== 'undefined') KitakantoTheme.stopLoop();
+  if(typeof KitakantoBossTheme !== 'undefined') KitakantoBossTheme.stopLoop();
+  if(typeof KyotoTheme !== 'undefined') KyotoTheme.stopLoop();
+  if(SummonTheme) SummonTheme.stopLoop();
+  const lbl = document.getElementById("specialBgmLabel");
+  if(lbl) lbl.style.display = "none";
 }
 
 const btnHomeHelp = $("#btnHomeHelp");
@@ -8254,17 +8338,18 @@ document.addEventListener("visibilitychange", () => {
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "12d1f90d64ab3a4463bea768e47abc1e",
   "createdAt": "2026-03-08T01:12:10.287Z",
   "schema": 2,
   "title": "都道府県バトル - Prefectural Fantasy",
-  "savedAt": "2026-03-11T13:24:15.745Z",
-  "aiInstruction": "すべての戦闘曲が、バトル終了後、結果表示画面移行時にとまり、メニュー音楽に移行するようにすること。",
-  "comment": "すべての戦闘曲が、バトル終了後、結果表示画面移行時にとまり、メニュー音楽に移行するようにすること。",
+  "savedAt": "2026-03-15T07:28:52.294Z",
+  "aiInstruction": "茨城、栃木の召喚獣戦の音楽を、次に添付するWEBオーディオに変更する。ほかの召喚獣戦の曲と同様に、召喚が完了した際、またはゲーム終了時には止め、次の曲につなぐこと。",
+  "comment": "茨城、栃木の召喚獣戦の音楽を、次に添付するWEBオーディオに変更する。ほかの召喚獣戦の曲と同様に、召喚が完了した際、またはゲーム終了時には止め、次の曲につなぐこと。",
   "sourceMode": "project",
-  "runId": "88685f876d456e670c79376e424e9de0"
+  "runId": "be2f934b891d487f4a5f01e1c79532db"
 }
 </script>
 </body>
