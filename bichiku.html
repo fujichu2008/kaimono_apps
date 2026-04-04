@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <title>おうち備蓄ナビ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* iPad最適化の微調整 */
+        body { -webkit-tap-highlight-color: transparent; background-color: #f3f4f6; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // 初期データ（サンプルの初期在庫）
+        const initialInventory = [
+            { id: 1, category: "食品", name: "自家製きゅうりの浅漬け", location: "冷蔵庫", quantity: 1, unit: "タッパー", expiry: "2026-04-10", photo: null },
+            { id: 2, category: "食品", name: "牛乳", location: "冷蔵庫横食品庫", quantity: 6, unit: "個", expiry: "2026-10-01", photo: null },
+            { id: 3, category: "エネルギー", name: "カセットボンベ", location: "床下収納", quantity: 12, unit: "本", expiry: "2032-01-01", photo: null },
+            { id: 4, category: "日用品", name: "ゴミ袋(45L)", location: "パントリー", quantity: 50, unit: "枚", expiry: "", photo: null },
+            { id: 5, category: "衛生用品", name: "大人用マスク", location: "玄関収納", quantity: 100, unit: "枚", expiry: "", photo: null },
+            { id: 6, category: "食品", name: "ミネラルウォーター(2L)", location: "床下収納", quantity: 12, unit: "本", expiry: "2028-08-01", photo: null }
+        ];
+
+                const SCENARIOS = [
+            "地震・台風（インフラ停止・短期サバイバル）",
+            "台湾有事（物流分断・長期ローリングストック）",
+            "ホルムズ海峡途絶（エネルギー・油脂類高騰）",
+            "日常モード（期限切れ間近の消費）"
+        ];
+
+        const DB_NAME = "stockguard-ai-db";
+        const STORE_NAME = "appState";
+                const APP_STATE_KEY = "stockguard-main";
+
+        const DEFAULT_LOCATIONS = [
+            "キッチン下収納",
+            "キッチン吊戸棚",
+            "キッチン食器棚",
+            "冷蔵庫横食品庫",
+            "リビングクローゼット",
+            "階段下収納",
+            "１F洗面台",
+            "脱衣所収納",
+            "廊下収納スペース",
+            "玄関ウォークスルークローゼット",
+            "トイレ",
+            "2F倉庫スペース",
+            "2Fウォークスルークローゼット",
+            "子供部屋",
+            "寝室",
+            "仕事部屋",
+            "家裏倉庫"
+        ];
+
+        function openStockGuardDB() {
+            return new Promise((resolve, reject) => {
+                if (!window.indexedDB) {
+                    resolve(null);
+                    return;
+                }
+                const request = window.indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+                    }
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function loadPersistedState() {
+            const db = await openStockGuardDB();
+            if (!db) return null;
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction(STORE_NAME, "readonly");
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.get(APP_STATE_KEY);
+                request.onsuccess = () => resolve(request.result || null);
+                request.onerror = () => reject(request.error);
+                transaction.oncomplete = () => db.close();
+                transaction.onerror = () => reject(transaction.error);
+            });
+        }
+
+        async function savePersistedState(state) {
+            const db = await openStockGuardDB();
+            if (!db) return;
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction(STORE_NAME, "readwrite");
+                const store = transaction.objectStore(STORE_NAME);
+                store.put({ id: APP_STATE_KEY, ...state });
+                transaction.oncomplete = () => {
+                    db.close();
+                    resolve();
+                };
+                transaction.onerror = () => reject(transaction.error);
+            });
+        }
+
+        function App() {
+                        const [inventory, setInventory] = useState(initialInventory);
+                                                const [viewMode, setViewMode] = useState("list");
+                        const [isDbReady, setIsDbReady] = useState(false);
+            const [locations, setLocations] = useState(DEFAULT_LOCATIONS);
+            const [lastUsedLocation, setLastUsedLocation] = useState(DEFAULT_LOCATIONS[0] || "");
+            const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+            const [newLocationName, setNewLocationName] = useState("");
+            const createBlankRow = (category = "食品") => ({
+                id: `blank-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                category,
+                name: "",
+                location: "",
+                quantity: "",
+                unit: "",
+                expiry: "",
+                photo: null
+            });
+            const [blankRow, setBlankRow] = useState(() => createBlankRow());
+                        const [activeCategory, setActiveCategory] = useState("すべて");
+            const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+            const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+            const [newItem, setNewItem] = useState({ category: "食品", name: "", location: DEFAULT_LOCATIONS[0] || "", quantity: 1, unit: "個", expiry: "", photo: null });
+            const [selectedScenario, setSelectedScenario] = useState(SCENARIOS[0]);
+            const [generatedPrompt, setGeneratedPrompt] = useState("");
+
+                        // アイコンの描画（マウント時）
+            useEffect(() => {
+                lucide.createIcons();
+            });
+
+                        useEffect(() => {
+                let mounted = true;
+
+                const loadStoredState = async () => {
+                    try {
+                        const savedState = await loadPersistedState();
+                        if (!mounted) return;
+
+                        const persistedInventory = savedState && Array.isArray(savedState.inventory) ? savedState.inventory : initialInventory;
+                        const persistedLocations = savedState && Array.isArray(savedState.locations) && savedState.locations.length
+                            ? savedState.locations
+                            : DEFAULT_LOCATIONS;
+                        const mergedLocations = Array.from(new Set([
+                            ...persistedLocations,
+                            ...persistedInventory.map(item => item.location).filter(Boolean)
+                        ]));
+                        const restoredLastUsedLocation =
+                            savedState && savedState.lastUsedLocation && mergedLocations.includes(savedState.lastUsedLocation)
+                                ? savedState.lastUsedLocation
+                                : (persistedInventory[persistedInventory.length - 1]?.location || mergedLocations[0] || "");
+
+                        setInventory(persistedInventory);
+                        setLocations(mergedLocations);
+                        setLastUsedLocation(restoredLastUsedLocation);
+                        setNewItem(prev => ({
+                            ...prev,
+                            location: restoredLastUsedLocation || mergedLocations[0] || ""
+                        }));
+
+                        if (savedState && savedState.viewMode) {
+                            setViewMode(savedState.viewMode);
+                        }
+                    } catch (error) {
+                        console.error("IndexedDB load failed:", error);
+                    } finally {
+                        if (mounted) {
+                            setIsDbReady(true);
+                        }
+                    }
+                };
+
+                loadStoredState();
+
+                return () => {
+                    mounted = false;
+                };
+            }, []);
+
+                        const categories = ["すべて", "食品", "エネルギー", "衛生用品", "日用品"];
+            const unitOptions = ["個", "本", "枚", "パック", "箱", "袋", "缶", "g", "kg", "ml", "L", "セット"];
+                        const locationOptions = locations.length ? locations : DEFAULT_LOCATIONS;
+
+            const filteredInventory = useMemo(() => {
+                return activeCategory === "すべて" 
+                    ? inventory 
+                    : inventory.filter(item => item.category === activeCategory);
+            }, [inventory, activeCategory]);
+
+                        // 数量変更ロジック
+            const updateQuantity = (id, delta) => {
+                setInventory(inventory.map(item => {
+                    if (item.id === id) {
+                        const newQuantity = Math.max(0, item.quantity + delta);
+                        return { ...item, quantity: newQuantity };
+                    }
+                    return item;
+                }));
+            };
+
+            // 写真アップロードロジック
+            const handlePhotoUpload = (id, e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        setInventory(inventory.map(item => item.id === id ? { ...item, photo: reader.result } : item));
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+                                                const updateItemField = (id, field, value) => {
+                setInventory(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+            };
+
+            const isBlankRowFilled = (item) => {
+                return Boolean(
+                    String(item.name || "").trim() ||
+                    String(item.location || "").trim() ||
+                    String(item.quantity ?? "").trim() ||
+                    String(item.unit || "").trim() ||
+                    String(item.expiry || "").trim() ||
+                    item.photo
+                );
+            };
+
+            const commitBlankRow = (nextRow) => {
+                setInventory(prev => [
+                    ...prev,
+                    {
+                        ...nextRow,
+                        quantity: nextRow.quantity === "" ? 0 : Math.max(0, parseInt(nextRow.quantity, 10) || 0)
+                    }
+                ]);
+                setBlankRow(createBlankRow(activeCategory === "すべて" ? "食品" : activeCategory));
+            };
+
+            const updateBlankRowField = (field, value) => {
+                const nextRow = { ...blankRow, [field]: value };
+                if (isBlankRowFilled(nextRow)) {
+                    commitBlankRow(nextRow);
+                } else {
+                    setBlankRow(nextRow);
+                }
+            };
+
+            const handleBlankRowPhotoUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        const nextRow = { ...blankRow, photo: reader.result };
+                        commitBlankRow(nextRow);
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+                        const addLocation = () => {
+                const trimmed = newLocationName.trim();
+                if (!trimmed) return;
+                setLocations(prev => prev.includes(trimmed) ? prev : [...prev, trimmed]);
+                setNewLocationName("");
+            };
+
+            const moveLocation = (index, direction) => {
+                setLocations(prev => {
+                    const targetIndex = index + direction;
+                    if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+                    const next = [...prev];
+                    [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+                    return next;
+                });
+            };
+
+            // AIプロンプト生成ロジック
+            const generateAiPrompt = () => {
+                const dataJson = JSON.stringify(inventory, null, 2);
+                const prompt = `あなたはプロの防災アドバイザー兼、家庭内リソース管理の専門家です。
+以下のJSONデータは、現在の我が家の在庫状況です。
+
+【想定する有事シナリオ】
+${selectedScenario}
+
+【指示】
+上記のシナリオに基づき、以下の在庫データを分析してください。
+1. 賞味期限や劣化を考慮し、どの順番で消費すべきかの具体的なアクションプラン。
+2. 選択された有事シナリオを乗り切るために、現在不足しており買い足すべき備蓄品のアドバイス。
+3. リソース（水、熱源、衛生など）を最適に配分するための注意点。
+
+【現在の在庫データ(JSON)】
+${dataJson}
+`;
+                setGeneratedPrompt(prompt);
+            };
+
+            // AIモーダルを開くときの処理
+                        useEffect(() => {
+                if (isAiModalOpen) {
+                    generateAiPrompt();
+                }
+            }, [isAiModalOpen, selectedScenario, inventory]);
+
+                                    useEffect(() => {
+                if (!isDbReady) return;
+
+                savePersistedState({ inventory, viewMode, locations, lastUsedLocation }).catch(error => {
+                    console.error("IndexedDB save failed:", error);
+                });
+            }, [inventory, viewMode, locations, lastUsedLocation, isDbReady]);
+
+                        useEffect(() => {
+                if (activeCategory === "すべて") {
+                    setBlankRow(prev => isBlankRowFilled(prev) ? prev : { ...prev, category: "食品" });
+                } else {
+                    setBlankRow(prev => isBlankRowFilled(prev) ? prev : { ...prev, category: activeCategory });
+                }
+            }, [activeCategory]);
+
+            useEffect(() => {
+                if (!isAddModalOpen) return;
+
+                const fallbackLocation =
+                    (lastUsedLocation && locationOptions.includes(lastUsedLocation) ? lastUsedLocation : locationOptions[0]) || "";
+
+                setNewItem(prev => ({
+                    ...prev,
+                    location: prev.location && locationOptions.includes(prev.location) ? prev.location : fallbackLocation
+                }));
+            }, [isAddModalOpen, lastUsedLocation, locations]);
+
+                        return (
+                <div className="flex h-screen bg-gray-100 font-sans text-gray-800">
+                    <datalist id="unit-options">
+                        {unitOptions.map(u => <option key={u} value={u} />)}
+                    </datalist>
+                    {/* 左サイドバー：iPadでの操作性を意識 */}
+                    <div className="w-64 bg-white shadow-lg flex flex-col">
+                                                <div className="p-6 text-xl font-bold text-blue-600 border-b flex items-center gap-2">
+                            <i data-lucide="shield-check"></i> おうち備蓄ナビ
+                        </div>
+                        <div className="p-4 flex-1 overflow-y-auto hide-scrollbar">
+                            <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase">カテゴリ</h3>
+                            <ul className="space-y-2 mb-8">
+                                {categories.map(cat => (
+                                    <li key={cat}>
+                                        <button 
+                                            onClick={() => setActiveCategory(cat)}
+                                            className={`w-full text-left px-4 py-3 rounded-xl transition-colors ${activeCategory === cat ? 'bg-blue-100 text-blue-700 font-bold' : 'hover:bg-gray-50'}`}
+                                        >
+                                            {cat}
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                                                <div className="p-4 border-t space-y-2">
+                            <button 
+                                onClick={() => setIsSettingsModalOpen(true)}
+                                className="w-full bg-white text-slate-700 py-3 rounded-xl border border-gray-200 shadow-sm flex items-center justify-center gap-2 hover:bg-gray-50 active:scale-95 transition"
+                            >
+                                <i data-lucide="settings-2"></i> 設定
+                            </button>
+                            <button 
+                                onClick={() => setIsAiModalOpen(true)}
+                                className="w-full bg-slate-800 text-white py-3 rounded-xl shadow flex items-center justify-center gap-2 hover:bg-slate-700 active:scale-95 transition"
+                            >
+                                <i data-lucide="bot"></i> AI分析を実行
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* メインコンテンツエリア */}
+                    <div className="flex-1 flex flex-col h-screen overflow-hidden">
+                                                <header className="bg-white px-6 py-4 border-b border-gray-200 flex justify-between items-center z-10">
+                            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                <h2 className="text-2xl font-bold">{activeCategory}の在庫</h2>
+                                <div className="flex items-center gap-1 bg-gray-100 rounded-xl p-1 border border-gray-200 w-fit">
+                                    <button
+                                        onClick={() => setViewMode("card")}
+                                        className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "card" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                                    >
+                                        <i data-lucide="layout-grid" className="w-4 h-4"></i> カード
+                                    </button>
+                                    <button
+                                        onClick={() => setViewMode("list")}
+                                        className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "list" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                                    >
+                                        <i data-lucide="list" className="w-4 h-4"></i> リスト
+                                    </button>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsAddModalOpen(true)} className="bg-white text-gray-700 px-4 py-2 rounded-xl border border-gray-200 shadow-sm flex items-center gap-2 hover:bg-gray-50 hover:border-gray-300 active:scale-95 transition text-sm font-semibold">
+                                <i data-lucide="plus"></i> アイテム登録
+                            </button>
+                        </header>
+
+                        <main className="flex-1 p-6 overflow-y-auto">
+                            {viewMode === "card" ? (
+                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 content-start">
+                            {filteredInventory.map(item => (
+                                <div key={item.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col relative">
+                                    {/* 期限アラート表示（簡易ロジック） */}
+                                    {item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3)) && (
+                                        <span className="absolute top-2 right-2 bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full z-10">
+                                            期限注意
+                                        </span>
+                                    )}
+                                    
+                                                                        {/* 写真エリア */}
+                                    <div className="h-32 bg-gray-200 flex items-center justify-center relative group cursor-pointer" onClick={() => document.getElementById(`photo-upload-${item.id}`).click()}>
+                                        {item.photo ? (
+                                            <img src={item.photo} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <i data-lucide="camera" className="text-gray-400 w-8 h-8 group-hover:scale-110 transition"></i>
+                                        )}
+                                        <div className="absolute bottom-0 left-0 bg-black bg-opacity-50 text-white text-xs px-2 py-1 m-2 rounded">
+                                            {item.location}
+                                        </div>
+                                        <input type="file" id={`photo-upload-${item.id}`} accept="image/*" className="hidden" onChange={(e) => handlePhotoUpload(item.id, e)} />
+                                    </div>
+
+                                    {/* 情報エリア */}
+                                    <div className="p-4 flex-1 flex flex-col justify-between">
+                                        <div>
+                                            <div className="text-xs text-blue-500 font-semibold mb-1">{item.category}</div>
+                                            <h3 className="font-bold text-lg leading-tight mb-2">{item.name}</h3>
+                                            {item.expiry && (
+                                                <div className="text-sm text-gray-500 flex items-center gap-1 mb-3">
+                                                    <i data-lucide="calendar" className="w-4 h-4"></i> {item.expiry}
+                                                </div>
+                                            )}
+                                        </div>
+                                        
+                                        {/* クイックエディット（数量変更） */}
+                                        <div className="flex items-center justify-between mt-auto pt-3 border-t">
+                                            <span className="text-xl font-bold">{item.quantity} <span className="text-sm font-normal text-gray-500">{item.unit}</span></span>
+                                            <div className="flex gap-1">
+                                                <button onClick={() => updateQuantity(item.id, -1)} className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center hover:bg-gray-200 active:bg-gray-300 transition text-xl">-</button>
+                                                <button onClick={() => updateQuantity(item.id, 1)} className="w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center hover:bg-blue-200 active:bg-blue-300 transition text-xl">+</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                                                        </div>
+                            ) : (
+                                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        <table className="min-w-[980px] w-full text-sm">
+                                            <thead className="bg-gray-50 border-b border-gray-200">
+                                                <tr className="text-left text-gray-600">
+                                                    <th className="px-4 py-3 font-semibold">写真</th>
+                                                    <th className="px-4 py-3 font-semibold">カテゴリ</th>
+                                                    <th className="px-4 py-3 font-semibold">品目名</th>
+                                                    <th className="px-4 py-3 font-semibold">保管場所</th>
+                                                    <th className="px-4 py-3 font-semibold">数量</th>
+                                                    <th className="px-4 py-3 font-semibold">単位</th>
+                                                    <th className="px-4 py-3 font-semibold">期限</th>
+                                                    <th className="px-4 py-3 font-semibold">状態</th>
+                                                </tr>
+                                            </thead>
+                                                                                        <tbody className="divide-y divide-gray-100">
+                                                {filteredInventory.map(item => {
+                                                    const isExpirySoon = item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3));
+                                                    return (
+                                                        <tr key={item.id} className="hover:bg-gray-50 align-top">
+                                                            <td className="px-4 py-3">
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        onClick={() => document.getElementById(`list-photo-upload-${item.id}`).click()}
+                                                                        className="w-10 h-10 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 flex items-center justify-center transition"
+                                                                    >
+                                                                        <i data-lucide="camera" className="w-4 h-4 text-gray-500"></i>
+                                                                    </button>
+                                                                    <span className="text-xs text-gray-500 whitespace-nowrap">{item.photo ? "登録済み" : "未登録"}</span>
+                                                                    <input
+                                                                        type="file"
+                                                                        id={`list-photo-upload-${item.id}`}
+                                                                        accept="image/*"
+                                                                        className="hidden"
+                                                                        onChange={(e) => handlePhotoUpload(item.id, e)}
+                                                                    />
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 min-w-[140px]">
+                                                                <select
+                                                                    value={item.category}
+                                                                    onChange={e => updateItemField(item.id, "category", e.target.value)}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                >
+                                                                    {categories.filter(c => c !== "すべて").map(c => <option key={c}>{c}</option>)}
+                                                                </select>
+                                                            </td>
+                                                            <td className="px-4 py-3 min-w-[220px]">
+                                                                <input
+                                                                    type="text"
+                                                                    value={item.name}
+                                                                    onChange={e => updateItemField(item.id, "name", e.target.value)}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                />
+                                                            </td>
+                                                                                                                        <td className="px-4 py-3 min-w-[170px]">
+                                                                <select
+                                                                    value={item.location}
+                                                                    onChange={e => updateItemField(item.id, "location", e.target.value)}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                >
+                                                                    {locationOptions.map(location => <option key={location} value={location}>{location}</option>)}
+                                                                </select>
+                                                            </td>
+                                                            <td className="px-4 py-3 min-w-[110px]">
+                                                                <input
+                                                                    type="number"
+                                                                    min="0"
+                                                                    value={item.quantity}
+                                                                    onChange={e => updateItemField(item.id, "quantity", Math.max(0, parseInt(e.target.value) || 0))}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                />
+                                                            </td>
+                                                                                                                        <td className="px-4 py-3 min-w-[100px]">
+                                                                <input
+                                                                    type="text"
+                                                                    list="unit-options"
+                                                                    value={item.unit}
+                                                                    onChange={e => updateItemField(item.id, "unit", e.target.value)}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                />
+                                                            </td>
+                                                            <td className="px-4 py-3 min-w-[150px]">
+                                                                <input
+                                                                    type="date"
+                                                                    value={item.expiry}
+                                                                    onChange={e => updateItemField(item.id, "expiry", e.target.value)}
+                                                                    className="w-full bg-white border border-gray-200 rounded-lg p-2.5"
+                                                                />
+                                                            </td>
+                                                            <td className="px-4 py-3 min-w-[110px]">
+                                                                <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${isExpirySoon ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600"}`}>
+                                                                    {isExpirySoon ? "期限注意" : "通常"}
+                                                                </span>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                                <tr key={blankRow.id} className="bg-blue-50 align-top">
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() => document.getElementById(`blank-photo-upload-${blankRow.id}`).click()}
+                                                                className="w-10 h-10 rounded-lg border border-dashed border-blue-300 bg-white hover:bg-blue-50 flex items-center justify-center transition"
+                                                            >
+                                                                <i data-lucide="camera" className="w-4 h-4 text-blue-500"></i>
+                                                            </button>
+                                                            <span className="text-xs text-blue-600 whitespace-nowrap">新規</span>
+                                                            <input
+                                                                type="file"
+                                                                id={`blank-photo-upload-${blankRow.id}`}
+                                                                accept="image/*"
+                                                                className="hidden"
+                                                                onChange={handleBlankRowPhotoUpload}
+                                                            />
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3 min-w-[140px]">
+                                                        <select
+                                                            value={blankRow.category}
+                                                            onChange={e => updateBlankRowField("category", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                        >
+                                                            {categories.filter(c => c !== "すべて").map(c => <option key={c}>{c}</option>)}
+                                                        </select>
+                                                    </td>
+                                                    <td className="px-4 py-3 min-w-[220px]">
+                                                        <input
+                                                            type="text"
+                                                            value={blankRow.name}
+                                                            onChange={e => updateBlankRowField("name", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                            placeholder="新しい品目名を入力"
+                                                        />
+                                                    </td>
+                                                                                                        <td className="px-4 py-3 min-w-[170px]">
+                                                        <select
+                                                            value={blankRow.location}
+                                                            onChange={e => updateBlankRowField("location", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                        >
+                                                            <option value="">保管場所を選択</option>
+                                                            {locationOptions.map(location => <option key={location} value={location}>{location}</option>)}
+                                                        </select>
+                                                    </td>
+                                                    <td className="px-4 py-3 min-w-[110px]">
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            value={blankRow.quantity}
+                                                            onChange={e => updateBlankRowField("quantity", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                            placeholder="0"
+                                                        />
+                                                    </td>
+                                                                                                        <td className="px-4 py-3 min-w-[100px]">
+                                                        <input
+                                                            type="text"
+                                                            list="unit-options"
+                                                            value={blankRow.unit}
+                                                            onChange={e => updateBlankRowField("unit", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                            placeholder="個"
+                                                        />
+                                                    </td>
+                                                    <td className="px-4 py-3 min-w-[150px]">
+                                                        <input
+                                                            type="date"
+                                                            value={blankRow.expiry}
+                                                            onChange={e => updateBlankRowField("expiry", e.target.value)}
+                                                            className="w-full bg-white border border-blue-200 rounded-lg p-2.5"
+                                                        />
+                                                    </td>
+                                                    <td className="px-4 py-3 min-w-[110px]">
+                                                        <span className="inline-flex px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap bg-blue-100 text-blue-700">
+                                                            入力待ち
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+                                        </div>
+
+                                        {/* アイテム登録モーダル */}
+                                        {isAddModalOpen && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                            <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
+                                <div className="p-6 border-b flex items-center justify-between gap-3 shrink-0">
+                                    <h2 className="text-xl font-bold whitespace-nowrap">新規アイテム登録</h2>
+                                    <button onClick={() => setIsAddModalOpen(false)} className="text-gray-400 hover:text-gray-800 shrink-0 p-1"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">カテゴリ</label>
+                                        <select value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3">
+                                            {categories.filter(c => c !== "すべて").map(c => <option key={c}>{c}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">品目名</label>
+                                        <input type="text" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" placeholder="例：カップラーメン" />
+                                    </div>
+                                                                        <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">保管場所</label>
+                                        <select value={newItem.location} onChange={e => setNewItem({...newItem, location: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3">
+                                            {locationOptions.map(location => <option key={location} value={location}>{location}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="flex flex-col sm:flex-row gap-4">
+                                        <div className="flex-1 min-w-0">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">数量</label>
+                                            <input type="number" value={newItem.quantity} onChange={e => setNewItem({...newItem, quantity: parseInt(e.target.value) || 0})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" min="0" />
+                                        </div>
+                                                                                <div className="flex-1 min-w-0">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">単位</label>
+                                            <input type="text" list="unit-options" value={newItem.unit} onChange={e => setNewItem({...newItem, unit: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" placeholder="例：個、本" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">賞味期限 / 使用期限</label>
+                                        <input type="date" value={newItem.expiry} onChange={e => setNewItem({...newItem, expiry: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" />
+                                    </div>
+                                </div>
+                                <div className="p-4 border-t flex flex-wrap justify-end gap-2 shrink-0">
+                                    <button onClick={() => setIsAddModalOpen(false)} className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 font-bold whitespace-nowrap min-w-[96px]">キャンセル</button>
+                                                                        <button onClick={() => {
+                                        if(!newItem.name) return alert("品目名を入力してください。");
+                                        const selectedLocation = newItem.location || lastUsedLocation || locationOptions[0] || "";
+                                        setInventory([...inventory, { ...newItem, location: selectedLocation, id: Date.now() }]);
+                                        setLastUsedLocation(selectedLocation);
+                                        setIsAddModalOpen(false);
+                                        setNewItem({ category: "食品", name: "", location: selectedLocation, quantity: 1, unit: "個", expiry: "", photo: null });
+                                    }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold whitespace-nowrap min-w-[96px]">登録する</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+
+
+                    {/* AIアドバイザーモーダル */}
+                                        {isSettingsModalOpen && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+                                <div className="p-6 border-b flex justify-between items-center">
+                                    <h2 className="text-2xl font-bold flex items-center gap-2"><i data-lucide="settings-2" className="text-slate-700"></i> 保管場所設定</h2>
+                                    <button onClick={() => setIsSettingsModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-6 overflow-y-auto flex-1 space-y-6">
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">保管場所を追加</label>
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <input
+                                                type="text"
+                                                value={newLocationName}
+                                                onChange={e => setNewLocationName(e.target.value)}
+                                                className="flex-1 bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                                placeholder="例：床下収納"
+                                            />
+                                            <button
+                                                onClick={addLocation}
+                                                className="px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold flex items-center justify-center gap-2 whitespace-nowrap"
+                                            >
+                                                <i data-lucide="plus" className="w-4 h-4"></i> 追加
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-2">下の矢印ボタンで表示順を変更できます。タッチ操作でも並び替えできます。</p>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">保管場所の表示順</label>
+                                        <div className="space-y-2">
+                                            {locationOptions.map((location, index) => (
+                                                <div key={location} className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="text-xs text-gray-400 mb-1">#{index + 1}</div>
+                                                        <div className="font-semibold text-gray-800 break-words">{location}</div>
+                                                    </div>
+                                                    <div className="flex gap-2 shrink-0">
+                                                        <button
+                                                            onClick={() => moveLocation(index, -1)}
+                                                            disabled={index === 0}
+                                                            className="w-10 h-10 rounded-lg border border-gray-200 bg-white hover:bg-gray-100 flex items-center justify-center transition disabled:opacity-40 disabled:cursor-not-allowed"
+                                                        >
+                                                            <i data-lucide="chevron-up" className="w-4 h-4"></i>
+                                                        </button>
+                                                        <button
+                                                            onClick={() => moveLocation(index, 1)}
+                                                            disabled={index === locationOptions.length - 1}
+                                                            className="w-10 h-10 rounded-lg border border-gray-200 bg-white hover:bg-gray-100 flex items-center justify-center transition disabled:opacity-40 disabled:cursor-not-allowed"
+                                                        >
+                                                            <i data-lucide="chevron-down" className="w-4 h-4"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="p-4 border-t flex justify-end">
+                                    <button onClick={() => setIsSettingsModalOpen(false)} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 font-bold min-w-[96px]">閉じる</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {isAiModalOpen && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+                                <div className="p-6 border-b flex justify-between items-center">
+                                    <h2 className="text-2xl font-bold flex items-center gap-2"><i data-lucide="bot" className="text-blue-600"></i> AIサバイバル・アドバイザー</h2>
+                                    <button onClick={() => setIsAiModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-6 overflow-y-auto flex-1">
+                                    <div className="mb-6">
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">想定する有事シナリオを選択</label>
+                                        <select 
+                                            value={selectedScenario}
+                                            onChange={(e) => setSelectedScenario(e.target.value)}
+                                            className="w-full bg-gray-50 border border-gray-300 text-gray-900 text-lg rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-3"
+                                        >
+                                            {SCENARIOS.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">AIへの送信プロンプト（JSONデータ含む）</label>
+                                        <div className="relative">
+                                            <textarea 
+                                                readOnly
+                                                value={generatedPrompt}
+                                                className="w-full h-64 bg-slate-50 border border-gray-300 text-sm font-mono rounded-xl p-4 hide-scrollbar"
+                                            ></textarea>
+                                            <button 
+                                                onClick={() => navigator.clipboard.writeText(generatedPrompt)}
+                                                className="absolute top-4 right-4 bg-white border shadow-sm px-3 py-1 rounded-lg text-sm flex items-center gap-1 hover:bg-gray-50"
+                                            >
+                                                <i data-lucide="copy" className="w-4 h-4"></i> コピー
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-2">※このプロンプトをコピーして、ChatGPTやGeminiなどのAIに貼り付けてください。</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+
+
+
+
+
+
+<script id="lfs-meta" type="application/json">
+{
+  "appId": "378c95ae9a463384fa2a36dfdf0d1c0c",
+  "createdAt": "2026-04-04T23:27:18.222Z",
+  "schema": 2,
+  "title": "おうち備蓄ナビ",
+  "savedAt": "2026-04-04T23:33:13.923Z",
+  "aiInstruction": "単位はプルダウンで選択可能とする。個別入力も可能とすること。\n\nリスト表示の単位の表示が崩れた（ほかの表示欄より少し下に配置されてしまう）ので元通り修正",
+  "comment": "単位はプルダウンで選択可能とする。個別入力も可能とすること。\n\nリスト表示の単位の表示が崩れた（ほかの表示欄より少し下に配置されてしまう）ので元通り修正",
+  "sourceMode": "project",
+  "runId": "f176999ce67d34d1b116f3f63c264df0"
+}
+</script>
+</body>
+</html>
