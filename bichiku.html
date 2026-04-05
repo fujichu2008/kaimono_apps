@@ -105,6 +105,31 @@
             "家裏倉庫"
         ];
 
+        const UNIT_SUGGESTION_RULES = [
+            { keywords: ["ミネラルウォーター", "天然水", "飲料水"], unit: "本" },
+            { keywords: ["牛乳", "豆乳"], unit: "個" },
+            { keywords: ["カセットボンベ", "ボンベ"], unit: "本" },
+            { keywords: ["ゴミ袋"], unit: "枚" },
+            { keywords: ["マスク"], unit: "枚" },
+            { keywords: ["トイレットペーパー"], unit: "ロール" },
+            { keywords: ["ボックスティッシュ", "ティッシュペーパー"], unit: "箱" },
+            { keywords: ["ウェットティッシュ", "おしりふき"], unit: "パック" },
+            { keywords: ["缶詰"], unit: "缶" },
+            { keywords: ["レトルトカレー", "レトルト"], unit: "パック" },
+            { keywords: ["パックごはん", "ごはんパック"], unit: "パック" },
+            { keywords: ["お米", "無洗米", "精米"], unit: "kg" },
+            { keywords: ["乾電池"], unit: "本" }
+        ];
+
+        function getSuggestedUnitByItemName(name) {
+            const normalizedName = String(name || "").trim();
+            if (!normalizedName) return "";
+            const matchedRule = UNIT_SUGGESTION_RULES.find(rule =>
+                rule.keywords.some(keyword => normalizedName.includes(keyword))
+            );
+            return matchedRule ? matchedRule.unit : "";
+        }
+
         function dataUrlToBlob(dataUrl) {
             if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
                 return null;
@@ -344,9 +369,10 @@
             const [isAiImportModalOpen, setIsAiImportModalOpen] = useState(false);
             const [aiImportText, setAiImportText] = useState("");
                         const [aiImportItems, setAiImportItems] = useState([]);
-            const [aiImportMessage, setAiImportMessage] = useState("");
+                        const [aiImportMessage, setAiImportMessage] = useState("");
             const [detailItemId, setDetailItemId] = useState(null);
             const [detailDraft, setDetailDraft] = useState(null);
+            const [detailPhotoSectionOpen, setDetailPhotoSectionOpen] = useState(false);
                                                                                                 const [sortField, setSortField] = useState("none");
             const [inventorySearchKeyword, setInventorySearchKeyword] = useState("");
             const [isInventorySearchOpen, setIsInventorySearchOpen] = useState(false);
@@ -435,11 +461,45 @@
                 return getCurrentQuantityValue(item) < recommendedQuantity;
             };
 
-            const formatQuantityLabel = (quantity, unit) => {
+                        const formatQuantityLabel = (quantity, unit) => {
                 if (quantity === "" || quantity === null || quantity === undefined) {
                     return "未入力";
                 }
                 return `${quantity}${unit ? ` ${unit}` : ""}`;
+            };
+
+            const getHouseholdSummaryText = () => {
+                const parts = [];
+                if (familyProfile.infants > 0) parts.push(`幼児${familyProfile.infants}人`);
+                if (familyProfile.children > 0) parts.push(`子供${familyProfile.children}人`);
+                if (familyProfile.adults > 0) parts.push(`大人${familyProfile.adults}人`);
+                return parts.length ? parts.join("・") : "人数未設定";
+            };
+
+            const getScenarioSummaryText = () => {
+                if (selectedScenario.includes("地震・台風")) return "停電や断水を伴う短期サバイバル";
+                if (selectedScenario.includes("台湾有事")) return "物流分断を伴う長期ローリングストック";
+                if (selectedScenario.includes("ホルムズ海峡")) return "エネルギー・油脂類高騰を見込んだ節約備蓄";
+                return "日常の消費と期限管理";
+            };
+
+            const getRecommendedStockRationale = (category) => {
+                if (category === "食品") return "主食・飲料・すぐ食べられる品を、家族全員の食数と日数から逆算して確保します。";
+                if (category === "エネルギー") return "停電やガス停止時でも必要な調理回数・照明時間をまかなえる量を基準にします。";
+                if (category === "衛生用品") return "家族人数×1日あたりの使用量×補充しづらい期間を見込んで設定します。";
+                if (category === "日用品") return "普段の消費速度に加え、買い足しが遅れる期間の余裕分を上乗せして設定します。";
+                return "家族人数と有事シナリオに応じた消費量をもとに設定します。";
+            };
+
+            const getRecommendedMemoText = (item) => {
+                const householdText = getHouseholdSummaryText();
+                const scenarioText = getScenarioSummaryText();
+                const recommendedQuantity = getRecommendedQuantityValue(item);
+                const unitLabel = item && item.unit ? item.unit : "個";
+                const quantityText = recommendedQuantity !== null
+                    ? `現在の適正在庫量は ${recommendedQuantity}${unitLabel} を目安にしています。`
+                    : "適正在庫量は未設定ですが、下の数量欄で目安を決められます。";
+                return `${scenarioText}を想定し、${householdText}で使う量から設定します。${getRecommendedStockRationale(item && item.category)}${quantityText}`;
             };
 
             const registerItemNameHistory = (name) => {
@@ -560,7 +620,7 @@
             }, []);
 
                         const categories = ["すべて", "食品", "エネルギー", "衛生用品", "日用品"];
-            const unitOptions = ["個", "本", "枚", "パック", "箱", "袋", "缶", "g", "kg", "ml", "L", "セット"];
+            const unitOptions = ["個", "本", "枚", "パック", "箱", "袋", "缶", "g", "kg", "ml", "L", "セット", "ロール"];
                         const locationOptions = locations.length ? locations : DEFAULT_LOCATIONS;
 
                                                 const filteredInventory = useMemo(() => {
@@ -609,20 +669,22 @@
                 return inventory.find(item => String(item.id) === String(detailItemId)) || null;
             }, [inventory, detailItemId]);
 
-            useEffect(() => {
+                        useEffect(() => {
                 if (!selectedDetailItem) {
                     setDetailDraft(null);
+                    setDetailPhotoSectionOpen(false);
                     return;
                 }
 
+                setDetailPhotoSectionOpen(Boolean(selectedDetailItem.photo || selectedDetailItem.photoBlob));
                 setDetailDraft({
                     ...selectedDetailItem,
                     photo: selectedDetailItem.photo || null,
                     photoBlob: selectedDetailItem.photoBlob || null,
                     recommendedQuantity: selectedDetailItem.recommendedQuantity ?? "",
-                    recommendedMemo: selectedDetailItem.recommendedMemo || ""
+                    recommendedMemo: selectedDetailItem.recommendedMemo || getRecommendedMemoText(selectedDetailItem)
                 });
-            }, [selectedDetailItem]);
+            }, [selectedDetailItem, familyProfile, selectedScenario]);
 
             const expiringItems = useMemo(() => {
                 return inventory
@@ -864,7 +926,14 @@
             };
 
                                                                                                 const updateItemField = (id, field, value) => {
-                setInventory(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+                setInventory(prev => prev.map(item => {
+                    if (item.id !== id) return item;
+                    if (field === "name") {
+                        const suggestedUnit = getSuggestedUnitByItemName(value);
+                        return { ...item, [field]: value, unit: suggestedUnit || item.unit };
+                    }
+                    return { ...item, [field]: value };
+                }));
             };
 
                                                 const handleDeleteItem = (id, name) => {
@@ -935,7 +1004,7 @@
                 });
             };
 
-            const handleCloseDetailModal = () => {
+                        const handleCloseDetailModal = () => {
                 setDetailDraft(prev => {
                     if (prev && prev.photo && prev.photo !== (selectedDetailItem && selectedDetailItem.photo)) {
                         releasePreviewUrl(prev.photo);
@@ -943,10 +1012,18 @@
                     return null;
                 });
                 setDetailItemId(null);
+                setDetailPhotoSectionOpen(false);
             };
 
             const updateDetailDraftField = (field, value) => {
-                setDetailDraft(prev => prev ? { ...prev, [field]: value } : prev);
+                setDetailDraft(prev => {
+                    if (!prev) return prev;
+                    if (field === "name") {
+                        const suggestedUnit = getSuggestedUnitByItemName(value);
+                        return { ...prev, [field]: value, unit: suggestedUnit || prev.unit };
+                    }
+                    return { ...prev, [field]: value };
+                });
             };
 
             const handleDetailDraftPhotoUpload = async (e) => {
@@ -1074,7 +1151,13 @@
             };
 
             const updateBlankRowField = (field, value) => {
-                setBlankRow(prev => ({ ...prev, [field]: value }));
+                setBlankRow(prev => {
+                    if (field === "name") {
+                        const suggestedUnit = getSuggestedUnitByItemName(value);
+                        return { ...prev, [field]: value, unit: suggestedUnit || prev.unit };
+                    }
+                    return { ...prev, [field]: value };
+                });
             };
 
                                                 const handleBlankRowPhotoUpload = async (e) => {
@@ -2154,8 +2237,8 @@ ${dataJson}
                                                         <div className="text-sm font-semibold text-gray-500 mt-1">{item.unit || "個"}</div>
                                                     </div>
                                                 </div>
-                                                <div className="text-[11px] text-gray-500 mt-2 leading-relaxed">
-                                                    {item.recommendedMemo || "家族構成・想定シナリオ・消費ペースを踏まえた目安として調整できます。"}
+                                                                                                <div className="text-[11px] text-gray-500 mt-2 leading-relaxed">
+                                                    {item.recommendedMemo || getRecommendedMemoText(item)}
                                                 </div>
                                             </div>
                                             {isStockShort && (
@@ -2391,7 +2474,18 @@ ${dataJson}
                                     </div>
                                                                                                                                                 <div>
                                         <label className="block text-sm font-bold text-gray-700 mb-1">品目名</label>
-                                                                                <input type="text" list="item-name-options" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" placeholder="例：カップラーメン" />
+                                                                                <input
+                                            type="text"
+                                            list="item-name-options"
+                                            value={newItem.name}
+                                            onChange={e => {
+                                                const nextName = e.target.value;
+                                                const suggestedUnit = getSuggestedUnitByItemName(nextName);
+                                                setNewItem({ ...newItem, name: nextName, unit: suggestedUnit || newItem.unit });
+                                            }}
+                                            className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            placeholder="例：カップラーメン"
+                                        />
                                                                                 
                                     </div>
                                     <div>
@@ -2828,45 +2922,56 @@ ${dataJson}
                                     <button type="button" onClick={handleCloseDetailModal} className="text-gray-400 hover:text-gray-800 shrink-0"><i data-lucide="x"></i></button>
                                 </div>
                                 <div className="p-5 space-y-5 overflow-y-auto flex-1 min-h-0">
-                                    <div>
-                                        <label className="block text-sm font-bold text-gray-700 mb-2">写真</label>
-                                        <div className="flex flex-col sm:flex-row items-start gap-4">
-                                            <div className="w-full sm:w-56 h-48 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center shrink-0">
-                                                {detailDraft.photo ? (
-                                                    <img src={detailDraft.photo} className="w-full h-full object-cover" />
-                                                ) : (
-                                                    <i data-lucide="camera" className="w-10 h-10 text-gray-400"></i>
-                                                )}
-                                            </div>
-                                            <div className="flex-1 min-w-0 space-y-2">
-                                                <div className="flex flex-wrap gap-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => document.getElementById(`detail-photo-capture-${detailDraft.id}`).click()}
-                                                        className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
-                                                    >
-                                                        撮影する
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => document.getElementById(`detail-photo-upload-${detailDraft.id}`).click()}
-                                                        className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
-                                                    >
-                                                        画像を選ぶ
-                                                    </button>
-                                                    {detailDraft.photo && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={clearDetailDraftPhoto}
-                                                            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-bold whitespace-nowrap"
-                                                        >
-                                                            削除
-                                                        </button>
+                                                                        <div>
+                                        <div className="flex items-center justify-between gap-3 mb-2">
+                                            <label className="block text-sm font-bold text-gray-700">写真</label>
+                                            <button
+                                                type="button"
+                                                onClick={() => setDetailPhotoSectionOpen(prev => !prev)}
+                                                className="px-3 py-1.5 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm font-bold"
+                                            >
+                                                {detailPhotoSectionOpen ? "写真を閉じる" : "写真を開く"}
+                                            </button>
+                                        </div>
+                                        {detailPhotoSectionOpen && (
+                                            <div className="flex flex-col sm:flex-row items-start gap-4">
+                                                <div className="w-full sm:w-56 h-48 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center shrink-0">
+                                                    {detailDraft.photo ? (
+                                                        <img src={detailDraft.photo} className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <i data-lucide="camera" className="w-10 h-10 text-gray-400"></i>
                                                     )}
                                                 </div>
-                                                <p className="text-xs text-gray-500">スマホでは「撮影する」でカメラを起動できます。</p>
+                                                <div className="flex-1 min-w-0 space-y-2">
+                                                    <div className="flex flex-wrap gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => document.getElementById(`detail-photo-capture-${detailDraft.id}`).click()}
+                                                            className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
+                                                        >
+                                                            撮影する
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => document.getElementById(`detail-photo-upload-${detailDraft.id}`).click()}
+                                                            className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
+                                                        >
+                                                            画像を選ぶ
+                                                        </button>
+                                                        {detailDraft.photo && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={clearDetailDraftPhoto}
+                                                                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-bold whitespace-nowrap"
+                                                            >
+                                                                削除
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <p className="text-xs text-gray-500">スマホでは「撮影する」でカメラを起動できます。</p>
+                                                </div>
                                             </div>
-                                        </div>
+                                        )}
                                         <input
                                             type="file"
                                             id={`detail-photo-capture-${detailDraft.id}`}
@@ -2916,7 +3021,7 @@ ${dataJson}
                                                 className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
                                             />
                                         </div>
-                                        <div>
+                                                                                <div>
                                             <label className="block text-sm font-bold text-gray-700 mb-1">数量</label>
                                             <input
                                                 type="number"
@@ -2933,17 +3038,8 @@ ${dataJson}
                                                 list="unit-options"
                                                 value={detailDraft.unit}
                                                 onChange={e => updateDetailDraftField("unit", e.target.value)}
-                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3 h-[48px]"
                                                 placeholder="例：個、本"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-bold text-gray-700 mb-1">賞味期限 / 使用期限</label>
-                                            <input
-                                                type="date"
-                                                value={detailDraft.expiry}
-                                                onChange={e => updateDetailDraftField("expiry", e.target.value)}
-                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
                                             />
                                         </div>
                                         <div>
@@ -2954,20 +3050,29 @@ ${dataJson}
                                                     min="0"
                                                     value={detailDraft.recommendedQuantity}
                                                     onChange={e => updateDetailDraftField("recommendedQuantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
-                                                    className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                                    className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3 h-[48px]"
                                                     placeholder="未設定"
                                                 />
                                                 <span className="text-sm text-gray-500 whitespace-nowrap">{detailDraft.unit || "個"}</span>
                                             </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">賞味期限 / 使用期限</label>
+                                            <input
+                                                type="date"
+                                                value={detailDraft.expiry}
+                                                onChange={e => updateDetailDraftField("expiry", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3 h-[48px]"
+                                            />
                                         </div>
                                         <div className="sm:col-span-2">
                                             <label className="block text-sm font-bold text-gray-700 mb-1">適正在庫メモ</label>
                                             <textarea
                                                 value={detailDraft.recommendedMemo || ""}
                                                 onChange={e => updateDetailDraftField("recommendedMemo", e.target.value)}
-                                                rows="4"
+                                                rows="5"
                                                 className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3 text-sm"
-                                                placeholder="家族構成・想定シナリオ・消費ペースを踏まえた目安をメモできます。"
+                                                placeholder={getRecommendedMemoText(detailDraft)}
                                             ></textarea>
                                         </div>
                                     </div>
@@ -2976,9 +3081,18 @@ ${dataJson}
                                         <div className="rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm font-semibold">現在数量が適正在庫量を下回っています。保存後も補充候補として確認してください。</div>
                                     )}
                                 </div>
-                                <div className="p-4 border-t flex flex-wrap justify-end gap-2 shrink-0">
-                                    <button type="button" onClick={handleCloseDetailModal} className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 font-bold min-w-[96px]">閉じる</button>
-                                    <button type="button" onClick={handleSaveDetailItem} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold min-w-[96px]">保存</button>
+                                                                <div className="p-4 border-t flex flex-wrap justify-between gap-2 shrink-0">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleDeleteItem(detailDraft.id, detailDraft.name)}
+                                        className="px-4 py-2 bg-white text-red-600 border border-red-200 rounded-lg hover:bg-red-50 font-bold min-w-[96px]"
+                                    >
+                                        削除
+                                    </button>
+                                    <div className="flex flex-wrap justify-end gap-2">
+                                        <button type="button" onClick={handleSaveDetailItem} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold min-w-[96px]">保存</button>
+                                        <button type="button" onClick={handleCloseDetailModal} className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 font-bold min-w-[96px]">閉じる</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -3023,17 +3137,18 @@ ${dataJson}
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "378c95ae9a463384fa2a36dfdf0d1c0c",
   "createdAt": "2026-04-04T23:27:18.222Z",
   "schema": 2,
   "title": "おうち備蓄ナビ",
-  "savedAt": "2026-04-05T16:46:47.878Z",
-  "aiInstruction": "在庫一覧のカード表示では、実際の在庫量/適正在庫量　を、並列してわかりやすく表示。実際の在庫量のほうが太字で少し大きく目立たせて。\n\nカード表示で、適正在庫の欄が、表示用と修正用の二つに分かれているのを、表示用だけに統合。表示用をタップするとそのまま数量変更ができるように。\nまた、カード下部の在庫数表示はなくして、上部の表示用数量に一本化。なお、表示用数量も手動修正可能とする。",
-  "comment": "在庫一覧のカード表示では、実際の在庫量/適正在庫量　を、並列してわかりやすく表示。実際の在庫量のほうが太字で少し大きく目立たせて。\n\nカード表示で、適正在庫の欄が、表示用と修正用の二つに分かれているのを、表示用だけに統合。表示用をタップするとそのまま数量変更ができるように。\nまた、カード下部の在庫数表示はなくして、上部の表示用数量に一本化。なお、表示用数量も手動修正可能とする。",
+  "savedAt": "2026-04-05T17:18:25.155Z",
+  "aiInstruction": "単位の入力コストを下げるため、代表的な備蓄品目について単位のリストをつくり、品目入力時、品目名の文字列が含まれているかどうかを判定して、単位候補を自動で入力すること。もちろん、手動で単位の変更も可能とする。\n\nリスト表示の詳細カードに、削除ボタンを新設\n\n・適正在庫メモは、数量設定の考え方を、家族構成とシナリオからより具体的に記述するようにすること。\n・リスト表示の詳細カードで、数量のすぐ下を適正在庫量とし、単位のすぐ下を賞味期限欄とする。賞味期限欄と、適正在庫欄の高さはそろえること。\n・リスト表示の詳細カードで、保存ボタンと、閉じるボタンの左右を入れ替える。写真欄は、写真がない場合は閉じて必要に応じ開いて使用するようにする。写真登録済みの場合は開いて表示する。",
+  "comment": "単位の入力コストを下げるため、代表的な備蓄品目について単位のリストをつくり、品目入力時、品目名の文字列が含まれているかどうかを判定して、単位候補を自動で入力すること。もちろん、手動で単位の変更も可能とする。\n\nリスト表示の詳細カードに、削除ボタンを新設\n\n・適正在庫メモは、数量設定の考え方を、家族構成とシナリオからより具体的に記述するようにすること。\n・リスト表示の詳細カードで、数量のすぐ下を適正在庫量とし、単位のすぐ下を賞味期限欄とする。賞味期限欄と、適正在庫欄の高さはそろえること。\n・リスト表示の詳細カードで、保存ボタンと、閉じるボタンの左右を入れ替える。写真欄は、写真がない場合は閉じて必要に応じ開いて使用するようにする。写真登録済みの場合は開いて表示する。",
   "sourceMode": "project",
-  "runId": "53d4f5ac0d4cfa34de3b970aa0b6b6be"
+  "runId": "f30b74408818a101223ff9834c2832ca"
 }
 </script>
 </body>
