@@ -74,9 +74,15 @@
             { key: "action", label: "今日やること重視" }
         ];
 
-                const DB_NAME = "stockguard-ai-db";
-        const STORE_NAME = "appState";
-                const APP_STATE_KEY = "stockguard-main";
+                        const DB_NAME = "stockguard-ai-db";
+        const DB_VERSION = 2;
+        const LEGACY_STORE_NAME = "appState";
+        const SETTINGS_STORE_NAME = "settingsState";
+        const INVENTORY_STORE_NAME = "inventoryState";
+        const IMAGE_STORE_NAME = "inventoryPhotos";
+        const APP_STATE_KEY = "stockguard-main";
+        const SETTINGS_KEY = "stockguard-settings";
+        const INVENTORY_KEY = "stockguard-inventory";
         const DEFAULT_FAMILY_PROFILE = { infants: 0, children: 0, adults: 0 };
 
         const DEFAULT_LOCATIONS = [
@@ -99,17 +105,42 @@
             "家裏倉庫"
         ];
 
+        function dataUrlToBlob(dataUrl) {
+            if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+                return null;
+            }
+            const parts = dataUrl.split(",");
+            if (parts.length < 2) return null;
+            const mimeMatch = parts[0].match(/data:(.*?);base64/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+            const binary = atob(parts[1]);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return new Blob([bytes], { type: mimeType });
+        }
+
         function openStockGuardDB() {
             return new Promise((resolve, reject) => {
                 if (!window.indexedDB) {
                     resolve(null);
                     return;
                 }
-                const request = window.indexedDB.open(DB_NAME, 1);
+                const request = window.indexedDB.open(DB_NAME, DB_VERSION);
                 request.onupgradeneeded = () => {
                     const db = request.result;
-                    if (!db.objectStoreNames.contains(STORE_NAME)) {
-                        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+                    if (!db.objectStoreNames.contains(LEGACY_STORE_NAME)) {
+                        db.createObjectStore(LEGACY_STORE_NAME, { keyPath: "id" });
+                    }
+                    if (!db.objectStoreNames.contains(SETTINGS_STORE_NAME)) {
+                        db.createObjectStore(SETTINGS_STORE_NAME, { keyPath: "id" });
+                    }
+                    if (!db.objectStoreNames.contains(INVENTORY_STORE_NAME)) {
+                        db.createObjectStore(INVENTORY_STORE_NAME, { keyPath: "id" });
+                    }
+                    if (!db.objectStoreNames.contains(IMAGE_STORE_NAME)) {
+                        db.createObjectStore(IMAGE_STORE_NAME, { keyPath: "id" });
                     }
                 };
                 request.onsuccess = () => resolve(request.result);
@@ -117,32 +148,161 @@
             });
         }
 
-        async function loadPersistedState() {
-            const db = await openStockGuardDB();
-            if (!db) return null;
+        function readStoreRecord(db, storeName, key) {
             return new Promise((resolve, reject) => {
-                const transaction = db.transaction(STORE_NAME, "readonly");
-                const store = transaction.objectStore(STORE_NAME);
-                const request = store.get(APP_STATE_KEY);
+                if (!db.objectStoreNames.contains(storeName)) {
+                    resolve(null);
+                    return;
+                }
+                const transaction = db.transaction(storeName, "readonly");
+                const store = transaction.objectStore(storeName);
+                const request = store.get(key);
                 request.onsuccess = () => resolve(request.result || null);
                 request.onerror = () => reject(request.error);
-                transaction.oncomplete = () => db.close();
                 transaction.onerror = () => reject(transaction.error);
             });
         }
 
-        async function savePersistedState(state) {
+        function readAllStoreRecords(db, storeName) {
+            return new Promise((resolve, reject) => {
+                if (!db.objectStoreNames.contains(storeName)) {
+                    resolve([]);
+                    return;
+                }
+                const transaction = db.transaction(storeName, "readonly");
+                const store = transaction.objectStore(storeName);
+                const request = store.getAll();
+                request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+                request.onerror = () => reject(request.error);
+                transaction.onerror = () => reject(transaction.error);
+            });
+        }
+
+        async function loadPersistedState() {
+            const db = await openStockGuardDB();
+            if (!db) return null;
+
+            try {
+                const [settingsRecord, inventoryRecord, legacyState] = await Promise.all([
+                    readStoreRecord(db, SETTINGS_STORE_NAME, SETTINGS_KEY),
+                    readStoreRecord(db, INVENTORY_STORE_NAME, INVENTORY_KEY),
+                    readStoreRecord(db, LEGACY_STORE_NAME, APP_STATE_KEY)
+                ]);
+
+                let persistedInventory = Array.isArray(inventoryRecord && inventoryRecord.items)
+                    ? inventoryRecord.items.map(item => ({ ...item, photo: null, photoBlob: null }))
+                    : null;
+
+                if (persistedInventory && db.objectStoreNames.contains(IMAGE_STORE_NAME)) {
+                    const photoRecords = await readAllStoreRecords(db, IMAGE_STORE_NAME);
+                    const photoMap = new Map(
+                        photoRecords.map(record => [String(record.id), record.blob || null])
+                    );
+                    persistedInventory = persistedInventory.map(item => ({
+                        ...item,
+                        photo: null,
+                        photoBlob: photoMap.get(String(item.id)) || null
+                    }));
+                } else if (!persistedInventory && legacyState && Array.isArray(legacyState.inventory)) {
+                    persistedInventory = legacyState.inventory.map(item => ({
+                        ...item,
+                        photo: item.photo || null,
+                        photoBlob: null
+                    }));
+                }
+
+                return {
+                    ...(legacyState || {}),
+                    ...((settingsRecord && settingsRecord.data) || {}),
+                    inventory: persistedInventory
+                };
+            } finally {
+                db.close();
+            }
+        }
+
+        async function savePersistedInventory(inventory) {
             const db = await openStockGuardDB();
             if (!db) return;
+
+            const normalizedItems = (Array.isArray(inventory) ? inventory : []).map(item => {
+                const photoBlob = item && item.photoBlob
+                    ? item.photoBlob
+                    : dataUrlToBlob(item && item.photo);
+                const { photo, photoBlob: _photoBlob, ...rest } = item || {};
+                return {
+                    persistedItem: { ...rest },
+                    photoBlob: photoBlob || null
+                };
+            });
+
             return new Promise((resolve, reject) => {
-                const transaction = db.transaction(STORE_NAME, "readwrite");
-                const store = transaction.objectStore(STORE_NAME);
-                store.put({ id: APP_STATE_KEY, ...state });
+                const transaction = db.transaction([INVENTORY_STORE_NAME, IMAGE_STORE_NAME], "readwrite");
+                const inventoryStore = transaction.objectStore(INVENTORY_STORE_NAME);
+                const imageStore = transaction.objectStore(IMAGE_STORE_NAME);
+
+                inventoryStore.put({
+                    id: INVENTORY_KEY,
+                    items: normalizedItems.map(entry => entry.persistedItem)
+                });
+
+                const validImageIds = new Set();
+
+                normalizedItems.forEach(entry => {
+                    const imageId = String(entry.persistedItem.id);
+                    validImageIds.add(imageId);
+                    if (entry.photoBlob) {
+                        imageStore.put({ id: imageId, blob: entry.photoBlob });
+                    } else {
+                        imageStore.delete(imageId);
+                    }
+                });
+
+                const keysRequest = imageStore.getAllKeys();
+                keysRequest.onsuccess = () => {
+                    (keysRequest.result || []).forEach(key => {
+                        if (!validImageIds.has(String(key))) {
+                            imageStore.delete(key);
+                        }
+                    });
+                };
+                keysRequest.onerror = () => reject(keysRequest.error);
+
                 transaction.oncomplete = () => {
                     db.close();
                     resolve();
                 };
-                transaction.onerror = () => reject(transaction.error);
+                transaction.onerror = () => {
+                    db.close();
+                    reject(transaction.error);
+                };
+                transaction.onabort = () => {
+                    db.close();
+                    reject(transaction.error);
+                };
+            });
+        }
+
+        async function savePersistedSettings(settings) {
+            const db = await openStockGuardDB();
+            if (!db) return;
+
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction(SETTINGS_STORE_NAME, "readwrite");
+                const store = transaction.objectStore(SETTINGS_STORE_NAME);
+                store.put({ id: SETTINGS_KEY, data: { ...(settings || {}) } });
+                transaction.oncomplete = () => {
+                    db.close();
+                    resolve();
+                };
+                transaction.onerror = () => {
+                    db.close();
+                    reject(transaction.error);
+                };
+                transaction.onabort = () => {
+                    db.close();
+                    reject(transaction.error);
+                };
             });
         }
 
@@ -157,7 +317,7 @@
                         const [newLocationName, setNewLocationName] = useState("");
             const [familyProfile, setFamilyProfile] = useState(() => ({ ...DEFAULT_FAMILY_PROFILE }));
             const [itemNameHistory, setItemNameHistory] = useState([]);
-            const createBlankRow = (category = "食品") => ({
+                        const createBlankRow = (category = "食品") => ({
                 id: `blank-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 category,
                 name: "",
@@ -165,20 +325,27 @@
                 quantity: "",
                 unit: "",
                 expiry: "",
-                photo: null
+                photo: null,
+                photoBlob: null
             });
             const [blankRow, setBlankRow] = useState(() => createBlankRow());
-                        const [activeCategory, setActiveCategory] = useState("すべて");
-            const [isAiModalOpen, setIsAiModalOpen] = useState(false);
-            const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-            const [newItem, setNewItem] = useState({ category: "食品", name: "", location: DEFAULT_LOCATIONS[0] || "", quantity: 1, unit: "個", expiry: "", photo: null });
-            const [selectedScenario, setSelectedScenario] = useState(SCENARIOS[0]);
-            const [generatedPrompt, setGeneratedPrompt] = useState("");
+                        const [activeCategory, setActiveCategory] = useState("すべて");
+            const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+            const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+            const [newItem, setNewItem] = useState({ category: "食品", name: "", location: DEFAULT_LOCATIONS[0] || "", quantity: 1, unit: "個", expiry: "", photo: null, photoBlob: null });
+                        const [selectedScenario, setSelectedScenario] = useState(SCENARIOS[0]);
+            const [generatedPrompt, setGeneratedPrompt] = useState("");
                         const [selectedAnalysisOptions, setSelectedAnalysisOptions] = useState(["consume_plan", "short_actions", "replenishment"]);
             const [aiFreeText, setAiFreeText] = useState("");
             const [aiOutputStyle, setAiOutputStyle] = useState("action");
             const [isPromptPreviewOpen, setIsPromptPreviewOpen] = useState(false);
             const [aiCopyMessage, setAiCopyMessage] = useState("");
+            const [isRecommendedStockMode, setIsRecommendedStockMode] = useState(false);
+            const [isAiImportModalOpen, setIsAiImportModalOpen] = useState(false);
+            const [aiImportText, setAiImportText] = useState("");
+            const [aiImportItems, setAiImportItems] = useState([]);
+            const [aiImportMessage, setAiImportMessage] = useState("");
+            const [detailItemId, setDetailItemId] = useState(null);
                                                                                                 const [sortField, setSortField] = useState("none");
             const [inventorySearchKeyword, setInventorySearchKeyword] = useState("");
             const [isInventorySearchOpen, setIsInventorySearchOpen] = useState(false);
@@ -188,11 +355,37 @@
             const [barcodeInput, setBarcodeInput] = useState("");
             const [isBarcodeSupported] = useState(() => typeof window !== "undefined" && "BarcodeDetector" in window);
                         const videoRef = useRef(null);
-                        const scannerStreamRef = useRef(null);
+                                    const scannerStreamRef = useRef(null);
             const scannerRafRef = useRef(null);
             const barcodeDetectorRef = useRef(null);
             const swipeStateRef = useRef({ id: null, name: "", startX: 0, startY: 0, tracking: false, blocked: false });
             const locationSwipeStateRef = useRef({ index: null, startX: 0, startY: 0, tracking: false, blocked: false });
+            const inventorySaveTimerRef = useRef(null);
+            const settingsSaveTimerRef = useRef(null);
+            const iconRefreshTimerRef = useRef(null);
+            const photoUrlRegistryRef = useRef(new Set());
+
+            const createPreviewUrlFromBlob = (blob) => {
+                if (!blob) return null;
+                const objectUrl = URL.createObjectURL(blob);
+                photoUrlRegistryRef.current.add(objectUrl);
+                return objectUrl;
+            };
+
+            const releasePreviewUrl = (value) => {
+                if (typeof value !== "string" || !value.startsWith("blob:")) return;
+                if (!photoUrlRegistryRef.current.has(value)) return;
+                URL.revokeObjectURL(value);
+                photoUrlRegistryRef.current.delete(value);
+            };
+
+            const attachPreviewToItem = (item) => {
+                if (!item || !item.photoBlob) return item;
+                return {
+                    ...item,
+                    photo: createPreviewUrlFromBlob(item.photoBlob)
+                };
+            };
 
             const parseExpiryDate = (expiry) => {
                 if (!expiry) return null;
@@ -208,12 +401,44 @@
                 return Math.floor((expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
             };
 
-                        const formatExpiryStatus = (expiry) => {
+                                                const formatExpiryStatus = (expiry) => {
                 const days = getDaysUntilExpiry(expiry);
                 if (days === null) return "期限未設定";
                 if (days < 0) return `${Math.abs(days)}日超過`;
                 if (days === 0) return "今日まで";
                 return `あと${days}日`;
+            };
+
+            const parseQuantityNumber = (value) => {
+                if (value === "" || value === null || value === undefined) return null;
+                const parsed = parseInt(value, 10);
+                return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+            };
+
+            const getCurrentQuantityValue = (item) => {
+                const parsed = parseQuantityNumber(item && item.quantity);
+                return parsed === null ? 0 : parsed;
+            };
+
+            const getRecommendedQuantityValue = (item) => {
+                return parseQuantityNumber(item && item.recommendedQuantity);
+            };
+
+            const hasRecommendedQuantity = (item) => {
+                return getRecommendedQuantityValue(item) !== null;
+            };
+
+            const isBelowRecommendedStock = (item) => {
+                const recommendedQuantity = getRecommendedQuantityValue(item);
+                if (recommendedQuantity === null) return false;
+                return getCurrentQuantityValue(item) < recommendedQuantity;
+            };
+
+            const formatQuantityLabel = (quantity, unit) => {
+                if (quantity === "" || quantity === null || quantity === undefined) {
+                    return "未入力";
+                }
+                return `${quantity}${unit ? ` ${unit}` : ""}`;
             };
 
             const registerItemNameHistory = (name) => {
@@ -233,56 +458,49 @@
                 return Array.from(new Set(merged)).sort((a, b) => a.localeCompare(b, "ja"));
             }, [itemNameHistory, inventory]);
 
-                                                // アイコンの描画（初回表示＋DOM更新時のみ）
+                                                                                                // アイコンの描画（必要なUI変化時のみ）
             useEffect(() => {
-                let rafId = null;
-
-                const refreshIcons = () => {
-                    if (rafId !== null) {
-                        cancelAnimationFrame(rafId);
-                    }
-                    rafId = requestAnimationFrame(() => {
-                        lucide.createIcons();
-                    });
-                };
-
-                const rootElement = document.getElementById("root");
-                refreshIcons();
-
-                if (!rootElement || typeof MutationObserver === "undefined") {
-                    return () => {
-                        if (rafId !== null) {
-                            cancelAnimationFrame(rafId);
-                        }
-                    };
+                if (iconRefreshTimerRef.current !== null) {
+                    clearTimeout(iconRefreshTimerRef.current);
                 }
 
-                const observer = new MutationObserver(() => {
-                    refreshIcons();
-                });
-
-                observer.observe(rootElement, {
-                    childList: true,
-                    subtree: true
-                });
+                iconRefreshTimerRef.current = window.setTimeout(() => {
+                    requestAnimationFrame(() => {
+                        lucide.createIcons();
+                    });
+                }, 60);
 
                 return () => {
-                    observer.disconnect();
-                    if (rafId !== null) {
-                        cancelAnimationFrame(rafId);
+                    if (iconRefreshTimerRef.current !== null) {
+                        clearTimeout(iconRefreshTimerRef.current);
+                        iconRefreshTimerRef.current = null;
                     }
                 };
-            }, []);
+            }, [
+                currentPage,
+                viewMode,
+                isAddModalOpen,
+                isAiModalOpen,
+                isSettingsModalOpen,
+                isInventorySearchOpen,
+                activeCategory,
+                inventory.length,
+                locations.length,
+                isBarcodeSectionExpanded,
+                isBarcodeScannerOpen,
+                isPromptPreviewOpen
+            ]);
 
                         useEffect(() => {
                 let mounted = true;
 
-                const loadStoredState = async () => {
+                                        const loadStoredState = async () => {
                     try {
                         const savedState = await loadPersistedState();
                         if (!mounted) return;
 
-                        const persistedInventory = savedState && Array.isArray(savedState.inventory) ? savedState.inventory : initialInventory;
+                        const persistedInventoryBase = savedState && Array.isArray(savedState.inventory) ? savedState.inventory : initialInventory;
+                        const persistedInventory = persistedInventoryBase.map(item => attachPreviewToItem(item));
                         const persistedLocations = savedState && Array.isArray(savedState.locations) && savedState.locations.length
                             ? savedState.locations
                             : DEFAULT_LOCATIONS;
@@ -383,8 +601,12 @@
                     });
                 }
 
-                return sorted;
+                                return sorted;
                         }, [inventory, activeCategory, sortField, locationOptions, inventorySearchKeyword]);
+
+            const selectedDetailItem = useMemo(() => {
+                return inventory.find(item => String(item.id) === String(detailItemId)) || null;
+            }, [inventory, detailItemId]);
 
             const expiringItems = useMemo(() => {
                 return inventory
@@ -457,31 +679,33 @@
                 }, 120);
             };
 
-                        // 数量変更ロジック
-            const updateQuantity = (id, delta) => {
-                setInventory(inventory.map(item => {
-                    if (item.id === id) {
-                        const newQuantity = Math.max(0, item.quantity + delta);
-                        return { ...item, quantity: newQuantity };
-                    }
-                    return item;
-                }));
-            };
+                                                // 数量変更ロジック
+            const updateQuantity = (id, delta) => {
+                setInventory(prev => prev.map(item => {
+                    if (item.id === id) {
+                        const currentQuantity = getCurrentQuantityValue(item);
+                        const newQuantity = Math.max(0, currentQuantity + delta);
+                        return { ...item, quantity: newQuantity };
+                    }
+                    return item;
+                }));
+            };
 
             // 写真アップロードロジック
-                        const compressImageFile = (file, options = {}) => {
+                                                const compressImageFile = (file, options = {}) => {
                 const {
                     maxWidth = 1280,
                     maxHeight = 1280,
                     quality = 0.72,
-                    maxOutputBytes = 350 * 1024
+                    maxOutputBytes = 220 * 1024
                 } = options;
 
-                const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve(reader.result);
-                    reader.onerror = () => reject(reader.error);
-                    reader.readAsDataURL(blob);
+                const canvasToBlob = (canvas, type, exportQuality) => new Promise(resolveBlob => {
+                    if (typeof canvas.toBlob === "function") {
+                        canvas.toBlob(resolveBlob, type, exportQuality);
+                    } else {
+                        resolveBlob(null);
+                    }
                 });
 
                 return new Promise((resolve, reject) => {
@@ -524,31 +748,37 @@
                             context.fillRect(0, 0, targetWidth, targetHeight);
                             context.drawImage(image, 0, 0, targetWidth, targetHeight);
 
-                            const exportBlob = (exportQuality) => new Promise(resolveBlob => {
-                                if (typeof canvas.toBlob === "function") {
-                                    canvas.toBlob(resolveBlob, "image/jpeg", exportQuality);
-                                } else {
-                                    resolveBlob(null);
-                                }
-                            });
-
                             let currentQuality = quality;
-                            let blob = await exportBlob(currentQuality);
+                            let blob = await canvasToBlob(canvas, "image/webp", currentQuality);
 
-                            while (blob && blob.size > maxOutputBytes && currentQuality > 0.46) {
-                                currentQuality = Math.max(0.46, Number((currentQuality - 0.08).toFixed(2)));
-                                blob = await exportBlob(currentQuality);
+                            while (blob && blob.size > maxOutputBytes && currentQuality > 0.42) {
+                                currentQuality = Math.max(0.42, Number((currentQuality - 0.08).toFixed(2)));
+                                blob = await canvasToBlob(canvas, "image/webp", currentQuality);
+                            }
+
+                            if (!blob) {
+                                blob = await canvasToBlob(canvas, "image/jpeg", currentQuality);
                             }
 
                             cleanup();
 
-                            if (blob) {
-                                const dataUrl = await blobToDataUrl(blob);
-                                resolve(dataUrl);
+                            if (!blob) {
+                                const fallbackBlob = dataUrlToBlob(canvas.toDataURL("image/jpeg", currentQuality));
+                                if (!fallbackBlob) {
+                                    resolve(null);
+                                    return;
+                                }
+                                resolve({
+                                    blob: fallbackBlob,
+                                    previewUrl: createPreviewUrlFromBlob(fallbackBlob)
+                                });
                                 return;
                             }
 
-                            resolve(canvas.toDataURL("image/jpeg", currentQuality));
+                            resolve({
+                                blob,
+                                previewUrl: createPreviewUrlFromBlob(blob)
+                            });
                         } catch (error) {
                             cleanup();
                             reject(error);
@@ -571,7 +801,15 @@
                     await new Promise(resolve => setTimeout(resolve, 0));
                     const compressedPhoto = await compressImageFile(file);
                     if (!compressedPhoto) return;
-                    setInventory(prev => prev.map(item => item.id === id ? { ...item, photo: compressedPhoto } : item));
+                    setInventory(prev => prev.map(item => {
+                        if (item.id !== id) return item;
+                        releasePreviewUrl(item.photo);
+                        return {
+                            ...item,
+                            photo: compressedPhoto.previewUrl,
+                            photoBlob: compressedPhoto.blob
+                        };
+                    }));
                 } catch (error) {
                     console.error("Photo compression failed:", error);
                 } finally {
@@ -587,7 +825,14 @@
                     await new Promise(resolve => setTimeout(resolve, 0));
                     const compressedPhoto = await compressImageFile(file);
                     if (!compressedPhoto) return;
-                    setNewItem(prev => ({ ...prev, photo: compressedPhoto }));
+                    setNewItem(prev => {
+                        releasePreviewUrl(prev.photo);
+                        return {
+                            ...prev,
+                            photo: compressedPhoto.previewUrl,
+                            photoBlob: compressedPhoto.blob
+                        };
+                    });
                 } catch (error) {
                     console.error("New item photo compression failed:", error);
                 } finally {
@@ -596,17 +841,26 @@
             };
 
             const clearNewItemPhoto = () => {
-                setNewItem(prev => ({ ...prev, photo: null }));
+                setNewItem(prev => {
+                    releasePreviewUrl(prev.photo);
+                    return { ...prev, photo: null, photoBlob: null };
+                });
             };
 
                                                                                                 const updateItemField = (id, field, value) => {
                 setInventory(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
             };
 
-                        const handleDeleteItem = (id, name) => {
+                                                const handleDeleteItem = (id, name) => {
                 const itemName = String(name || "").trim() || "このアイテム";
                 if (!window.confirm(`「${itemName}」を削除しますか？`)) return;
-                setInventory(prev => prev.filter(item => item.id !== id));
+                setInventory(prev => {
+                    const targetItem = prev.find(item => item.id === id);
+                    if (targetItem) {
+                        releasePreviewUrl(targetItem.photo);
+                    }
+                    return prev.filter(item => item.id !== id);
+                });
             };
 
             const resetInventoryRowSwipe = () => {
@@ -631,7 +885,7 @@
                 };
             };
 
-            const handleInventoryRowTouchEnd = (item, e) => {
+                        const handleInventoryRowTouchEnd = (item, e) => {
                 const state = swipeStateRef.current;
                 const touch = e.changedTouches && e.changedTouches[0];
 
@@ -647,6 +901,16 @@
                 if (deltaX <= -90 && Math.abs(deltaY) <= 40 && Math.abs(deltaX) > Math.abs(deltaY)) {
                     handleDeleteItem(item.id, item.name);
                 }
+            };
+
+            const shouldBlockInventoryRowClick = (target) => {
+                if (!target || typeof target.closest !== "function") return false;
+                return Boolean(target.closest("button, input, select, label, a, textarea"));
+            };
+
+            const handleInventoryRowClick = (item, e) => {
+                if (shouldBlockInventoryRowClick(e.target)) return;
+                setDetailItemId(item.id);
             };
 
                         const isBlankRowFilled = (item) => {
@@ -693,7 +957,7 @@
                 setBlankRow(prev => ({ ...prev, [field]: value }));
             };
 
-                        const handleBlankRowPhotoUpload = async (e) => {
+                                                const handleBlankRowPhotoUpload = async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
 
@@ -701,7 +965,14 @@
                     await new Promise(resolve => setTimeout(resolve, 0));
                     const compressedPhoto = await compressImageFile(file);
                     if (!compressedPhoto) return;
-                    setBlankRow(prev => ({ ...prev, photo: compressedPhoto }));
+                    setBlankRow(prev => {
+                        releasePreviewUrl(prev.photo);
+                        return {
+                            ...prev,
+                            photo: compressedPhoto.previewUrl,
+                            photoBlob: compressedPhoto.blob
+                        };
+                    });
                 } catch (error) {
                     console.error("Blank row photo compression failed:", error);
                 } finally {
@@ -927,7 +1198,7 @@
                 }
             };
 
-                        const handleSaveNewItem = (keepOpen = false) => {
+                                                const handleSaveNewItem = (keepOpen = false) => {
                 const trimmedName = String(newItem.name || "").trim();
                 if (!trimmedName) {
                     alert("品目名を入力してください。");
@@ -940,7 +1211,7 @@
                 setInventory(prev => [...prev, { ...newItem, name: trimmedName, location: selectedLocation, id: Date.now() }]);
                 setLastUsedLocation(selectedLocation);
                 registerItemNameHistory(trimmedName);
-                setNewItem({ category: nextCategory, name: "", location: selectedLocation, quantity: 1, unit: "個", expiry: "", photo: null });
+                setNewItem({ category: nextCategory, name: "", location: selectedLocation, quantity: 1, unit: "個", expiry: "", photo: null, photoBlob: null });
 
                 if (!keepOpen) {
                     setIsAddModalOpen(false);
@@ -956,7 +1227,7 @@
                 );
             };
 
-            const createAiPromptText = () => {
+                        const createAiPromptText = () => {
                 const selectedAnalysisLabels = AI_ANALYSIS_OPTIONS
                     .filter(option => selectedAnalysisOptions.includes(option.key))
                     .map(option => option.label);
@@ -966,13 +1237,88 @@
 
                                                                 const extraInstruction = String(aiFreeText || "").trim();
                 const familyProfileText = `幼児: ${familyProfile.infants}人 / 子供: ${familyProfile.children}人 / 大人: ${familyProfile.adults}人`;
+                const scenarioForRecommendedStock = selectedScenario === "日常モード（期限切れ間近の消費）"
+                    ? "地震・台風（インフラ停止・短期サバイバル）"
+                    : selectedScenario;
                 const compactInventoryForAi = inventory.map(item => ({
+                    id: item.id,
+                    category: item.category,
                     name: item.name,
+                    location: item.location,
                     quantity: item.quantity,
                     unit: item.unit,
-                    expiry: item.expiry
+                    expiry: item.expiry,
+                    recommendedQuantity: item.recommendedQuantity ?? null
                 }));
                 const dataJson = JSON.stringify(compactInventoryForAi, null, 2);
+
+                                if (isRecommendedStockMode) {
+                    return `あなたはプロの防災アドバイザー兼、家庭内リソース管理の専門家です。
+以下のJSONデータは、現在の我が家の在庫状況です。
+
+【想定する有事シナリオ】
+${selectedScenario}
+
+【分析したい内容】
+${selectedAnalysisLabels.length ? selectedAnalysisLabels.map((label, index) => `${index + 1}. ${label}`).join("\n") : "指定なし"}
+
+【出力スタイル】
+${outputStyleLabel}
+
+【推奨在庫量判定に使うシナリオ】
+${scenarioForRecommendedStock}
+
+【追加指示】
+${extraInstruction || "特になし"}
+
+【家族構成】
+${familyProfileText}
+
+【出力順】
+1. まず、通常の分析結果を日本語で分かりやすく出力してください
+2. 分析結果では、選択された分析内容を優先し、家族構成・消費ペース・シナリオを踏まえて具体的な行動まで書いてください
+3. その後、最後にこのアプリへ取り込むためのJSONコードだけを、必ず \`\`\`json ... \`\`\` のコードブロックで出力してください
+4. JSONコードの前後に補足文は付けないでください
+
+【分析結果のルール】
+- 優先順位を明確にする
+- 今日すぐやることがあれば先に示す
+- 必要に応じて買い物リストや消費順を具体化する
+- 抽象論だけでなく実行アクションまで書く
+
+【最後に必ず出力するJSONコードのルール】
+- JSONコード部分は、通常の説明文ではなく、純粋なJSONのみを出力してください
+- 同系統の品目が複数行ある場合は、数量が一番大きい既存行を代表項目として1件だけ採用し、その行のidをtargetItemIdに入れてください
+- 代表に選ばれなかった重複行はitemsに含めないでください
+- 備蓄推奨だが未登録の品目は、新規候補としてtargetItemIdをnullにしてください
+- categoryは「食品」「エネルギー」「衛生用品」「日用品」のいずれかにしてください
+- recommendedQuantityは必ず数値にしてください
+- unitは既存品に合わせ、新規候補は自然な単位にしてください
+- reasonは短くしてください
+- currentQuantityには現在数量を数値で入れてください
+
+【最後に必ず出力するJSONコードのスキーマ】
+{
+  "scenarioBasis": "${scenarioForRecommendedStock}",
+  "familyProfile": { "infants": ${familyProfile.infants}, "children": ${familyProfile.children}, "adults": ${familyProfile.adults} },
+  "items": [
+    {
+      "targetItemId": "既存行id。新規候補はnull",
+      "targetName": "既存代表項目名または新規推奨品名",
+      "category": "食品",
+      "unit": "個",
+      "currentQuantity": 0,
+      "recommendedQuantity": 0,
+      "isMissing": false,
+      "reason": "短い理由"
+    }
+  ]
+}
+
+【現在の在庫データ(JSON)】
+${dataJson}
+`;
+                }
 
                 return `あなたはプロの防災アドバイザー兼、家庭内リソース管理の専門家です。
 以下のJSONデータは、現在の我が家の在庫状況です。
@@ -1039,17 +1385,226 @@ ${dataJson}
                 }
             };
 
-            const handleCopyAiPrompt = async () => {
+                        const handleCopyAiPrompt = async () => {
                 const prompt = createAiPromptText();
                 setGeneratedPrompt(prompt);
                 try {
                     await copyTextToClipboard(prompt);
-                    setAiCopyMessage("AI用プロンプトをコピーしました。");
+                    setAiCopyMessage(isRecommendedStockMode ? "AI用プロンプトをコピーしました。AIのJSON出力後に『AIインポート』で取り込めます。" : "AI用プロンプトをコピーしました。");
                 } catch (error) {
                     console.error("Prompt copy failed:", error);
                     setAiCopyMessage("コピーに失敗しました。生成内容を確認して手動でコピーしてください。");
                     setIsPromptPreviewOpen(true);
                 }
+            };
+
+                        const extractJsonTextFromAiResponse = (rawText) => {
+                const text = String(rawText || "").trim();
+                if (!text) {
+                    throw new Error("empty-json");
+                }
+
+                if (
+                    (text.startsWith("{") && text.endsWith("}")) ||
+                    (text.startsWith("[") && text.endsWith("]"))
+                ) {
+                    JSON.parse(text);
+                    return text;
+                }
+
+                const fencedMatches = [];
+                const fencedRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+                let fencedMatch;
+
+                while ((fencedMatch = fencedRegex.exec(text)) !== null) {
+                    fencedMatches.push(String(fencedMatch[1] || "").trim());
+                }
+
+                for (let i = fencedMatches.length - 1; i >= 0; i -= 1) {
+                    const candidate = fencedMatches[i];
+                    if (!candidate) continue;
+                    try {
+                        JSON.parse(candidate);
+                        return candidate;
+                    } catch (error) {
+                        // 続けて候補を探す
+                    }
+                }
+
+                const possibleStarts = [];
+                for (let i = 0; i < text.length; i += 1) {
+                    if (text[i] === "{" || text[i] === "[") {
+                        possibleStarts.push(i);
+                    }
+                }
+
+                for (let i = possibleStarts.length - 1; i >= 0; i -= 1) {
+                    const candidate = text.slice(possibleStarts[i]).trim();
+                    try {
+                        JSON.parse(candidate);
+                        return candidate;
+                    } catch (error) {
+                        // 続けて候補を探す
+                    }
+                }
+
+                throw new Error("json-not-found");
+            };
+
+            const normalizeAiImportItems = (rawText) => {
+                const jsonText = extractJsonTextFromAiResponse(rawText);
+                const parsed = JSON.parse(jsonText);
+                const sourceItems = Array.isArray(parsed)
+                    ? parsed
+                    : (Array.isArray(parsed && parsed.items) ? parsed.items : []);
+
+                if (!sourceItems.length) {
+                    throw new Error("no-items");
+                }
+
+                const normalizedItems = sourceItems.map((entry, index) => {
+                    const targetItemId = entry && entry.targetItemId !== undefined && entry.targetItemId !== null && entry.targetItemId !== ""
+                        ? String(entry.targetItemId)
+                        : null;
+                    const targetName = String((entry && (entry.targetName ?? entry.name)) || "").trim();
+                    const matchedExistingItem = inventory.find(item => {
+                        if (targetItemId) {
+                            return String(item.id) === targetItemId;
+                        }
+                        return targetName && String(item.name || "").trim() === targetName;
+                    });
+                    const recommendedQuantity = parseQuantityNumber(entry && (entry.recommendedQuantity ?? entry.recommendedQty ?? entry.targetQuantity ?? entry.stockLevel));
+
+                    return {
+                        key: `${targetItemId || targetName || "item"}-${index}`,
+                        targetItemId,
+                        targetName: targetName || (matchedExistingItem ? matchedExistingItem.name : ""),
+                        category: String((entry && entry.category) || (matchedExistingItem && matchedExistingItem.category) || "食品"),
+                        unit: String((entry && entry.unit) || (matchedExistingItem && matchedExistingItem.unit) || "個"),
+                        currentQuantity: matchedExistingItem ? matchedExistingItem.quantity : ((entry && entry.currentQuantity) ?? ""),
+                        recommendedQuantity: recommendedQuantity === null ? "" : recommendedQuantity,
+                        isMissing: Boolean((entry && entry.isMissing) || !matchedExistingItem),
+                        reason: String((entry && entry.reason) || ""),
+                        selected: true
+                    };
+                }).filter(item => item.targetName && item.recommendedQuantity !== "");
+
+                if (!normalizedItems.length) {
+                    throw new Error("no-normalized-items");
+                }
+
+                setAiImportText(rawText);
+                setAiImportItems(normalizedItems);
+                setAiImportMessage(`${normalizedItems.length}件の推奨在庫候補を読み込みました。`);
+            };
+
+            const handleApplyAiImportText = () => {
+                const trimmed = String(aiImportText || "").trim();
+                if (!trimmed) {
+                    setAiImportItems([]);
+                    setAiImportMessage("AIのJSONを貼り付けてください。");
+                    return;
+                }
+
+                try {
+                    normalizeAiImportItems(trimmed);
+                } catch (error) {
+                    console.error("AI import parse failed:", error);
+                    setAiImportItems([]);
+                    setAiImportMessage("JSONを読み取れませんでした。AIの出力JSONをそのまま貼り付けてください。");
+                }
+            };
+
+            const openAiImportModal = async () => {
+                setIsAiImportModalOpen(true);
+                setAiImportItems([]);
+                setAiImportMessage("クリップボードを確認しています…");
+
+                if (!(navigator.clipboard && window.isSecureContext)) {
+                    setAiImportMessage("この環境ではクリップボードを自動で読めません。下の欄にAIのJSONを貼り付けてください。");
+                    return;
+                }
+
+                try {
+                    const clipboardText = await navigator.clipboard.readText();
+                    if (!String(clipboardText || "").trim()) {
+                        setAiImportText("");
+                        setAiImportMessage("クリップボードが空です。下の欄にAIのJSONを貼り付けてください。");
+                        return;
+                    }
+                    normalizeAiImportItems(clipboardText);
+                } catch (error) {
+                    console.error("Clipboard read failed:", error);
+                    setAiImportMessage("クリップボードを読めませんでした。下の欄にAIのJSONを貼り付けてください。");
+                }
+            };
+
+            const toggleAiImportItem = (key) => {
+                setAiImportItems(prev => prev.map(item => item.key === key ? { ...item, selected: !item.selected } : item));
+            };
+
+            const toggleAllAiImportItems = (checked) => {
+                setAiImportItems(prev => prev.map(item => ({ ...item, selected: checked })));
+            };
+
+            const updateAiImportRecommendedQuantity = (key, value) => {
+                setAiImportItems(prev => prev.map(item => item.key === key ? { ...item, recommendedQuantity: value } : item));
+            };
+
+                        const handleImportRecommendedStock = () => {
+                const selectedItems = aiImportItems.filter(item => item.selected);
+                if (!selectedItems.length) {
+                    alert("インポート対象を1件以上選択してください。");
+                    return;
+                }
+
+                setInventory(prev => {
+                    const nextInventory = [...prev];
+                    const baseId = Date.now();
+
+                    selectedItems.forEach((entry, index) => {
+                        const recommendedQuantity = parseQuantityNumber(entry.recommendedQuantity);
+                        if (recommendedQuantity === null) return;
+
+                        const targetIndexById = entry.targetItemId
+                            ? nextInventory.findIndex(item => String(item.id) === String(entry.targetItemId))
+                            : -1;
+                        const targetIndex = targetIndexById !== -1
+                            ? targetIndexById
+                            : nextInventory.findIndex(item => String(item.name || "").trim() === String(entry.targetName || "").trim());
+
+                        if (targetIndex !== -1) {
+                            nextInventory[targetIndex] = {
+                                ...nextInventory[targetIndex],
+                                recommendedQuantity,
+                                recommendedMemo: String(entry.reason || nextInventory[targetIndex].recommendedMemo || "")
+                            };
+                            return;
+                        }
+
+                        nextInventory.push({
+                            id: baseId + index,
+                            category: entry.category || "食品",
+                            name: entry.targetName,
+                            location: "",
+                            quantity: "",
+                            unit: entry.unit || "個",
+                            expiry: "",
+                            photo: null,
+                            photoBlob: null,
+                            recommendedQuantity,
+                            recommendedMemo: String(entry.reason || "")
+                        });
+                    });
+
+                    return nextInventory;
+                });
+
+                setActiveCategory("すべて");
+                setCurrentPage("inventory");
+                setViewMode("list");
+                setIsAiImportModalOpen(false);
+                setAiImportMessage("適正在庫量を取り込みました。");
             };
 
                         // AIモーダルを開くときの処理
@@ -1063,13 +1618,55 @@ ${dataJson}
                 generateAiPrompt();
                         }, [isAiModalOpen, selectedScenario, inventory, selectedAnalysisOptions, aiFreeText, aiOutputStyle, familyProfile]);
 
-                                                                        useEffect(() => {
+                                                                                                                                                useEffect(() => {
                 if (!isDbReady) return;
 
-                                                                savePersistedState({ inventory, viewMode, currentPage, locations, lastUsedLocation, familyProfile, itemNameHistory, isBarcodeSectionExpanded }).catch(error => {
-                    console.error("IndexedDB save failed:", error);
-                });
-            }, [inventory, viewMode, currentPage, locations, lastUsedLocation, familyProfile, itemNameHistory, isBarcodeSectionExpanded, isDbReady]);
+                if (inventorySaveTimerRef.current !== null) {
+                    clearTimeout(inventorySaveTimerRef.current);
+                }
+
+                inventorySaveTimerRef.current = window.setTimeout(() => {
+                    savePersistedInventory(inventory).catch(error => {
+                        console.error("IndexedDB inventory save failed:", error);
+                    });
+                }, 450);
+
+                return () => {
+                    if (inventorySaveTimerRef.current !== null) {
+                        clearTimeout(inventorySaveTimerRef.current);
+                        inventorySaveTimerRef.current = null;
+                    }
+                };
+            }, [inventory, isDbReady]);
+
+            useEffect(() => {
+                if (!isDbReady) return;
+
+                if (settingsSaveTimerRef.current !== null) {
+                    clearTimeout(settingsSaveTimerRef.current);
+                }
+
+                settingsSaveTimerRef.current = window.setTimeout(() => {
+                    savePersistedSettings({
+                        viewMode,
+                        currentPage,
+                        locations,
+                        lastUsedLocation,
+                        familyProfile,
+                        itemNameHistory,
+                        isBarcodeSectionExpanded
+                    }).catch(error => {
+                        console.error("IndexedDB settings save failed:", error);
+                    });
+                }, 450);
+
+                return () => {
+                    if (settingsSaveTimerRef.current !== null) {
+                        clearTimeout(settingsSaveTimerRef.current);
+                        settingsSaveTimerRef.current = null;
+                    }
+                };
+            }, [viewMode, currentPage, locations, lastUsedLocation, familyProfile, itemNameHistory, isBarcodeSectionExpanded, isDbReady]);
 
                         useEffect(() => {
                 if (activeCategory === "すべて") {
@@ -1096,9 +1693,22 @@ ${dataJson}
                 }));
             }, [isAddModalOpen, lastUsedLocation, locations]);
 
-            useEffect(() => {
+                        useEffect(() => {
                 return () => {
                     stopBarcodeScanner();
+                    if (inventorySaveTimerRef.current !== null) {
+                        clearTimeout(inventorySaveTimerRef.current);
+                    }
+                    if (settingsSaveTimerRef.current !== null) {
+                        clearTimeout(settingsSaveTimerRef.current);
+                    }
+                    if (iconRefreshTimerRef.current !== null) {
+                        clearTimeout(iconRefreshTimerRef.current);
+                    }
+                    photoUrlRegistryRef.current.forEach(url => {
+                        URL.revokeObjectURL(url);
+                    });
+                    photoUrlRegistryRef.current.clear();
                 };
             }, []);
 
@@ -1225,6 +1835,13 @@ ${dataJson}
                                                     <option value="expiry">消費期限順</option>
                                                 </select>
                                             </div>
+                                                                                        <button
+                                                type="button"
+                                                onClick={openAiImportModal}
+                                                className="px-3 py-2.5 rounded-xl border border-violet-200 bg-violet-50 text-violet-700 shadow-sm flex items-center justify-center gap-2 hover:bg-violet-100 active:scale-95 transition text-sm font-semibold whitespace-nowrap"
+                                            >
+                                                <i data-lucide="download"></i> AIインポート
+                                            </button>
                                             <button
                                                 type="button"
                                                 onClick={() => {
@@ -1352,8 +1969,11 @@ ${dataJson}
                             )}
                             {currentPage === "inventory" ? (viewMode === "card" ? (
                                 <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 content-start">
-                            {filteredInventory.map(item => (
-                                                                <div id={`inventory-item-${item.id}`} key={item.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col relative">
+                                                        {filteredInventory.map(item => {
+                                const isStockShort = isBelowRecommendedStock(item);
+                                const recommendedQuantity = getRecommendedQuantityValue(item);
+                                return (
+                                                                <div id={`inventory-item-${item.id}`} key={item.id} className={`rounded-2xl shadow-sm border overflow-hidden flex flex-col relative ${isStockShort ? "bg-red-50 border-red-100" : "bg-white border-gray-100"}`}>
                                     {/* 期限アラート表示（簡易ロジック） */}
                                     {item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3)) && (
                                         <span className="absolute top-2 right-2 bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full z-10">
@@ -1361,18 +1981,18 @@ ${dataJson}
                                         </span>
                                     )}
                                     
-                                                                        {/* 写真エリア */}
-                                    <div className="h-32 bg-gray-200 flex items-center justify-center relative group cursor-pointer" onClick={() => document.getElementById(`photo-upload-${item.id}`).click()}>
-                                        {item.photo ? (
-                                            <img src={item.photo} className="w-full h-full object-cover" />
-                                        ) : (
-                                            <i data-lucide="camera" className="text-gray-400 w-8 h-8 group-hover:scale-110 transition"></i>
-                                        )}
-                                        <div className="absolute bottom-0 left-0 bg-black bg-opacity-50 text-white text-xs px-2 py-1 m-2 rounded">
-                                            {item.location}
-                                        </div>
-                                        <input type="file" id={`photo-upload-${item.id}`} accept="image/*" className="hidden" onChange={(e) => handlePhotoUpload(item.id, e)} />
-                                    </div>
+                                                                        {/* 写真エリア */}
+                                    <div className="h-32 bg-gray-200 flex items-center justify-center relative group cursor-pointer" onClick={() => document.getElementById(`photo-upload-${item.id}`).click()}>
+                                        {item.photo ? (
+                                            <img src={item.photo} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <i data-lucide="camera" className="text-gray-400 w-8 h-8 group-hover:scale-110 transition"></i>
+                                        )}
+                                        <div className="absolute bottom-0 left-0 bg-black bg-opacity-50 text-white text-xs px-2 py-1 m-2 rounded">
+                                            {item.location || "保管場所未設定"}
+                                        </div>
+                                        <input type="file" id={`photo-upload-${item.id}`} accept="image/*" className="hidden" onChange={(e) => handlePhotoUpload(item.id, e)} />
+                                    </div>
 
                                     {/* 情報エリア */}
                                     <div className="p-4 flex-1 flex flex-col justify-between">
@@ -1384,11 +2004,34 @@ ${dataJson}
                                                     <i data-lucide="calendar" className="w-4 h-4"></i> {item.expiry}
                                                 </div>
                                             )}
+                                                                                        <div className={`rounded-xl border px-3 py-3 mb-3 ${isStockShort ? "border-red-200 bg-red-50/70" : "border-gray-200 bg-gray-50"}`}>
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <i data-lucide="package-check" className={`w-4 h-4 ${isStockShort ? "text-red-600" : "text-gray-500"}`}></i>
+                                                    <span className={`text-sm font-semibold ${isStockShort ? "text-red-700" : "text-gray-700"}`}>適正在庫量</span>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        value={recommendedQuantity !== null ? recommendedQuantity : ""}
+                                                        onChange={e => updateItemField(item.id, "recommendedQuantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                                        className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                                                        placeholder="未設定"
+                                                    />
+                                                    <span className="text-sm text-gray-500 whitespace-nowrap">{item.unit || "個"}</span>
+                                                </div>
+                                                <div className="text-[11px] text-gray-500 mt-2 leading-relaxed">
+                                                    {item.recommendedMemo || "家族構成・想定シナリオ・消費ペースを踏まえた目安として調整できます。"}
+                                                </div>
+                                            </div>
+                                            {isStockShort && (
+                                                <div className="text-xs text-red-600 bg-red-100/80 rounded-lg px-2 py-1 mb-3">現在数量が適正在庫量を下回っています</div>
+                                            )}
                                         </div>
                                         
                                         {/* クイックエディット（数量変更） */}
-                                        <div className="flex items-center justify-between mt-auto pt-3 border-t">
-                                            <span className="text-xl font-bold">{item.quantity} <span className="text-sm font-normal text-gray-500">{item.unit}</span></span>
+                                        <div className={`flex items-center justify-between mt-auto pt-3 border-t ${isStockShort ? "border-red-100" : ""}`}>
+                                            <span className={`text-lg font-bold ${isStockShort ? "text-red-700" : "text-gray-800"}`}>{formatQuantityLabel(item.quantity, item.unit)}</span>
                                             <div className="flex gap-1">
                                                 <button onClick={() => updateQuantity(item.id, -1)} className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center hover:bg-gray-200 active:bg-gray-300 transition text-xl">-</button>
                                                 <button onClick={() => updateQuantity(item.id, 1)} className="w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center hover:bg-blue-200 active:bg-blue-300 transition text-xl">+</button>
@@ -1396,7 +2039,8 @@ ${dataJson}
                                         </div>
                                     </div>
                                 </div>
-                            ))}
+                                );
+                            })}
                                                         </div>
                             ) : (
                                                                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
@@ -1415,14 +2059,18 @@ ${dataJson}
                                                 </tr>
                                             </thead>
                                                                                         <tbody className="divide-y divide-gray-100">
-                                                {filteredInventory.map(item => {
+                                                                                                {filteredInventory.map(item => {
                                                     const isExpirySoon = item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3));
+                                                    const isStockShort = isBelowRecommendedStock(item);
                                                     return (
-                                                                                                                                                                                                                                <tr id={`inventory-item-${item.id}`} key={item.id} className="hover:bg-gray-50 align-top" onTouchStart={(e) => handleInventoryRowTouchStart(item, e)} onTouchEnd={(e) => handleInventoryRowTouchEnd(item, e)} onTouchCancel={resetInventoryRowSwipe}>
+                                                                                                                                                                                                                                <tr id={`inventory-item-${item.id}`} key={item.id} className={`align-top ${isStockShort ? "bg-red-50/70 hover:bg-red-50" : "hover:bg-gray-50"}`} onTouchStart={(e) => handleInventoryRowTouchStart(item, e)} onTouchEnd={(e) => handleInventoryRowTouchEnd(item, e)} onTouchCancel={resetInventoryRowSwipe} onClick={(e) => handleInventoryRowClick(item, e)}>
                                                                                                                         <td className="px-2 py-3 align-top">
                                                                                                                                                                                                                                                                 <div className="flex flex-col items-center gap-1">
                                                                     <button
-                                                                        onClick={() => document.getElementById(`list-photo-upload-${item.id}`).click()}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            document.getElementById(`list-photo-upload-${item.id}`).click();
+                                                                        }}
                                                                         className="w-9 h-9 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 flex items-center justify-center transition"
                                                                     >
                                                                         <i data-lucide="camera" className="w-4 h-4 text-gray-500"></i>
@@ -1440,6 +2088,7 @@ ${dataJson}
                                                                                                                         <td className="px-2 py-3 align-top">
                                                                 <select
                                                                     value={item.category}
+                                                                    onClick={e => e.stopPropagation()}
                                                                     onChange={e => updateItemField(item.id, "category", e.target.value)}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
                                                                 >
@@ -1451,6 +2100,7 @@ ${dataJson}
                                                                     type="text"
                                                                     list="item-name-options"
                                                                     value={item.name}
+                                                                    onClick={e => e.stopPropagation()}
                                                                     onChange={e => updateItemField(item.id, "name", e.target.value)}
                                                                     onBlur={e => registerItemNameHistory(e.target.value)}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
@@ -1459,9 +2109,11 @@ ${dataJson}
                                                                                                                                                                                     <td className="px-2 py-3 align-top">
                                                                 <select
                                                                     value={item.location}
+                                                                    onClick={e => e.stopPropagation()}
                                                                     onChange={e => updateItemField(item.id, "location", e.target.value)}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
                                                                 >
+                                                                    <option value="">保管場所未設定</option>
                                                                     {locationOptions.map(location => <option key={location} value={location}>{location}</option>)}
                                                                 </select>
                                                             </td>
@@ -1470,7 +2122,8 @@ ${dataJson}
                                                                     type="number"
                                                                     min="0"
                                                                     value={item.quantity}
-                                                                    onChange={e => updateItemField(item.id, "quantity", Math.max(0, parseInt(e.target.value) || 0))}
+                                                                    onClick={e => e.stopPropagation()}
+                                                                    onChange={e => updateItemField(item.id, "quantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
                                                                 />
                                                             </td>
@@ -1479,6 +2132,7 @@ ${dataJson}
                                                                     type="text"
                                                                     list="unit-options"
                                                                     value={item.unit}
+                                                                    onClick={e => e.stopPropagation()}
                                                                     onChange={e => updateItemField(item.id, "unit", e.target.value)}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
                                                                 />
@@ -1487,12 +2141,13 @@ ${dataJson}
                                                                 <input
                                                                     type="date"
                                                                     value={item.expiry}
+                                                                    onClick={e => e.stopPropagation()}
                                                                     onChange={e => updateItemField(item.id, "expiry", e.target.value)}
                                                                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-2 text-sm leading-tight"
                                                                 />
                                                             </td>
                                                                                                                         <td className="px-2 py-3 align-top">
-                                                                <span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${isExpirySoon ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600"}`}>
+                                                                                                                                <span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${isExpirySoon ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600"}`}>
                                                                     {isExpirySoon ? "期限注意" : "通常"}
                                                                 </span>
                                                             </td>
@@ -1835,7 +2490,7 @@ ${dataJson}
                                     <button type="button" onClick={() => setIsAiModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
                                 </div>
                                 <div className="p-6 overflow-y-auto flex-1 space-y-6">
-                                    <div>
+                                                                        <div>
                                         <label className="block text-sm font-bold text-gray-700 mb-2">想定する有事シナリオを選択</label>
                                         <select 
                                             value={selectedScenario}
@@ -1844,6 +2499,23 @@ ${dataJson}
                                         >
                                             {SCENARIOS.map(s => <option key={s} value={s}>{s}</option>)}
                                         </select>
+                                    </div>
+
+                                    <div className="bg-violet-50 border border-violet-200 rounded-2xl p-4 sm:p-5">
+                                        <div className="flex items-start gap-3">
+                                            <input
+                                                id="recommended-stock-mode"
+                                                type="checkbox"
+                                                checked={isRecommendedStockMode}
+                                                onChange={(e) => setIsRecommendedStockMode(e.target.checked)}
+                                                className="mt-1 w-4 h-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500"
+                                            />
+                                            <div className="min-w-0">
+                                                                                                <label htmlFor="recommended-stock-mode" className="block text-sm font-bold text-slate-800">推奨在庫量判定</label>
+                                                <p className="text-xs text-slate-600 mt-1 leading-relaxed">ONにすると、AIにはまず通常の分析結果を出させ、その最後にこのアプリへ取り込むためのJSONコードを出力させます。出力後は在庫一覧の「AIインポート」から回答全文、または末尾のJSONコードを取り込めます。</p>
+                                                <p className="text-xs text-slate-500 mt-2">※ 日常モードが選ばれていても、推奨在庫量判定では「地震・台風」を前提に算出します。</p>
+                                            </div>
+                                        </div>
                                     </div>
 
                                     <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -1932,6 +2604,150 @@ ${dataJson}
                                 </div>
                             </div>
                         </div>
+                                        )}
+
+                    {isAiImportModalOpen && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setIsAiImportModalOpen(false)}>
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                                <div className="p-6 border-b flex items-center justify-between gap-3 shrink-0">
+                                    <h2 className="text-xl sm:text-2xl font-bold flex items-center gap-2"><i data-lucide="download" className="text-violet-600"></i> 適正在庫量AIインポート</h2>
+                                    <button type="button" onClick={() => setIsAiImportModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                                                                        <p className="text-sm text-gray-600">AIが出力した本文付きの回答も、そのまま貼り付けできます。最後のJSONコードを読み取り、必要なら数量を調整してから適正在庫量として取り込みます。</p>
+                                    <div className="rounded-xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">{aiImportMessage || "クリップボードのJSONを読み込みます。"}</div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">AIのJSON</label>
+                                        <textarea
+                                            value={aiImportText}
+                                            onChange={(e) => setAiImportText(e.target.value)}
+                                            className="w-full h-48 bg-slate-50 border border-gray-300 rounded-xl p-4 text-sm font-mono hide-scrollbar"
+                                            placeholder="AIが出力したJSONをここに貼り付けてください"
+                                        ></textarea>
+                                        <div className="flex flex-wrap gap-2 mt-3">
+                                            <button type="button" onClick={handleApplyAiImportText} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 font-bold">JSONを再読込</button>
+                                            <button type="button" onClick={() => toggleAllAiImportItems(true)} className="px-4 py-2 bg-white text-slate-700 border border-gray-200 rounded-lg hover:bg-gray-50 font-bold">すべてチェック</button>
+                                            <button type="button" onClick={() => toggleAllAiImportItems(false)} className="px-4 py-2 bg-white text-slate-700 border border-gray-200 rounded-lg hover:bg-gray-50 font-bold">すべて外す</button>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        {aiImportItems.length ? aiImportItems.map(entry => {
+                                            const recommendedQuantity = parseQuantityNumber(entry.recommendedQuantity);
+                                            const shortage = recommendedQuantity !== null && getCurrentQuantityValue({ quantity: entry.currentQuantity }) < recommendedQuantity;
+                                            return (
+                                                <div key={entry.key} className={`rounded-2xl border p-4 ${entry.selected ? "border-blue-200 bg-blue-50/40" : "border-gray-200 bg-white"} ${shortage ? "ring-1 ring-red-100" : ""}`}>
+                                                    <div className="flex items-start gap-3">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={entry.selected}
+                                                            onChange={() => toggleAiImportItem(entry.key)}
+                                                            className="mt-1 w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                                        />
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <div className="font-semibold text-gray-800 break-words">{entry.targetName}</div>
+                                                                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-white border border-gray-200 text-gray-600">{entry.category}</span>
+                                                                {entry.isMissing && <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700">未登録</span>}
+                                                                {shortage && <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-50 border border-red-200 text-red-700">不足見込み</span>}
+                                                            </div>
+                                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                                                                <div className="bg-white rounded-xl border border-gray-200 px-3 py-3">
+                                                                    <div className="text-[11px] text-gray-500 mb-1">現在数量</div>
+                                                                    <div className="text-sm font-semibold text-gray-800">{formatQuantityLabel(entry.currentQuantity, entry.unit)}</div>
+                                                                </div>
+                                                                <div className="bg-white rounded-xl border border-gray-200 px-3 py-3">
+                                                                    <div className="text-[11px] text-gray-500 mb-1">適正在庫量</div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <input
+                                                                            type="number"
+                                                                            min="0"
+                                                                            value={entry.recommendedQuantity}
+                                                                            onChange={(e) => updateAiImportRecommendedQuantity(entry.key, e.target.value)}
+                                                                            className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                                                                        />
+                                                                        <span className="text-sm text-gray-500 whitespace-nowrap">{entry.unit}</span>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="bg-white rounded-xl border border-gray-200 px-3 py-3">
+                                                                    <div className="text-[11px] text-gray-500 mb-1">理由</div>
+                                                                    <div className="text-sm text-gray-700 break-words">{entry.reason || "—"}</div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        }) : (
+                                            <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 px-4 py-8 text-center text-sm text-gray-500">JSONを読み込むと、ここに適正在庫量の候補が表示されます。</div>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="p-4 border-t flex flex-wrap justify-end gap-2 shrink-0">
+                                    <button type="button" onClick={() => setIsAiImportModalOpen(false)} className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 font-bold">閉じる</button>
+                                    <button type="button" onClick={handleImportRecommendedStock} className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-500 font-bold">適正在庫量インポート</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {selectedDetailItem && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setDetailItemId(null)}>
+                            <div className={`bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden ${isBelowRecommendedStock(selectedDetailItem) ? "border border-red-200" : ""}`} onClick={(e) => e.stopPropagation()}>
+                                <div className={`p-5 border-b flex items-start justify-between gap-3 ${isBelowRecommendedStock(selectedDetailItem) ? "bg-red-50 border-red-100" : "bg-white border-gray-200"}`}>
+                                    <div className="min-w-0">
+                                        <div className="text-xs font-semibold text-blue-600 mb-1">{selectedDetailItem.category}</div>
+                                        <h3 className="text-xl font-bold text-gray-800 break-words">{selectedDetailItem.name}</h3>
+                                        <p className="text-sm text-gray-500 mt-1">リスト行をタップして開いた詳細カードです。</p>
+                                    </div>
+                                    <button type="button" onClick={() => setDetailItemId(null)} className="text-gray-400 hover:text-gray-800 shrink-0"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-5 space-y-4">
+                                    <div className="w-full h-48 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center">
+                                        {selectedDetailItem.photo ? (
+                                            <img src={selectedDetailItem.photo} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <i data-lucide="camera" className="w-10 h-10 text-gray-400"></i>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                                            <div className="text-[11px] text-gray-500 mb-1">保管場所</div>
+                                            <div className="text-sm font-semibold text-gray-800 break-words">{selectedDetailItem.location || "未設定"}</div>
+                                        </div>
+                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                                            <div className="text-[11px] text-gray-500 mb-1">現在数量</div>
+                                            <div className={`text-sm font-semibold ${isBelowRecommendedStock(selectedDetailItem) ? "text-red-700" : "text-gray-800"}`}>{formatQuantityLabel(selectedDetailItem.quantity, selectedDetailItem.unit)}</div>
+                                        </div>
+                                                                                <div className={`rounded-xl border px-4 py-3 ${isBelowRecommendedStock(selectedDetailItem) ? "border-red-200 bg-red-50" : "border-gray-200 bg-gray-50"}`}>
+                                            <div className="text-[11px] text-gray-500 mb-1">適正在庫量</div>
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    value={hasRecommendedQuantity(selectedDetailItem) ? selectedDetailItem.recommendedQuantity : ""}
+                                                    onChange={e => updateItemField(selectedDetailItem.id, "recommendedQuantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                                    className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                                                    placeholder="未設定"
+                                                />
+                                                <span className="text-sm text-gray-500 whitespace-nowrap">{selectedDetailItem.unit || "個"}</span>
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                                            <div className="text-[11px] text-gray-500 mb-1">期限</div>
+                                            <div className="text-sm font-semibold text-gray-800">{selectedDetailItem.expiry || "未設定"}</div>
+                                        </div>
+                                        <div className="sm:col-span-2 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                                            <div className="text-[11px] text-gray-500 mb-1">適正在庫メモ</div>
+                                            <div className="text-sm text-gray-700 leading-relaxed">{selectedDetailItem.recommendedMemo || "家族構成・想定シナリオ・消費ペースを踏まえた目安として調整できます。"}</div>
+                                        </div>
+                                    </div>
+                                    {isBelowRecommendedStock(selectedDetailItem) && (
+                                        <div className="rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm font-semibold">現在数量が適正在庫量を下回っています。補充候補として確認してください。</div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     )}
                 </div>
             );
@@ -1970,17 +2786,18 @@ ${dataJson}
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "378c95ae9a463384fa2a36dfdf0d1c0c",
   "createdAt": "2026-04-04T23:27:18.222Z",
   "schema": 2,
   "title": "おうち備蓄ナビ",
-  "savedAt": "2026-04-05T15:19:14.775Z",
-  "aiInstruction": "設定画面の改善。\n・保管場所の設定と、家族構成設定が混在している。わかりやすくゾーニングして。\n・家族構成設定欄には、小さく注意書きで、データはローカルに保存され外部サーバに保存されないが、AI分析時にAIに渡されることを明記。\n・保存場所は、×ボタンで削除可能とする。また、iPadのスワイプ操作で順番を入れ替え可能とする。\n\n設定画面では、家族構成設定を、一番上に配置。",
-  "comment": "設定画面の改善。\n・保管場所の設定と、家族構成設定が混在している。わかりやすくゾーニングして。\n・家族構成設定欄には、小さく注意書きで、データはローカルに保存され外部サーバに保存されないが、AI分析時にAIに渡されることを明記。\n・保存場所は、×ボタンで削除可能とする。また、iPadのスワイプ操作で順番を入れ替え可能とする。\n\n設定画面では、家族構成設定を、一番上に配置。",
+  "savedAt": "2026-04-05T16:29:09.137Z",
+  "aiInstruction": "このアプリの保存処理と描画処理を軽量化してください。\n\n要件:\n- IndexedDBを1レコード丸ごと保存する方式から改善し、在庫データと設定データを分ける\n- 保存処理はデバウンスして、入力のたびに過剰保存しない\n- 画像データの保存方法を見直し、大量登録時でも重くなりにくくする\n- lucide.createIcons の呼び出し回数を減らし、入力中の再描画負荷を下げる\n- 既存UIと既存機能は維持する\n- 単一HTMLのまま実装する\n\nAI分析において、分析したい内容とは別の項目で「推奨在庫量判定」チェックボックスをつける。\n・推奨在庫量判定がONの場合、すべての在庫リストをもとに、選択した有事シナリオをもとに（日常モードの場合は「自身・台風」を想定）、各在庫に対する、推奨在庫量を、シナリオと、家族構成をもとに算出する。同じような品目が複数項目にまたがって登録されている場合、代表と思われる項目＝数量が一番大きな項目に対してのみ、推奨在庫量を設定する。\n・備蓄が推奨されるが、リストにないものは、リストにないことを前提に、品目名と推奨在庫量を設定する。\n・そして、このモードでは、AIにJSON形式で推奨在庫量データを吐き出させ、コピペでこのアプリに戻せるようにする。\n・アプリの在庫一覧に、「AIインポート」ボタンを追加（検索ボタンの左）。上記JSONコードをコピーした状態でこのボタンをおすと、ポップアップで、各項目の推奨数量と、未登録だが備蓄が推奨される品目名のリストを、現在の数量と、推奨数量併記で出力する。すべての項目は、デフォルトではインポート対象とするが、ユーザーがチェックを外したりつけたりして、選択できる。なお、ポップアップ内で、すべてチェックをつける/外すボタンも用意。また、この画面でユーザは適正在庫量を変更できる。\n・そのうえで、「適正在庫量インポート」ボタンを押すと、チェックをつけた項目に該当する各項目に、適正在庫量の情報が登録される。未登録の場合、保管場所や数量、単位、期限ブランクの状態で、備忘としてリストに登録される。\n・在庫リストにおいて、カード表示の場合、適正在庫量も表示する。適正在庫量に満たない場合、ごく薄い赤色で警告。\n　リスト表示の場合、各リストの行をタップすると、詳細情報カードがポップアップ表示されるようにし、そこで写真含めて確認できるようにする。また、適正在庫量も、カード内で表示する。なお、適正在庫量に満たない場合、リスト表示の行およびカードの色を、ごく薄い赤色にして警告する。\n\n状態欄は、賞味期限に基づいて判定していたもとのままにして。\nカード内で、適正在庫量を、自分で変更できるように。また、適正在庫の考え方のメモも表示して。\n\nAI分析で推奨在庫量判定をチェックしたとき、アウトプットがJSONコードだけになっている。ほかの分析結果をまず確実に出力し、最後に、アプリに登録するためのJSONコードを出力してください。",
+  "comment": "このアプリの保存処理と描画処理を軽量化してください。\n\n要件:\n- IndexedDBを1レコード丸ごと保存する方式から改善し、在庫データと設定データを分ける\n- 保存処理はデバウンスして、入力のたびに過剰保存しない\n- 画像データの保存方法を見直し、大量登録時でも重くなりにくくする\n- lucide.createIcons の呼び出し回数を減らし、入力中の再描画負荷を下げる\n- 既存UIと既存機能は維持する\n- 単一HTMLのまま実装する\n\nAI分析において、分析したい内容とは別の項目で「推奨在庫量判定」チェックボックスをつける。\n・推奨在庫量判定がONの場合、すべての在庫リストをもとに、選択した有事シナリオをもとに（日常モードの場合は「自身・台風」を想定）、各在庫に対する、推奨在庫量を、シナリオと、家族構成をもとに算出する。同じような品目が複数項目にまたがって登録されている場合、代表と思われる項目＝数量が一番大きな項目に対してのみ、推奨在庫量を設定する。\n・備蓄が推奨されるが、リストにないものは、リストにないことを前提に、品目名と推奨在庫量を設定する。\n・そして、このモードでは、AIにJSON形式で推奨在庫量データを吐き出させ、コピペでこのアプリに戻せるようにする。\n・アプリの在庫一覧に、「AIインポート」ボタンを追加（検索ボタンの左）。上記JSONコードをコピーした状態でこのボタンをおすと、ポップアップで、各項目の推奨数量と、未登録だが備蓄が推奨される品目名のリストを、現在の数量と、推奨数量併記で出力する。すべての項目は、デフォルトではインポート対象とするが、ユーザーがチェックを外したりつけたりして、選択できる。なお、ポップアップ内で、すべてチェックをつける/外すボタンも用意。また、この画面でユーザは適正在庫量を変更できる。\n・そのうえで、「適正在庫量インポート」ボタンを押すと、チェックをつけた項目に該当する各項目に、適正在庫量の情報が登録される。未登録の場合、保管場所や数量、単位、期限ブランクの状態で、備忘としてリストに登録される。\n・在庫リストにおいて、カード表示の場合、適正在庫量も表示する。適正在庫量に満たない場合、ごく薄い赤色で警告。\n　リスト表示の場合、各リストの行をタップすると、詳細情報カードがポップアップ表示されるようにし、そこで写真含めて確認できるようにする。また、適正在庫量も、カード内で表示する。なお、適正在庫量に満たない場合、リスト表示の行およびカードの色を、ごく薄い赤色にして警告する。\n\n状態欄は、賞味期限に基づいて判定していたもとのままにして。\nカード内で、適正在庫量を、自分で変更できるように。また、適正在庫の考え方のメモも表示して。\n\nAI分析で推奨在庫量判定をチェックしたとき、アウトプットがJSONコードだけになっている。ほかの分析結果をまず確実に出力し、最後に、アプリに登録するためのJSONコードを出力してください。",
   "sourceMode": "project",
-  "runId": "31ef0778f38deb1f68caa0fada5ae4e4"
+  "runId": "2d79b402907aa8cba30b0a121575f0bf"
 }
 </script>
 </body>
