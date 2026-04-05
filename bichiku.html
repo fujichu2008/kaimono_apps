@@ -343,9 +343,10 @@
             const [isRecommendedStockMode, setIsRecommendedStockMode] = useState(false);
             const [isAiImportModalOpen, setIsAiImportModalOpen] = useState(false);
             const [aiImportText, setAiImportText] = useState("");
-            const [aiImportItems, setAiImportItems] = useState([]);
+                        const [aiImportItems, setAiImportItems] = useState([]);
             const [aiImportMessage, setAiImportMessage] = useState("");
             const [detailItemId, setDetailItemId] = useState(null);
+            const [detailDraft, setDetailDraft] = useState(null);
                                                                                                 const [sortField, setSortField] = useState("none");
             const [inventorySearchKeyword, setInventorySearchKeyword] = useState("");
             const [isInventorySearchOpen, setIsInventorySearchOpen] = useState(false);
@@ -604,9 +605,24 @@
                                 return sorted;
                         }, [inventory, activeCategory, sortField, locationOptions, inventorySearchKeyword]);
 
-            const selectedDetailItem = useMemo(() => {
+                        const selectedDetailItem = useMemo(() => {
                 return inventory.find(item => String(item.id) === String(detailItemId)) || null;
             }, [inventory, detailItemId]);
+
+            useEffect(() => {
+                if (!selectedDetailItem) {
+                    setDetailDraft(null);
+                    return;
+                }
+
+                setDetailDraft({
+                    ...selectedDetailItem,
+                    photo: selectedDetailItem.photo || null,
+                    photoBlob: selectedDetailItem.photoBlob || null,
+                    recommendedQuantity: selectedDetailItem.recommendedQuantity ?? "",
+                    recommendedMemo: selectedDetailItem.recommendedMemo || ""
+                });
+            }, [selectedDetailItem]);
 
             const expiringItems = useMemo(() => {
                 return inventory
@@ -908,9 +924,113 @@
                 return Boolean(target.closest("button, input, select, label, a, textarea"));
             };
 
+                        const handleOpenDetailItem = (item) => {
+                setDetailItemId(item.id);
+                setDetailDraft({
+                    ...item,
+                    photo: item.photo || null,
+                    photoBlob: item.photoBlob || null,
+                    recommendedQuantity: item.recommendedQuantity ?? "",
+                    recommendedMemo: item.recommendedMemo || ""
+                });
+            };
+
+            const handleCloseDetailModal = () => {
+                setDetailDraft(prev => {
+                    if (prev && prev.photo && prev.photo !== (selectedDetailItem && selectedDetailItem.photo)) {
+                        releasePreviewUrl(prev.photo);
+                    }
+                    return null;
+                });
+                setDetailItemId(null);
+            };
+
+            const updateDetailDraftField = (field, value) => {
+                setDetailDraft(prev => prev ? { ...prev, [field]: value } : prev);
+            };
+
+            const handleDetailDraftPhotoUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                try {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    const compressedPhoto = await compressImageFile(file);
+                    if (!compressedPhoto) return;
+                    setDetailDraft(prev => {
+                        if (!prev) return prev;
+                        if (prev.photo && prev.photo !== (selectedDetailItem && selectedDetailItem.photo)) {
+                            releasePreviewUrl(prev.photo);
+                        }
+                        return {
+                            ...prev,
+                            photo: compressedPhoto.previewUrl,
+                            photoBlob: compressedPhoto.blob
+                        };
+                    });
+                } catch (error) {
+                    console.error("Detail photo compression failed:", error);
+                } finally {
+                    e.target.value = "";
+                }
+            };
+
+            const clearDetailDraftPhoto = () => {
+                setDetailDraft(prev => {
+                    if (!prev) return prev;
+                    if (prev.photo && prev.photo !== (selectedDetailItem && selectedDetailItem.photo)) {
+                        releasePreviewUrl(prev.photo);
+                    }
+                    return {
+                        ...prev,
+                        photo: null,
+                        photoBlob: null
+                    };
+                });
+            };
+
+            const handleSaveDetailItem = () => {
+                if (!detailDraft) return;
+
+                const trimmedName = String(detailDraft.name || "").trim();
+                if (!trimmedName) {
+                    alert("品目名を入力してください。");
+                    return;
+                }
+
+                const normalizedLocation = detailDraft.location || "";
+                const normalizedUnit = String(detailDraft.unit || "").trim();
+                const normalizedQuantity = detailDraft.quantity === "" ? "" : Math.max(0, parseInt(detailDraft.quantity, 10) || 0);
+                const normalizedRecommendedQuantity = detailDraft.recommendedQuantity === "" ? "" : Math.max(0, parseInt(detailDraft.recommendedQuantity, 10) || 0);
+
+                setInventory(prev => prev.map(item => {
+                    if (String(item.id) !== String(detailItemId)) return item;
+                    if (item.photo && item.photo !== detailDraft.photo) {
+                        releasePreviewUrl(item.photo);
+                    }
+                    return {
+                        ...item,
+                        ...detailDraft,
+                        name: trimmedName,
+                        location: normalizedLocation,
+                        unit: normalizedUnit,
+                        quantity: normalizedQuantity,
+                        recommendedQuantity: normalizedRecommendedQuantity,
+                        recommendedMemo: String(detailDraft.recommendedMemo || "")
+                    };
+                }));
+
+                if (normalizedLocation) {
+                    setLastUsedLocation(normalizedLocation);
+                }
+                registerItemNameHistory(trimmedName);
+                setDetailDraft(null);
+                setDetailItemId(null);
+            };
+
             const handleInventoryRowClick = (item, e) => {
                 if (shouldBlockInventoryRowClick(e.target)) return;
-                setDetailItemId(item.id);
+                handleOpenDetailItem(item);
             };
 
                         const isBlankRowFilled = (item) => {
@@ -2691,60 +2811,169 @@ ${dataJson}
                         </div>
                     )}
 
-                    {selectedDetailItem && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setDetailItemId(null)}>
-                            <div className={`bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden ${isBelowRecommendedStock(selectedDetailItem) ? "border border-red-200" : ""}`} onClick={(e) => e.stopPropagation()}>
-                                <div className={`p-5 border-b flex items-start justify-between gap-3 ${isBelowRecommendedStock(selectedDetailItem) ? "bg-red-50 border-red-100" : "bg-white border-gray-200"}`}>
+                                        {selectedDetailItem && detailDraft && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={handleCloseDetailModal}>
+                            <div className={`bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col ${isBelowRecommendedStock(detailDraft) ? "border border-red-200" : ""}`} onClick={(e) => e.stopPropagation()}>
+                                <div className={`p-5 border-b flex items-start justify-between gap-3 shrink-0 ${isBelowRecommendedStock(detailDraft) ? "bg-red-50 border-red-100" : "bg-white border-gray-200"}`}>
                                     <div className="min-w-0">
-                                        <div className="text-xs font-semibold text-blue-600 mb-1">{selectedDetailItem.category}</div>
-                                        <h3 className="text-xl font-bold text-gray-800 break-words">{selectedDetailItem.name}</h3>
-                                        <p className="text-sm text-gray-500 mt-1">リスト行をタップして開いた詳細カードです。</p>
+                                        <div className="text-xs font-semibold text-blue-600 mb-1">{detailDraft.category}</div>
+                                        <h3 className="text-xl font-bold text-gray-800 break-words">{detailDraft.name || "詳細編集"}</h3>
+                                        <p className="text-sm text-gray-500 mt-1">このカード内で各項目を編集し、保存ボタンでまとめて更新できます。</p>
                                     </div>
-                                    <button type="button" onClick={() => setDetailItemId(null)} className="text-gray-400 hover:text-gray-800 shrink-0"><i data-lucide="x"></i></button>
+                                    <button type="button" onClick={handleCloseDetailModal} className="text-gray-400 hover:text-gray-800 shrink-0"><i data-lucide="x"></i></button>
                                 </div>
-                                <div className="p-5 space-y-4">
-                                    <div className="w-full h-48 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center">
-                                        {selectedDetailItem.photo ? (
-                                            <img src={selectedDetailItem.photo} className="w-full h-full object-cover" />
-                                        ) : (
-                                            <i data-lucide="camera" className="w-10 h-10 text-gray-400"></i>
-                                        )}
+                                <div className="p-5 space-y-5 overflow-y-auto flex-1 min-h-0">
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">写真</label>
+                                        <div className="flex flex-col sm:flex-row items-start gap-4">
+                                            <div className="w-full sm:w-56 h-48 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center shrink-0">
+                                                {detailDraft.photo ? (
+                                                    <img src={detailDraft.photo} className="w-full h-full object-cover" />
+                                                ) : (
+                                                    <i data-lucide="camera" className="w-10 h-10 text-gray-400"></i>
+                                                )}
+                                            </div>
+                                            <div className="flex-1 min-w-0 space-y-2">
+                                                <div className="flex flex-wrap gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => document.getElementById(`detail-photo-capture-${detailDraft.id}`).click()}
+                                                        className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
+                                                    >
+                                                        撮影する
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => document.getElementById(`detail-photo-upload-${detailDraft.id}`).click()}
+                                                        className="px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 font-bold whitespace-nowrap"
+                                                    >
+                                                        画像を選ぶ
+                                                    </button>
+                                                    {detailDraft.photo && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={clearDetailDraftPhoto}
+                                                            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-bold whitespace-nowrap"
+                                                        >
+                                                            削除
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <p className="text-xs text-gray-500">スマホでは「撮影する」でカメラを起動できます。</p>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="file"
+                                            id={`detail-photo-capture-${detailDraft.id}`}
+                                            accept="image/*"
+                                            capture="environment"
+                                            className="hidden"
+                                            onChange={handleDetailDraftPhotoUpload}
+                                        />
+                                        <input
+                                            type="file"
+                                            id={`detail-photo-upload-${detailDraft.id}`}
+                                            accept="image/*"
+                                            className="hidden"
+                                            onChange={handleDetailDraftPhotoUpload}
+                                        />
                                     </div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-                                            <div className="text-[11px] text-gray-500 mb-1">保管場所</div>
-                                            <div className="text-sm font-semibold text-gray-800 break-words">{selectedDetailItem.location || "未設定"}</div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">カテゴリ</label>
+                                            <select
+                                                value={detailDraft.category}
+                                                onChange={e => updateDetailDraftField("category", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            >
+                                                {categories.filter(c => c !== "すべて").map(c => <option key={c}>{c}</option>)}
+                                            </select>
                                         </div>
-                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-                                            <div className="text-[11px] text-gray-500 mb-1">現在数量</div>
-                                            <div className={`text-sm font-semibold ${isBelowRecommendedStock(selectedDetailItem) ? "text-red-700" : "text-gray-800"}`}>{formatQuantityLabel(selectedDetailItem.quantity, selectedDetailItem.unit)}</div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">保管場所</label>
+                                            <select
+                                                value={detailDraft.location}
+                                                onChange={e => updateDetailDraftField("location", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            >
+                                                <option value="">保管場所未設定</option>
+                                                {locationOptions.map(location => <option key={location} value={location}>{location}</option>)}
+                                            </select>
                                         </div>
-                                                                                <div className={`rounded-xl border px-4 py-3 ${isBelowRecommendedStock(selectedDetailItem) ? "border-red-200 bg-red-50" : "border-gray-200 bg-gray-50"}`}>
-                                            <div className="text-[11px] text-gray-500 mb-1">適正在庫量</div>
+                                        <div className="sm:col-span-2">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">品目名</label>
+                                            <input
+                                                type="text"
+                                                list="item-name-options"
+                                                value={detailDraft.name}
+                                                onChange={e => updateDetailDraftField("name", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">数量</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                value={detailDraft.quantity}
+                                                onChange={e => updateDetailDraftField("quantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">単位</label>
+                                            <input
+                                                type="text"
+                                                list="unit-options"
+                                                value={detailDraft.unit}
+                                                onChange={e => updateDetailDraftField("unit", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                                placeholder="例：個、本"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">賞味期限 / 使用期限</label>
+                                            <input
+                                                type="date"
+                                                value={detailDraft.expiry}
+                                                onChange={e => updateDetailDraftField("expiry", e.target.value)}
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">適正在庫量</label>
                                             <div className="flex items-center gap-2">
                                                 <input
                                                     type="number"
                                                     min="0"
-                                                    value={hasRecommendedQuantity(selectedDetailItem) ? selectedDetailItem.recommendedQuantity : ""}
-                                                    onChange={e => updateItemField(selectedDetailItem.id, "recommendedQuantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
-                                                    className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                                                    value={detailDraft.recommendedQuantity}
+                                                    onChange={e => updateDetailDraftField("recommendedQuantity", e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                                    className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3"
                                                     placeholder="未設定"
                                                 />
-                                                <span className="text-sm text-gray-500 whitespace-nowrap">{selectedDetailItem.unit || "個"}</span>
+                                                <span className="text-sm text-gray-500 whitespace-nowrap">{detailDraft.unit || "個"}</span>
                                             </div>
                                         </div>
-                                        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-                                            <div className="text-[11px] text-gray-500 mb-1">期限</div>
-                                            <div className="text-sm font-semibold text-gray-800">{selectedDetailItem.expiry || "未設定"}</div>
-                                        </div>
-                                        <div className="sm:col-span-2 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-                                            <div className="text-[11px] text-gray-500 mb-1">適正在庫メモ</div>
-                                            <div className="text-sm text-gray-700 leading-relaxed">{selectedDetailItem.recommendedMemo || "家族構成・想定シナリオ・消費ペースを踏まえた目安として調整できます。"}</div>
+                                        <div className="sm:col-span-2">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">適正在庫メモ</label>
+                                            <textarea
+                                                value={detailDraft.recommendedMemo || ""}
+                                                onChange={e => updateDetailDraftField("recommendedMemo", e.target.value)}
+                                                rows="4"
+                                                className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3 text-sm"
+                                                placeholder="家族構成・想定シナリオ・消費ペースを踏まえた目安をメモできます。"
+                                            ></textarea>
                                         </div>
                                     </div>
-                                    {isBelowRecommendedStock(selectedDetailItem) && (
-                                        <div className="rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm font-semibold">現在数量が適正在庫量を下回っています。補充候補として確認してください。</div>
+
+                                    {isBelowRecommendedStock(detailDraft) && (
+                                        <div className="rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm font-semibold">現在数量が適正在庫量を下回っています。保存後も補充候補として確認してください。</div>
                                     )}
+                                </div>
+                                <div className="p-4 border-t flex flex-wrap justify-end gap-2 shrink-0">
+                                    <button type="button" onClick={handleCloseDetailModal} className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 font-bold min-w-[96px]">閉じる</button>
+                                    <button type="button" onClick={handleSaveDetailItem} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 font-bold min-w-[96px]">保存</button>
                                 </div>
                             </div>
                         </div>
@@ -2787,17 +3016,18 @@ ${dataJson}
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "378c95ae9a463384fa2a36dfdf0d1c0c",
   "createdAt": "2026-04-04T23:27:18.222Z",
   "schema": 2,
   "title": "おうち備蓄ナビ",
-  "savedAt": "2026-04-05T16:29:09.137Z",
-  "aiInstruction": "このアプリの保存処理と描画処理を軽量化してください。\n\n要件:\n- IndexedDBを1レコード丸ごと保存する方式から改善し、在庫データと設定データを分ける\n- 保存処理はデバウンスして、入力のたびに過剰保存しない\n- 画像データの保存方法を見直し、大量登録時でも重くなりにくくする\n- lucide.createIcons の呼び出し回数を減らし、入力中の再描画負荷を下げる\n- 既存UIと既存機能は維持する\n- 単一HTMLのまま実装する\n\nAI分析において、分析したい内容とは別の項目で「推奨在庫量判定」チェックボックスをつける。\n・推奨在庫量判定がONの場合、すべての在庫リストをもとに、選択した有事シナリオをもとに（日常モードの場合は「自身・台風」を想定）、各在庫に対する、推奨在庫量を、シナリオと、家族構成をもとに算出する。同じような品目が複数項目にまたがって登録されている場合、代表と思われる項目＝数量が一番大きな項目に対してのみ、推奨在庫量を設定する。\n・備蓄が推奨されるが、リストにないものは、リストにないことを前提に、品目名と推奨在庫量を設定する。\n・そして、このモードでは、AIにJSON形式で推奨在庫量データを吐き出させ、コピペでこのアプリに戻せるようにする。\n・アプリの在庫一覧に、「AIインポート」ボタンを追加（検索ボタンの左）。上記JSONコードをコピーした状態でこのボタンをおすと、ポップアップで、各項目の推奨数量と、未登録だが備蓄が推奨される品目名のリストを、現在の数量と、推奨数量併記で出力する。すべての項目は、デフォルトではインポート対象とするが、ユーザーがチェックを外したりつけたりして、選択できる。なお、ポップアップ内で、すべてチェックをつける/外すボタンも用意。また、この画面でユーザは適正在庫量を変更できる。\n・そのうえで、「適正在庫量インポート」ボタンを押すと、チェックをつけた項目に該当する各項目に、適正在庫量の情報が登録される。未登録の場合、保管場所や数量、単位、期限ブランクの状態で、備忘としてリストに登録される。\n・在庫リストにおいて、カード表示の場合、適正在庫量も表示する。適正在庫量に満たない場合、ごく薄い赤色で警告。\n　リスト表示の場合、各リストの行をタップすると、詳細情報カードがポップアップ表示されるようにし、そこで写真含めて確認できるようにする。また、適正在庫量も、カード内で表示する。なお、適正在庫量に満たない場合、リスト表示の行およびカードの色を、ごく薄い赤色にして警告する。\n\n状態欄は、賞味期限に基づいて判定していたもとのままにして。\nカード内で、適正在庫量を、自分で変更できるように。また、適正在庫の考え方のメモも表示して。\n\nAI分析で推奨在庫量判定をチェックしたとき、アウトプットがJSONコードだけになっている。ほかの分析結果をまず確実に出力し、最後に、アプリに登録するためのJSONコードを出力してください。",
-  "comment": "このアプリの保存処理と描画処理を軽量化してください。\n\n要件:\n- IndexedDBを1レコード丸ごと保存する方式から改善し、在庫データと設定データを分ける\n- 保存処理はデバウンスして、入力のたびに過剰保存しない\n- 画像データの保存方法を見直し、大量登録時でも重くなりにくくする\n- lucide.createIcons の呼び出し回数を減らし、入力中の再描画負荷を下げる\n- 既存UIと既存機能は維持する\n- 単一HTMLのまま実装する\n\nAI分析において、分析したい内容とは別の項目で「推奨在庫量判定」チェックボックスをつける。\n・推奨在庫量判定がONの場合、すべての在庫リストをもとに、選択した有事シナリオをもとに（日常モードの場合は「自身・台風」を想定）、各在庫に対する、推奨在庫量を、シナリオと、家族構成をもとに算出する。同じような品目が複数項目にまたがって登録されている場合、代表と思われる項目＝数量が一番大きな項目に対してのみ、推奨在庫量を設定する。\n・備蓄が推奨されるが、リストにないものは、リストにないことを前提に、品目名と推奨在庫量を設定する。\n・そして、このモードでは、AIにJSON形式で推奨在庫量データを吐き出させ、コピペでこのアプリに戻せるようにする。\n・アプリの在庫一覧に、「AIインポート」ボタンを追加（検索ボタンの左）。上記JSONコードをコピーした状態でこのボタンをおすと、ポップアップで、各項目の推奨数量と、未登録だが備蓄が推奨される品目名のリストを、現在の数量と、推奨数量併記で出力する。すべての項目は、デフォルトではインポート対象とするが、ユーザーがチェックを外したりつけたりして、選択できる。なお、ポップアップ内で、すべてチェックをつける/外すボタンも用意。また、この画面でユーザは適正在庫量を変更できる。\n・そのうえで、「適正在庫量インポート」ボタンを押すと、チェックをつけた項目に該当する各項目に、適正在庫量の情報が登録される。未登録の場合、保管場所や数量、単位、期限ブランクの状態で、備忘としてリストに登録される。\n・在庫リストにおいて、カード表示の場合、適正在庫量も表示する。適正在庫量に満たない場合、ごく薄い赤色で警告。\n　リスト表示の場合、各リストの行をタップすると、詳細情報カードがポップアップ表示されるようにし、そこで写真含めて確認できるようにする。また、適正在庫量も、カード内で表示する。なお、適正在庫量に満たない場合、リスト表示の行およびカードの色を、ごく薄い赤色にして警告する。\n\n状態欄は、賞味期限に基づいて判定していたもとのままにして。\nカード内で、適正在庫量を、自分で変更できるように。また、適正在庫の考え方のメモも表示して。\n\nAI分析で推奨在庫量判定をチェックしたとき、アウトプットがJSONコードだけになっている。ほかの分析結果をまず確実に出力し、最後に、アプリに登録するためのJSONコードを出力してください。",
+  "savedAt": "2026-04-05T16:34:38.157Z",
+  "aiInstruction": "リストをタップして開いた詳細カード内で、適正在庫量だけでなく、すべての項目を修正し、更新できるようにして。カード内に保存ボタンと、閉じるボタンをつけて。",
+  "comment": "リストをタップして開いた詳細カード内で、適正在庫量だけでなく、すべての項目を修正し、更新できるようにして。カード内に保存ボタンと、閉じるボタンをつけて。",
   "sourceMode": "project",
-  "runId": "2d79b402907aa8cba30b0a121575f0bf"
+  "runId": "f30cf5369728ca23118a1f9802f16d98"
 }
 </script>
 </body>
