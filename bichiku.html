@@ -20,7 +20,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useMemo } = React;
+                const { useState, useEffect, useMemo, useRef } = React;
 
         // 初期データ（サンプルの初期在庫）
         const initialInventory = [
@@ -37,6 +37,23 @@
             "台湾有事（物流分断・長期ローリングストック）",
             "ホルムズ海峡途絶（エネルギー・油脂類高騰）",
             "日常モード（期限切れ間近の消費）"
+        ];
+
+                const AI_ANALYSIS_OPTIONS = [
+            { key: "consume_plan", label: "期限優先で消費計画" },
+            { key: "short_actions", label: "7日以内にやること" },
+            { key: "replenishment", label: "買い足すべき備蓄品" },
+            { key: "scenario_gap", label: "シナリオ別の不足分析" },
+            { key: "resource_balance", label: "水・熱源・衛生の配分注意" },
+            { key: "storage_review", label: "保管場所の見直し" },
+            { key: "shopping_list", label: "買い物リスト作成" }
+        ];
+
+        const AI_OUTPUT_STYLE_OPTIONS = [
+            { key: "simple", label: "簡潔" },
+            { key: "detailed", label: "詳細" },
+            { key: "table", label: "表形式" },
+            { key: "action", label: "今日やること重視" }
         ];
 
         const DB_NAME = "stockguard-ai-db";
@@ -135,11 +152,84 @@
             const [newItem, setNewItem] = useState({ category: "食品", name: "", location: DEFAULT_LOCATIONS[0] || "", quantity: 1, unit: "個", expiry: "", photo: null });
             const [selectedScenario, setSelectedScenario] = useState(SCENARIOS[0]);
             const [generatedPrompt, setGeneratedPrompt] = useState("");
+            const [selectedAnalysisOptions, setSelectedAnalysisOptions] = useState(["consume_plan", "short_actions", "replenishment"]);
+            const [aiFreeText, setAiFreeText] = useState("");
+            const [aiOutputStyle, setAiOutputStyle] = useState("action");
+            const [isPromptPreviewOpen, setIsPromptPreviewOpen] = useState(false);
+            const [aiCopyMessage, setAiCopyMessage] = useState("");
+                                                const [sortField, setSortField] = useState("none");
+                        const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState(false);
+            const [isBarcodeSectionExpanded, setIsBarcodeSectionExpanded] = useState(false);
+            const [barcodeStatus, setBarcodeStatus] = useState("");
+            const [barcodeInput, setBarcodeInput] = useState("");
+            const [isBarcodeSupported] = useState(() => typeof window !== "undefined" && "BarcodeDetector" in window);
+            const videoRef = useRef(null);
+            const scannerStreamRef = useRef(null);
+            const scannerRafRef = useRef(null);
+            const barcodeDetectorRef = useRef(null);
 
-                        // アイコンの描画（マウント時）
+            const parseExpiryDate = (expiry) => {
+                if (!expiry) return null;
+                const date = new Date(`${expiry}T00:00:00`);
+                return Number.isNaN(date.getTime()) ? null : date;
+            };
+
+            const getDaysUntilExpiry = (expiry) => {
+                const expiryDate = parseExpiryDate(expiry);
+                if (!expiryDate) return null;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                return Math.floor((expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+            };
+
+            const formatExpiryStatus = (expiry) => {
+                const days = getDaysUntilExpiry(expiry);
+                if (days === null) return "期限未設定";
+                if (days < 0) return `${Math.abs(days)}日超過`;
+                if (days === 0) return "今日まで";
+                return `あと${days}日`;
+            };
+
+                                                // アイコンの描画（初回表示＋DOM更新時のみ）
             useEffect(() => {
-                lucide.createIcons();
-            });
+                let rafId = null;
+
+                const refreshIcons = () => {
+                    if (rafId !== null) {
+                        cancelAnimationFrame(rafId);
+                    }
+                    rafId = requestAnimationFrame(() => {
+                        lucide.createIcons();
+                    });
+                };
+
+                const rootElement = document.getElementById("root");
+                refreshIcons();
+
+                if (!rootElement || typeof MutationObserver === "undefined") {
+                    return () => {
+                        if (rafId !== null) {
+                            cancelAnimationFrame(rafId);
+                        }
+                    };
+                }
+
+                const observer = new MutationObserver(() => {
+                    refreshIcons();
+                });
+
+                observer.observe(rootElement, {
+                    childList: true,
+                    subtree: true
+                });
+
+                return () => {
+                    observer.disconnect();
+                    if (rafId !== null) {
+                        cancelAnimationFrame(rafId);
+                    }
+                };
+            }, []);
 
                         useEffect(() => {
                 let mounted = true;
@@ -170,8 +260,11 @@
                             location: restoredLastUsedLocation || mergedLocations[0] || ""
                         }));
 
-                        if (savedState && savedState.viewMode) {
+                                                if (savedState && savedState.viewMode) {
                             setViewMode(savedState.viewMode);
+                        }
+                        if (savedState && typeof savedState.isBarcodeSectionExpanded === "boolean") {
+                            setIsBarcodeSectionExpanded(savedState.isBarcodeSectionExpanded);
                         }
                     } catch (error) {
                         console.error("IndexedDB load failed:", error);
@@ -193,11 +286,111 @@
             const unitOptions = ["個", "本", "枚", "パック", "箱", "袋", "缶", "g", "kg", "ml", "L", "セット"];
                         const locationOptions = locations.length ? locations : DEFAULT_LOCATIONS;
 
-            const filteredInventory = useMemo(() => {
-                return activeCategory === "すべて" 
-                    ? inventory 
+                        const filteredInventory = useMemo(() => {
+                const base = activeCategory === "すべて"
+                    ? inventory
                     : inventory.filter(item => item.category === activeCategory);
-            }, [inventory, activeCategory]);
+
+                if (sortField === "none") return base;
+
+                const sorted = [...base];
+
+                if (sortField === "category") {
+                    sorted.sort((a, b) => String(a.category || "").localeCompare(String(b.category || ""), "ja"));
+                } else if (sortField === "location") {
+                    const getLocationIndex = (location) => {
+                        const index = locationOptions.indexOf(location);
+                        return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+                    };
+                    sorted.sort((a, b) => {
+                        const diff = getLocationIndex(a.location) - getLocationIndex(b.location);
+                        if (diff !== 0) return diff;
+                        return String(a.name || "").localeCompare(String(b.name || ""), "ja");
+                    });
+                } else if (sortField === "expiry") {
+                    sorted.sort((a, b) => {
+                        const aHasExpiry = Boolean(a.expiry);
+                        const bHasExpiry = Boolean(b.expiry);
+                        if (aHasExpiry && bHasExpiry) return String(a.expiry).localeCompare(String(b.expiry), "ja");
+                        if (aHasExpiry) return -1;
+                        if (bHasExpiry) return 1;
+                        return String(a.name || "").localeCompare(String(b.name || ""), "ja");
+                    });
+                }
+
+                return sorted;
+                        }, [inventory, activeCategory, sortField, locationOptions]);
+
+            const expiringItems = useMemo(() => {
+                return inventory
+                    .filter(item => parseExpiryDate(item.expiry))
+                    .map(item => ({
+                        ...item,
+                        daysUntilExpiry: getDaysUntilExpiry(item.expiry)
+                    }))
+                    .sort((a, b) => {
+                        const dayDiff = a.daysUntilExpiry - b.daysUntilExpiry;
+                        if (dayDiff !== 0) return dayDiff;
+                        return String(a.name || "").localeCompare(String(b.name || ""), "ja");
+                    });
+            }, [inventory]);
+
+            const dueIn7DaysItems = useMemo(() => {
+                return expiringItems.filter(item => item.daysUntilExpiry >= 0 && item.daysUntilExpiry <= 7);
+            }, [expiringItems]);
+
+            const dueIn30DaysItems = useMemo(() => {
+                return expiringItems.filter(item => item.daysUntilExpiry >= 0 && item.daysUntilExpiry <= 30);
+            }, [expiringItems]);
+
+            const expiredItems = useMemo(() => {
+                return expiringItems.filter(item => item.daysUntilExpiry < 0);
+            }, [expiringItems]);
+
+            const priorityConsumptionItems = useMemo(() => {
+                return expiringItems.filter(item => item.daysUntilExpiry >= 0).slice(0, 5);
+            }, [expiringItems]);
+
+            const dashboardCards = [
+                {
+                    key: "due7",
+                    title: "7日以内に期限が来るもの",
+                    items: dueIn7DaysItems,
+                    headerClass: "bg-amber-50 text-amber-900",
+                    statusClass: "text-amber-700"
+                },
+                {
+                    key: "due30",
+                    title: "30日以内に期限が来るもの",
+                    items: dueIn30DaysItems,
+                    headerClass: "bg-orange-50 text-orange-900",
+                    statusClass: "text-orange-700"
+                },
+                {
+                    key: "expired",
+                    title: "期限切れ",
+                    items: expiredItems,
+                    headerClass: "bg-red-50 text-red-900",
+                    statusClass: "text-red-700"
+                },
+                {
+                    key: "priority",
+                    title: "優先消費おすすめ",
+                    items: priorityConsumptionItems,
+                    headerClass: "bg-blue-50 text-blue-900",
+                    statusClass: "text-blue-700"
+                }
+            ];
+
+            const scrollToInventoryItem = (item) => {
+                setActiveCategory("すべて");
+                window.setTimeout(() => {
+                    const target = document.getElementById(`inventory-item-${item.id}`);
+                    if (target) {
+                        target.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }
+                }, 120);
+            };
 
                         // 数量変更ロジック
             const updateQuantity = (id, delta) => {
@@ -226,7 +419,7 @@
                 setInventory(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
             };
 
-            const isBlankRowFilled = (item) => {
+                        const isBlankRowFilled = (item) => {
                 return Boolean(
                     String(item.name || "").trim() ||
                     String(item.location || "").trim() ||
@@ -238,23 +431,35 @@
             };
 
             const commitBlankRow = (nextRow) => {
+                const trimmedName = String(nextRow.name || "").trim();
+                if (!trimmedName) return false;
+
+                const normalizedLocation = nextRow.location || lastUsedLocation || locationOptions[0] || "";
+                const normalizedUnit = String(nextRow.unit || "").trim();
+
                 setInventory(prev => [
                     ...prev,
                     {
                         ...nextRow,
+                        name: trimmedName,
+                        location: normalizedLocation,
+                        unit: normalizedUnit,
                         quantity: nextRow.quantity === "" ? 0 : Math.max(0, parseInt(nextRow.quantity, 10) || 0)
                     }
                 ]);
+                if (normalizedLocation) {
+                    setLastUsedLocation(normalizedLocation);
+                }
                 setBlankRow(createBlankRow(activeCategory === "すべて" ? "食品" : activeCategory));
+                return true;
+            };
+
+            const commitBlankRowIfReady = () => {
+                commitBlankRow(blankRow);
             };
 
             const updateBlankRowField = (field, value) => {
-                const nextRow = { ...blankRow, [field]: value };
-                if (isBlankRowFilled(nextRow)) {
-                    commitBlankRow(nextRow);
-                } else {
-                    setBlankRow(nextRow);
-                }
+                setBlankRow(prev => ({ ...prev, [field]: value }));
             };
 
             const handleBlankRowPhotoUpload = (e) => {
@@ -262,14 +467,147 @@
                 if (file) {
                     const reader = new FileReader();
                     reader.onloadend = () => {
-                        const nextRow = { ...blankRow, photo: reader.result };
-                        commitBlankRow(nextRow);
+                        setBlankRow(prev => ({ ...prev, photo: reader.result }));
                     };
                     reader.readAsDataURL(file);
                 }
             };
 
-                        const addLocation = () => {
+            const handleBlankRowBlur = (e) => {
+                const currentTarget = e.currentTarget;
+                window.setTimeout(() => {
+                    if (!currentTarget.contains(document.activeElement)) {
+                        commitBlankRowIfReady();
+                    }
+                }, 0);
+            };
+
+            const handleBlankRowKeyDown = (e) => {
+                if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                commitBlankRowIfReady();
+            };
+
+                                                                                                const toggleBarcodeSection = () => {
+                setIsBarcodeSectionExpanded(prev => {
+                    const next = !prev;
+                    if (!next) {
+                        stopBarcodeScanner();
+                    }
+                    return next;
+                });
+            };
+
+            const applyBarcodeToName = () => {
+                const trimmed = String(barcodeInput || "").trim();
+                if (!trimmed) return;
+                setNewItem(prev => ({ ...prev, name: trimmed }));
+                setBarcodeStatus("入力内容を品目名に反映しました。");
+            };
+
+            const stopBarcodeScanner = (shouldClose = true) => {
+                if (scannerRafRef.current !== null) {
+                    cancelAnimationFrame(scannerRafRef.current);
+                    scannerRafRef.current = null;
+                }
+                if (scannerStreamRef.current) {
+                    scannerStreamRef.current.getTracks().forEach(track => track.stop());
+                    scannerStreamRef.current = null;
+                }
+                if (videoRef.current && videoRef.current.srcObject) {
+                    videoRef.current.srcObject = null;
+                }
+                if (shouldClose) {
+                    setIsBarcodeScannerOpen(false);
+                }
+            };
+
+            const scanBarcodeLoop = async () => {
+                const video = videoRef.current;
+                const detector = barcodeDetectorRef.current;
+
+                if (!video || !detector || !scannerStreamRef.current) {
+                    return;
+                }
+
+                if (video.readyState >= 2) {
+                    try {
+                        const detectedCodes = await detector.detect(video);
+                        const rawValue = detectedCodes && detectedCodes[0] && detectedCodes[0].rawValue
+                            ? String(detectedCodes[0].rawValue).trim()
+                            : "";
+
+                        if (rawValue) {
+                            setBarcodeInput(rawValue);
+                            setNewItem(prev => ({ ...prev, name: rawValue }));
+                            setBarcodeStatus("バーコードを読み取り、品目名に反映しました。");
+                            stopBarcodeScanner();
+                            return;
+                        }
+                    } catch (error) {
+                        console.error("Barcode detection failed:", error);
+                        setBarcodeStatus("読取に失敗しました。下の欄に手入力してください。");
+                        stopBarcodeScanner();
+                        return;
+                    }
+                }
+
+                scannerRafRef.current = requestAnimationFrame(scanBarcodeLoop);
+            };
+
+            const startBarcodeScanner = async () => {
+                if (!isBarcodeSupported || typeof window.BarcodeDetector === "undefined") {
+                    setBarcodeStatus("この環境では自動読取に未対応です。下の欄に手入力してください。");
+                    setIsBarcodeScannerOpen(false);
+                    return;
+                }
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    setBarcodeStatus("この端末ではカメラを利用できません。下の欄に手入力してください。");
+                    setIsBarcodeScannerOpen(false);
+                    return;
+                }
+
+                try {
+                    stopBarcodeScanner(false);
+                    setBarcodeStatus("カメラを起動しています…");
+
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: { ideal: "environment" } },
+                        audio: false
+                    });
+
+                    scannerStreamRef.current = stream;
+                    barcodeDetectorRef.current = barcodeDetectorRef.current || new window.BarcodeDetector();
+                    setIsBarcodeScannerOpen(true);
+
+                    await new Promise(resolve => {
+                        const video = videoRef.current;
+                        if (!video) {
+                            resolve();
+                            return;
+                        }
+                        video.onloadedmetadata = () => {
+                            const playResult = video.play();
+                            if (playResult && typeof playResult.then === "function") {
+                                playResult.then(resolve).catch(resolve);
+                            } else {
+                                resolve();
+                            }
+                        };
+                        video.srcObject = stream;
+                    });
+
+                    setBarcodeStatus("バーコードを枠内に合わせてください。");
+                    scannerRafRef.current = requestAnimationFrame(scanBarcodeLoop);
+                } catch (error) {
+                    console.error("Camera start failed:", error);
+                    setBarcodeStatus("カメラを起動できませんでした。下の欄に手入力してください。");
+                    stopBarcodeScanner();
+                }
+            };
+
+            const addLocation = () => {
                 const trimmed = newLocationName.trim();
                 if (!trimmed) return;
                 setLocations(prev => prev.includes(trimmed) ? prev : [...prev, trimmed]);
@@ -286,41 +624,118 @@
                 });
             };
 
-            // AIプロンプト生成ロジック
-            const generateAiPrompt = () => {
+                        // AIプロンプト生成ロジック
+            const toggleAnalysisOption = (optionKey) => {
+                setSelectedAnalysisOptions(prev =>
+                    prev.includes(optionKey)
+                        ? prev.filter(key => key !== optionKey)
+                        : [...prev, optionKey]
+                );
+            };
+
+            const createAiPromptText = () => {
+                const selectedAnalysisLabels = AI_ANALYSIS_OPTIONS
+                    .filter(option => selectedAnalysisOptions.includes(option.key))
+                    .map(option => option.label);
+
+                const outputStyleLabel =
+                    AI_OUTPUT_STYLE_OPTIONS.find(option => option.key === aiOutputStyle)?.label || "今日やること重視";
+
+                const extraInstruction = String(aiFreeText || "").trim();
                 const dataJson = JSON.stringify(inventory, null, 2);
-                const prompt = `あなたはプロの防災アドバイザー兼、家庭内リソース管理の専門家です。
+
+                return `あなたはプロの防災アドバイザー兼、家庭内リソース管理の専門家です。
 以下のJSONデータは、現在の我が家の在庫状況です。
 
 【想定する有事シナリオ】
 ${selectedScenario}
 
-【指示】
-上記のシナリオに基づき、以下の在庫データを分析してください。
-1. 賞味期限や劣化を考慮し、どの順番で消費すべきかの具体的なアクションプラン。
-2. 選択された有事シナリオを乗り切るために、現在不足しており買い足すべき備蓄品のアドバイス。
-3. リソース（水、熱源、衛生など）を最適に配分するための注意点。
+【分析したい内容】
+${selectedAnalysisLabels.length ? selectedAnalysisLabels.map((label, index) => `${index + 1}. ${label}`).join("\n") : "指定なし"}
+
+【出力スタイル】
+${outputStyleLabel}
+
+【追加指示】
+${extraInstruction || "特になし"}
+
+【回答ルール】
+- 選択された分析内容を優先して整理する
+- 優先順位を明確にする
+- 今日すぐやることがあれば先に示す
+- 必要に応じて買い物リストや消費順を具体化する
+- 抽象論だけでなく実行アクションまで書く
 
 【現在の在庫データ(JSON)】
 ${dataJson}
 `;
-                setGeneratedPrompt(prompt);
             };
 
-            // AIモーダルを開くときの処理
-                        useEffect(() => {
-                if (isAiModalOpen) {
-                    generateAiPrompt();
+            const generateAiPrompt = () => {
+                setGeneratedPrompt(createAiPromptText());
+            };
+
+            const togglePromptPreview = () => {
+                setGeneratedPrompt(createAiPromptText());
+                setIsPromptPreviewOpen(prev => !prev);
+            };
+
+            const copyTextToClipboard = async (text) => {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                    return true;
                 }
-            }, [isAiModalOpen, selectedScenario, inventory]);
+
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+
+                try {
+                    const copied = document.execCommand("copy");
+                    document.body.removeChild(textarea);
+                    return copied;
+                } catch (error) {
+                    document.body.removeChild(textarea);
+                    throw error;
+                }
+            };
+
+            const handleCopyAiPrompt = async () => {
+                const prompt = createAiPromptText();
+                setGeneratedPrompt(prompt);
+                try {
+                    await copyTextToClipboard(prompt);
+                    setAiCopyMessage("AI用プロンプトをコピーしました。");
+                } catch (error) {
+                    console.error("Prompt copy failed:", error);
+                    setAiCopyMessage("コピーに失敗しました。生成内容を確認して手動でコピーしてください。");
+                    setIsPromptPreviewOpen(true);
+                }
+            };
+
+                        // AIモーダルを開くときの処理
+                        useEffect(() => {
+                if (!isAiModalOpen) {
+                    setIsPromptPreviewOpen(false);
+                    setAiCopyMessage("");
+                    return;
+                }
+
+                generateAiPrompt();
+            }, [isAiModalOpen, selectedScenario, inventory, selectedAnalysisOptions, aiFreeText, aiOutputStyle]);
 
                                     useEffect(() => {
                 if (!isDbReady) return;
 
-                savePersistedState({ inventory, viewMode, locations, lastUsedLocation }).catch(error => {
+                                savePersistedState({ inventory, viewMode, locations, lastUsedLocation, isBarcodeSectionExpanded }).catch(error => {
                     console.error("IndexedDB save failed:", error);
                 });
-            }, [inventory, viewMode, locations, lastUsedLocation, isDbReady]);
+            }, [inventory, viewMode, locations, lastUsedLocation, isBarcodeSectionExpanded, isDbReady]);
 
                         useEffect(() => {
                 if (activeCategory === "すべて") {
@@ -330,8 +745,13 @@ ${dataJson}
                 }
             }, [activeCategory]);
 
-            useEffect(() => {
-                if (!isAddModalOpen) return;
+                        useEffect(() => {
+                if (!isAddModalOpen) {
+                    stopBarcodeScanner();
+                    setBarcodeStatus("");
+                    setBarcodeInput("");
+                    return;
+                }
 
                 const fallbackLocation =
                     (lastUsedLocation && locationOptions.includes(lastUsedLocation) ? lastUsedLocation : locationOptions[0]) || "";
@@ -341,6 +761,12 @@ ${dataJson}
                     location: prev.location && locationOptions.includes(prev.location) ? prev.location : fallbackLocation
                 }));
             }, [isAddModalOpen, lastUsedLocation, locations]);
+
+            useEffect(() => {
+                return () => {
+                    stopBarcodeScanner();
+                };
+            }, []);
 
                         return (
                 <div className="flex h-screen bg-gray-100 font-sans text-gray-800">
@@ -386,21 +812,36 @@ ${dataJson}
                     {/* メインコンテンツエリア */}
                     <div className="flex-1 flex flex-col h-screen overflow-hidden">
                                                 <header className="bg-white px-6 py-4 border-b border-gray-200 flex justify-between items-center z-10">
-                            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                                <h2 className="text-2xl font-bold">{activeCategory}の在庫</h2>
-                                <div className="flex items-center gap-1 bg-gray-100 rounded-xl p-1 border border-gray-200 w-fit">
-                                    <button
-                                        onClick={() => setViewMode("card")}
-                                        className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "card" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                            <div className="flex flex-col gap-3">
+                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                    <h2 className="text-2xl font-bold">{activeCategory}の在庫</h2>
+                                    <div className="flex items-center gap-1 bg-gray-100 rounded-xl p-1 border border-gray-200 w-fit">
+                                        <button
+                                            onClick={() => setViewMode("card")}
+                                            className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "card" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                                        >
+                                            <i data-lucide="layout-grid" className="w-4 h-4"></i> カード
+                                        </button>
+                                        <button
+                                            onClick={() => setViewMode("list")}
+                                            className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "list" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                                        >
+                                            <i data-lucide="list" className="w-4 h-4"></i> リスト
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <label className="text-sm font-semibold text-gray-600 whitespace-nowrap">並び替え</label>
+                                    <select
+                                        value={sortField}
+                                        onChange={e => setSortField(e.target.value)}
+                                        className="bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700"
                                     >
-                                        <i data-lucide="layout-grid" className="w-4 h-4"></i> カード
-                                    </button>
-                                    <button
-                                        onClick={() => setViewMode("list")}
-                                        className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition ${viewMode === "list" ? "bg-white text-gray-800 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
-                                    >
-                                        <i data-lucide="list" className="w-4 h-4"></i> リスト
-                                    </button>
+                                        <option value="none">指定なし</option>
+                                        <option value="category">カテゴリ順</option>
+                                        <option value="location">保管場所順</option>
+                                        <option value="expiry">消費期限順</option>
+                                    </select>
                                 </div>
                             </div>
                             <button onClick={() => setIsAddModalOpen(true)} className="bg-white text-gray-700 px-4 py-2 rounded-xl border border-gray-200 shadow-sm flex items-center gap-2 hover:bg-gray-50 hover:border-gray-300 active:scale-95 transition text-sm font-semibold">
@@ -408,11 +849,55 @@ ${dataJson}
                             </button>
                         </header>
 
-                        <main className="flex-1 p-6 overflow-y-auto">
+                                                <main className="flex-1 p-6 overflow-y-auto">
+                            <section className="mb-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                                    {dashboardCards.map(card => (
+                                        <div key={card.key} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                                            <div className={`px-4 py-3 border-b border-gray-200 ${card.headerClass}`}>
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <h3 className="font-bold text-sm leading-snug">{card.title}</h3>
+                                                    <span className="text-xs font-semibold px-2 py-1 rounded-full bg-white/80 text-gray-700 whitespace-nowrap">
+                                                        {card.items.length}件
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="p-4">
+                                                {card.items.length ? (
+                                                    <div className="space-y-2">
+                                                        {card.items.slice(0, 5).map(item => (
+                                                            <button
+                                                                key={item.id}
+                                                                onClick={() => scrollToInventoryItem(item)}
+                                                                className="w-full text-left rounded-xl border border-gray-200 px-3 py-2 hover:bg-gray-50 active:scale-[0.99] transition"
+                                                            >
+                                                                <div className="flex items-start justify-between gap-3">
+                                                                    <div className="min-w-0">
+                                                                        <div className="text-sm font-semibold text-gray-800 truncate">{item.name}</div>
+                                                                        <div className="text-xs text-gray-500 mt-1 truncate">{item.category} ・ {item.location || "保管場所未設定"}</div>
+                                                                    </div>
+                                                                    <div className="text-right shrink-0">
+                                                                        <div className={`text-xs font-bold whitespace-nowrap ${card.statusClass}`}>
+                                                                            {formatExpiryStatus(item.expiry)}
+                                                                        </div>
+                                                                        <div className="text-xs text-gray-400 mt-1 whitespace-nowrap">{item.expiry}</div>
+                                                                    </div>
+                                                                </div>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-sm text-gray-500">該当なし</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
                             {viewMode === "card" ? (
                                 <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 content-start">
                             {filteredInventory.map(item => (
-                                <div key={item.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col relative">
+                                                                <div id={`inventory-item-${item.id}`} key={item.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col relative">
                                     {/* 期限アラート表示（簡易ロジック） */}
                                     {item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3)) && (
                                         <span className="absolute top-2 right-2 bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full z-10">
@@ -477,7 +962,7 @@ ${dataJson}
                                                 {filteredInventory.map(item => {
                                                     const isExpirySoon = item.expiry && new Date(item.expiry) < new Date(new Date().setMonth(new Date().getMonth() + 3));
                                                     return (
-                                                        <tr key={item.id} className="hover:bg-gray-50 align-top">
+                                                                                                                <tr id={`inventory-item-${item.id}`} key={item.id} className="hover:bg-gray-50 align-top">
                                                             <td className="px-4 py-3">
                                                                 <div className="flex items-center gap-2">
                                                                     <button
@@ -556,7 +1041,12 @@ ${dataJson}
                                                         </tr>
                                                     );
                                                 })}
-                                                <tr key={blankRow.id} className="bg-blue-50 align-top">
+                                                                                                <tr
+                                                    key={blankRow.id}
+                                                    className="bg-blue-50 align-top"
+                                                    onBlurCapture={handleBlankRowBlur}
+                                                    onKeyDown={handleBlankRowKeyDown}
+                                                >
                                                     <td className="px-4 py-3">
                                                         <div className="flex items-center gap-2">
                                                             <button
@@ -660,9 +1150,76 @@ ${dataJson}
                                             {categories.filter(c => c !== "すべて").map(c => <option key={c}>{c}</option>)}
                                         </select>
                                     </div>
-                                    <div>
+                                                                        <div>
                                         <label className="block text-sm font-bold text-gray-700 mb-1">品目名</label>
                                         <input type="text" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded-lg p-3" placeholder="例：カップラーメン" />
+                                                                                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+                                            <button
+                                                type="button"
+                                                onClick={toggleBarcodeSection}
+                                                className="w-full px-3 sm:px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-slate-100 active:scale-[0.99] transition"
+                                            >
+                                                <div>
+                                                    <div className="text-sm font-bold text-slate-800">バーコード読み取り</div>
+                                                    <div className="text-xs text-slate-500 mt-1">{isBarcodeSectionExpanded ? "読み取りパネルを使用できます" : "通常は閉じています。必要なときだけ開いて使えます。"}</div>
+                                                </div>
+                                                <div className="flex items-center gap-2 shrink-0 text-slate-600">
+                                                    <span className="text-xs font-semibold">{isBarcodeSectionExpanded ? "開いています" : "閉じています"}</span>
+                                                    <i data-lucide={isBarcodeSectionExpanded ? "chevron-up" : "chevron-down"}></i>
+                                                </div>
+                                            </button>
+
+                                            {isBarcodeSectionExpanded && (
+                                                <div className="border-t border-slate-200 p-3 sm:p-4">
+                                                    <div className="flex flex-col gap-3">
+                                                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                                            <div>
+                                                                <div className="text-xs text-slate-500">BarcodeDetector API を優先して使用し、未対応環境では手入力に切り替えます。</div>
+                                                            </div>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => isBarcodeScannerOpen ? stopBarcodeScanner() : startBarcodeScanner()}
+                                                                className="w-full sm:w-auto px-4 py-3 rounded-xl bg-slate-800 text-white font-bold hover:bg-slate-700 active:scale-95 transition flex items-center justify-center gap-2"
+                                                            >
+                                                                <i data-lucide="camera"></i>
+                                                                {isBarcodeScannerOpen ? "読取を停止" : "カメラで読む"}
+                                                            </button>
+                                                        </div>
+
+                                                        {isBarcodeScannerOpen && (
+                                                            <div className="rounded-xl overflow-hidden border border-slate-200 bg-black relative">
+                                                                <video ref={videoRef} className="w-full aspect-[4/3] object-cover" autoPlay playsInline muted />
+                                                                <div className="absolute inset-x-6 top-1/2 -translate-y-1/2 h-24 border-2 border-white/90 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.18)]"></div>
+                                                                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/55 text-white text-xs px-3 py-1.5 rounded-full whitespace-nowrap">
+                                                                    バーコードを中央の枠に合わせてください
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        <div className="flex flex-col sm:flex-row gap-2">
+                                                            <input
+                                                                type="text"
+                                                                value={barcodeInput}
+                                                                onChange={e => setBarcodeInput(e.target.value)}
+                                                                className="flex-1 bg-white border border-gray-300 rounded-lg p-3"
+                                                                placeholder="バーコード番号または品名を入力"
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={applyBarcodeToName}
+                                                                className="w-full sm:w-auto px-4 py-3 rounded-lg border border-slate-300 bg-white text-slate-700 font-bold hover:bg-slate-100 active:scale-95 transition whitespace-nowrap"
+                                                            >
+                                                                品目名へ反映
+                                                            </button>
+                                                        </div>
+
+                                                        <div className={`text-xs ${barcodeStatus ? "text-slate-600" : "text-slate-500"}`}>
+                                                            {barcodeStatus || (isBarcodeSupported ? "読取後は品目名欄に反映されます。カテゴリ・単位は続けて選択してください。" : "この端末では自動読取に未対応です。必要に応じて手入力してください。")} 
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                                                         <div>
                                         <label className="block text-sm font-bold text-gray-700 mb-1">保管場所</label>
@@ -768,15 +1325,15 @@ ${dataJson}
                         </div>
                     )}
 
-                    {isAiModalOpen && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+                                                                                {isAiModalOpen && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setIsAiModalOpen(false)}>
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
                                 <div className="p-6 border-b flex justify-between items-center">
                                     <h2 className="text-2xl font-bold flex items-center gap-2"><i data-lucide="bot" className="text-blue-600"></i> AIサバイバル・アドバイザー</h2>
-                                    <button onClick={() => setIsAiModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
+                                    <button type="button" onClick={() => setIsAiModalOpen(false)} className="text-gray-400 hover:text-gray-800"><i data-lucide="x"></i></button>
                                 </div>
-                                <div className="p-6 overflow-y-auto flex-1">
-                                    <div className="mb-6">
+                                <div className="p-6 overflow-y-auto flex-1 space-y-6">
+                                    <div>
                                         <label className="block text-sm font-bold text-gray-700 mb-2">想定する有事シナリオを選択</label>
                                         <select 
                                             value={selectedScenario}
@@ -786,23 +1343,89 @@ ${dataJson}
                                             {SCENARIOS.map(s => <option key={s} value={s}>{s}</option>)}
                                         </select>
                                     </div>
-                                    
+
+                                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+                                        <label className="block text-sm font-bold text-gray-700 mb-3">分析したい内容</label>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            {AI_ANALYSIS_OPTIONS.map(option => {
+                                                const isSelected = selectedAnalysisOptions.includes(option.key);
+                                                return (
+                                                    <button
+                                                        key={option.key}
+                                                        type="button"
+                                                        onClick={() => toggleAnalysisOption(option.key)}
+                                                        className={`text-left rounded-xl border px-3 py-3 transition ${isSelected ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"}`}
+                                                    >
+                                                        <div className="flex items-center gap-2">
+                                                            <i data-lucide={isSelected ? "check-circle-2" : "circle"} className="w-4 h-4"></i>
+                                                            <span className="text-sm font-semibold">{option.label}</span>
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-3">複数選択できます。選んだ観点を優先してAIに分析させます。</p>
+                                    </div>
+
                                     <div>
-                                        <label className="block text-sm font-bold text-gray-700 mb-2">AIへの送信プロンプト（JSONデータ含む）</label>
-                                        <div className="relative">
-                                            <textarea 
-                                                readOnly
-                                                value={generatedPrompt}
-                                                className="w-full h-64 bg-slate-50 border border-gray-300 text-sm font-mono rounded-xl p-4 hide-scrollbar"
-                                            ></textarea>
-                                            <button 
-                                                onClick={() => navigator.clipboard.writeText(generatedPrompt)}
-                                                className="absolute top-4 right-4 bg-white border shadow-sm px-3 py-1 rounded-lg text-sm flex items-center gap-1 hover:bg-gray-50"
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">自由記述でAIへの追加指示</label>
+                                        <textarea
+                                            value={aiFreeText}
+                                            onChange={(e) => setAiFreeText(e.target.value)}
+                                            rows="4"
+                                            className="w-full bg-gray-50 border border-gray-300 rounded-xl p-4 text-sm"
+                                            placeholder="例：子どもが食べやすいものを優先。停電3日を重視。予算は5,000円以内。"
+                                        ></textarea>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-2">出力スタイル</label>
+                                        <select
+                                            value={aiOutputStyle}
+                                            onChange={(e) => setAiOutputStyle(e.target.value)}
+                                            className="w-full bg-gray-50 border border-gray-300 text-gray-900 rounded-xl block p-3"
+                                        >
+                                            {AI_OUTPUT_STYLE_OPTIONS.map(option => (
+                                                <option key={option.key} value={option.key}>{option.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    <div className="bg-white border border-gray-200 rounded-2xl p-4 space-y-3">
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={handleCopyAiPrompt}
+                                                className="flex-1 bg-slate-800 text-white py-3 rounded-xl shadow flex items-center justify-center gap-2 hover:bg-slate-700 active:scale-95 transition font-semibold"
                                             >
-                                                <i data-lucide="copy" className="w-4 h-4"></i> コピー
+                                                <i data-lucide="copy" className="w-4 h-4"></i> AI用プロンプトをコピー
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={togglePromptPreview}
+                                                className="px-4 py-3 bg-white text-slate-700 rounded-xl border border-gray-200 shadow-sm flex items-center justify-center gap-2 hover:bg-gray-50 active:scale-95 transition font-semibold"
+                                            >
+                                                <i data-lucide={isPromptPreviewOpen ? "eye-off" : "eye"} className="w-4 h-4"></i>
+                                                {isPromptPreviewOpen ? "生成内容を隠す" : "生成内容を確認"}
                                             </button>
                                         </div>
-                                        <p className="text-xs text-gray-500 mt-2">※このプロンプトをコピーして、ChatGPTやGeminiなどのAIに貼り付けてください。</p>
+
+                                        {aiCopyMessage && (
+                                            <div className="text-sm font-semibold text-emerald-600">{aiCopyMessage}</div>
+                                        )}
+
+                                        <p className="text-xs text-gray-500">※ プロンプト全文は初期状態では表示されません。必要な場合のみ確認してください。</p>
+
+                                        {isPromptPreviewOpen && (
+                                            <div>
+                                                <label className="block text-sm font-bold text-gray-700 mb-2">生成されたAI用プロンプト</label>
+                                                <textarea 
+                                                    readOnly
+                                                    value={generatedPrompt}
+                                                    className="w-full h-72 bg-slate-50 border border-gray-300 text-sm font-mono rounded-xl p-4 hide-scrollbar"
+                                                ></textarea>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -821,17 +1444,22 @@ ${dataJson}
 
 
 
+
+
+
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "378c95ae9a463384fa2a36dfdf0d1c0c",
   "createdAt": "2026-04-04T23:27:18.222Z",
   "schema": 2,
   "title": "おうち備蓄ナビ",
-  "savedAt": "2026-04-04T23:33:13.923Z",
-  "aiInstruction": "単位はプルダウンで選択可能とする。個別入力も可能とすること。\n\nリスト表示の単位の表示が崩れた（ほかの表示欄より少し下に配置されてしまう）ので元通り修正",
-  "comment": "単位はプルダウンで選択可能とする。個別入力も可能とすること。\n\nリスト表示の単位の表示が崩れた（ほかの表示欄より少し下に配置されてしまう）ので元通り修正",
+  "savedAt": "2026-04-05T00:06:18.618Z",
+  "aiInstruction": "現在の「おうち備蓄ナビ」アプリのAI分析機能を強化してください。\n\n目的：\n今はAI分析モーダル内で、想定シナリオを選び、長いプロンプト全文をそのまま表示してコピーするだけになっています。\nこれを、より使いやすい「分析内容を選べるAI分析モーダル」に改善してください。\n\nやりたいこと：\n1. AI分析モーダル内に「分析したい内容」の選択UIを追加する\n- 複数選択可能にする\n- チェックボックスまたはチップ形式で見やすく表示する\n- 候補は以下を用意する\n  - 期限優先で消費計画\n  - 7日以内にやること\n  - 買い足すべき備蓄品\n  - シナリオ別の不足分析\n  - 水・熱源・衛生の配分注意\n  - 在庫の偏り・重複チェック\n  - 保管場所の見直し\n  - 買い物リスト作成\n\n2. 自由記述欄を追加する\n- ユーザーがAIへ細かい追加指示を書けるようにする\n- 例：\n  「子どもが食べやすいものを優先」\n  「停電3日を重視」\n  「予算5000円以内」\n- 未入力でも使えるようにする\n\n3. 出力スタイルを選べるようにする\n- 単一選択でよい\n- 候補は以下\n  - 要点だけ簡潔に\n  - 実行手順を詳しく\n  - 表形式で整理\n  - 今日やること中心\n\n4. プロンプト全文はデフォルトで非表示にする\n- 今のように最初から大きなtextareaで全文表示しない\n- 「生成内容を確認」ボタンを押したときだけ表示する\n- 初期状態では閉じた状態にする\n\n5. ワンクリックでコピーしやすくする\n- 主ボタンは「AI用プロンプトをコピー」にする\n- ボタン押下時に、現在の在庫データ・選択中シナリオ・分析項目・自由記述・出力スタイルを反映した完成プロンプトを生成し、clipboardへコピーする\n- コピー成功時は分かりやすいトーストまたは簡易メッセージを出す\n\n6. 生成されるプロンプト文面を改善する\n- ただ在庫JSONを貼るだけではなく、\n  「選択された分析テーマに沿って整理して回答すること」\n  「優先順位をつけること」\n  「具体的なアクションを示すこと」\n  をAIに明示する\n- 自由記述がある場合は、その内容もプロンプトに組み込む\n\n7. UIはスマホでも使いやすくする\n- ボタンは押しやすいサイズ\n- 情報を詰め込みすぎず、セクションごとにカード風に整理\n- 既存デザイン（Tailwindベース、丸みのあるモーダル）に自然に合わせる\n\n8. 既存機能は壊さない\n- 想定シナリオ選択はそのまま活かす\n- 現在のinventory JSON生成ロジックは活用する\n- AI分析モーダルの開閉は既存の状態管理を使う\n- ×ボタンとオーバーレイクリックで正常に閉じること\n\n実装上の希望：\n- React hooksベースの今の書き方に合わせる\n- 状態名は分かりやすくする\n- 分析項目の定義は配列で持ち、UIとプロンプト生成の両方で使い回す\n- 出力プレビューは textarea または整形済みテキスト領域でよいが、初期は閉じる\n- コードは単一HTMLファイルとしてそのまま動作する形にする\n\n仕上がりイメージ：\n「AI分析を実行」を押す\n→ シナリオを選ぶ\n→ 分析内容を複数選ぶ\n→ 必要なら自由記述を書く\n→ 「AI用プロンプトをコピー」を押す\n→ 外部AIへ貼るだけで、欲しい観点で分析できる\n\n既存コードをベースに、UI追加・状態追加・プロンプト生成ロジック改善を含めて、完全な動作コードとして反映してください。\n\n「おうち備蓄ナビ」のAI分析モーダルを改善してください。\n\n要件：\n- 想定シナリオ選択はそのまま使う\n- 新たに「分析したい内容」を複数選択できるUIを追加する\n- 新たに「自由記述でAIへの追加指示」を入力できるtextareaを追加する\n- 新たに「出力スタイル（簡潔 / 詳細 / 表形式 / 今日やること重視）」を選べるようにする\n- 生成されるAI用プロンプトは、在庫JSON・選択シナリオ・選択分析項目・自由記述・出力スタイルをすべて反映する\n- プロンプト全文はデフォルト非表示にし、「生成内容を確認」押下時だけ表示する\n- 「AI用プロンプトをコピー」ボタンを追加し、ワンクリックで完成プロンプトをコピーできるようにする\n- コピー成功時にメッセージ表示する\n- モーダルの×ボタンと背景クリックで正常に閉じるようにする\n- スマホで使いやすいUIにする\n- 既存デザインに自然に馴染ませる\n- 単一HTMLでそのまま動くように、既存コードへ統合してください",
+  "comment": "現在の「おうち備蓄ナビ」アプリのAI分析機能を強化してください。\n\n目的：\n今はAI分析モーダル内で、想定シナリオを選び、長いプロンプト全文をそのまま表示してコピーするだけになっています。\nこれを、より使いやすい「分析内容を選べるAI分析モーダル」に改善してください。\n\nやりたいこと：\n1. AI分析モーダル内に「分析したい内容」の選択UIを追加する\n- 複数選択可能にする\n- チェックボックスまたはチップ形式で見やすく表示する\n- 候補は以下を用意する\n  - 期限優先で消費計画\n  - 7日以内にやること\n  - 買い足すべき備蓄品\n  - シナリオ別の不足分析\n  - 水・熱源・衛生の配分注意\n  - 在庫の偏り・重複チェック\n  - 保管場所の見直し\n  - 買い物リスト作成\n\n2. 自由記述欄を追加する\n- ユーザーがAIへ細かい追加指示を書けるようにする\n- 例：\n  「子どもが食べやすいものを優先」\n  「停電3日を重視」\n  「予算5000円以内」\n- 未入力でも使えるようにする\n\n3. 出力スタイルを選べるようにする\n- 単一選択でよい\n- 候補は以下\n  - 要点だけ簡潔に\n  - 実行手順を詳しく\n  - 表形式で整理\n  - 今日やること中心\n\n4. プロンプト全文はデフォルトで非表示にする\n- 今のように最初から大きなtextareaで全文表示しない\n- 「生成内容を確認」ボタンを押したときだけ表示する\n- 初期状態では閉じた状態にする\n\n5. ワンクリックでコピーしやすくする\n- 主ボタンは「AI用プロンプトをコピー」にする\n- ボタン押下時に、現在の在庫データ・選択中シナリオ・分析項目・自由記述・出力スタイルを反映した完成プロンプトを生成し、clipboardへコピーする\n- コピー成功時は分かりやすいトーストまたは簡易メッセージを出す\n\n6. 生成されるプロンプト文面を改善する\n- ただ在庫JSONを貼るだけではなく、\n  「選択された分析テーマに沿って整理して回答すること」\n  「優先順位をつけること」\n  「具体的なアクションを示すこと」\n  をAIに明示する\n- 自由記述がある場合は、その内容もプロンプトに組み込む\n\n7. UIはスマホでも使いやすくする\n- ボタンは押しやすいサイズ\n- 情報を詰め込みすぎず、セクションごとにカード風に整理\n- 既存デザイン（Tailwindベース、丸みのあるモーダル）に自然に合わせる\n\n8. 既存機能は壊さない\n- 想定シナリオ選択はそのまま活かす\n- 現在のinventory JSON生成ロジックは活用する\n- AI分析モーダルの開閉は既存の状態管理を使う\n- ×ボタンとオーバーレイクリックで正常に閉じること\n\n実装上の希望：\n- React hooksベースの今の書き方に合わせる\n- 状態名は分かりやすくする\n- 分析項目の定義は配列で持ち、UIとプロンプト生成の両方で使い回す\n- 出力プレビューは textarea または整形済みテキスト領域でよいが、初期は閉じる\n- コードは単一HTMLファイルとしてそのまま動作する形にする\n\n仕上がりイメージ：\n「AI分析を実行」を押す\n→ シナリオを選ぶ\n→ 分析内容を複数選ぶ\n→ 必要なら自由記述を書く\n→ 「AI用プロンプトをコピー」を押す\n→ 外部AIへ貼るだけで、欲しい観点で分析できる\n\n既存コードをベースに、UI追加・状態追加・プロンプト生成ロジック改善を含めて、完全な動作コードとして反映してください。\n\n「おうち備蓄ナビ」のAI分析モーダルを改善してください。\n\n要件：\n- 想定シナリオ選択はそのまま使う\n- 新たに「分析したい内容」を複数選択できるUIを追加する\n- 新たに「自由記述でAIへの追加指示」を入力できるtextareaを追加する\n- 新たに「出力スタイル（簡潔 / 詳細 / 表形式 / 今日やること重視）」を選べるようにする\n- 生成されるAI用プロンプトは、在庫JSON・選択シナリオ・選択分析項目・自由記述・出力スタイルをすべて反映する\n- プロンプト全文はデフォルト非表示にし、「生成内容を確認」押下時だけ表示する\n- 「AI用プロンプトをコピー」ボタンを追加し、ワンクリックで完成プロンプトをコピーできるようにする\n- コピー成功時にメッセージ表示する\n- モーダルの×ボタンと背景クリックで正常に閉じるようにする\n- スマホで使いやすいUIにする\n- 既存デザインに自然に馴染ませる\n- 単一HTMLでそのまま動くように、既存コードへ統合してください",
   "sourceMode": "project",
-  "runId": "f176999ce67d34d1b116f3f63c264df0"
+  "runId": "20bb5322bc3982b430408dd573a3e204"
 }
 </script>
 </body>
