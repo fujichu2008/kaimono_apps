@@ -15,12 +15,36 @@
         .abcjs-container { background: white; padding: 10px; border-radius: 8px; overflow-x: auto; color: black; }
         select { background: #1e293b; border: 1px solid #334155; padding: 8px; border-radius: 6px; width: 100%; }
         .hidden { display: none; }
+        .brand-mark { display: inline-flex; align-items: center; gap: 0.55rem; }
+        .visualizer-icon { width: 18px; height: 18px; display: inline-flex; align-items: flex-end; gap: 2px; flex-shrink: 0; }
+        .visualizer-icon .viz-bar {
+            width: 3px;
+            border-radius: 9999px;
+            background: linear-gradient(to top, #38bdf8, #34d399);
+            opacity: 0.75;
+            box-shadow: 0 0 0 rgba(56,189,248,0);
+            transition: height 0.14s linear, opacity 0.14s linear, box-shadow 0.18s ease;
+        }
+        .visualizer-icon.playing .viz-bar {
+            opacity: 1;
+            box-shadow: 0 0 10px rgba(56,189,248,0.35);
+        }
     </style>
 </head>
 <body class="pb-8">
 
     <header class="px-4 py-2 flex justify-between items-center glass sticky top-0 z-50">
-        <h1 class="text-xl font-bold bg-gradient-to-r from-sky-400 to-emerald-400 bg-clip-text text-transparent">SonicForge</h1>
+        <h1 class="text-xl font-bold">
+            <span class="brand-mark">
+                <span id="header-visualizer" class="visualizer-icon" aria-hidden="true">
+                    <span class="viz-bar" style="height:6px"></span>
+                    <span class="viz-bar" style="height:10px"></span>
+                    <span class="viz-bar" style="height:14px"></span>
+                    <span class="viz-bar" style="height:9px"></span>
+                </span>
+                <span class="bg-gradient-to-r from-sky-400 to-emerald-400 bg-clip-text text-transparent">SonicForge</span>
+            </span>
+        </h1>
         <nav class="flex gap-2">
             <button onclick="toggleView('compose')" id="nav-compose" class="p-2 transition-colors active-tab text-slate-400">
                 <i data-lucide="plus-circle" class="w-5 h-5"></i>
@@ -204,6 +228,9 @@
         let playbackEndTimer = null;
         let playbackStartedAt = 0;
         let playbackDurationSec = 0;
+        let visualizerRaf = null;
+        let visualizerTempoBpm = 120;
+        let visualizerStartedAt = 0;
 
         const dbPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open('SonicForgeDB', 1);
@@ -229,9 +256,79 @@
             });
         }
 
+        function parseTempoFromABC(abc = "") {
+            const match = abc.match(/^Q:\s*(?:(\d+\/\d+)\s*=\s*)?(\d+(?:\.\d+)?)/mi);
+            if (!match) return 120;
+
+            const noteLength = match[1];
+            const bpmValue = parseFloat(match[2]);
+            if (!Number.isFinite(bpmValue)) return 120;
+            if (!noteLength) return bpmValue;
+
+            const [num, den] = noteLength.split('/').map(Number);
+            if (!num || !den) return bpmValue;
+
+            const noteValue = num / den;
+            return bpmValue * (noteValue / 0.25);
+        }
+
+        function applyVisualizerHeights(levels = [6, 10, 14, 9]) {
+            const bars = document.querySelectorAll('#header-visualizer .viz-bar');
+            bars.forEach((bar, idx) => {
+                const height = levels[idx] ?? 8;
+                bar.style.height = `${height}px`;
+            });
+        }
+
+        function setVisualizerIdle() {
+            if (visualizerRaf) {
+                cancelAnimationFrame(visualizerRaf);
+                visualizerRaf = null;
+            }
+            const root = document.getElementById('header-visualizer');
+            if (root) root.classList.remove('playing');
+            applyVisualizerHeights([6, 10, 14, 9]);
+        }
+
+        function startVisualizerAnimation(startAt = performance.now()) {
+            const root = document.getElementById('header-visualizer');
+            if (!root) return;
+
+            if (visualizerRaf) {
+                cancelAnimationFrame(visualizerRaf);
+                visualizerRaf = null;
+            }
+
+            visualizerStartedAt = startAt;
+            root.classList.add('playing');
+
+            const animate = () => {
+                if (!window.isPlaying && !window.isModalPlaying) {
+                    setVisualizerIdle();
+                    return;
+                }
+
+                const elapsed = (performance.now() - visualizerStartedAt) / 1000;
+                const beat = elapsed * (Math.max(40, visualizerTempoBpm) / 60);
+                const levels = [0, 1, 2, 3].map((i) => {
+                    const waveA = Math.abs(Math.sin((beat + i * 0.21) * Math.PI));
+                    const waveB = Math.abs(Math.sin((beat * 2.35) + i * 0.85));
+                    const waveC = Math.abs(Math.cos((beat * 0.72) + i * 0.55));
+                    const mix = (waveA * 0.58) + (waveB * 0.27) + (waveC * 0.15);
+                    return Math.round(5 + mix * 11);
+                });
+
+                applyVisualizerHeights(levels);
+                visualizerRaf = requestAnimationFrame(animate);
+            };
+
+            animate();
+        }
+
         // --- 初期化 ---
         window.onload = async () => {
             lucide.createIcons();
+            setVisualizerIdle();
             initGenreSelect();
             initInstrumentChips();
             await loadLibraryFromDB();
@@ -397,6 +494,7 @@
             } else {
                 updatePlaybackBar(0);
             }
+            setVisualizerIdle();
             lucide.createIcons();
         }
 
@@ -404,6 +502,7 @@
             clearPlaybackTimers();
             playbackStartedAt = performance.now();
             updatePlaybackBar(0);
+            startVisualizerAnimation(playbackStartedAt);
 
             if (!playbackDurationSec || playbackDurationSec <= 0) return;
 
@@ -425,11 +524,13 @@
             currentLibraryId = libId;
             currentRating = rating;
             playbackDurationSec = 0;
+            visualizerTempoBpm = parseTempoFromABC(abc);
             window.currentMidi = null;
             document.getElementById('current-title').innerText = title;
             document.getElementById('current-meta').innerText = meta;
             updatePlayerRatingUI();
             resetPlaybackBar();
+            setVisualizerIdle();
             
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
             
@@ -500,6 +601,7 @@
                 if (modalBtn) modalBtn.innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
                 changed = true;
             }
+            setVisualizerIdle();
             if (changed) lucide.createIcons();
         }
 
@@ -521,14 +623,17 @@
                 window.modalMidi = new ABCJS.synth.CreateSynth();
                 await window.modalMidi.init({ visualObj: visualObj });
                 await window.modalMidi.prime();
+                visualizerTempoBpm = parseTempoFromABC(item.abc);
                 await window.modalMidi.start();
                 
                 window.isModalPlaying = true;
+                startVisualizerAnimation();
                 btn.innerHTML = '<i data-lucide="square" class="w-4 h-4"></i> 停止';
             } catch (e) {
                 console.error(e);
                 alert("再生に失敗しました");
                 btn.innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
+                setVisualizerIdle();
             }
             lucide.createIcons();
         }
