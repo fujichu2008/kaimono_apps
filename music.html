@@ -102,9 +102,16 @@
                     <div id="notation-paper" class="abcjs-container"></div>
                 </div>
 
-                <div class="mt-4 text-center">
+                <div class="mt-4 text-center space-y-2">
                     <h3 id="current-title" class="text-lg font-bold">曲名未定</h3>
                     <p id="current-meta" class="text-xs text-slate-400">Generating vibe...</p>
+                    <div id="player-rating" class="flex justify-center gap-1 text-slate-500">
+                        <i data-lucide="star" class="w-5 h-5 cursor-pointer" onclick="setRating(1)"></i>
+                        <i data-lucide="star" class="w-5 h-5 cursor-pointer" onclick="setRating(2)"></i>
+                        <i data-lucide="star" class="w-5 h-5 cursor-pointer" onclick="setRating(3)"></i>
+                        <i data-lucide="star" class="w-5 h-5 cursor-pointer" onclick="setRating(4)"></i>
+                        <i data-lucide="star" class="w-5 h-5 cursor-pointer" onclick="setRating(5)"></i>
+                    </div>
                 </div>
 
                 <div class="flex justify-center gap-6 mt-6">
@@ -127,10 +134,19 @@
             </div>
         </section>
 
-        <section id="view-library" class="hidden space-y-4">
+        <section id="view-library" class="hidden space-y-4 relative">
             <h2 class="text-lg font-bold">マイ・ライブラリ</h2>
             <div id="library-list" class="space-y-2">
+            </div>
+            <div id="library-modal" class="hidden absolute top-0 left-0 w-full h-full glass rounded-2xl p-6 flex flex-col gap-4 z-10 shadow-2xl bg-slate-900/90">
+                <h3 id="modal-title" class="text-xl font-bold text-sky-400"></h3>
+                <div id="modal-rating" class="flex gap-1 text-yellow-400 text-lg"></div>
+                <p id="modal-desc" class="text-sm text-slate-300 flex-1 overflow-y-auto leading-relaxed"></p>
+                <div class="flex gap-2 mt-auto">
+                    <button onclick="closeLibraryModal()" class="flex-1 py-3 bg-slate-700 rounded-xl text-sm font-bold transition-colors hover:bg-slate-600">閉じる</button>
+                    <button id="btn-modal-load" class="flex-1 py-3 bg-sky-500 rounded-xl text-sm font-bold flex justify-center items-center gap-2 transition-colors hover:bg-sky-400"><i data-lucide="play" class="w-4 h-4"></i> 読み込む</button>
                 </div>
+            </div>
         </section>
     </main>
 
@@ -165,6 +181,9 @@
         const INSTRUMENTS = ["Piano", "Pipe Organ", "Choir", "Violin", "Viola", "Cello", "Timpani", "Distortion Guitar", "Harp", "Flute", "Trumpet", "Drums", "Shakuhachi", "Koto"];
 
         let currentABC = "";
+        let currentMetaRaw = "";
+        let currentLibraryId = null;
+        let currentRating = 0;
         let synthControl = null;
         let selectedInstruments = [];
         let library = [];
@@ -316,10 +335,14 @@
         }
 
         // --- 再生・レンダリング ---
-        function renderMusic(abc, title, meta) {
+        function renderMusic(abc, title, meta, libId = null, rating = 0) {
             currentABC = abc;
+            currentMetaRaw = meta;
+            currentLibraryId = libId;
+            currentRating = rating;
             document.getElementById('current-title').innerText = title;
             document.getElementById('current-meta').innerText = meta;
+            updatePlayerRatingUI();
             
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
             
@@ -367,6 +390,46 @@
             }
         }
 
+        async function setRating(stars) {
+            currentRating = stars;
+            updatePlayerRatingUI();
+            
+            if (currentLibraryId !== null) {
+                try {
+                    const db = await dbPromise;
+                    const tx = db.transaction('library', 'readwrite');
+                    const store = tx.objectStore('library');
+                    const req = store.get(currentLibraryId);
+                    req.onsuccess = () => {
+                        const data = req.result;
+                        if(data) {
+                            data.rating = stars;
+                            store.put(data);
+                            tx.oncomplete = async () => {
+                                await loadLibraryFromDB();
+                                updateLibraryList();
+                            };
+                        }
+                    };
+                } catch(e) { console.error("Rating Save Error:", e); }
+            }
+        }
+
+        function updatePlayerRatingUI() {
+            const stars = document.querySelectorAll('#player-rating i');
+            stars.forEach((star, idx) => {
+                if (idx < currentRating) {
+                    star.classList.remove('text-slate-500');
+                    star.classList.add('text-yellow-400');
+                    star.setAttribute('fill', 'currentColor');
+                } else {
+                    star.classList.remove('text-yellow-400');
+                    star.classList.add('text-slate-500');
+                    star.setAttribute('fill', 'none');
+                }
+            });
+        }
+
         // --- ユーティリティ ---
         function copyAbcCode() {
             if (!currentABC) {
@@ -390,13 +453,24 @@
                 alert("保存する楽曲データがありません。");
                 return;
             }
+            if (currentLibraryId !== null) {
+                alert("この曲はすでに保存されています。評価の変更は自動で保存されます。");
+                return;
+            }
             const title = document.getElementById('current-title').innerText;
-            const item = { title, abc: currentABC, date: new Date().toLocaleDateString() };
+            const item = { 
+                title, 
+                abc: currentABC, 
+                description: currentMetaRaw, 
+                rating: currentRating, 
+                date: new Date().toLocaleDateString() 
+            };
 
             try {
                 const db = await dbPromise;
                 const tx = db.transaction('library', 'readwrite');
-                tx.objectStore('library').add(item);
+                const req = tx.objectStore('library').add(item);
+                req.onsuccess = (e) => { currentLibraryId = e.target.result; };
                 tx.oncomplete = async () => {
                     alert("ライブラリに保存しました！");
                     await loadLibraryFromDB();
@@ -410,21 +484,40 @@
 
         function updateLibraryList() {
             const list = document.getElementById('library-list');
-            list.innerHTML = library.map((item, idx) => `
-                <div class="glass p-3 rounded-xl flex justify-between items-center" onclick="loadFromLibrary(${idx})">
+            list.innerHTML = library.map((item, idx) => {
+                const stars = '★'.repeat(item.rating || 0) + '☆'.repeat(5 - (item.rating || 0));
+                return `
+                <div class="glass p-3 rounded-xl flex justify-between items-center cursor-pointer hover:bg-slate-800 transition" onclick="showLibraryModal(${idx})">
                     <div>
                         <div class="font-bold text-sm">${item.title}</div>
-                        <div class="text-[10px] text-slate-500">${item.date}</div>
+                        <div class="text-[10px] text-slate-500">${item.date} <span class="text-yellow-400 ml-2 text-xs">${stars}</span></div>
                     </div>
                     <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
                 </div>
-            `).join('');
+                `;
+            }).join('');
             lucide.createIcons();
+        }
+
+        function showLibraryModal(idx) {
+            const item = library[idx];
+            document.getElementById('modal-title').innerText = item.title;
+            document.getElementById('modal-desc').innerText = item.description || "説明はありません。";
+            document.getElementById('modal-rating').innerText = '★'.repeat(item.rating || 0) + '☆'.repeat(5 - (item.rating || 0));
+            document.getElementById('btn-modal-load').onclick = () => {
+                closeLibraryModal();
+                loadFromLibrary(idx);
+            };
+            document.getElementById('library-modal').classList.remove('hidden');
+        }
+
+        function closeLibraryModal() {
+            document.getElementById('library-modal').classList.add('hidden');
         }
 
         function loadFromLibrary(idx) {
             const item = library[idx];
-            renderMusic(item.abc, item.title, "Saved from library");
+            renderMusic(item.abc, item.title, item.description || "Saved from library", item.id, item.rating || 0);
             toggleView('player');
         }
     </script>
