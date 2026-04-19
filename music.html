@@ -167,13 +167,39 @@
         let currentABC = "";
         let synthControl = null;
         let selectedInstruments = [];
-        let library = JSON.parse(localStorage.getItem('vibescore_library') || '[]');
+        let library = [];
+
+        const dbPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open('VibeScoreDB', 1);
+            request.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('library')) {
+                    db.createObjectStore('library', { keyPath: 'id', autoIncrement: true });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+
+        async function loadLibraryFromDB() {
+            const db = await dbPromise;
+            return new Promise((resolve) => {
+                const tx = db.transaction('library', 'readonly');
+                const request = tx.objectStore('library').getAll();
+                request.onsuccess = () => {
+                    library = request.result;
+                    resolve();
+                };
+            });
+        }
 
         // --- 初期化 ---
-        window.onload = () => {
+        window.onload = async () => {
             lucide.createIcons();
             initGenreSelect();
             initInstrumentChips();
+            await loadLibraryFromDB();
+            updateLibraryList();
         };
 
         function initGenreSelect() {
@@ -359,13 +385,27 @@
             document.getElementById(`nav-${view}`).classList.add('active-tab');
         }
 
-        function saveToLibrary() {
+        async function saveToLibrary() {
+            if (!currentABC) {
+                alert("保存する楽曲データがありません。");
+                return;
+            }
             const title = document.getElementById('current-title').innerText;
             const item = { title, abc: currentABC, date: new Date().toLocaleDateString() };
-            library.push(item);
-            localStorage.setItem('vibescore_library', JSON.stringify(library));
-            alert("ライブラリに保存しました！");
-            updateLibraryList();
+
+            try {
+                const db = await dbPromise;
+                const tx = db.transaction('library', 'readwrite');
+                tx.objectStore('library').add(item);
+                tx.oncomplete = async () => {
+                    alert("ライブラリに保存しました！");
+                    await loadLibraryFromDB();
+                    updateLibraryList();
+                };
+            } catch (err) {
+                console.error("IndexedDB Save Error:", err);
+                alert("保存に失敗しました。");
+            }
         }
 
         function updateLibraryList() {
