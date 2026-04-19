@@ -114,6 +114,16 @@
                     </div>
                 </div>
 
+                <div class="mt-5 space-y-2">
+                    <div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div id="playback-progress" class="h-full bg-sky-400 rounded-full" style="width: 0%; transition: width 0.1s linear;"></div>
+                    </div>
+                    <div class="flex justify-between text-[11px] text-slate-400">
+                        <span id="playback-current">0:00</span>
+                        <span id="playback-total">0:00</span>
+                    </div>
+                </div>
+
                 <div class="flex justify-center gap-6 mt-6">
                     <button onclick="rewindMusic()" class="p-3 bg-slate-800 rounded-full"><i data-lucide="skip-back"></i></button>
                     <button id="btn-play-pause" onclick="togglePlay()" class="p-5 bg-sky-500 rounded-full"><i data-lucide="play" fill="currentColor"></i></button>
@@ -190,6 +200,10 @@
         let synthControl = null;
         let selectedInstruments = [];
         let library = [];
+        let playbackTimer = null;
+        let playbackEndTimer = null;
+        let playbackStartedAt = 0;
+        let playbackDurationSec = 0;
 
         const dbPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open('SonicForgeDB', 1);
@@ -338,15 +352,84 @@
         }
 
         // --- 再生・レンダリング ---
+        function formatPlaybackTime(sec) {
+            if (!Number.isFinite(sec) || sec < 0) sec = 0;
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            return `${m}:${String(s).padStart(2, '0')}`;
+        }
+
+        function updatePlaybackBar(elapsedSec = 0) {
+            const progress = document.getElementById('playback-progress');
+            const current = document.getElementById('playback-current');
+            const total = document.getElementById('playback-total');
+            const duration = Math.max(0, playbackDurationSec || 0);
+            const safeElapsed = Math.max(0, Math.min(elapsedSec, duration || elapsedSec));
+            const ratio = duration > 0 ? (safeElapsed / duration) * 100 : 0;
+
+            if (progress) progress.style.width = `${ratio}%`;
+            if (current) current.innerText = formatPlaybackTime(safeElapsed);
+            if (total) total.innerText = formatPlaybackTime(duration);
+        }
+
+        function clearPlaybackTimers() {
+            if (playbackTimer) {
+                clearInterval(playbackTimer);
+                playbackTimer = null;
+            }
+            if (playbackEndTimer) {
+                clearTimeout(playbackEndTimer);
+                playbackEndTimer = null;
+            }
+        }
+
+        function resetPlaybackBar() {
+            clearPlaybackTimers();
+            updatePlaybackBar(0);
+        }
+
+        function finalizePlayerPlayback(atEnd = false) {
+            window.isPlaying = false;
+            const btn = document.getElementById('btn-play-pause');
+            if (btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+            if (atEnd) {
+                updatePlaybackBar(playbackDurationSec || 0);
+            } else {
+                updatePlaybackBar(0);
+            }
+            lucide.createIcons();
+        }
+
+        function startPlaybackTracking() {
+            clearPlaybackTimers();
+            playbackStartedAt = performance.now();
+            updatePlaybackBar(0);
+
+            if (!playbackDurationSec || playbackDurationSec <= 0) return;
+
+            playbackTimer = setInterval(() => {
+                const elapsed = (performance.now() - playbackStartedAt) / 1000;
+                updatePlaybackBar(elapsed);
+            }, 100);
+
+            playbackEndTimer = setTimeout(() => {
+                clearPlaybackTimers();
+                finalizePlayerPlayback(true);
+            }, (playbackDurationSec * 1000) + 150);
+        }
+
         function renderMusic(abc, title, meta, libId = null, rating = 0) {
             if (typeof stopAllMusic === 'function') stopAllMusic();
             currentABC = abc;
             currentMetaRaw = meta;
             currentLibraryId = libId;
             currentRating = rating;
+            playbackDurationSec = 0;
+            window.currentMidi = null;
             document.getElementById('current-title').innerText = title;
             document.getElementById('current-meta').innerText = meta;
             updatePlayerRatingUI();
+            resetPlaybackBar();
             
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
             
@@ -354,10 +437,16 @@
                 const midi = new ABCJS.synth.CreateSynth();
                 midi.init({ visualObj: visualObj })
                     .then(() => midi.prime())
-                    .then(() => {
+                    .then((primed) => {
+                        playbackDurationSec = primed && primed.duration ? primed.duration : 0;
+                        updatePlaybackBar(0);
                         window.currentMidi = midi;
                     })
-                    .catch(err => console.error("Audio Init Error:", err));
+                    .catch(err => {
+                        playbackDurationSec = 0;
+                        updatePlaybackBar(0);
+                        console.error("Audio Init Error:", err);
+                    });
             }
 
             // 再生状態をリセット
@@ -375,23 +464,34 @@
             const btn = document.getElementById('btn-play-pause');
             if (window.isPlaying) {
                 stopAllMusic();
-            } else {
-                stopAllMusic();
+                return;
+            }
+
+            stopAllMusic();
+            try {
                 await window.currentMidi.start();
                 btn.innerHTML = '<i data-lucide="pause" fill="currentColor"></i>';
                 window.isPlaying = true;
+                startPlaybackTracking();
                 lucide.createIcons();
+            } catch (e) {
+                console.error("Playback Error:", e);
+                finalizePlayerPlayback(false);
             }
         }
 
         function stopAllMusic() {
             let changed = false;
             if (window.currentMidi && window.isPlaying) {
+                clearPlaybackTimers();
                 window.currentMidi.stop();
                 window.isPlaying = false;
                 const btn = document.getElementById('btn-play-pause');
                 if (btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+                updatePlaybackBar(0);
                 changed = true;
+            } else {
+                clearPlaybackTimers();
             }
             if (window.modalMidi && window.isModalPlaying) {
                 window.modalMidi.stop();
@@ -433,12 +533,22 @@
             lucide.createIcons();
         }
 
-        function rewindMusic() {
-            if (window.currentMidi) {
-                window.currentMidi.stop();
-                if (window.isPlaying) {
-                    window.currentMidi.start();
+        async function rewindMusic() {
+            if (!window.currentMidi) return;
+
+            clearPlaybackTimers();
+            window.currentMidi.stop();
+
+            if (window.isPlaying) {
+                try {
+                    await window.currentMidi.start();
+                    startPlaybackTracking();
+                } catch (e) {
+                    console.error("Rewind Error:", e);
+                    finalizePlayerPlayback(false);
                 }
+            } else {
+                updatePlaybackBar(0);
             }
         }
 
