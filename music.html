@@ -141,7 +141,7 @@
             </div>
         </section>
         
-        <section id="view-compose" class="hidden space-y-4">
+        <section id="view-compose" class="space-y-4">
             <div class="glass p-4 rounded-2xl space-y-4">
                 <h2 class="text-sm font-semibold text-sky-400 flex items-center gap-2">
                     <i data-lucide="music-2" class="w-4 h-4"></i> 楽曲コンセプト設定
@@ -262,12 +262,12 @@
             <h2 class="text-lg font-bold">マイ・ライブラリ</h2>
             <div id="library-list" class="space-y-2">
             </div>
-            <div id="library-modal" class="hidden absolute top-0 left-0 w-full h-full glass rounded-2xl p-6 flex flex-col gap-4 z-10 shadow-2xl bg-slate-900/90">
+            <div id="library-modal" class="hidden fixed top-0 left-0 w-full h-[100dvh] overflow-y-auto glass p-6 flex flex-col gap-4 z-[60] shadow-2xl bg-slate-900/95">
                 <h3 id="modal-title" class="text-xl font-bold text-sky-400"></h3>
                 <div id="modal-rating" class="flex gap-1 text-yellow-400 text-lg"></div>
-                <p id="modal-desc" class="text-sm text-slate-300 flex-1 overflow-y-auto leading-relaxed"></p>
+                <p id="modal-desc" class="text-sm text-slate-300 overflow-y-auto leading-relaxed"></p>
                 <div id="hidden-modal-paper" class="hidden"></div>
-                <div class="grid grid-cols-2 gap-2 mt-auto">
+                <div class="grid grid-cols-2 gap-2 mt-2">
                     <button id="btn-modal-play" class="w-full py-3 bg-amber-500 rounded-xl text-sm font-bold flex justify-center items-center gap-2 transition-colors hover:bg-amber-400"><i data-lucide="play" class="w-4 h-4"></i> 再生</button>
                     <button id="btn-modal-load" class="w-full py-3 bg-sky-500 rounded-xl text-sm font-bold flex justify-center items-center gap-2 transition-colors hover:bg-sky-400"><i data-lucide="download" class="w-4 h-4"></i> 読込</button>
                     <button onclick="closeLibraryModal()" class="w-full py-3 bg-slate-700 rounded-xl text-sm font-bold transition-colors hover:bg-slate-600">閉じる</button>
@@ -322,27 +322,63 @@
         let visualizerTempoBpm = 120;
         let visualizerStartedAt = 0;
 
-        const dbPromise = new Promise((resolve, reject) => {
-            const request = indexedDB.open('SonicForgeDB', 1);
-            request.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains('library')) {
-                    db.createObjectStore('library', { keyPath: 'id', autoIncrement: true });
+        const dbPromise = new Promise((resolve) => {
+            try {
+                if (!('indexedDB' in window)) {
+                    console.warn("IndexedDB is not available in this environment.");
+                    resolve(null);
+                    return;
                 }
-            };
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
+
+                const request = indexedDB.open('SonicForgeDB', 1);
+                request.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains('library')) {
+                        db.createObjectStore('library', { keyPath: 'id', autoIncrement: true });
+                    }
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => {
+                    console.error("IndexedDB Open Error:", request.error);
+                    resolve(null);
+                };
+            } catch (e) {
+                console.error("IndexedDB Init Error:", e);
+                resolve(null);
+            }
         });
 
         async function loadLibraryFromDB() {
             const db = await dbPromise;
+            if (!db) {
+                library = [];
+                return;
+            }
+
             return new Promise((resolve) => {
-                const tx = db.transaction('library', 'readonly');
-                const request = tx.objectStore('library').getAll();
-                request.onsuccess = () => {
-                    library = request.result;
+                try {
+                    const tx = db.transaction('library', 'readonly');
+                    const request = tx.objectStore('library').getAll();
+
+                    request.onsuccess = () => {
+                        library = request.result || [];
+                        resolve();
+                    };
+                    request.onerror = () => {
+                        console.error("Library Load Error:", request.error);
+                        library = [];
+                        resolve();
+                    };
+                    tx.onerror = () => {
+                        console.error("Library Transaction Error:", tx.error);
+                        library = [];
+                        resolve();
+                    };
+                } catch (e) {
+                    console.error("Library Read Error:", e);
+                    library = [];
                     resolve();
-                };
+                }
             });
         }
 
@@ -413,6 +449,29 @@
             };
 
             animate();
+        }
+
+        function safeCreateIcons() {
+            try {
+                if (window.lucide && typeof lucide.createIcons === 'function') {
+                    lucide.createIcons();
+                }
+            } catch (e) {
+                console.error("Lucide Init Error:", e);
+            }
+        }
+
+        function registerPlaybackCleanupHandlers() {
+            const stopPlaybackOnClose = () => {
+                try {
+                    if (typeof stopAllMusic === 'function') stopAllMusic();
+                } catch (e) {
+                    console.error("Playback Cleanup Error:", e);
+                }
+            };
+
+            window.addEventListener('pagehide', stopPlaybackOnClose);
+            window.addEventListener('beforeunload', stopPlaybackOnClose);
         }
 
         // --- 初期化 ---
@@ -646,34 +705,67 @@ V:8 nm="Timpani" snm="Timp"
         ];
 
         window.onload = async () => {
-            lucide.createIcons();
-            setVisualizerIdle();
-            initGenreSelect();
-            initInstrumentChips();
-            await loadLibraryFromDB();
+            let showHelp = false;
 
-            if (!localStorage.getItem('sonicforge_help_seen')) {
-                toggleView('help');
-                localStorage.setItem('sonicforge_help_seen', 'true');
-            } else {
-                toggleView('compose');
+            try {
+                showHelp = !localStorage.getItem('sonicforge_help_seen');
+            } catch (e) {
+                console.warn("localStorage Read Error:", e);
             }
 
-            if (!localStorage.getItem('sonicforge_preset_loaded_v3')) {
-                try {
-                    const db = await dbPromise;
-                    const tx = db.transaction('library', 'readwrite');
-                    PRESET_MUSICS.forEach(music => tx.objectStore('library').add(music));
-                    tx.oncomplete = async () => {
-                        localStorage.setItem('sonicforge_preset_loaded_v3', 'true');
-                        await loadLibraryFromDB();
-                        updateLibraryList();
-                    };
-                } catch (e) {
-                    console.error("Preset Load Error:", e);
+            try {
+                registerPlaybackCleanupHandlers();
+                safeCreateIcons();
+                setVisualizerIdle();
+                initGenreSelect();
+                initInstrumentChips();
+                await loadLibraryFromDB();
+
+                if (showHelp) {
+                    try {
+                        localStorage.setItem('sonicforge_help_seen', 'true');
+                    } catch (e) {
+                        console.warn("localStorage Write Error:", e);
+                    }
                 }
-            } else {
+
+                let presetLoaded = true;
+                try {
+                    presetLoaded = !!localStorage.getItem('sonicforge_preset_loaded_v3');
+                } catch (e) {
+                    console.warn("Preset Flag Read Error:", e);
+                }
+
+                if (!presetLoaded) {
+                    try {
+                        const db = await dbPromise;
+                        if (db) {
+                            const tx = db.transaction('library', 'readwrite');
+                            PRESET_MUSICS.forEach(music => tx.objectStore('library').add(music));
+                            tx.oncomplete = async () => {
+                                try {
+                                    localStorage.setItem('sonicforge_preset_loaded_v3', 'true');
+                                } catch (e) {
+                                    console.warn("Preset Flag Write Error:", e);
+                                }
+                                await loadLibraryFromDB();
+                                updateLibraryList();
+                                safeCreateIcons();
+                            };
+                            tx.onerror = () => {
+                                console.error("Preset Transaction Error:", tx.error);
+                            };
+                        }
+                    } catch (e) {
+                        console.error("Preset Load Error:", e);
+                    }
+                }
+            } catch (e) {
+                console.error("Initialization Error:", e);
+            } finally {
+                toggleView(showHelp ? 'help' : 'compose');
                 updateLibraryList();
+                safeCreateIcons();
             }
         };
 
@@ -1131,6 +1223,7 @@ V:8 nm="Timpani" snm="Timp"
             document.getElementById('btn-modal-play').innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
             lucide.createIcons();
             document.getElementById('library-modal').classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
         }
 
         async function deleteFromLibrary(id) {
@@ -1154,8 +1247,9 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function closeLibraryModal() {
-            if (window.isModalPlaying && typeof stopAllMusic === 'function') stopAllMusic();
+            if (typeof stopAllMusic === 'function') stopAllMusic();
             document.getElementById('library-modal').classList.add('hidden');
+            document.body.style.overflow = '';
         }
 
         function loadFromLibrary(idx) {
