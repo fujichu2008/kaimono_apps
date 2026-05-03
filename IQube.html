@@ -2239,6 +2239,14 @@ V:8
     viewDistance:27.0,
     currentLook:null,
     helpOpen:false,
+    titlePointer:{
+      active:false,
+      id:null,
+      tx:0,
+      ty:0,
+      tz:-1.2,
+      lastAt:0
+    },
   };
 
   function haptic(ms = 20){
@@ -2505,39 +2513,41 @@ V:8
     const ctx = ensureAudio();
     if(!ctx || !audioMaster) return;
 
-    const fireRollImpact = () => {
+    const fireLandingImpact = () => {
       if(!audioCtx || audioCtx.state !== "running") return;
 
       const nowMs = performance.now();
       const speed = getEffectiveSpeed();
-      const minGap = speed >= 8 ? 42 : speed > 1 ? 62 : 86;
+      const minGap = speed >= 8 ? 30 : speed > 1 ? 48 : 72;
 
-      // AUTO高速時やSKIP時に音が密集しすぎないよう、最低間隔だけ制限する。
+      // 接地音は着地フレームで鳴る。高速時だけ最低間隔を短くし、音の渋滞を防ぐ。
       if(nowMs - lastCubeRollSoundAt < minGap) return;
       lastCubeRollSoundAt = nowMs;
 
-      const mass = clamp(Math.sqrt(Math.max(1,cubeCount)) / 2.7,.62,1.55);
-      const t = audioCtx.currentTime + .010;
+      const mass = clamp(Math.pow(Math.max(1,cubeCount), .42) / 1.95, .72, 1.85);
+      const t = audioCtx.currentTime + .006;
 
-      // 1回の90度回転につき「ドーン」という重低音を鳴らす。
-      // より低域の周波数にし、ゲインを上げ、余韻を少し長めに残して重厚感を強調する。
-      tone(45,t,.45,'sine',.35 * mass,25);
-      tone(65,t + .002,.30,'sawtooth',.25 * mass,30);
-      tone(95,t + .006,.20,'triangle',.15 * mass,55);
-      tone(35,t + .018,.50,'sine',.15 * mass,20);
+      // 接地瞬間の「ドーン」。超低域の沈み込み＋床鳴り＋短い衝撃ノイズを重ねる。
+      tone(38,t,.62,'sine',.34 * mass,22);
+      tone(54,t + .004,.48,'sawtooth',.24 * mass,28);
+      tone(84,t + .014,.24,'triangle',.13 * mass,46);
+      tone(28,t + .055,.78,'sine',.17 * mass,20);
 
-      // ノイズも低周波帯を強調し、地響きのような余韻を持たせる。
-      noiseBurst(t,.25,.18 * mass,450);
-      noiseBurst(t + .030,.20,.10 * mass,750);
-      noiseBurst(t + .080,.15,.05 * mass,1200);
+      // アタック部分。重い箱が床に当たった瞬間の硬さを少しだけ足す。
+      tone(118,t + .020,.13,'square',.045 * mass,72);
+      tone(172,t + .026,.08,'triangle',.030 * mass,96);
+
+      // 床の低い響き。高域を抑え、軽い砂音ではなく鈍い地響きにする。
+      noiseBurst(t,.18,.17 * mass,340);
+      noiseBurst(t + .045,.34,.13 * mass,230);
+      noiseBurst(t + .130,.28,.055 * mass,720);
     };
 
     if(ctx.state === "running"){
-      fireRollImpact();
+      fireLandingImpact();
     }else{
-      // resumeだけでreturnすると、その回の転がり音が消えるため、復帰後に鳴らす。
       ctx.resume()
-        .then(fireRollImpact)
+        .then(fireLandingImpact)
         .catch(() => {});
     }
   }
@@ -3097,11 +3107,12 @@ V:8
       depthWrite:false
     });
 
-    const swarmGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+    const swarmGeo = cubeGeo.clone();
+    const swarmCoreGeo = coreGeo.clone();
 
-    // タイトル背景キューブはライト依存にすると端末によって黒く見えるため、
-    // MeshBasicMaterialで確実に発色させる。
-    const TITLE_SWARM_COUNT = 900;
+    // タイトル背景もゲーム中のキューブと同じ「本体＋エッジ＋緑コア」の構成にする。
+    // 端末負荷を抑えるためInstancedMeshのまま、市販ゲーム風の立体キューブ粒子として描画する。
+    const TITLE_SWARM_COUNT = 680;
     const titleSwarmTypes = [];
     const titleTypeCounts = { normal:0, green:0, red:0 };
 
@@ -3117,28 +3128,84 @@ V:8
     titleSwarm.userData.indexMap = [];
 
     const titleMaterials = {
-      normal:new THREE.MeshBasicMaterial({ color:0x787d82 }),
-      green:new THREE.MeshBasicMaterial({ color:0x57ff8a }),
-      red:new THREE.MeshBasicMaterial({ color:0xff4e6e })
+      normalBody:new THREE.MeshBasicMaterial({
+        color:0x787d82,
+        map:normalTexture
+      }),
+      normalEdge:new THREE.MeshBasicMaterial({
+        color:0xb9c0c7,
+        wireframe:true,
+        transparent:true,
+        opacity:.34
+      }),
+      greenBody:new THREE.MeshBasicMaterial({
+        color:0xcfe7ff,
+        transparent:true,
+        opacity:.38,
+        depthWrite:false
+      }),
+      greenCore:new THREE.MeshBasicMaterial({
+        color:0x57ff8a
+      }),
+      greenEdge:new THREE.MeshBasicMaterial({
+        color:0x57ff8a,
+        wireframe:true,
+        transparent:true,
+        opacity:.82
+      }),
+      redBody:new THREE.MeshBasicMaterial({
+        color:0xff4e6e
+      }),
+      redEdge:new THREE.MeshBasicMaterial({
+        color:0xffd1da,
+        wireframe:true,
+        transparent:true,
+        opacity:.74
+      })
     };
+
+    function createTitleParticleMeshes(type,count){
+      const bodyMat = titleMaterials[type + 'Body'];
+      const edgeMat = titleMaterials[type + 'Edge'];
+      const body = new THREE.InstancedMesh(swarmGeo, bodyMat, count);
+      const edge = new THREE.InstancedMesh(swarmGeo, edgeMat, count);
+      let core = null;
+
+      body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      edge.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+      body.frustumCulled = false;
+      edge.frustumCulled = false;
+
+      titleSwarm.add(body);
+      titleSwarm.add(edge);
+      titleSwarm.userData.instancedMeshes.push(body,edge);
+
+      if(type === 'green'){
+        core = new THREE.InstancedMesh(swarmCoreGeo, titleMaterials.greenCore, count);
+        core.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        core.frustumCulled = false;
+        titleSwarm.add(core);
+        titleSwarm.userData.instancedMeshes.push(core);
+      }
+
+      return {body,edge,core};
+    }
 
     const titleMeshes = {
-      normal:new THREE.InstancedMesh(swarmGeo, titleMaterials.normal, titleTypeCounts.normal),
-      green:new THREE.InstancedMesh(swarmGeo, titleMaterials.green, titleTypeCounts.green),
-      red:new THREE.InstancedMesh(swarmGeo, titleMaterials.red, titleTypeCounts.red)
+      normal:createTitleParticleMeshes('normal',titleTypeCounts.normal),
+      green:createTitleParticleMeshes('green',titleTypeCounts.green),
+      red:createTitleParticleMeshes('red',titleTypeCounts.red)
     };
-
-    for(const key of ['normal','green','red']){
-      titleMeshes[key].instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      titleSwarm.add(titleMeshes[key]);
-      titleSwarm.userData.instancedMeshes.push(titleMeshes[key]);
-    }
 
     const localIndex = { normal:0, green:0, red:0 };
     for(let i=0; i<TITLE_SWARM_COUNT; i++){
       const type = titleSwarmTypes[i];
+      const bundle = titleMeshes[type];
       titleSwarm.userData.indexMap[i] = {
-        mesh:titleMeshes[type],
+        body:bundle.body,
+        edge:bundle.edge,
+        core:bundle.core,
         index:localIndex[type]++
       };
     }
@@ -3146,7 +3213,10 @@ V:8
     titleSwarm.setMatrixAt = function(i, matrix){
       const slot = this.userData.indexMap[i];
       if(!slot) return;
-      slot.mesh.setMatrixAt(slot.index, matrix);
+
+      slot.body.setMatrixAt(slot.index, matrix);
+      slot.edge.setMatrixAt(slot.index, matrix);
+      if(slot.core) slot.core.setMatrixAt(slot.index, matrix);
     };
 
     titleSwarm.updateInstanceMatrices = function(){
@@ -5244,7 +5314,7 @@ V:8
       }
     }
 
-    playCubeRollSound(state.cubes.length);
+    // 転がり音は開始時ではなく、updateCubes()で盤面に接地した瞬間に鳴らす。
 
     state.autoViewDistance = getAutoBoardDistance(state.boardRows, state.activeCols);
     state.viewDistance = state.autoViewDistance;
@@ -5432,9 +5502,7 @@ V:8
       moved++;
     }
 
-    if(moved > 0){
-      playCubeRollSound(moved);
-    }
+    // 転がり音はここでは鳴らさない。接地した瞬間にupdateCubes()側で鳴らす。
 
     state.lastStep = now;
     state.rolling = moved > 0;
@@ -5573,6 +5641,7 @@ V:8
   function updateCubes(now){
     let any = false;
     let done = true;
+    let landedCount = 0;
 
     for(const cube of state.cubes){
       if(!cube.anim) continue;
@@ -5593,9 +5662,16 @@ V:8
         cube.anim = null;
         cube.group.position.z = to.z;
         cube.group.position.y = .48;
+        landedCount++;
       }else{
         done = false;
       }
+    }
+
+    if(landedCount > 0){
+      // 盤面に接地した瞬間だけ鳴らす。複数キューブは1つの重い衝撃音にまとめる。
+      playCubeRollSound(landedCount);
+      cameraShake = Math.max(cameraShake, clamp(.045 + landedCount * .010, .055, .16));
     }
 
     if(state.rolling && any && done){
@@ -5929,6 +6005,13 @@ V:8
         const rawDive = dive ? clamp((now - dive.start) / dive.duration, 0, 1) : 0;
         const diveEase = rawDive * rawDive * (3 - 2 * rawDive);
         const dummy = new THREE.Object3D();
+        const titlePointer = state.titlePointer || {};
+        const pointerAge = now - (titlePointer.lastAt || 0);
+        const pointerHold = titlePointer.active ? 1 : clamp(1 - pointerAge / 1400, 0, 1);
+        const pointerStrength = Math.max(0, pointerHold) * (1 - diveEase * .72);
+        const pointerX = titlePointer.tx || 0;
+        const pointerY = titlePointer.ty || 0;
+        const pointerZ = titlePointer.tz || -1.2;
 
         for(let i=0; i<count; i++){
           const phi = Math.acos(1 - 2 * (i + 0.5) / count);
@@ -5937,6 +6020,20 @@ V:8
           const r = baseR * (1 + diveEase * 3.4);
 
           dummy.position.setFromSphericalCoords(r, phi, theta);
+
+          if(pointerStrength > .001){
+            const dx = pointerX - dummy.position.x;
+            const dy = pointerY - dummy.position.y;
+            const dz = pointerZ - dummy.position.z;
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            const pull = pointerStrength * clamp(1.20 / (1 + dist * .18), .045, .42);
+            const swirl = Math.sin(now * .004 + i * .31) * pointerStrength * .12;
+
+            dummy.position.x += dx * pull + Math.cos(i * .70 + t * 7.0) * swirl;
+            dummy.position.y += dy * pull + Math.sin(i * .53 + t * 6.0) * swirl;
+            dummy.position.z += dz * pull;
+          }
+
           dummy.position.z -= diveEase * ((i % 42) * .82 + 2.5);
           dummy.position.y += Math.sin(t * 10 + i * .23) * diveEase * .9;
 
@@ -5945,8 +6042,9 @@ V:8
           dummy.rotation.y += t * 2.2 + diveEase * 5.4;
           dummy.rotation.z += t * 1.5 + i * 0.02;
 
-          const nearBoost = diveEase > .1 && i % 13 === 0 ? 1.9 * diveEase : 0;
-          const s = Math.max(.08, .48 + Math.sin(t * 3 + i * 0.1) * .32 + nearBoost);
+          const nearBoost = diveEase > .1 && i % 13 === 0 ? .62 * diveEase : 0;
+          const pointerScaleBoost = pointerStrength > .001 && i % 7 === 0 ? pointerStrength * .18 : 0;
+          const s = Math.max(.055, .18 + Math.sin(t * 3 + i * 0.1) * .10 + nearBoost + pointerScaleBoost);
           dummy.scale.set(s,s,s);
           dummy.updateMatrix();
           titleSwarm.setMatrixAt(i, dummy.matrix);
@@ -6247,6 +6345,72 @@ V:8
     }
   }
 
+  function titlePointerCanReact(e){
+    if(state.running || state.gameOverStarted || state.helpOpen || state.titleDive) return false;
+    if(!dom.overlay || dom.overlay.classList.contains("hidden")) return false;
+
+    const target = e.target;
+    if(target && target.closest && target.closest("button,.helpModal")) return false;
+
+    return true;
+  }
+
+  function setTitlePointerFromEvent(e,active){
+    if(!state.titlePointer){
+      state.titlePointer = {
+        active:false,
+        id:null,
+        tx:0,
+        ty:0,
+        tz:-1.2,
+        lastAt:0
+      };
+    }
+
+    const targetEl = renderer && renderer.domElement ? renderer.domElement : dom.game;
+    const rect = targetEl.getBoundingClientRect();
+    const w = Math.max(1,rect.width || innerWidth);
+    const h = Math.max(1,rect.height || innerHeight);
+    const nx = clamp(((e.clientX - rect.left) / w) * 2 - 1,-1,1);
+    const ny = clamp(-(((e.clientY - rect.top) / h) * 2 - 1),-1,1);
+
+    state.titlePointer.active = !!active;
+    state.titlePointer.id = active ? e.pointerId : state.titlePointer.id;
+    state.titlePointer.tx = nx * 7.4;
+    state.titlePointer.ty = ny * 4.8;
+    state.titlePointer.tz = -1.2 - (1 - Math.abs(ny)) * 1.6;
+    state.titlePointer.lastAt = performance.now();
+  }
+
+  function handleTitlePointerDown(e){
+    if(!titlePointerCanReact(e)) return;
+
+    e.preventDefault();
+    setTitlePointerFromEvent(e,true);
+
+    try{
+      dom.overlay.setPointerCapture(e.pointerId);
+    }catch(_){}
+
+    cameraShake = Math.max(cameraShake,.025);
+    haptic(8);
+  }
+
+  function handleTitlePointerMove(e){
+    if(!state.titlePointer || !state.titlePointer.active) return;
+    if(state.titlePointer.id !== e.pointerId) return;
+
+    e.preventDefault();
+    setTitlePointerFromEvent(e,true);
+  }
+
+  function handleTitlePointerEnd(e){
+    if(!state.titlePointer || state.titlePointer.id !== e.pointerId) return;
+
+    state.titlePointer.active = false;
+    state.titlePointer.lastAt = performance.now();
+  }
+
   function bindControls(){
     bindTapButton("boomBtn", activateBombs);
     bindTapButton("skipBtn", triggerManualSkip);
@@ -6292,6 +6456,14 @@ V:8
       dom.helpModal.addEventListener("wheel", e => {
         e.stopPropagation();
       }, {passive:true});
+    }
+
+    if(dom.overlay){
+      dom.overlay.addEventListener("pointerdown", handleTitlePointerDown, {passive:false});
+      dom.overlay.addEventListener("pointermove", handleTitlePointerMove, {passive:false});
+      dom.overlay.addEventListener("pointerup", handleTitlePointerEnd, {passive:false});
+      dom.overlay.addEventListener("pointercancel", handleTitlePointerEnd, {passive:false});
+      dom.overlay.addEventListener("lostpointercapture", handleTitlePointerEnd, {passive:false});
     }
 
     let startHandledAt = 0;
