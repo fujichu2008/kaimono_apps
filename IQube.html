@@ -5130,6 +5130,161 @@ V:8
     return rowsSpec.map((spec, i) => makeLevelLine(activeCols, spec, cutIndex * sliceRows + i));
   }
 
+  function addShieldChainSpecial(rowsSpec, activeCols, sliceRows, r, c, ch){
+    if(!rowsSpec || !rowsSpec.length) return false;
+
+    const rr = clamp(Math.round(r),0,sliceRows - 1);
+    const baseC = clamp(Math.round(c),0,activeCols - 1);
+    const row = rowsSpec[rr];
+
+    const same = row.find(x => x.c === baseC && x.ch === ch);
+    if(same) return true;
+
+    const used = cc => row.some(x => x.c === cc);
+    const candidates = [baseC];
+
+    for(let spread=1; spread<activeCols; spread++){
+      candidates.push(baseC - spread, baseC + spread);
+    }
+
+    for(const raw of candidates){
+      const cc = clamp(raw,0,activeCols - 1);
+      if(!used(cc)){
+        row.push({c:cc,ch});
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function makeShieldChainCut(level, cutIndex, sliceRows, activeCols){
+    const seed = state.queueSeed + level * 2213 + cutIndex * 389;
+    const rowsSpec = Array.from({length:sliceRows},() => []);
+    const add = (r,c,ch) => addShieldChainSpecial(rowsSpec,activeCols,sliceRows,r,c,ch);
+
+    const center = Math.floor(activeCols / 2);
+    const lane = clamp(center + Math.floor(seededRand(seed + 1) * 3) - 1,1,Math.max(1,activeCols - 2));
+    const mirror = c => activeCols - 1 - c;
+    const motif = Math.floor(seededRand(seed + 2) * 8);
+
+    // 必須構造：
+    // 1) 爆破キューブ同士を近接させ、1つ起点にすると次の爆破キューブへ連鎖する。
+    // 2) 禁止キューブをその3×3範囲内に置き、シールドを使わないと赤誤爆になる。
+    // 3) 端・中央・斜めをレベルごとに混ぜ、毎レベルで「気持ちいい連鎖」と「保護判断」を出す。
+    if(motif === 0){
+      add(0,lane,'G'); add(0,lane + 1,'R');
+      add(1,lane - 1,'G'); add(1,lane,'R');
+      add(2,lane + 1,'G');
+    }else if(motif === 1){
+      add(0,lane - 1,'R'); add(0,lane,'G'); add(0,lane + 1,'R');
+      add(1,lane,'G');
+      add(2,lane - 1,'G'); add(2,lane + 1,'R');
+    }else if(motif === 2){
+      add(0,1,'G'); add(0,2,'R');
+      add(1,2,'G'); add(1,3,'R');
+      add(2,3,'G'); add(2,4,'R');
+    }else if(motif === 3){
+      add(0,mirror(lane),'G'); add(0,mirror(lane) - 1,'R');
+      add(1,mirror(lane) + 1,'G'); add(1,mirror(lane),'R');
+      add(2,lane,'G'); add(2,lane + 1,'R');
+    }else if(motif === 4){
+      add(0,0,'R'); add(0,1,'G'); add(0,2,'G');
+      add(1,1,'R'); add(1,2,'G');
+      add(2,3,'R'); add(2,4,'G');
+    }else if(motif === 5){
+      add(0,center - 1,'G'); add(0,center + 1,'G');
+      add(1,center,'R');
+      add(2,center - 1,'R'); add(2,center,'G'); add(2,center + 1,'R');
+    }else if(motif === 6){
+      add(0,center,'G'); add(1,center - 1,'R'); add(1,center + 1,'R');
+      add(2,center,'G');
+      if(sliceRows > 3){ add(3,center - 1,'G'); add(3,center,'R'); }
+    }else{
+      add(0,1,'R'); add(0,2,'G');
+      add(1,2,'R'); add(1,3,'G');
+      add(2,activeCols - 2,'R'); add(2,activeCols - 3,'G');
+    }
+
+    const extraClusters = clamp(Math.floor((level + 1) / 3) + Math.floor(sliceRows / 5),1,4);
+    for(let i=0; i<extraClusters; i++){
+      const baseR = Math.floor(seededRand(seed + 30 + i * 5) * sliceRows);
+      const baseC = clamp(Math.floor(seededRand(seed + 31 + i * 5) * activeCols),1,Math.max(1,activeCols - 2));
+
+      add(baseR,baseC,'G');
+
+      // 赤は必ず緑の周囲1マスに置く。つまり、緑を起爆するとシールド保護の判断が発生する。
+      const redSide = seededRand(seed + 32 + i * 5) < .5 ? -1 : 1;
+      add(baseR,baseC + redSide,'R');
+
+      // 高レベルでは連鎖をもう1段増やす。
+      if(level >= 3 || i % 2 === 0){
+        add(baseR + 1,baseC,'G');
+      }
+      if(level >= 5){
+        add(baseR + 1,baseC - redSide,'R');
+      }
+    }
+
+    // どの行にも判断材料を最低1つ置く。空行だけの単調な出題を防ぐ。
+    for(let r=0; r<sliceRows; r++){
+      if(rowsSpec[r].length === 0){
+        const c = clamp(Math.floor(seededRand(seed + 90 + r) * activeCols),1,Math.max(1,activeCols - 2));
+        add(r,c,'G');
+        add(r,c + (seededRand(seed + 100 + r) < .5 ? -1 : 1),'R');
+      }
+    }
+
+    // 全カットで「緑2個以上」「緑範囲内の赤1個以上」を最終保証する。
+    let rows = rowsSpec.map((spec,i) => makeLevelLine(activeCols,spec,cutIndex * sliceRows + i));
+    let a = smartAnalyze(rows);
+
+    if(a.greenCount < 2 || a.redRisk < 1){
+      const r = Math.min(1,sliceRows - 1);
+      const c = clamp(center,1,Math.max(1,activeCols - 2));
+      add(r,c,'G');
+      add(r,c + 1,'R');
+      if(sliceRows > 2) add(r + 1,c,'G');
+      rows = rowsSpec.map((spec,i) => makeLevelLine(activeCols,spec,cutIndex * sliceRows + i));
+      a = smartAnalyze(rows);
+    }
+
+    // 直近カットと似すぎる場合は左右反転して新鮮さを確保。
+    const signature = smartFingerprint(rows);
+    if(state.cutHistorySignatures && state.cutHistorySignatures.includes(signature)){
+      rows = rows.map(line => {
+        const chars = line.split('');
+        const start = getActiveColStart(activeCols);
+        const active = chars.slice(start,start + activeCols).reverse();
+        for(let i=0; i<activeCols; i++) chars[start + i] = active[i];
+        return normalizeLine(chars.join(''),cutIndex);
+      });
+    }
+
+    if(!state.cutHistorySignatures) state.cutHistorySignatures = [];
+    state.cutHistorySignatures.push(smartFingerprint(rows));
+    if(state.cutHistorySignatures.length > 30) state.cutHistorySignatures.shift();
+
+    return rows.map((line,i) => normalizeLine(line,cutIndex * sliceRows + i));
+  }
+
+  function estimateShieldChainBombs(rows, level, activeCols){
+    const a = smartAnalyze(rows);
+    const activeCells = Math.max(1,(activeCols || COLS) * rows.length);
+
+    // 青爆弾：連鎖起点。緑が多くても隣接していれば少数で済む想定。
+    const triggerNeed = Math.max(1,Math.ceil(a.greenCount * .36));
+
+    // 緑範囲内の赤は、シールドを使う前提で評価対象に含める。
+    const shieldNeed = Math.max(1,Math.ceil(Math.min(a.redRisk,a.redCount) * .72));
+
+    // 緑連鎖で覆いきれない通常キューブの後処理分。
+    const cleanupNeed = Math.max(0,Math.ceil(Math.max(0,activeCells - a.greenCoverage) / 18));
+
+    const pressure = level >= 6 ? 1 : 0;
+    return clamp(triggerNeed + shieldNeed + cleanupNeed + pressure,2,12);
+  }
+
   function buildLevelPlan(level){
     const shape = getLevelShape(level);
     const slice = shape.slice;
@@ -5143,8 +5298,8 @@ V:8
     state.cutHistorySignatures = [];
 
     for(let cut=0; cut<cutCount; cut++){
-      const cutRows = makeAdvancedLevelCut(level,cut,slice,activeCols);
-      estimatedBombs += estimateCutBombs(cutRows,level);
+      const cutRows = makeShieldChainCut(level,cut,slice,activeCols);
+      estimatedBombs += estimateShieldChainBombs(cutRows,level,activeCols);
       for(const line of cutRows){
         rows.push(line);
       }
@@ -5316,7 +5471,7 @@ V:8
 
     resetWorld();
     rebuildQueuePreview();
-    toast('LEVEL ' + level + '：盤 ' + plan.activeCols + '列 / 出題 ' + plan.slice + '行×' + plan.cutCount + 'セット',1250);
+    toast('LEVEL ' + level + '：連鎖＋シールド必須 / 盤 ' + plan.activeCols + '列 / 出題 ' + plan.slice + '行×' + plan.cutCount + 'セット',1250);
   }
 
   function spawnWave(){
