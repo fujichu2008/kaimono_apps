@@ -268,6 +268,13 @@
                 <button onclick="copyAbcCode()" class="w-full mt-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2">
                     <i data-lucide="code" class="w-4 h-4"></i> 楽曲コード(ABC)をコピーして外部で使う
                 </button>
+
+                <button onclick="exportCurrentSongAsWav()" id="btn-export-audio" class="w-full mt-3 py-3 bg-purple-600 hover:bg-purple-500 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2">
+                    <i data-lucide="file-audio" class="w-4 h-4"></i> 再生音色のままWAVを書き出す
+                </button>
+                <p id="audio-export-status" class="text-[11px] text-slate-400 text-center leading-relaxed">
+                    再生時と同じABCJS SoundFont音源でWAV化します。
+                </p>
             </div>
 
             <div class="glass p-4 rounded-2xl space-y-3">
@@ -1315,6 +1322,576 @@ V:8 nm="Timpani" snm="Timp"
                     star.setAttribute('fill', 'none');
                 }
             });
+        }
+
+        // --- 音声ファイル書き出し ---
+        function sanitizeAudioFileName(name = "sonicforge-song") {
+            return String(name || "sonicforge-song")
+                .replace(/[\\/:*?"<>|]/g, "_")
+                .replace(/\s+/g, "_")
+                .slice(0, 48) || "sonicforge-song";
+        }
+
+        function parseAbcBaseUnit(abc = "") {
+            const match = abc.match(/^L:\s*(\d+)\s*\/\s*(\d+)/mi);
+            if (!match) return 1 / 8;
+            const num = Number(match[1]);
+            const den = Number(match[2]);
+            if (!num || !den) return 1 / 8;
+            return num / den;
+        }
+
+        function readAbcDurationMultiplier(text, startIndex) {
+            let i = startIndex;
+            let numberText = "";
+
+            while (i < text.length && /[0-9]/.test(text[i])) {
+                numberText += text[i];
+                i++;
+            }
+
+            let multiplier = numberText ? Number(numberText) : 1;
+
+            if (text[i] === "/") {
+                let slashCount = 0;
+                while (text[i] === "/") {
+                    slashCount++;
+                    i++;
+                }
+
+                let denominatorText = "";
+                while (i < text.length && /[0-9]/.test(text[i])) {
+                    denominatorText += text[i];
+                    i++;
+                }
+
+                if (denominatorText) {
+                    multiplier = multiplier / Number(denominatorText);
+                } else {
+                    multiplier = multiplier / Math.pow(2, slashCount);
+                }
+            }
+
+            if (!Number.isFinite(multiplier) || multiplier <= 0) multiplier = 1;
+            return { multiplier, nextIndex: i };
+        }
+
+        function abcNoteToFrequency(midiNumber) {
+            return 440 * Math.pow(2, (midiNumber - 69) / 12);
+        }
+
+        function readAbcNoteToken(text, startIndex) {
+            let i = startIndex;
+            let accidental = 0;
+
+            if (text.slice(i, i + 2) === "^^") {
+                accidental = 2;
+                i += 2;
+            } else if (text.slice(i, i + 2) === "__") {
+                accidental = -2;
+                i += 2;
+            } else if (text[i] === "^") {
+                accidental = 1;
+                i++;
+            } else if (text[i] === "_") {
+                accidental = -1;
+                i++;
+            } else if (text[i] === "=") {
+                accidental = 0;
+                i++;
+            }
+
+            const note = text[i];
+            if (!/[A-Ga-g]/.test(note || "")) return null;
+            i++;
+
+            const semitoneMap = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+            const isLower = note === note.toLowerCase();
+            let midi = (isLower ? 72 : 60) + semitoneMap[note.toUpperCase()] + accidental;
+
+            while (i < text.length && (text[i] === "'" || text[i] === ",")) {
+                midi += text[i] === "'" ? 12 : -12;
+                i++;
+            }
+
+            const duration = readAbcDurationMultiplier(text, i);
+            return {
+                freq: abcNoteToFrequency(midi),
+                durationMultiplier: duration.multiplier,
+                nextIndex: duration.nextIndex
+            };
+        }
+
+        function collectAbcVoiceBodies(abc = "") {
+            const voices = new Map();
+            let currentVoice = "default";
+            let inBody = false;
+
+            const addLine = (voice, line) => {
+                const cleanLine = line.trim();
+                if (!cleanLine) return;
+                if (!voices.has(voice)) voices.set(voice, []);
+                voices.get(voice).push(cleanLine);
+            };
+
+            abc.replace(/\r/g, "").split("\n").forEach((rawLine) => {
+                let line = rawLine.trim();
+                if (!line || line.startsWith("%")) return;
+
+                if (/^K:/i.test(line)) {
+                    inBody = true;
+                    return;
+                }
+
+                const inlineVoice = line.match(/^\[V:([^\]]+)\]\s*(.*)$/i);
+                if (inlineVoice) {
+                    inBody = true;
+                    currentVoice = inlineVoice[1].trim() || currentVoice;
+                    addLine(currentVoice, inlineVoice[2] || "");
+                    return;
+                }
+
+                if (/^V:/i.test(line)) {
+                    const voiceMatch = line.match(/^V:\s*([^\s]+)/i);
+                    currentVoice = voiceMatch ? voiceMatch[1] : currentVoice;
+                    return;
+                }
+
+                if (!inBody) return;
+                if (/^[A-Za-z]:/.test(line) || /^%%/.test(line)) return;
+
+                addLine(currentVoice, line);
+            });
+
+            return Array.from(voices.values())
+                .map(lines => lines.join(" "))
+                .filter(Boolean);
+        }
+
+        function parseAbcEventsFromVoice(voiceText, baseUnit) {
+            const cleaned = voiceText
+                .replace(/"[^"]*"/g, " ")
+                .replace(/![^!]*!/g, " ")
+                .replace(/\+[^+]*\+/g, " ");
+
+            const events = [];
+            let i = 0;
+
+            while (i < cleaned.length) {
+                const char = cleaned[i];
+
+                if (/\s/.test(char) || char === "|" || char === ":" || char === "-" || char === "(" || char === ")" || char === ".") {
+                    i++;
+                    continue;
+                }
+
+                if (char === "[") {
+                    const closeIndex = cleaned.indexOf("]", i + 1);
+                    if (closeIndex === -1) {
+                        i++;
+                        continue;
+                    }
+
+                    const content = cleaned.slice(i + 1, closeIndex);
+                    if (/^[A-Za-z]:/.test(content)) {
+                        i = closeIndex + 1;
+                        continue;
+                    }
+
+                    let chordIndex = 0;
+                    const freqs = [];
+                    let internalDuration = 1;
+
+                    while (chordIndex < content.length) {
+                        const noteToken = readAbcNoteToken(content, chordIndex);
+                        if (noteToken) {
+                            freqs.push(noteToken.freq);
+                            internalDuration = Math.max(internalDuration, noteToken.durationMultiplier || 1);
+                            chordIndex = noteToken.nextIndex;
+                        } else {
+                            chordIndex++;
+                        }
+                    }
+
+                    const outsideDuration = readAbcDurationMultiplier(cleaned, closeIndex + 1);
+                    const multiplier = outsideDuration.nextIndex > closeIndex + 1
+                        ? outsideDuration.multiplier
+                        : internalDuration;
+
+                    if (freqs.length) {
+                        events.push({
+                            freqs,
+                            durationBeats: multiplier * (baseUnit / 0.25)
+                        });
+                    }
+
+                    i = outsideDuration.nextIndex;
+                    continue;
+                }
+
+                if (char === "z" || char === "x" || char === "Z") {
+                    const duration = readAbcDurationMultiplier(cleaned, i + 1);
+                    events.push({
+                        freqs: [],
+                        durationBeats: duration.multiplier * (baseUnit / 0.25)
+                    });
+                    i = duration.nextIndex;
+                    continue;
+                }
+
+                const noteToken = readAbcNoteToken(cleaned, i);
+                if (noteToken) {
+                    events.push({
+                        freqs: [noteToken.freq],
+                        durationBeats: noteToken.durationMultiplier * (baseUnit / 0.25)
+                    });
+                    i = noteToken.nextIndex;
+                    continue;
+                }
+
+                i++;
+            }
+
+            return events.filter(event => Number.isFinite(event.durationBeats) && event.durationBeats > 0);
+        }
+
+        function encodeWavFromFloat32(samples, sampleRate) {
+            const bytesPerSample = 2;
+            const blockAlign = bytesPerSample;
+            const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+            const view = new DataView(buffer);
+
+            const writeString = (offset, value) => {
+                for (let i = 0; i < value.length; i++) {
+                    view.setUint8(offset + i, value.charCodeAt(i));
+                }
+            };
+
+            writeString(0, "RIFF");
+            view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+            writeString(8, "WAVE");
+            writeString(12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * blockAlign, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, 16, true);
+            writeString(36, "data");
+            view.setUint32(40, samples.length * bytesPerSample, true);
+
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++, offset += 2) {
+                const s = Math.max(-1, Math.min(1, samples[i]));
+                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+            }
+
+            return new Blob([view], { type: "audio/wav" });
+        }
+
+        function countAbcVoicesForExport(abc = "") {
+            const ids = new Set();
+
+            abc.replace(/\r/g, "").split("\n").forEach((line) => {
+                const defMatch = line.match(/^V:\s*([^\s]+)/i);
+                if (defMatch) ids.add(defMatch[1]);
+
+                const inlineMatches = line.matchAll(/\[V:([^\]\s]+)[^\]]*\]/gi);
+                for (const match of inlineMatches) {
+                    ids.add(match[1]);
+                }
+            });
+
+            return Math.max(1, ids.size || collectAbcVoiceBodies(abc).length || 1);
+        }
+
+        function audioBufferToWavBlob(audioBuffer) {
+            if (!audioBuffer || typeof audioBuffer.getChannelData !== "function") {
+                return null;
+            }
+
+            const srcChannelCount = Math.max(1, Math.min(audioBuffer.numberOfChannels || 1, 32));
+            const outChannelCount = 2; // スマホ互換性を優先し、必ず2chステレオにする
+            const sampleRate = Math.max(8000, Math.round(audioBuffer.sampleRate || 44100));
+            const length = Math.max(0, audioBuffer.length || 0);
+            if (!length) return null;
+
+            const bytesPerSample = 2;
+            const blockAlign = outChannelCount * bytesPerSample;
+            const byteRate = sampleRate * blockAlign;
+            const dataSize = length * blockAlign;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            const writeString = (offset, value) => {
+                for (let i = 0; i < value.length; i++) {
+                    view.setUint8(offset + i, value.charCodeAt(i));
+                }
+            };
+
+            writeString(0, "RIFF");
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(8, "WAVE");
+            writeString(12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, outChannelCount, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, 16, true); // 16bit
+            writeString(36, "data");
+            view.setUint32(40, dataSize, true);
+
+            const channels = [];
+            for (let ch = 0; ch < srcChannelCount; ch++) {
+                channels.push(audioBuffer.getChannelData(ch));
+            }
+
+            const toInt16 = (sample) => {
+                const s = Math.max(-1, Math.min(1, Number.isFinite(sample) ? sample : 0));
+                return s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
+            };
+
+            let offset = 44;
+            for (let i = 0; i < length; i++) {
+                let left = 0;
+                let right = 0;
+
+                if (srcChannelCount === 1) {
+                    left = right = channels[0][i] || 0;
+                } else if (srcChannelCount === 2) {
+                    left = channels[0][i] || 0;
+                    right = channels[1][i] || 0;
+                } else {
+                    let leftCount = 0;
+                    let rightCount = 0;
+                    for (let ch = 0; ch < srcChannelCount; ch++) {
+                        const value = channels[ch][i] || 0;
+                        if (ch % 2 === 0) {
+                            left += value;
+                            leftCount++;
+                        } else {
+                            right += value;
+                            rightCount++;
+                        }
+                    }
+                    left = leftCount ? left / leftCount : 0;
+                    right = rightCount ? right / rightCount : left;
+                }
+
+                view.setInt16(offset, toInt16(left), true);
+                offset += 2;
+                view.setInt16(offset, toInt16(right), true);
+                offset += 2;
+            }
+
+            return new Blob([buffer], { type: "audio/wav" });
+        }
+
+        async function blobLooksLikeRiffWave(blob) {
+            if (!(blob instanceof Blob) || blob.size < 44) return false;
+            try {
+                const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+                const text = Array.from(header).map(v => String.fromCharCode(v)).join("");
+                return text.slice(0, 4) === "RIFF" && text.slice(8, 12) === "WAVE";
+            } catch (e) {
+                console.warn("WAV Header Check Error:", e);
+                return false;
+            }
+        }
+
+        async function normalizeAbcjsWavDownloadToBlob(source) {
+            if (!source) return null;
+
+            let blob = null;
+
+            if (source instanceof Blob) {
+                blob = source;
+            } else if (source instanceof ArrayBuffer) {
+                blob = new Blob([source], { type: "audio/wav" });
+            } else if (ArrayBuffer.isView(source)) {
+                const sliced = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+                blob = new Blob([sliced], { type: "audio/wav" });
+            } else if (typeof source === "string") {
+                if (source.startsWith("data:")) {
+                    const response = await fetch(source);
+                    blob = await response.blob();
+                } else {
+                    // バイナリ文字列として返る実装向け。通常はここには入らない。
+                    const bytes = new Uint8Array(source.length);
+                    for (let i = 0; i < source.length; i++) bytes[i] = source.charCodeAt(i) & 0xff;
+                    blob = new Blob([bytes], { type: "audio/wav" });
+                }
+            } else if (source.buffer instanceof ArrayBuffer) {
+                blob = new Blob([source.buffer], { type: "audio/wav" });
+            }
+
+            if (!blob) return null;
+            return await blobLooksLikeRiffWave(blob) ? new Blob([blob], { type: "audio/wav" }) : null;
+        }
+
+        async function synthesizeAbcToWavBlob(abc = "") {
+            if (!window.ABCJS || !ABCJS.synth || !ABCJS.synth.CreateSynth) {
+                throw new Error("ABCJSの音源機能が利用できません。");
+            }
+
+            const scratch = document.createElement("div");
+            scratch.style.position = "fixed";
+            scratch.style.left = "-99999px";
+            scratch.style.top = "0";
+            scratch.style.width = "1px";
+            scratch.style.height = "1px";
+            scratch.style.overflow = "hidden";
+            scratch.setAttribute("aria-hidden", "true");
+            document.body.appendChild(scratch);
+
+            let exportSynth = null;
+
+            try {
+                const visualObj = ABCJS.renderAbc(scratch, abc, { responsive: "resize" })[0];
+                if (!visualObj) throw new Error("ABCの楽譜レンダリングに失敗しました。");
+
+                exportSynth = new ABCJS.synth.CreateSynth();
+                await exportSynth.init({ visualObj });
+                const primed = await exportSynth.prime();
+
+                let wavBlob = null;
+
+                // スマホで再生できない主因を避けるため、download()の生WAVよりも
+                // AudioBufferを取得して、16bit PCM / 2ch の標準WAVへ作り直す。
+                if (typeof exportSynth.getAudioBuffer === "function") {
+                    wavBlob = audioBufferToWavBlob(exportSynth.getAudioBuffer());
+                }
+
+                // getAudioBufferが使えない場合のみ、ABCJSのdownload()をフォールバックで使う。
+                // ただしRIFF/WAVEヘッダが確認できるものだけ採用する。
+                if (!wavBlob && typeof exportSynth.download === "function") {
+                    wavBlob = await normalizeAbcjsWavDownloadToBlob(exportSynth.download());
+                }
+
+                if (!wavBlob || !(await blobLooksLikeRiffWave(wavBlob))) {
+                    throw new Error("スマホ互換WAVの生成に失敗しました。RIFF/WAVEヘッダを確認できません。");
+                }
+
+                return {
+                    blob: wavBlob,
+                    durationSec: primed && primed.duration ? primed.duration : (playbackDurationSec || 0),
+                    voiceCount: countAbcVoicesForExport(abc)
+                };
+            } finally {
+                try {
+                    if (exportSynth && typeof exportSynth.stop === "function") {
+                        exportSynth.stop();
+                    }
+                } catch (e) {
+                    console.warn("Export Synth Stop Error:", e);
+                }
+                scratch.remove();
+            }
+        }
+
+        function showAudioExportLink(blob, filename, durationSec, voiceCount) {
+            const status = document.getElementById("audio-export-status");
+            if (!status) return;
+
+            if (window.lastSonicForgeAudioUrl) {
+                try {
+                    URL.revokeObjectURL(window.lastSonicForgeAudioUrl);
+                } catch (e) {
+                    console.warn("Audio URL Revoke Error:", e);
+                }
+            }
+
+            const url = URL.createObjectURL(blob);
+            window.lastSonicForgeAudioUrl = url;
+            status.innerHTML = "";
+
+            const audio = document.createElement("audio");
+            audio.controls = true;
+            audio.preload = "metadata";
+            audio.src = url;
+            audio.className = "w-full mt-2";
+            status.appendChild(audio);
+
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = filename;
+            link.className = "inline-flex justify-center items-center gap-1 mt-2 text-sky-300 underline underline-offset-4";
+            link.textContent = `${filename} を保存`;
+            status.appendChild(link);
+
+            const detail = document.createElement("div");
+            detail.className = "mt-1 text-slate-500";
+            detail.textContent = `スマホ互換WAV / 16bit PCM / 2ch / ${formatPlaybackTime(durationSec)} / ${voiceCount}パート相当`;
+            status.appendChild(detail);
+        }
+
+        async function exportCurrentSongAsWav() {
+            if (!currentABC) {
+                alert("書き出す楽曲データがありません。先に曲(JSON)を読み込んでください。");
+                return;
+            }
+
+            const btn = document.getElementById("btn-export-audio");
+            const status = document.getElementById("audio-export-status");
+            const originalHtml = btn ? btn.innerHTML : "";
+
+            try {
+                if (typeof stopAllMusic === "function") stopAllMusic();
+
+                if (btn) {
+                    btn.disabled = true;
+                    btn.classList.add("opacity-60");
+                    btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 音声ファイル生成中...';
+                    safeCreateIcons();
+                }
+                if (status) status.innerText = "ABCJSの再生音源（SoundFont）から、スマホ互換の16bit PCM / 2ch WAVを生成しています。曲が長い場合や初回のSoundFont読み込み時は少し時間がかかります。";
+
+                await new Promise(resolve => setTimeout(resolve, 40));
+
+                const title = document.getElementById("current-title")?.innerText || "sonicforge-song";
+                const filename = `${sanitizeAudioFileName(title)}.wav`;
+                const result = await synthesizeAbcToWavBlob(currentABC);
+                const file = typeof File !== "undefined" ? new File([result.blob], filename, { type: "audio/wav" }) : null;
+
+                showAudioExportLink(result.blob, filename, result.durationSec, result.voiceCount);
+
+                if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({
+                            files: [file],
+                            title: title,
+                            text: "SonicForgeで生成した楽曲WAVです。"
+                        });
+                    } catch (shareError) {
+                        if (shareError && shareError.name !== "AbortError") {
+                            console.warn("Share Error:", shareError);
+                        }
+                    }
+                } else {
+                    const tempUrl = URL.createObjectURL(result.blob);
+                    const a = document.createElement("a");
+                    a.href = tempUrl;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(tempUrl), 5000);
+                }
+            } catch (e) {
+                console.error("Audio Export Error:", e);
+                alert("音声ファイルの生成に失敗しました。SoundFontの読み込み失敗、ABC記法の複雑さ、ブラウザのメモリ不足、またはWAV変換時の端末制限が原因の可能性があります。");
+                if (status) status.innerText = "生成に失敗しました。通信状態を確認し、短めの曲またはパート数を減らした曲で再度お試しください。";
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.classList.remove("opacity-60");
+                    btn.innerHTML = originalHtml || '<i data-lucide="file-audio" class="w-4 h-4"></i> 再生音色のままWAVを書き出す';
+                    safeCreateIcons();
+                }
+            }
         }
 
         // --- ユーティリティ ---
