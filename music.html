@@ -247,6 +247,16 @@
                     </div>
                 </div>
 
+                <div class="mt-3">
+                    <button onclick="toggleInstrumentPanel()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2 text-slate-300 border border-slate-700 shadow-sm">
+                        <i data-lucide="sliders" class="w-4 h-4"></i> 楽器のチェック・チューニング
+                    </button>
+                    <div id="instrument-panel" class="hidden mt-2 p-3 bg-slate-900/80 rounded-xl border border-slate-700">
+                        <div id="instrument-list" class="grid grid-cols-2 gap-2 text-xs">
+                        </div>
+                    </div>
+                </div>
+
                 <div class="mt-5 space-y-2">
                     <div id="playback-seek-track" class="seek-track w-full h-3 bg-slate-700 rounded-full overflow-hidden" role="slider" aria-label="再生位置" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" tabindex="0">
                         <div id="playback-progress" class="h-full bg-sky-400 rounded-full" style="width: 0%; transition: width 0.1s linear;"></div>
@@ -352,6 +362,8 @@
         let visualizerTempoBpm = 120;
         let visualizerStartedAt = 0;
         let isRepeatEnabled = false;
+        let activeVoices = [];
+        let availableVoices = [];
 
         const dbPromise = new Promise((resolve) => {
             try {
@@ -1085,6 +1097,151 @@ V:8 nm="Timpani" snm="Timp"
             lucide.createIcons();
         }
 
+        function parseVoicesFromABC(abc) {
+            const voices = [];
+            const lines = abc.split('\n');
+            lines.forEach(line => {
+                const match = line.match(/^V:\s*(\S+)/);
+                if (match) {
+                    const id = match[1];
+                    if (!voices.find(v => v.id === id)) {
+                        let name = `パート ${id}`;
+                        const nameMatch = line.match(/(?:nm|name)="([^"]+)"/);
+                        if (nameMatch) {
+                            name = nameMatch[1];
+                        }
+                        voices.push({ id, name });
+                    }
+                }
+            });
+            return voices;
+        }
+
+        function initInstrumentPanel() {
+            availableVoices = parseVoicesFromABC(currentABC);
+            activeVoices = availableVoices.map(v => v.id);
+            renderInstrumentList();
+            const panel = document.getElementById('instrument-panel');
+            if (panel && !panel.classList.contains('hidden')) {
+                panel.classList.add('hidden');
+            }
+        }
+
+        function toggleInstrumentPanel() {
+            const panel = document.getElementById('instrument-panel');
+            if (panel) panel.classList.toggle('hidden');
+        }
+
+        function renderInstrumentList() {
+            const list = document.getElementById('instrument-list');
+            if (!list) return;
+            if (availableVoices.length === 0) {
+                list.innerHTML = '<div class="col-span-2 text-slate-500 text-center py-2">楽器情報が取得できません</div>';
+                return;
+            }
+            list.innerHTML = availableVoices.map(v => {
+                const isChecked = activeVoices.includes(v.id) ? 'checked' : '';
+                return `
+                    <label class="flex items-center gap-2 cursor-pointer bg-slate-800 p-2 rounded-lg hover:bg-slate-700 transition border border-slate-700">
+                        <input type="checkbox" value="${v.id}" ${isChecked} onchange="onInstrumentChange(this)" class="w-4 h-4 accent-sky-400">
+                        <span class="truncate text-slate-300">${v.name}</span>
+                    </label>
+                `;
+            }).join('');
+        }
+
+        function onInstrumentChange(checkbox) {
+            const vId = checkbox.value;
+            if (checkbox.checked) {
+                if (!activeVoices.includes(vId)) activeVoices.push(vId);
+            } else {
+                activeVoices = activeVoices.filter(id => id !== vId);
+            }
+            applyInstrumentTuning();
+        }
+
+        function generateTunedABC() {
+            const lines = currentABC.split('\n');
+            const newLines = [];
+            let currentVoice = null;
+            
+            lines.forEach(line => {
+                const processedLine = line;
+
+                if (processedLine.trim() === '') {
+                    newLines.push(processedLine);
+                    return;
+                }
+
+                // 1. パート宣言 (V:1 nm="...")
+                const vMatch = processedLine.match(/^V:\s*(\S+)/);
+                if (vMatch) {
+                    currentVoice = vMatch[1];
+                    newLines.push(processedLine);
+                    return;
+                }
+
+                // 2. インラインパート宣言 ([V:1] C D E)
+                const inlineVMatch = processedLine.match(/^\s*\[V:([^\]\s]+)\]/);
+                if (inlineVMatch) {
+                    currentVoice = inlineVMatch[1];
+                    if (!activeVoices.includes(currentVoice)) {
+                        newLines.push('% (muted) ' + processedLine);
+                        return;
+                    }
+                }
+
+                // 3. ヘッダやディレクティブ、コメント行
+                if (processedLine.match(/^[A-Za-z]:/) || processedLine.startsWith('%%') || processedLine.startsWith('%')) {
+                    newLines.push(processedLine);
+                    return;
+                }
+
+                // 4. 音符行 (メロディデータ)
+                if (currentVoice && !activeVoices.includes(currentVoice)) {
+                    newLines.push('% (muted) ' + processedLine);
+                } else {
+                    newLines.push(processedLine);
+                }
+            });
+            
+            return newLines.join('\n');
+        }
+
+        async function applyInstrumentTuning() {
+            const wasPlaying = window.isPlaying;
+            const currentPos = playbackPositionSec;
+            const tunedABC = generateTunedABC();
+            const scratch = document.createElement('div');
+            const visualObjForAudio = ABCJS.renderAbc(scratch, tunedABC)[0];
+
+            if (window.currentMidi) {
+                window.currentMidi.stop();
+                clearPlaybackTimers();
+            }
+
+            try {
+                const midi = new ABCJS.synth.CreateSynth();
+                await midi.init({ visualObj: visualObjForAudio });
+                const primed = await midi.prime();
+                if (primed && primed.duration) {
+                    playbackDurationSec = primed.duration;
+                }
+                window.currentMidi = midi;
+
+                if (wasPlaying) {
+                    if (typeof window.currentMidi.seek === 'function') {
+                        window.currentMidi.seek(currentPos, "seconds");
+                    }
+                    await window.currentMidi.start();
+                    window.isPlaying = true;
+                    startPlaybackTracking(currentPos);
+                }
+            } catch (e) {
+                console.error("Tuning Apply Error:", e);
+            }
+        }
+
         function startPlaybackTracking(startSec = playbackPositionSec) {
             clearPlaybackTimers();
             const safeStartSec = clampPlaybackTime(startSec);
@@ -1125,6 +1282,8 @@ V:8 nm="Timpani" snm="Timp"
             updatePlayerRatingUI();
             resetPlaybackBar();
             setVisualizerIdle();
+            
+            initInstrumentPanel();
             
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
             
