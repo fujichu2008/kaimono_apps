@@ -532,7 +532,7 @@
             <button class="tool-btn warning" onclick="openPromptModal()">
                 <span>🤖 AI指示</span>
             </button>
-            <button class="tool-btn" onclick="openFixModal()">
+                        <button class="tool-btn" onclick="handleFixButtonClick(event)" onpointerdown="startFixLongPress(event)" onpointerup="cancelFixLongPress()" onpointerleave="cancelFixLongPress()" onpointercancel="cancelFixLongPress()" oncontextmenu="event.preventDefault()">
                 <span>🛠️ 修正</span>
             </button>
             <button class="tool-btn" onclick="undo()" title="元に戻す" style="min-width: 40px;">
@@ -647,8 +647,25 @@
                     <button onclick="document.getElementById('ai-instruction').value = ''" style="background: rgba(0,0,0,0.6); color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 2px 6px; font-size: 10px; cursor: pointer;">✕</button>
                 </div>
             </div>
-                        <textarea id="ai-instruction" placeholder="例: ボタンの色を赤にして、配置を中央寄せにする..." style="height:160px;"></textarea>
-           
+                                            <textarea id="ai-instruction" placeholder="例: ボタンの色を赤にして、配置を中央寄せにする..." style="height:160px;"></textarea>
+
+            <div style="margin: 10px 0 12px 0; padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(255,255,255,0.04);">
+                <p class="section-desc" style="margin-bottom:8px;">コード添付オプション</p>
+                <label style="display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:6px; cursor:pointer;">
+                    <input type="checkbox" id="prompt-code-attach" checked onclick="setPromptCodeAttachMode('attach')" style="width:auto; margin:0;"> コードを添付する
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:6px; cursor:pointer;">
+                    <input type="checkbox" id="prompt-code-none" onclick="setPromptCodeAttachMode('none')" style="width:auto; margin:0;"> コードを添付しない
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:8px; cursor:pointer;">
+                    <input type="checkbox" id="prompt-code-split" onclick="setPromptCodeAttachMode('split')" style="width:auto; margin:0;"> 分割してコードを予めAIに覚えさせる
+                </label>
+                <div id="prompt-split-panel" style="display:none; padding:8px; border-radius:6px; background: rgba(0,0,0,0.18);">
+                    <div id="prompt-split-info" class="section-desc" style="margin-bottom:6px;">コードを20万字ごとに分割します。</div>
+                    <div id="prompt-split-buttons" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
+                </div>
+            </div>
+
                         <h3 style="margin-top:15px;">出力形式を選択してコピー</h3>
             <div class="modal-buttons">
                 <button class="btn-action" onclick="copyPrompt('full')">① フル</button>
@@ -664,9 +681,14 @@
     <div id="fix-modal" class="modal-overlay">
         <div class="modal">
             <h2>修正ツール</h2>
-            <div class="modal-tabs">
+                        <div class="modal-tabs">
                 <button class="modal-tab-btn active" onclick="switchFixTab('auto')">① オート(JSON)</button>
                 <button class="modal-tab-btn" onclick="switchFixTab('manual')">② 手動修正</button>
+            </div>
+                        <div id="fix-error" style="display:none; margin: -4px 0 12px 0; padding: 8px 10px; border: 1px solid var(--danger-color); border-radius: 6px; background: rgba(244,67,54,0.12); color: #ffb3b3; font-size: 12px; line-height: 1.5; white-space: pre-wrap;"></div>
+            <div id="fix-recovery" style="display:none; margin: -4px 0 12px 0; padding: 10px; border: 1px solid var(--warning-color); border-radius: 6px; background: rgba(255,152,0,0.10); color: #ffd59a; font-size: 12px; line-height: 1.5;">
+                <div id="fix-recovery-text" style="margin-bottom: 8px; white-space: pre-wrap;"></div>
+                <button class="btn-action" onclick="copyFixRecoveryPrompt()" style="width:100%; padding:8px; color:#fff; border-color: var(--warning-color);">🔁 リカバリープロンプトをコピー</button>
             </div>
 
             <div id="tab-auto" class="tab-content active">
@@ -934,11 +956,129 @@
             document.body.removeChild(textArea);
         }
 
-        function openPromptModal() {
+                        function openPromptModal() {
             document.getElementById('prompt-modal').style.display = 'flex';
+            setPromptCodeAttachMode(getPromptCodeAttachMode(), { silent: true });
+            updatePromptSplitButtons();
         }
+
+                let fixLongPressTimer = null;
+        let fixLongPressed = false;
+        let lastFailedAutoFixes = [];
+        let lastAutoFixSnapshotCode = "";
+
         function openFixModal() {
+            clearFixError();
+            switchFixTab('auto');
             document.getElementById('fix-modal').style.display = 'flex';
+        }
+
+        function handleFixButtonClick(event) {
+            if (fixLongPressed) {
+                fixLongPressed = false;
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            openFixModal();
+        }
+
+        function startFixLongPress(event) {
+            cancelFixLongPress();
+            fixLongPressed = false;
+            fixLongPressTimer = setTimeout(() => {
+                fixLongPressed = true;
+                showToast("クリップボードのJSONを自動適用します...");
+                autoApplyFixFromClipboard();
+            }, 650);
+        }
+
+        function cancelFixLongPress() {
+            if (fixLongPressTimer) {
+                clearTimeout(fixLongPressTimer);
+                fixLongPressTimer = null;
+            }
+        }
+
+        async function autoApplyFixFromClipboard() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (!text || !text.trim()) {
+                    openFixModal();
+                    displayFixError("クリップボードが空です。JSONをコピーしてから、修正ボタンを長押ししてください。");
+                    return;
+                }
+                document.getElementById('json-input').value = text;
+                const ok = applyAutoFix({ fromLongPress: true });
+                if (!ok) {
+                    document.getElementById('fix-modal').style.display = 'flex';
+                }
+            } catch (err) {
+                openFixModal();
+                displayFixError("クリップボードの読み取りに失敗しました。ブラウザの権限を確認するか、通常の修正画面から貼り付けてください。");
+            }
+        }
+
+                function displayFixError(message) {
+            const box = document.getElementById('fix-error');
+            if (!box) return;
+            box.textContent = "⚠️ " + message;
+            box.style.display = 'block';
+        }
+
+        function displayFixRecovery(failedFixes, appliedCount) {
+            lastFailedAutoFixes = Array.isArray(failedFixes) ? failedFixes : [];
+            lastAutoFixSnapshotCode = editor.getValue();
+
+            const box = document.getElementById('fix-recovery');
+            const text = document.getElementById('fix-recovery-text');
+            if (!box || !text) return;
+
+            text.textContent = `${appliedCount}箇所は適用済みです。\n未適用の${lastFailedAutoFixes.length}件だけ、現在のコードから一意に特定できるsearch/replace JSONとしてAIに出力し直してもらえます。`;
+            box.style.display = 'block';
+        }
+
+        function copyFixRecoveryPrompt() {
+            if (!lastFailedAutoFixes.length) {
+                showToast("再依頼する未適用JSONがありません");
+                return;
+            }
+
+            const failedJson = JSON.stringify(lastFailedAutoFixes, null, 2);
+            const prompt = `以下のAppStudio自動修正JSONのうち、一部のsearch/beforeが現在のコード内で見つからず未適用でした。\n\n[依頼]\n1. 未適用分だけを対象に、現在のコードから一意に特定できるよう、searchには前後の実コードを十分に含めて出力し直してください。\n2. searchには、現在のコード内に実在する文字列を、コメント・空白・インデント・改行も含めて完全一致で入れてください。\n3. replaceには、修正後のコードを省略せず入れてください。\n4. 出力はJSON配列のみ。Markdownや解説文は不要です。\n5. すでに適用済みの修正は再出力しないでください。\n\n[未適用だったJSON]\n${failedJson}\n\n[現在のコード（適用できた修正は反映済み）]\n\`\`\`html\n${lastAutoFixSnapshotCode}\n\`\`\``;
+
+            const onCopy = () => showToast("リカバリープロンプトをコピーしました");
+
+            navigator.clipboard.writeText(prompt).then(onCopy).catch(() => {
+                const textArea = document.createElement("textarea");
+                textArea.value = prompt;
+                textArea.style.position = "fixed";
+                textArea.style.left = "-9999px";
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    onCopy();
+                } catch (e) {
+                    alert("コピーに失敗しました。");
+                }
+                document.body.removeChild(textArea);
+            });
+        }
+
+        function clearFixError() {
+            const box = document.getElementById('fix-error');
+            if (box) {
+                box.textContent = "";
+                box.style.display = 'none';
+            }
+
+            const recovery = document.getElementById('fix-recovery');
+            const recoveryText = document.getElementById('fix-recovery-text');
+            if (recovery) recovery.style.display = 'none';
+            if (recoveryText) recoveryText.textContent = "";
+            lastFailedAutoFixes = [];
+            lastAutoFixSnapshotCode = "";
         }
 
         function switchFixTab(tab) {
@@ -951,22 +1091,172 @@
             document.getElementById(`tab-${tab}`).classList.add('active');
         }
 
-                                                function copyPrompt(type) {
+                                                        const PROMPT_CODE_CHUNK_SIZE = 200000;
+
+        function getPromptCodeAttachMode() {
+            if (document.getElementById('prompt-code-split')?.checked) return 'split';
+            if (document.getElementById('prompt-code-none')?.checked) return 'none';
+            return 'attach';
+        }
+
+        function setPromptCodeAttachMode(mode, options = {}) {
+            const attach = document.getElementById('prompt-code-attach');
+            const none = document.getElementById('prompt-code-none');
+            const split = document.getElementById('prompt-code-split');
+            if (!attach || !none || !split) return;
+
+            attach.checked = mode === 'attach';
+            none.checked = mode === 'none';
+            split.checked = mode === 'split';
+
+            const panel = document.getElementById('prompt-split-panel');
+            if (panel) panel.style.display = mode === 'split' ? 'block' : 'none';
+            if (mode === 'split') updatePromptSplitButtons();
+        }
+
+        function getPromptCodeChunks() {
+            const code = editor.getValue();
+            const chunks = [];
+            for (let i = 0; i < code.length; i += PROMPT_CODE_CHUNK_SIZE) {
+                chunks.push(code.slice(i, i + PROMPT_CODE_CHUNK_SIZE));
+            }
+            return chunks.length ? chunks : [""];
+        }
+
+        function updatePromptSplitButtons() {
+            const panel = document.getElementById('prompt-split-panel');
+            const info = document.getElementById('prompt-split-info');
+            const wrap = document.getElementById('prompt-split-buttons');
+            if (!panel || !info || !wrap) return;
+
+            if (getPromptCodeAttachMode() !== 'split') {
+                panel.style.display = 'none';
+                return;
+            }
+
+            panel.style.display = 'block';
+            const chunks = getPromptCodeChunks();
+            const codeLength = editor.getValue().length;
+            info.textContent = `コード ${codeLength.toLocaleString()}文字を20万字ごとに ${chunks.length} 分割します。1から順番にコピーしてAIへ送ってください。`;
+            wrap.innerHTML = "";
+
+            chunks.forEach((chunk, index) => {
+                const btn = document.createElement('button');
+                btn.className = 'btn-action';
+                btn.textContent = String(index + 1);
+                btn.style.cssText = 'flex:0 0 auto; min-width:42px; padding:7px 10px; font-weight:bold;';
+                btn.onclick = () => copyPromptCodeChunk(index);
+                wrap.appendChild(btn);
+            });
+        }
+
+        function writeTextWithFallback(text, successMessage) {
+            const onCopy = () => showToast(successMessage || "コピーしました");
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(onCopy).catch(() => {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    textArea.style.position = "fixed";
+                    textArea.style.left = "-9999px";
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    try {
+                        document.execCommand('copy');
+                        onCopy();
+                    } catch (e) {
+                        alert("コピーに失敗しました。権限を確認してください。");
+                    }
+                    document.body.removeChild(textArea);
+                });
+                return;
+            }
+
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-9999px";
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                onCopy();
+            } catch (e) {
+                alert("コピーに失敗しました。権限を確認してください。");
+            }
+            document.body.removeChild(textArea);
+        }
+
+        function copyPromptCodeChunk(index) {
+            const chunks = getPromptCodeChunks();
+            const total = chunks.length;
+            const chunk = chunks[index] || "";
+            const isFirst = index === 0;
+            const isLast = index === total - 1;
+
+            const prompt = `${isFirst
+                ? `これから対象コードを${total}回に分割して送ります。あなたは各分割を順番に記憶し、最後の修正指示が来るまで修正案やJSONを出力せず、「第${index + 1}分割を記憶しました」とだけ返答してください。`
+                : `前回の続きです。対象コードの第${index + 1}分割を記憶してください。まだ最後の修正指示が来るまでは、修正案やJSONを出力せず、「第${index + 1}分割を記憶しました」とだけ返答してください。`
+            }
+
+[分割情報]
+第${index + 1}分割 / 全${total}分割
+${isLast ? "※これは最後の分割です。このあと別メッセージで修正指示を送ります。" : "※続きの分割があります。"}
+
+[対象コード 第${index + 1}分割]
+\`\`\`html
+${chunk}
+\`\`\``;
+
+            writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`);
+        }
+
+        function buildPromptCodeSection(currentCode, mode) {
+            if (mode === 'none') {
+                return `
+
+[対象コード]
+このプロンプトには対象コードを添付しません。直前に共有済みのコード、または別途提示済みのコードを前提にしてください。`;
+            }
+
+            if (mode === 'split') {
+                return `
+
+[対象コード]
+対象コードは、この直前までに20万字ごとの分割プロンプトでAIに記憶させています。このプロンプトには全文を添付しません。`;
+            }
+
+            return `
+
+対象コード:
+\`\`\`html
+${currentCode}
+\`\`\``;
+        }
+
+        function buildSplitModePrefix(mode) {
+            if (mode !== 'split') return "";
+            return `あなたは、直前までの会話で分割して渡された対象コードをすでに記憶しています。もし直前にJSON修正コードが提示されている場合は、そのJSON修正を反映した最新版コードを記憶したうえで、以下の指令を実行してください。\n\n`;
+        }
+
+        function copyPrompt(type) {
             let prompt = "";
             const currentCode = editor.getValue();
+            const codeAttachMode = getPromptCodeAttachMode();
+            const targetCodeSection = buildPromptCodeSection(currentCode, codeAttachMode);
+            const splitModePrefix = buildSplitModePrefix(codeAttachMode);
             const instructionInput = document.getElementById('ai-instruction');
             const instruction = instructionInput.value;
             const instructionText = instruction ? `\n具体的な指示:\n${instruction}\n` : "";
-            
+
             if (type === 'full') {
                 // フルコード
-                prompt = `以下のコードを見直し、修正・改善した完全なフルコードを出力してください。${instructionText}\n\n出力形式:\n1. 冒頭に、修正箇所・制約条件・改善提案を簡潔なコメントで記述。\n2. その後、修正済みの完全なフルコード。\n\n対象コード:\n\`\`\`html\n${currentCode}\n\`\`\``;
+                prompt = `${splitModePrefix}以下のコードを見直し、修正・改善した完全なフルコードを出力してください。${instructionText}\n\n出力形式:\n1. 冒頭に、修正箇所・制約条件・改善提案を簡潔なコメントで記述。\n2. その後、修正済みの完全なフルコード。${targetCodeSection}`;
             } else if (type === 'manual') {
                 // 手動修正 (Before/After表示)
-                prompt = `以下のコードの修正をお願いします。${instructionText}\n\n出力形式:\n修正対象の箇所について、修正前(Before)と修正後(After)のコードブロックを対にして出力してください。\n修正前のコードは、検索して特定できるように、省略せず正確に記述してください。\n\n出力例:\n### 修正箇所1\n**修正前(Before)**\n\`\`\`html\n<div class="old">...</div>\n\`\`\`\n**修正後(After)**\n\`\`\`html\n<div class="new">...</div>\n\`\`\`\n\n対象コード:\n\`\`\`html\n${currentCode}\n\`\`\``;
+                prompt = `${splitModePrefix}以下のコードの修正をお願いします。${instructionText}\n\n出力形式:\n修正対象の箇所について、修正前(Before)と修正後(After)のコードブロックを対にして出力してください。\n修正前のコードは、検索して特定できるように、省略せず正確に記述してください。\n\n出力例:\n### 修正箇所1\n**修正前(Before)**\n\`\`\`html\n<div class="old">...</div>\n\`\`\`\n**修正後(After)**\n\`\`\`html\n<div class="new">...</div>\n\`\`\`${targetCodeSection}`;
             } else if (type === 'auto' || type === 'json') {
                 // オート修正 (JSON)
-                prompt = `以下のコードの修正をお願いします。${instructionText}\n\n出力形式:\n1. まず、修正方針・制約・改善案を簡潔に解説してください。\n2. 次に、コード置換用のJSONデータを **Markdownコードブロック(\`\`\`json ... \`\`\`)** で出力してください。\n\nJSON形式:\n[\n  {"before": "修正前の置換対象コード部分(一意に特定できる長さ)", "after": "修正後のコード"}\n]\n\n対象コード:\n\`\`\`html\n${currentCode}\n\`\`\``;
+                prompt = `${splitModePrefix}以下のコードの修正をお願いします。${instructionText}\n\n出力形式:\n1. まず、修正方針・制約・改善案を簡潔に解説してください。\n2. 次に、コード置換用のJSONデータを **Markdownコードブロック(\`\`\`json ... \`\`\`)** で出力してください。\n\nJSON形式:\n[\n  {"before": "修正前の置換対象コード部分(一意に特定できる長さ)", "after": "修正後のコード"}\n]\n\n【厳守事項】\n・置換対象は現在のコードから一意に特定できる長さで抽出してください。\n・before/searchには、コメント・空白・インデント・改行も含めて現在のコードの該当箇所を完全一致で入れてください。\n・省略記法や「既存のコード」などの要約を入れないでください。${targetCodeSection}`;
             }
 
             const onCopy = () => {
@@ -994,6 +1284,8 @@
             });
         }
 
+
+
         async function pasteToJsonInput() {
             try {
                 const text = await navigator.clipboard.readText();
@@ -1004,17 +1296,30 @@
             }
         }
 
-        function clearJsonInput() {
+                function clearJsonInput() {
             document.getElementById('json-input').value = "";
+            clearFixError();
         }
 
-                                        function applyAutoFix() {
+                function applyAutoFix(options = {}) {
+            const fromLongPress = options.fromLongPress === true;
+            clearFixError();
+
             let jsonStr = document.getElementById('json-input').value;
-            if (!jsonStr.trim()) return showToast("JSONが空です");
+            if (!jsonStr.trim()) {
+                const msg = "JSONが空です";
+                if (fromLongPress) {
+                    openFixModal();
+                    displayFixError(msg);
+                } else {
+                    showToast(msg);
+                }
+                return false;
+            }
 
             const firstOpen = jsonStr.indexOf('[');
             const lastClose = jsonStr.lastIndexOf(']');
-            
+
             if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
                 jsonStr = jsonStr.substring(firstOpen, lastClose + 1);
             } else {
@@ -1025,8 +1330,9 @@
                 const fixes = JSON.parse(jsonStr);
                 let code = editor.getValue();
                 code = code.replace(/\r\n/g, '\n'); // 改行正規化
-                
+
                 let count = 0;
+                const failedFixes = [];
 
                 if (!Array.isArray(fixes)) throw new Error("配列ではありません");
 
@@ -1034,12 +1340,28 @@
                 const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
                 const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 
-                for (const fix of fixes) {
-                    if (!fix.before || !fix.after) continue;
+                const countOccurrences = (base, needle) => {
+                    if (!needle) return 0;
+                    let index = 0;
+                    let found = 0;
+                    while ((index = base.indexOf(needle, index)) !== -1) {
+                        found++;
+                        index += needle.length;
+                    }
+                    return found;
+                };
 
-                    let target = fix.before.replace(/\r\n/g, '\n');
-                    let replacement = fix.after.replace(/\r\n/g, '\n');
-                    
+                for (const fix of fixes) {
+                    const beforeText = fix.before !== undefined ? fix.before : fix.search;
+                    const afterText = fix.after !== undefined ? fix.after : fix.replace;
+                    if (!beforeText || afterText === undefined) {
+                        failedFixes.push({ reason: "before/search または after/replace が不足", fix });
+                        continue;
+                    }
+
+                    let target = String(beforeText).replace(/\r\n/g, '\n');
+                    let replacement = String(afterText).replace(/\r\n/g, '\n');
+
                     // 候補生成 (同値表現の展開)
                     const variants = new Set([
                         target,
@@ -1053,41 +1375,41 @@
 
                     // 1. 完全一致スキャン
                     for (const cand of variants) {
-                        if (code.includes(cand)) {
-                            const occurrences = code.split(cand).length - 1;
+                        const occurrences = countOccurrences(code, cand);
+                        if (occurrences > 0) {
                             totalFound += occurrences;
-                            if (occurrences > 0) bestMatch = cand;
+                            if (!bestMatch) bestMatch = cand;
                         }
                     }
 
                     // 2. ヒットなしならTrim一致スキャン
                     if (totalFound === 0) {
-                         const variantsTrim = new Set();
-                         for (const v of variants) variantsTrim.add(v.trim());
-                         
-                         for (const cand of variantsTrim) {
-                            if (code.includes(cand)) {
-                                const occurrences = code.split(cand).length - 1;
+                        const variantsTrim = new Set();
+                        for (const v of variants) variantsTrim.add(v.trim());
+
+                        for (const cand of variantsTrim) {
+                            const occurrences = countOccurrences(code, cand);
+                            if (occurrences > 0) {
                                 totalFound += occurrences;
-                                if (occurrences > 0) bestMatch = cand;
+                                if (!bestMatch) bestMatch = cand;
                             }
-                         }
+                        }
                     }
 
-                                        if (totalFound === 0) {
-                        // 失敗情報をセットして手動モードへ誘導
-                        const failJson = JSON.stringify([fix], null, 2);
-                        document.getElementById('manual-find').value = target;
-                        document.getElementById('manual-replace').value = replacement;
-                        
-                        prompt("修正対象が見つかりませんでした。\n以下のJSONをコピーしてAIに再指示するか、\n自動入力された「② 手動修正」タブで微調整してください。", failJson);
-                        
-                        switchFixTab('manual');
-                        return;
+                    if (totalFound === 0) {
+                        failedFixes.push({
+                            reason: "対象コードが見つかりません",
+                            fix
+                        });
+                        continue;
                     }
+
                     if (totalFound > 1) {
-                        alert("修正中断: 対象コードが複数箇所(または複数の表現で)見つかりました。\n誤置換を防ぐため、対象コード(before)をより長くユニークにしてください。");
-                        return;
+                        failedFixes.push({
+                            reason: `対象コードが${totalFound}箇所見つかったため安全のため未適用`,
+                            fix
+                        });
+                        continue;
                     }
 
                     // replaceテキストの形式合わせ
@@ -1095,22 +1417,52 @@
                         if (bestMatch === decodeEnt(target)) replacement = decodeEnt(replacement);
                         else if (bestMatch === encodeEnt(target)) replacement = encodeEnt(replacement);
                         else if (bestMatch === decodeEnt(decodeEnt(target))) replacement = decodeEnt(decodeEnt(replacement));
-                        
+
                         code = code.replace(bestMatch, replacement);
                         count++;
                     }
                 }
 
                 editor.setValue(code);
+
+                if (failedFixes.length > 0) {
+                    document.getElementById('fix-modal').style.display = 'flex';
+                    switchFixTab('auto');
+                    document.getElementById('json-input').value = JSON.stringify(failedFixes.map(item => item.fix), null, 2);
+
+                    const firstFailed = failedFixes[0].fix || {};
+                    const firstBefore = firstFailed.before !== undefined ? firstFailed.before : firstFailed.search;
+                    const firstAfter = firstFailed.after !== undefined ? firstFailed.after : firstFailed.replace;
+                    document.getElementById('manual-find').value = firstBefore ? String(firstBefore) : "";
+                    document.getElementById('manual-replace').value = firstAfter !== undefined ? String(firstAfter) : "";
+
+                    displayFixError(`${count}箇所は適用済みです。未適用が${failedFixes.length}件あります。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
+                    displayFixRecovery(failedFixes, count);
+                    showToast(`${count}箇所を適用 / ${failedFixes.length}件は未適用`);
+                    return false;
+                }
+
                 showToast(`${count}箇所の修正を適用しました\n(形式ゆらぎ自動補正)`);
                 document.getElementById('json-input').value = "";
                 closeModal('fix-modal');
+                return true;
 
             } catch (e) {
                 console.error(e);
-                alert("JSONエラー: " + e.message);
+                const msg = "JSONエラー: " + e.message;
+                if (fromLongPress) {
+                    openFixModal();
+                    displayFixError(msg);
+                } else {
+                    alert(msg);
+                }
+                return false;
             }
         }
+
+
+
+
 
                 function applyManualFix() {
             const findText = document.getElementById('manual-find').value;
@@ -1710,17 +2062,18 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "f5791908991642ab755dd87876ba27f0",
   "createdAt": "2026-01-05T22:09:30.050Z",
   "schema": 2,
   "title": "AppStudioMobile v2",
-  "savedAt": "2026-05-01T05:05:59.162Z",
-  "aiInstruction": "Githubアップロード完了後に表示されるURLがhttps://github.com/　からはじまるもので、ユーザ名.github.io　で直接htmlをブラウザから開いて実行できる形になっていない\n\ngithubアップロード後に表示されるURLがhttps://github.com から始まっていて、https://ユーザ名.github.io/　からはじまる、すぐwebにアクセス可能なものになっていない",
-  "comment": "Githubアップロード完了後に表示されるURLがhttps://github.com/　からはじまるもので、ユーザ名.github.io　で直接htmlをブラウザから開いて実行できる形になっていない\n\ngithubアップロード後に表示されるURLがhttps://github.com から始まっていて、https://ユーザ名.github.io/　からはじまる、すぐwebにアクセス可能なものになっていない",
+  "savedAt": "2026-06-08T16:24:04.518Z",
+  "aiInstruction": "修正ボタンを長押しすると、JSONによる自動修正を画面を開かずに実行できること。なおエラーになった場合は、画面が開き、エラーであることが表示される。\n\nオート修正のさいに、対象コードが見つからない部分がある場合は、見つかる部分だけ修正したうえで、「見つからなかったコードの前後のJSONファイルを、コードの中から特定できるよう、出力しなおす」ようAIに指示するプロンプトをワンタップでコピーし、リカバリーできるようにすること。\n\nAI指示のコメント欄の下で、\n・コードを添付する\n・コードを添付しない\n・分割してコードを予めAIに覚えさせる\nのチェックボックスをつけ、コードを指示プロンプトにつけるかどうか選択可能とする。\n分割するを選んだ場合、コード20万字ごとに分割し、1，2，・・・のボタンをタップし、それぞれを連続してAIに覚えさせることができるようにする。1では、これから分割してコードを与えるので覚えるように、AIに指示する。また分割するを選んだ場合に、プロンプト生成ボタンで取得されるプロンプトの冒頭に、すでにJSON修正コードがある場合はそれを反映したコードを覚えたうえで指令を実行するようにAIに指示する。",
+  "comment": "修正ボタンを長押しすると、JSONによる自動修正を画面を開かずに実行できること。なおエラーになった場合は、画面が開き、エラーであることが表示される。\n\nオート修正のさいに、対象コードが見つからない部分がある場合は、見つかる部分だけ修正したうえで、「見つからなかったコードの前後のJSONファイルを、コードの中から特定できるよう、出力しなおす」ようAIに指示するプロンプトをワンタップでコピーし、リカバリーできるようにすること。\n\nAI指示のコメント欄の下で、\n・コードを添付する\n・コードを添付しない\n・分割してコードを予めAIに覚えさせる\nのチェックボックスをつけ、コードを指示プロンプトにつけるかどうか選択可能とする。\n分割するを選んだ場合、コード20万字ごとに分割し、1，2，・・・のボタンをタップし、それぞれを連続してAIに覚えさせることができるようにする。1では、これから分割してコードを与えるので覚えるように、AIに指示する。また分割するを選んだ場合に、プロンプト生成ボタンで取得されるプロンプトの冒頭に、すでにJSON修正コードがある場合はそれを反映したコードを覚えたうえで指令を実行するようにAIに指示する。",
   "sourceMode": "project",
-  "runId": "f7b98af3659801a89ff94fdb42cdd557"
+  "runId": "e0f97ff5e12573ae75b11fdf810dd76b"
 }
 </script>
 </body>
