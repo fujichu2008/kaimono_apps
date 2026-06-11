@@ -12426,13 +12426,65 @@ function updateHud(){
       return getNativeBgmTrack(level).abc;
     }
 
-        function getNativeBgmVisualObj(abc, level){
+            function normalizeNativeBgmAbcForSynth(abc){
+      const src = String(abc || '').replace(/\r\n?/g,'\n').trim();
+      if(!src) return '';
+
+      const chunks = src
+        .split(/\n(?=X:\s*\d+)/g)
+        .map(part => part.trim())
+        .filter(Boolean);
+
+      if(chunks.length <= 1) return src + '\n';
+
+      const firstLines = chunks[0].split('\n');
+      const header = [];
+      const body = [];
+      let firstBody = false;
+
+      for(const line of firstLines){
+        if(!firstBody){
+          header.push(line);
+          if(/^K\s*:/i.test(line)) firstBody = true;
+        }else{
+          body.push(line);
+        }
+      }
+
+      for(let i=1; i<chunks.length; i++){
+        const lines = chunks[i].split('\n');
+        let inBody = false;
+
+        body.push('|');
+
+        for(const line of lines){
+          if(/^K\s*:/i.test(line)){
+            inBody = true;
+            continue;
+          }
+
+          if(!inBody) continue;
+          if(/^\s*X\s*:/i.test(line)) continue;
+          if(/^\s*T\s*:/i.test(line)) continue;
+          if(/^\s*C\s*:/i.test(line)) continue;
+          if(/^\s*Z\s*:/i.test(line)) continue;
+          if(/^\s*N\s*:/i.test(line)) continue;
+
+          body.push(line);
+        }
+      }
+
+      return header.concat('',body).join('\n').replace(/\n{3,}/g,'\n\n').trim() + '\n';
+    }
+
+    function getNativeBgmVisualObj(abc, level){
       if(!abc || !window.ABCJS) return null;
 
-      // 既存の getAbcVisualObj() は曲ごとのキャッシュ分離が甘い場合があり、
-      // 最初に描画したレベル1のvisualObjを返してしまうことがある。
-      // ここではBGM専用に「レベル＋ABC本文」で完全に分離したvisualObjを作る。
-            const abcText = String(abc || '');
+      // レベル3以上の曲が複数のX:チューンに分かれている場合、
+      // renderAbc() の先頭visualObjだけをSynthへ渡すと冒頭だけが再生される。
+      // そのため、BGM用途ではABC全体を1つのチューンへ結合してから高品質再生する。
+      const normalizedAbc = normalizeNativeBgmAbcForSynth(abc);
+      const abcText = String(normalizedAbc || '');
       let hash = 0;
       for(let i=0; i<abcText.length; i++){
         hash = ((hash << 5) - hash + abcText.charCodeAt(i)) | 0;
@@ -12454,13 +12506,18 @@ function updateHud(){
         slot.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:720px;height:auto;overflow:hidden;opacity:0;pointer-events:none;';
         nativeBgm.hidden.appendChild(slot);
 
-        const rendered = ABCJS.renderAbc(slot, abc, {
+        const rendered = ABCJS.renderAbc(slot, normalizedAbc, {
           responsive:'resize',
           add_classes:true,
           staffwidth:720
         });
 
         const visualObj = rendered && rendered[0] ? rendered[0] : null;
+
+        if(visualObj){
+          visualObj.__iqubeFullAbc = normalizedAbc;
+          visualObj.__iqubeTrackLevel = level;
+        }
 
         if(visualObj && nativeBgm.visualCache){
           nativeBgm.visualCache.set(key, visualObj);
@@ -12578,7 +12635,7 @@ function updateHud(){
       }
 
       const token = ++nativeBgm.token;
-      const loopMs = getNativeBgmLoopMs(abc,visualObj,level);
+            const loopMs = getNativeBgmLoopMs(visualObj && visualObj.__iqubeFullAbc ? visualObj.__iqubeFullAbc : abc,visualObj,level);
       nativeBgm.level = trackKey;
       nativeBgm.starting = true;
       if(typeof bgmPlaying !== 'undefined') bgmPlaying = true;
