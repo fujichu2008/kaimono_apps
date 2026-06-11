@@ -297,9 +297,10 @@
             </button>
 
             <div class="glass p-4 rounded-2xl">
-                <div id="display-notation" class="relative bg-slate-900 rounded-xl border border-slate-800 overflow-hidden" style="height: 220px;">
+                <div id="display-notation" class="relative bg-slate-900 rounded-xl border border-slate-800 overflow-hidden cursor-pointer" style="height: 220px;" onclick="window.visualizerMode = window.visualizerMode === 'radial' ? 'nova' : (window.visualizerMode === 'nova' ? 'matrix' : 'radial')" title="タップで可視化モードを切り替え">
                     <div id="notation-paper" class="hidden"></div>
                     <canvas id="neon-grid-canvas" class="absolute inset-0 w-full h-full"></canvas>
+                    <div class="absolute top-2 right-2 text-[10px] text-slate-500 bg-slate-900/80 px-2 py-1 rounded pointer-events-none border border-slate-700">TAP to Change View</div>
                 </div>
 
                 <div class="mt-4 text-center space-y-2">
@@ -1655,91 +1656,240 @@ V:8 nm="Timpani" snm="Timp"
                     ctx.fillStyle = theme.bg;
                     ctx.fillRect(0, 0, width, height);
                     
-                    const size = 3; // 細かい四角形のサイズ
-                    const gap = 1; // 四角形間の隙間
-                    const cellSize = size + gap;
-                    const cols = Math.floor(width / cellSize);
-                    const rows = Math.floor(height / cellSize);
-                    
                     const nowSec = playbackPositionSec;
-                    const viewWindowSec = 6; 
-                    const playheadCol = Math.floor(cols * 0.2); // プレイヘッド（縦線）の位置（左から20%）
-                    const colsPerSec = (cols - playheadCol) / (viewWindowSec * 0.8);
                     
-                    // 行と列の2次元配列(マトリクス)を初期化
-                    const matrix = Array.from({ length: cols }, () => Array(rows).fill(null));
-                    
-                    // パートごとの色割り当て
-                    const colors = theme.colors;
-                    
-                    window.dotTracks.forEach((track, idx) => {
-                        const vId = availableVoices[idx]?.id;
-                        if (vId && !activeVoices.includes(vId)) return; // ミュート時は除外
+                    if (window.visualizerMode === 'radial') {
+                        // 【放射状モード】中心から外側へ音が放たれる演出
+                        const cx = width / 2;
+                        const cy = height / 2;
+                        const maxR = Math.max(width, height) * 0.6;
+                        const pxPerSec = maxR / 1.5; // 外周に到達するまでの速度
                         
-                        const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
-                        const intensity = Math.max(0.2, vol / 127);
-                        const color = colors[idx % colors.length];
+                        ctx.globalCompositeOperation = 'lighter';
                         
-                        track.forEach(note => {
-                            // 画面外の音符はスキップ
-                            if (note.end < nowSec - (playheadCol / colsPerSec) || note.start > nowSec + viewWindowSec) return;
+                        window.dotTracks.forEach((track, idx) => {
+                            const vId = availableVoices[idx]?.id;
+                            if (vId && !activeVoices.includes(vId)) return;
                             
-                            const startCol = Math.floor(playheadCol + (note.start - nowSec) * colsPerSec);
-                            const endCol = Math.floor(playheadCol + (note.end - nowSec) * colsPerSec);
+                            const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
+                            const intensity = Math.max(0.15, vol / 127);
+                            const color = theme.colors[idx % theme.colors.length];
                             
-                            note.freqs.forEach(freq => {
-                                const midi = 69 + 12 * Math.log2(freq / 440);
-                                // Y軸（ピッチ）のマッピング: C2(36) ~ C7(96)
-                                const normalizedY = 1 - Math.max(0, Math.min(1, (midi - 36) / 60));
-                                const r = Math.max(0, Math.min(rows - 1, Math.floor(normalizedY * rows)));
+                            track.forEach(note => {
+                                const rHead = (nowSec - note.start) * pxPerSec;
+                                const rTail = (nowSec - note.end) * pxPerSec;
                                 
-                                // 音符の長さ分だけマトリクスの該当カラムを点灯状態にする
-                                for (let c = Math.max(0, startCol); c <= Math.min(cols - 1, endCol); c++) {
-                                    matrix[c][r] = { color, intensity };
-                                }
+                                if (rHead < 0 || rTail > maxR) return;
+                                
+                                const clampedTail = Math.max(0, rTail);
+                                const clampedHead = Math.max(0, rHead);
+                                if (clampedHead <= clampedTail) return;
+                                
+                                note.freqs.forEach(freq => {
+                                    const midi = 69 + 12 * Math.log2(freq / 440);
+                                    // 楽器ごとに角度を分け、ピッチで放射を少し広げる
+                                    const baseAngle = (idx / Math.max(1, availableVoices.length)) * Math.PI * 2;
+                                    const pitchOffset = ((midi - 60) / 30) * Math.PI;
+                                    const angle = baseAngle + pitchOffset - Math.PI / 2;
+                                    
+                                    ctx.globalAlpha = intensity;
+                                    ctx.strokeStyle = color;
+                                    ctx.shadowColor = color;
+                                    ctx.shadowBlur = 12;
+                                    ctx.lineWidth = 2 + (clampedHead / maxR) * 5;
+                                    ctx.lineCap = 'round';
+                                    
+                                    ctx.beginPath();
+                                    ctx.moveTo(cx + Math.cos(angle) * (clampedTail + 20), cy + Math.sin(angle) * (clampedTail + 20));
+                                    ctx.lineTo(cx + Math.cos(angle) * (clampedHead + 20), cy + Math.sin(angle) * (clampedHead + 20));
+                                    ctx.stroke();
+                                    
+                                    // 音が鳴った瞬間のコア発光
+                                    if (nowSec >= note.start && nowSec <= note.end) {
+                                        ctx.beginPath();
+                                        ctx.arc(cx + Math.cos(angle) * 20, cy + Math.sin(angle) * 20, 3, 0, Math.PI * 2);
+                                        ctx.fillStyle = '#ffffff';
+                                        ctx.shadowBlur = 15;
+                                        ctx.fill();
+                                    }
+                                });
                             });
                         });
-                    });
-                    
-                    // グリッドを中央に配置するためのオフセット計算
-                    const offsetX = (width - (cols * cellSize - gap)) / 2;
-                    const offsetY = (height - (rows * cellSize - gap)) / 2;
-                    
-                    ctx.globalCompositeOperation = 'lighter';
-                    
-                    for (let c = 0; c < cols; c++) {
-                        for (let r = 0; r < rows; r++) {
-                            const x = offsetX + c * cellSize;
-                            const y = offsetY + r * cellSize;
-                            const cell = matrix[c][r];
+                        
+                        // 中央のコア
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, 14, 0, Math.PI*2);
+                        ctx.fillStyle = (window.isPlaying || window.isModalPlaying) ? theme.colors[0] : theme.base;
+                        ctx.shadowBlur = (window.isPlaying || window.isModalPlaying) ? 25 : 0;
+                        ctx.shadowColor = theme.colors[0];
+                        ctx.fill();
+                        
+                        ctx.globalAlpha = 1.0;
+                        ctx.globalCompositeOperation = 'source-over';
+                    } else if (window.visualizerMode === 'nova') {
+                        // 【Novaモード】星の瞬きと波紋（ホタルのような浮遊感）
+                        ctx.globalCompositeOperation = 'lighter';
+                        
+                        window.dotTracks.forEach((track, idx) => {
+                            const vId = availableVoices[idx]?.id;
+                            if (vId && !activeVoices.includes(vId)) return;
                             
-                            if (cell) {
-                                // 再生中の音符ブロックを描画
-                                ctx.globalAlpha = cell.intensity;
-                                ctx.fillStyle = cell.color;
-                                ctx.shadowColor = cell.color;
-                                ctx.shadowBlur = window.isPlaying || window.isModalPlaying ? 6 : 0;
-                                ctx.fillRect(x, y, size, size);
-                            } else {
-                                // 消灯状態のベース四角形
-                                ctx.globalAlpha = 0.15;
-                                ctx.fillStyle = theme.base;
-                                ctx.shadowBlur = 0;
-                                ctx.fillRect(x, y, size, size);
+                            const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
+                            const intensity = Math.max(0.15, vol / 127);
+                            const color = theme.colors[idx % theme.colors.length];
+                            
+                            track.forEach(note => {
+                                const age = nowSec - note.start;
+                                const timeSinceEnd = nowSec - note.end;
+                                
+                                // 表示期間：再生の0.5秒前から、再生終了後2秒まで
+                                if (age < -0.5 || timeSinceEnd > 2.0) return;
+                                
+                                // ノートごとの固有のX座標（擬似乱数で空間に散らす）
+                                const seed = note.start * 1357.9 + idx * 864.2;
+                                const x = (Math.sin(seed) * 0.4 + 0.5) * width;
+                                
+                                note.freqs.forEach((freq, fIdx) => {
+                                    const midi = 69 + 12 * Math.log2(freq / 440);
+                                    const normalizedY = 1 - Math.max(0, Math.min(1, (midi - 36) / 60));
+                                    const y = 20 + normalizedY * (height - 40);
+                                    
+                                    // 浮遊感を演出する揺らぎ
+                                    const floatY = y + Math.sin(nowSec * 2 + seed + fIdx) * 15;
+                                    const floatX = x + Math.cos(nowSec * 1.5 + seed + fIdx) * 15;
+                                    
+                                    ctx.fillStyle = color;
+                                    ctx.strokeStyle = color;
+                                    
+                                    if (age >= 0 && timeSinceEnd <= 0) {
+                                        // 再生中：強く光るコアと鼓動
+                                        const pulse = Math.abs(Math.sin(nowSec * Math.PI * 8)) * 0.3 + 0.7;
+                                        ctx.globalAlpha = intensity * pulse;
+                                        ctx.shadowColor = color;
+                                        ctx.shadowBlur = 20;
+                                        
+                                        ctx.beginPath();
+                                        ctx.arc(floatX, floatY, 4 + pulse * 3, 0, Math.PI * 2);
+                                        ctx.fill();
+                                        
+                                        // 再生中：広がり続ける波紋
+                                        const rippleRadius = (age % 0.5) * 80;
+                                        ctx.globalAlpha = intensity * (1 - (age % 0.5) / 0.5) * 0.5;
+                                        ctx.lineWidth = 1.5;
+                                        ctx.beginPath();
+                                        ctx.arc(floatX, floatY, rippleRadius, 0, Math.PI * 2);
+                                        ctx.stroke();
+                                    } else if (timeSinceEnd > 0) {
+                                        // 再生終了後：フェードアウトしつつ拡散する光
+                                        const fade = 1 - (timeSinceEnd / 2.0);
+                                        ctx.globalAlpha = intensity * fade * 0.5;
+                                        ctx.shadowBlur = 10 * fade;
+                                        
+                                        ctx.beginPath();
+                                        ctx.arc(floatX, floatY, 4 + timeSinceEnd * 15, 0, Math.PI * 2);
+                                        ctx.fill();
+                                    } else if (age < 0) {
+                                        // 再生直前：収束してくる予兆の輪
+                                        const intro = 1 - Math.abs(age) / 0.5;
+                                        ctx.globalAlpha = intensity * intro * 0.4;
+                                        ctx.shadowBlur = 0;
+                                        ctx.beginPath();
+                                        ctx.arc(floatX, floatY, 20 * (1 - intro), 0, Math.PI * 2);
+                                        ctx.stroke();
+                                    }
+                                });
+                            });
+                        });
+                        
+                        ctx.globalAlpha = 1.0;
+                        ctx.globalCompositeOperation = 'source-over';
+                    } else {
+                        // 【マトリクスモード】右から左へ流れるピアノロール
+                        const size = 3; // 細かい四角形のサイズ
+                        const gap = 1; // 四角形間の隙間
+                        const cellSize = size + gap;
+                        const cols = Math.floor(width / cellSize);
+                        const rows = Math.floor(height / cellSize);
+                        
+                        const viewWindowSec = 6; 
+                        const playheadCol = Math.floor(cols * 0.2); // プレイヘッド（縦線）の位置（左から20%）
+                        const colsPerSec = (cols - playheadCol) / (viewWindowSec * 0.8);
+                        
+                        // 行と列の2次元配列(マトリクス)を初期化
+                        const matrix = Array.from({ length: cols }, () => Array(rows).fill(null));
+                        
+                        // パートごとの色割り当て
+                        const colors = theme.colors;
+                        
+                        window.dotTracks.forEach((track, idx) => {
+                            const vId = availableVoices[idx]?.id;
+                            if (vId && !activeVoices.includes(vId)) return; // ミュート時は除外
+                            
+                            const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
+                            const intensity = Math.max(0.2, vol / 127);
+                            const color = colors[idx % colors.length];
+                            
+                            track.forEach(note => {
+                                // 画面外の音符はスキップ
+                                if (note.end < nowSec - (playheadCol / colsPerSec) || note.start > nowSec + viewWindowSec) return;
+                                
+                                const startCol = Math.floor(playheadCol + (note.start - nowSec) * colsPerSec);
+                                const endCol = Math.floor(playheadCol + (note.end - nowSec) * colsPerSec);
+                                
+                                note.freqs.forEach(freq => {
+                                    const midi = 69 + 12 * Math.log2(freq / 440);
+                                    // Y軸（ピッチ）のマッピング: C2(36) ~ C7(96)
+                                    const normalizedY = 1 - Math.max(0, Math.min(1, (midi - 36) / 60));
+                                    const r = Math.max(0, Math.min(rows - 1, Math.floor(normalizedY * rows)));
+                                    
+                                    // 音符の長さ分だけマトリクスの該当カラムを点灯状態にする
+                                    for (let c = Math.max(0, startCol); c <= Math.min(cols - 1, endCol); c++) {
+                                        matrix[c][r] = { color, intensity };
+                                    }
+                                });
+                            });
+                        });
+                        
+                        // グリッドを中央に配置するためのオフセット計算
+                        const offsetX = (width - (cols * cellSize - gap)) / 2;
+                        const offsetY = (height - (rows * cellSize - gap)) / 2;
+                        
+                        ctx.globalCompositeOperation = 'lighter';
+                        
+                        for (let c = 0; c < cols; c++) {
+                            for (let r = 0; r < rows; r++) {
+                                const x = offsetX + c * cellSize;
+                                const y = offsetY + r * cellSize;
+                                const cell = matrix[c][r];
+                                
+                                if (cell) {
+                                    // 再生中の音符ブロックを描画
+                                    ctx.globalAlpha = cell.intensity;
+                                    ctx.fillStyle = cell.color;
+                                    ctx.shadowColor = cell.color;
+                                    ctx.shadowBlur = window.isPlaying || window.isModalPlaying ? 6 : 0;
+                                    ctx.fillRect(x, y, size, size);
+                                } else {
+                                    // 消灯状態のベース四角形
+                                    ctx.globalAlpha = 0.15;
+                                    ctx.fillStyle = theme.base;
+                                    ctx.shadowBlur = 0;
+                                    ctx.fillRect(x, y, size, size);
+                                }
                             }
                         }
+                        
+                        // 現在の演奏位置を示す縦線（プレイヘッド）
+                        const playheadX = offsetX + playheadCol * cellSize;
+                        ctx.globalAlpha = 0.8;
+                        ctx.fillStyle = theme.colors[0];
+                        ctx.shadowColor = theme.colors[0];
+                        ctx.shadowBlur = 10;
+                        ctx.fillRect(playheadX, offsetY, 2, rows * cellSize);
+                        
+                        ctx.globalAlpha = 1.0;
+                        ctx.globalCompositeOperation = 'source-over';
                     }
-                    
-                    // 現在の演奏位置を示す縦線（プレイヘッド）
-                    const playheadX = offsetX + playheadCol * cellSize;
-                    ctx.globalAlpha = 0.8;
-                    ctx.fillStyle = theme.colors[0];
-                    ctx.shadowColor = theme.colors[0];
-                    ctx.shadowBlur = 10;
-                    ctx.fillRect(playheadX, offsetY, 2, rows * cellSize);
-                    
-                    ctx.globalAlpha = 1.0;
-                    ctx.globalCompositeOperation = 'source-over';
                 };
                 drawCanvas();
             }
