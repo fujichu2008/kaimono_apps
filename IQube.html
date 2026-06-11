@@ -10710,9 +10710,16 @@ function updateHud(){
     state.tickMs = Math.max(1350,3650 - (level - 1) * 145);
     state.rollDuration = Math.max(430,980 - (level - 1) * 34);
 
-    resetWorld();
+        resetWorld();
     rebuildQueuePreview();
     toast('LEVEL ' + level + '：連鎖＋シールド必須 / 盤 ' + plan.activeCols + '列 / 出題 ' + plan.slice + '行×' + plan.cutCount + 'セット',1250);
+
+    // レベル準備完了時点で、現在レベル専用のBGMへ必ず切り替える。
+    // レベル3以上でレベル1曲が残り続ける問題を防ぐ。
+    if(!isTutorialActive() && !state.musicMuted && bgmPlaying){
+      stopBgm(.04);
+      startBgm(true, level);
+    }
   }
 
   function spawnWave(){
@@ -12361,18 +12368,62 @@ function updateHud(){
       visualCache:new Map()
     };
 
-    function getNativeBgmAbc(level){
-      const lv = Number(level ?? state.level ?? 1);
+        function getNativeBgmTrack(level){
+      const lv = Number.isFinite(Number(level)) ? Number(level) : Number(state.level || 1);
+      let trackLevel = lv;
+      let label = 'Level 1 Tactical Core';
+      let abc = abcNormal;
 
-      if(lv === 99) return abcEnding;
-      if(lv === -3) return abcTutorial;
-      if(lv === -2) return abcRedAlert;
-      if(lv === -1) return abcGameOver;
-      if(lv >= 7 || state.hiddenStageMode) return abcHiddenStage;
-      if(lv >= 6) return abcParadigmShift;
-      if(lv >= 5) return abcLevel5;
-      if(lv >= 3) return abcBoss;
-      return abcNormal;
+      if(lv === 99){
+        trackLevel = 99;
+        label = 'Ending';
+        abc = abcEnding;
+      }else if(lv === -3){
+        trackLevel = -3;
+        label = 'Tutorial';
+        abc = abcTutorial;
+      }else if(lv === -2){
+        trackLevel = -2;
+        label = 'Red Alert';
+        abc = abcRedAlert;
+      }else if(lv === -1){
+        trackLevel = -1;
+        label = 'Game Over';
+        abc = abcGameOver;
+      }else if(lv >= 7 || state.hiddenStageMode){
+        trackLevel = 7;
+        label = 'Hidden Stage';
+        abc = abcHiddenStage;
+      }else if(lv >= 6){
+        trackLevel = 6;
+        label = 'Paradigm Shift';
+        abc = abcParadigmShift;
+      }else if(lv >= 5){
+        trackLevel = 5;
+        label = 'Final Boss Mix';
+        abc = abcLevel5;
+      }else if(lv >= 3){
+        trackLevel = 3;
+        label = 'Boss Battle Mix';
+        abc = abcBoss;
+      }
+
+      const abcText = String(abc || '');
+      let hash = 0;
+      for(let i=0; i<abcText.length; i++){
+        hash = ((hash << 5) - hash + abcText.charCodeAt(i)) | 0;
+      }
+
+      return {
+        level:trackLevel,
+        label,
+        abc,
+        key:String(trackLevel) + ':' + label + ':' + abcText.length + ':' + Math.abs(hash)
+      };
+    }
+
+    function getNativeBgmAbc(level){
+      return getNativeBgmTrack(level).abc;
     }
 
         function getNativeBgmVisualObj(abc, level){
@@ -12381,7 +12432,12 @@ function updateHud(){
       // 既存の getAbcVisualObj() は曲ごとのキャッシュ分離が甘い場合があり、
       // 最初に描画したレベル1のvisualObjを返してしまうことがある。
       // ここではBGM専用に「レベル＋ABC本文」で完全に分離したvisualObjを作る。
-      const key = String(level ?? '') + ':' + String(abc).length + ':' + String(abc).slice(0,220);
+            const abcText = String(abc || '');
+      let hash = 0;
+      for(let i=0; i<abcText.length; i++){
+        hash = ((hash << 5) - hash + abcText.charCodeAt(i)) | 0;
+      }
+      const key = String(level ?? '') + ':' + abcText.length + ':' + Math.abs(hash);
 
       if(nativeBgm.visualCache && nativeBgm.visualCache.has(key)){
         return nativeBgm.visualCache.get(key);
@@ -12485,10 +12541,11 @@ function updateHud(){
     };
 
         startBgm = function(force = false, overrideLevel = null){
-            const rawLevel = overrideLevel == null ? (state && state.level) : overrideLevel;
-      const level = Number.isFinite(Number(rawLevel)) ? Number(rawLevel) : 1;
-      const abc = getNativeBgmAbc(level);
-      const trackKey = String(level) + ':' + (state.hiddenStageMode ? 'hidden' : 'main') + ':' + String(abc || '').length + ':' + String(abc || '').slice(0,160);
+                  const requestedLevel = overrideLevel == null ? (state && state.level) : overrideLevel;
+      const track = getNativeBgmTrack(requestedLevel);
+      const level = track.level;
+      const abc = track.abc;
+      const trackKey = track.key;
 
       if(state.musicMuted || !abc){
         stopBgm(0);
@@ -12501,11 +12558,11 @@ function updateHud(){
 
       stopBgm(0);
 
-      if(!window.ABCJS || !ABCJS.synth || !ABCJS.synth.CreateSynth){
-        // abcjs Synthが使えない環境だけ、従来の簡易再生へ戻す。
-        try{
-          originalStartBgm.call(null,force,overrideLevel);
-        }catch(_){ }
+            if(!window.ABCJS || !ABCJS.synth || !ABCJS.synth.CreateSynth){
+        // 高品質再生を優先するため、abcjs Synthが使えない場合に旧簡易BGMへ戻さない。
+        // 旧BGMへ戻すと、レベル3以上でもレベル1曲が鳴る原因になる。
+        console.warn('abcjs synth unavailable: native BGM skipped', track.label);
+        if(typeof bgmPlaying !== 'undefined') bgmPlaying = false;
         return;
       }
 
@@ -12547,12 +12604,12 @@ function updateHud(){
             if(typeof bgmPlaying !== 'undefined') bgmPlaying = true;
             return synth.start();
           })
-          .catch(err => {
-            console.warn('abcjs synth playback failed', err);
+                    .catch(err => {
+            console.warn('abcjs synth playback failed', track.label, err);
             if(token !== nativeBgm.token) return;
-            try{
-              originalStartBgm.call(null,true,overrideLevel);
-            }catch(_){ }
+            // 失敗時も旧簡易BGMへ戻さない。レベル1曲への巻き戻りを防ぐ。
+            nativeBgm.starting = false;
+            if(typeof bgmPlaying !== 'undefined') bgmPlaying = false;
           });
 
         nativeBgm.timer = setTimeout(() => {
@@ -12820,17 +12877,18 @@ function updateHud(){
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "dc88910f3d3446a9dc9470ef08fad724",
   "createdAt": "2026-06-07T14:20:24.080Z",
   "schema": 2,
   "title": "IQube",
-  "savedAt": "2026-06-11T15:47:46.758Z",
-  "aiInstruction": "なぜかすべての音楽がTactical　Coreのレベル１音楽になってしまうので修正\n\nすべての音楽がレベル１のTactical coreになっている。レベル３でも、Tactical　Coreそのまま演奏しようとしている。それぞれに設定した音楽が、高品質でなるよう修正",
-  "comment": "なぜかすべての音楽がTactical　Coreのレベル１音楽になってしまうので修正\n\nすべての音楽がレベル１のTactical coreになっている。レベル３でも、Tactical　Coreそのまま演奏しようとしている。それぞれに設定した音楽が、高品質でなるよう修正",
+  "savedAt": "2026-06-11T17:40:25.105Z",
+  "aiInstruction": "レベル３以上の再生がまだおかしいです。修正して。",
+  "comment": "レベル３以上の再生がまだおかしいです。修正して。",
   "sourceMode": "project",
-  "runId": "e5d91552f133ad03bf7719b9866451a7"
+  "runId": "b973a5a86eda80493203073f16aa970c"
 }
 </script>
 </body>
