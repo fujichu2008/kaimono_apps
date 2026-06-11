@@ -12346,6 +12346,200 @@ function updateHud(){
     renderer.domElement.addEventListener("lostpointercapture", handleCanvasPointerEnd, {passive:false});
   }
 
+    function installNativeAbcBgmPlayback(){
+    // BGMをゲーム内の簡易発音ではなく、abcjs標準SynthでABC譜面どおりに鳴らす。
+    // これにより、演奏専用アプリで再生した時に近い音価・テンポ・休符感を保つ。
+    const originalStopBgm = stopBgm;
+    const originalStartBgm = startBgm;
+    const nativeBgm = {
+      synth:null,
+      token:0,
+      timer:null,
+      level:null,
+      hidden:null,
+      starting:false
+    };
+
+    function getNativeBgmAbc(level){
+      const lv = Number(level ?? state.level ?? 1);
+
+      if(lv === 99) return abcEnding;
+      if(lv === -3) return abcTutorial;
+      if(lv === -2) return abcRedAlert;
+      if(lv === -1) return abcGameOver;
+      if(lv >= 7 || state.hiddenStageMode) return abcHiddenStage;
+      if(lv >= 6) return abcParadigmShift;
+      if(lv >= 5) return abcLevel5;
+      if(lv >= 3) return abcBoss;
+      return abcNormal;
+    }
+
+    function getNativeBgmVisualObj(abc){
+      if(!abc || !window.ABCJS) return null;
+
+      try{
+        if(typeof getAbcVisualObj === 'function'){
+          const cached = getAbcVisualObj(abc);
+          if(cached) return cached;
+        }
+      }catch(_){
+        // 既存キャッシュ取得に失敗した場合は、下の標準renderAbcへフォールバックする。
+      }
+
+      if(!nativeBgm.hidden){
+        nativeBgm.hidden = document.createElement('div');
+        nativeBgm.hidden.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;';
+        document.body.appendChild(nativeBgm.hidden);
+      }
+
+      try{
+        nativeBgm.hidden.innerHTML = '';
+        const rendered = ABCJS.renderAbc(nativeBgm.hidden, abc, {
+          responsive:'resize',
+          add_classes:true,
+          staffwidth:720
+        });
+        return rendered && rendered[0] ? rendered[0] : null;
+      }catch(err){
+        console.warn('abcjs render failed', err);
+        return null;
+      }
+    }
+
+    function getNativeBgmLoopMs(abc, visualObj){
+      try{
+        if(typeof getAbcLoopDurationMs === 'function'){
+          const ms = Number(getAbcLoopDurationMs(abc));
+          if(Number.isFinite(ms) && ms > 800) return ms;
+        }
+      }catch(_){
+        // 既存の長さ推定が使えない場合は、visualObj側の情報から推定する。
+      }
+
+      const fallbackMs = Number(visualObj && (visualObj.millisecondsPerMeasure || 0));
+      const measureCount = Number(visualObj && visualObj.lines ? visualObj.lines.length : 0);
+      if(Number.isFinite(fallbackMs) && fallbackMs > 0 && measureCount > 0){
+        return Math.max(1800, fallbackMs * Math.max(4, measureCount));
+      }
+
+      return 16000;
+    }
+
+    function stopNativeBgm(){
+      nativeBgm.token++;
+      nativeBgm.starting = false;
+
+      if(nativeBgm.timer){
+        clearTimeout(nativeBgm.timer);
+        nativeBgm.timer = null;
+      }
+
+      if(nativeBgm.synth){
+        try{
+          if(typeof nativeBgm.synth.stop === 'function') nativeBgm.synth.stop();
+        }catch(_){ }
+        try{
+          if(typeof nativeBgm.synth.destroy === 'function') nativeBgm.synth.destroy();
+        }catch(_){ }
+      }
+
+      nativeBgm.synth = null;
+      nativeBgm.level = null;
+
+      if(typeof bgmPlaying !== 'undefined') bgmPlaying = false;
+    }
+
+    stopBgm = function(fade = 0){
+      stopNativeBgm();
+      try{
+        originalStopBgm.call(null,fade);
+      }catch(_){
+        // 古い簡易BGM停止処理が失敗しても、abcjs側は停止済みにする。
+      }
+    };
+
+    startBgm = function(force = false, overrideLevel = null){
+      const level = overrideLevel == null ? (typeof getGameplayBgmLevel === 'function' ? getGameplayBgmLevel() : state.level) : overrideLevel;
+      const abc = getNativeBgmAbc(level);
+
+      if(state.musicMuted || !abc){
+        stopBgm(0);
+        return;
+      }
+
+      if(!force && nativeBgm.synth && nativeBgm.level === level && bgmPlaying){
+        return;
+      }
+
+      stopBgm(0);
+
+      if(!window.ABCJS || !ABCJS.synth || !ABCJS.synth.CreateSynth){
+        // abcjs Synthが使えない環境だけ、従来の簡易再生へ戻す。
+        try{
+          originalStartBgm.call(null,force,overrideLevel);
+        }catch(_){ }
+        return;
+      }
+
+      unlockAudioNow();
+      wakeAudio();
+
+      const visualObj = getNativeBgmVisualObj(abc);
+      if(!visualObj){
+        try{
+          originalStartBgm.call(null,force,overrideLevel);
+        }catch(_){ }
+        return;
+      }
+
+      const token = ++nativeBgm.token;
+      const loopMs = getNativeBgmLoopMs(abc,visualObj);
+      nativeBgm.level = level;
+      nativeBgm.starting = true;
+      if(typeof bgmPlaying !== 'undefined') bgmPlaying = true;
+
+      const playOnce = () => {
+        if(token !== nativeBgm.token || state.musicMuted) return;
+
+        let synth;
+        try{
+          synth = new ABCJS.synth.CreateSynth();
+          nativeBgm.synth = synth;
+        }catch(err){
+          console.warn('abcjs synth create failed', err);
+          return;
+        }
+
+        Promise.resolve()
+          .then(() => synth.init({ visualObj }))
+          .then(() => synth.prime())
+          .then(() => {
+            if(token !== nativeBgm.token || state.musicMuted) return;
+            nativeBgm.starting = false;
+            if(typeof bgmPlaying !== 'undefined') bgmPlaying = true;
+            return synth.start();
+          })
+          .catch(err => {
+            console.warn('abcjs synth playback failed', err);
+            if(token !== nativeBgm.token) return;
+            try{
+              originalStartBgm.call(null,true,overrideLevel);
+            }catch(_){ }
+          });
+
+        nativeBgm.timer = setTimeout(() => {
+          if(token !== nativeBgm.token || state.musicMuted) return;
+          try{
+            if(nativeBgm.synth && typeof nativeBgm.synth.stop === 'function') nativeBgm.synth.stop();
+          }catch(_){ }
+          playOnce();
+        },Math.max(1200,loopMs + 80));
+      };
+
+      playOnce();
+    };
+  }
+
   function boot(){
     if(!window.THREE){
       dom.overlayTitle.textContent = "読み込みエラー";
@@ -12353,6 +12547,7 @@ function updateHud(){
       return;
     }
 
+    installNativeAbcBgmPlayback();
     updateHud();
     updateMusicMuteButton();
     updatePauseButton();
@@ -12594,17 +12789,18 @@ function updateHud(){
 
 
 
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "dc88910f3d3446a9dc9470ef08fad724",
   "createdAt": "2026-06-07T14:20:24.080Z",
   "schema": 2,
   "title": "IQube",
-  "savedAt": "2026-06-10T16:09:44.244Z",
-  "aiInstruction": "通常モードなのに、隠しステージの流れ星みたいなのが散らばって静止して見えるのを、なくして。",
-  "comment": "通常モードなのに、隠しステージの流れ星みたいなのが散らばって静止して見えるのを、なくして。",
+  "savedAt": "2026-06-11T15:14:32.392Z",
+  "aiInstruction": "音楽の再生した感じが、想定したものと違う。より、コードの原音そのものの温室に。\n\n音楽の鳴り方が、ふつうに演奏専用アプリでならしたのとちょっとちがう。そのままの音楽でならして",
+  "comment": "音楽の再生した感じが、想定したものと違う。より、コードの原音そのものの温室に。\n\n音楽の鳴り方が、ふつうに演奏専用アプリでならしたのとちょっとちがう。そのままの音楽でならして",
   "sourceMode": "project",
-  "runId": "6ac9994b56a3fa3adf1bd11b2ba9aa8e"
+  "runId": "147654127bb67ab046c0241f108c6d9f"
 }
 </script>
 </body>
