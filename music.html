@@ -12,7 +12,60 @@
         body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f1f5f9; }
         .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); }
         .active-tab { color: #38bdf8 !important; border-bottom: 2px solid #38bdf8; }
-        .abcjs-container { background: white; padding: 10px; border-radius: 8px; overflow-x: auto; color: black; }
+        .abcjs-container {
+            background: white;
+            padding: 10px 12px;
+            border-radius: 14px;
+            overflow-x: auto;
+            overflow-y: auto;
+            color: black;
+            position: relative;
+            scroll-behavior: auto;
+            max-height: 55vh;
+            white-space: nowrap;
+            box-shadow: inset 0 0 0 1px rgba(15,23,42,0.08);
+        }
+        .abcjs-container svg {
+            display: block;
+            max-width: none !important;
+        }
+        .abcjs-container::-webkit-scrollbar { width: 6px; height: 6px; }
+        .abcjs-container::-webkit-scrollbar-thumb { background: rgba(14,165,233,0.5); border-radius: 9999px; }
+        .score-follow-wrap { position: relative; overflow: hidden; border-radius: 16px; }
+        .score-follow-wrap::before,
+        .score-follow-wrap::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 44px;
+            pointer-events: none;
+            z-index: 4;
+        }
+        .score-follow-wrap::before { left: 0; background: linear-gradient(to right, rgba(15,23,42,0.32), transparent); }
+        .score-follow-wrap::after { right: 0; background: linear-gradient(to left, rgba(15,23,42,0.32), transparent); }
+        #score-playhead-line {
+            position: absolute;
+            top: 10px;
+            bottom: 10px;
+            left: 50%;
+            width: 3px;
+            border-radius: 9999px;
+            background: linear-gradient(to bottom, rgba(14,165,233,0.12), rgba(14,165,233,0.98), rgba(16,185,129,0.82));
+            box-shadow: 0 0 16px rgba(56,189,248,0.65), 0 0 34px rgba(16,185,129,0.2);
+            pointer-events: none;
+            opacity: 0;
+            z-index: 6;
+            transform: translateX(-50%);
+            transition: opacity 0.2s ease;
+        }
+        .score-follow-wrap.following #score-playhead-line { opacity: 1; }
+        .abcjs-note.sf-note-active, .abcjs-note.sf-note-active path, .abcjs-note.sf-note-active ellipse, .abcjs-note.sf-note-active text,
+        .abcjs-chord.sf-note-active, .abcjs-chord.sf-note-active path, .abcjs-chord.sf-note-active ellipse, .abcjs-chord.sf-note-active text {
+            fill: #0ea5e9 !important;
+            stroke: #0ea5e9 !important;
+            filter: drop-shadow(0 0 4px rgba(14,165,233,0.55));
+        }
         select { background: #1e293b; border: 1px solid #334155; padding: 8px; border-radius: 6px; width: 100%; }
         .hidden { display: none; }
         .brand-mark { display: inline-flex; align-items: center; gap: 0.55rem; }
@@ -244,8 +297,9 @@
             </button>
 
             <div class="glass p-4 rounded-2xl">
-                <div id="display-notation">
-                    <div id="notation-paper" class="abcjs-container"></div>
+                <div id="display-notation" class="relative bg-slate-900 rounded-xl border border-slate-800 overflow-hidden" style="height: 220px;">
+                    <div id="notation-paper" class="hidden"></div>
+                    <canvas id="neon-grid-canvas" class="absolute inset-0 w-full h-full"></canvas>
                 </div>
 
                 <div class="mt-4 text-center space-y-2">
@@ -983,6 +1037,53 @@ V:8 nm="Timpani" snm="Timp"
                 track.setAttribute('aria-valuenow', String(Math.round(safeElapsed)));
                 track.setAttribute('aria-valuetext', `${formatPlaybackTime(safeElapsed)} / ${formatPlaybackTime(duration)}`);
             }
+            updateScoreFollow(safeElapsed, duration);
+        }
+
+        function resetScoreFollow() {
+            const wrap = document.getElementById('display-notation');
+            const paper = document.getElementById('notation-paper');
+            const playhead = document.getElementById('score-playhead-line');
+            if (wrap) wrap.classList.remove('following');
+            if (paper) paper.scrollLeft = 0;
+            if (playhead) playhead.style.left = '0px';
+            document.querySelectorAll('.sf-note-active').forEach(el => el.classList.remove('sf-note-active'));
+        }
+
+        function updateScoreFollow(elapsedSec = 0, durationSec = playbackDurationSec) {
+            const wrap = document.getElementById('display-notation');
+            const paper = document.getElementById('notation-paper');
+            const playhead = document.getElementById('score-playhead-line');
+            if (!wrap || !paper || !playhead) return;
+
+            const duration = Math.max(0, durationSec || 0);
+            if (!duration || duration <= 0) {
+                resetScoreFollow();
+                return;
+            }
+
+            const ratio = Math.max(0, Math.min(elapsedSec / duration, 1));
+            wrap.classList.toggle('following', !!window.isPlaying);
+
+            // 再生時間に基づく線形なX座標の推定
+            const playheadX_in_paper = paper.scrollWidth * ratio;
+
+            // プレイヘッドを画面中央付近に保つためのスクロール量を計算
+            const maxScroll = Math.max(0, paper.scrollWidth - paper.clientWidth);
+            let targetScroll = playheadX_in_paper - (paper.clientWidth * 0.5);
+            targetScroll = Math.max(0, Math.min(maxScroll, targetScroll));
+
+            // スクロール適用
+            paper.scrollLeft = targetScroll;
+
+            // プレイヘッド(縦線)の位置をコンテナ内の相対位置として動的に配置
+            const playheadX_in_container = playheadX_in_paper - targetScroll;
+            playhead.style.left = `${playheadX_in_container}px`;
+        }
+
+        function highlightScoreNoteByRatio(ratio) {
+            // 重いDOMのBoundingRect計算による描画遅延と同期ズレを防ぐため無効化
+            return null;
         }
 
         function getSeekSecondsFromPointerEvent(event) {
@@ -1090,6 +1191,7 @@ V:8 nm="Timpani" snm="Timp"
             clearPlaybackTimers();
             playbackPositionSec = 0;
             updatePlaybackBar(0);
+            resetScoreFollow();
         }
 
         function finalizePlayerPlayback(atEnd = false) {
@@ -1491,7 +1593,156 @@ V:8 nm="Timpani" snm="Timp"
             
             initInstrumentPanel();
             
+            // 楽譜は非表示のまま音声合成用にレンダリング
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
+            
+            // ドットビジュアライザ用の演奏データを計算
+            window.dotTracks = [];
+            const baseUnit = parseAbcBaseUnit(abc);
+            const bodies = collectAbcVoiceBodies(abc);
+            const secPerBeat = 60 / visualizerTempoBpm;
+            
+            bodies.forEach((body, vIdx) => {
+                const events = parseAbcEventsFromVoice(body, baseUnit);
+                if (!events.length) return;
+                let trackNotes = [];
+                let currentTime = 0;
+                let loopCount = 0;
+                // 繰り返し記号をカバーするため多めに展開
+                while (loopCount < 20) {
+                    events.forEach(ev => {
+                        const dur = ev.durationBeats * secPerBeat;
+                        if (ev.freqs && ev.freqs.length > 0) {
+                            trackNotes.push({ start: currentTime, end: currentTime + dur, freqs: ev.freqs, voice: vIdx });
+                        }
+                        currentTime += dur;
+                    });
+                    loopCount++;
+                }
+                window.dotTracks.push(trackNotes);
+            });
+
+            // テーマ（曲調）判定ロジック
+            const getThemeColors = (abc, meta, bpm) => {
+                const text = (abc + " " + meta).toLowerCase();
+                if (text.includes("戦闘") || text.includes("battle") || text.includes("サイバーパンク") || text.includes("cyberpunk") || text.includes("激しい") || bpm > 140) {
+                    return { bg: '#1a0b2e', base: '#2d1b4e', colors: ['#f43f5e', '#a855f7', '#ec4899', '#facc15', '#0ea5e9', '#d946ef', '#ef4444', '#8b5cf6', '#fb923c', '#10b981'] };
+                }
+                if (text.includes("悲しい") || text.includes("絶望") || text.includes("静か") || text.includes("アンビエント") || text.match(/k:[a-g][#b]?m/i)) {
+                    return { bg: '#081426', base: '#12233f', colors: ['#3b82f6', '#6366f1', '#8b5cf6', '#cbd5e1', '#38bdf8', '#818cf8', '#a78bfa', '#94a3b8', '#0ea5e9', '#4f46e5'] };
+                }
+                if (text.includes("ファンタジー") || text.includes("fantasy") || text.includes("自然") || text.includes("森") || text.includes("村")) {
+                    return { bg: '#062817', base: '#0f3d26', colors: ['#34d399', '#fcd34d', '#4ade80', '#fbbf24', '#a3e635', '#2dd4bf', '#10b981', '#f59e0b', '#65a30d', '#14b8a6'] };
+                }
+                return { bg: '#0f172a', base: '#1e293b', colors: ['#38bdf8', '#34d399', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c', '#4ade80', '#60a5fa', '#f87171', '#c084fc'] };
+            };
+
+            // 描画ループの初期化（二重登録防止）
+            if (!window.dotCanvasRafInit) {
+                window.dotCanvasRafInit = true;
+                const drawCanvas = () => {
+                    requestAnimationFrame(drawCanvas);
+                    const canvas = document.getElementById('neon-grid-canvas');
+                    if (!canvas || !window.dotTracks) return;
+                    
+                    const ctx = canvas.getContext('2d');
+                    const width = canvas.width = canvas.clientWidth;
+                    const height = canvas.height = canvas.clientHeight;
+                    
+                    const theme = getThemeColors(currentABC, currentMetaRaw, visualizerTempoBpm);
+                    
+                    // 背景をテーマカラーで塗りつぶす
+                    ctx.fillStyle = theme.bg;
+                    ctx.fillRect(0, 0, width, height);
+                    
+                    const size = 3; // 細かい四角形のサイズ
+                    const gap = 1; // 四角形間の隙間
+                    const cellSize = size + gap;
+                    const cols = Math.floor(width / cellSize);
+                    const rows = Math.floor(height / cellSize);
+                    
+                    const nowSec = playbackPositionSec;
+                    const viewWindowSec = 6; 
+                    const playheadCol = Math.floor(cols * 0.2); // プレイヘッド（縦線）の位置（左から20%）
+                    const colsPerSec = (cols - playheadCol) / (viewWindowSec * 0.8);
+                    
+                    // 行と列の2次元配列(マトリクス)を初期化
+                    const matrix = Array.from({ length: cols }, () => Array(rows).fill(null));
+                    
+                    // パートごとの色割り当て
+                    const colors = theme.colors;
+                    
+                    window.dotTracks.forEach((track, idx) => {
+                        const vId = availableVoices[idx]?.id;
+                        if (vId && !activeVoices.includes(vId)) return; // ミュート時は除外
+                        
+                        const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
+                        const intensity = Math.max(0.2, vol / 127);
+                        const color = colors[idx % colors.length];
+                        
+                        track.forEach(note => {
+                            // 画面外の音符はスキップ
+                            if (note.end < nowSec - (playheadCol / colsPerSec) || note.start > nowSec + viewWindowSec) return;
+                            
+                            const startCol = Math.floor(playheadCol + (note.start - nowSec) * colsPerSec);
+                            const endCol = Math.floor(playheadCol + (note.end - nowSec) * colsPerSec);
+                            
+                            note.freqs.forEach(freq => {
+                                const midi = 69 + 12 * Math.log2(freq / 440);
+                                // Y軸（ピッチ）のマッピング: C2(36) ~ C7(96)
+                                const normalizedY = 1 - Math.max(0, Math.min(1, (midi - 36) / 60));
+                                const r = Math.max(0, Math.min(rows - 1, Math.floor(normalizedY * rows)));
+                                
+                                // 音符の長さ分だけマトリクスの該当カラムを点灯状態にする
+                                for (let c = Math.max(0, startCol); c <= Math.min(cols - 1, endCol); c++) {
+                                    matrix[c][r] = { color, intensity };
+                                }
+                            });
+                        });
+                    });
+                    
+                    // グリッドを中央に配置するためのオフセット計算
+                    const offsetX = (width - (cols * cellSize - gap)) / 2;
+                    const offsetY = (height - (rows * cellSize - gap)) / 2;
+                    
+                    ctx.globalCompositeOperation = 'lighter';
+                    
+                    for (let c = 0; c < cols; c++) {
+                        for (let r = 0; r < rows; r++) {
+                            const x = offsetX + c * cellSize;
+                            const y = offsetY + r * cellSize;
+                            const cell = matrix[c][r];
+                            
+                            if (cell) {
+                                // 再生中の音符ブロックを描画
+                                ctx.globalAlpha = cell.intensity;
+                                ctx.fillStyle = cell.color;
+                                ctx.shadowColor = cell.color;
+                                ctx.shadowBlur = window.isPlaying || window.isModalPlaying ? 6 : 0;
+                                ctx.fillRect(x, y, size, size);
+                            } else {
+                                // 消灯状態のベース四角形
+                                ctx.globalAlpha = 0.15;
+                                ctx.fillStyle = theme.base;
+                                ctx.shadowBlur = 0;
+                                ctx.fillRect(x, y, size, size);
+                            }
+                        }
+                    }
+                    
+                    // 現在の演奏位置を示す縦線（プレイヘッド）
+                    const playheadX = offsetX + playheadCol * cellSize;
+                    ctx.globalAlpha = 0.8;
+                    ctx.fillStyle = theme.colors[0];
+                    ctx.shadowColor = theme.colors[0];
+                    ctx.shadowBlur = 10;
+                    ctx.fillRect(playheadX, offsetY, 2, rows * cellSize);
+                    
+                    ctx.globalAlpha = 1.0;
+                    ctx.globalCompositeOperation = 'source-over';
+                };
+                drawCanvas();
+            }
             
             // 読込開始時にボタンをローディング状態にする
             window.isPlaying = false;
@@ -1597,6 +1848,7 @@ V:8 nm="Timpani" snm="Timp"
             isPlaybackSeeking = false;
             const seekTrack = document.getElementById('playback-seek-track');
             if (seekTrack) seekTrack.classList.remove('seeking');
+            resetScoreFollow();
             setVisualizerIdle();
             if (changed) lucide.createIcons();
         }
