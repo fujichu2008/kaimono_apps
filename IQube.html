@@ -9033,9 +9033,10 @@ function updateHud(){
       details.push(`赤${stats.redSaved}保護`);
     }
 
-    // 最低コマ数評価：最初の起爆ターンを起点に、何回転がったかで判定する。
-    const minimumRolls = Math.max(0,Math.floor(Number(stats.optimalRolls) || 0));
-    if((stats.activations || 0) > 0 && (stats.rollsAfterBoom || 0) <= minimumRolls && (stats.emptyBooms || 0) === 0){
+    // 最低コマ数評価：最初の起爆ターンを1コマ目として、赤以外を消し切るまでのコマ数で判定する。
+    const minimumRolls = Math.max(1,Math.floor(Number(stats.optimalRolls) || 1));
+    const actualRolls = 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0));
+    if((stats.activations || 0) > 0 && actualRolls <= minimumRolls && (stats.emptyBooms || 0) === 0){
       labels.push('MINIMUM STEP');
     }
 
@@ -9047,7 +9048,7 @@ function updateHud(){
 
     if((stats.maxChain || 0) > 0) details.unshift(`${stats.maxChain}CHAIN`);
     if((stats.removed || 0) > 0) details.push(`${stats.removed}個消去`);
-    if((stats.activations || 0) > 0) details.push(`${stats.rollsAfterBoom || 0}/${Math.max(0,Math.floor(Number(stats.optimalRolls) || 0))}コマ`);
+    if((stats.activations || 0) > 0) details.push(`${1 + (stats.rollsAfterBoom || 0)}/${Math.max(1,Math.floor(Number(stats.optimalRolls) || 1))}コマ`);
 
     stats.judged = true;
     state.lastCutJudgeKey = `${state.level}-${state.cutNumber}`;
@@ -10432,7 +10433,29 @@ function updateHud(){
     }
 
     const uncoveredNormals = normals.filter(p => !covered.has(p.c + ',' + p.r)).length;
-    const shieldsNeeded = reds.filter(p => covered.has(p.c + ',' + p.r)).length;
+
+    // シールドは「その赤を巻き込む緑連鎖の起爆」と同じBOOMで同時設置する必要があるため、
+    // 連結成分ごとに (起爆1 + 必要シールド数) を不可分なセットグループとして扱う。
+    const shieldsByComp = new Array(compSizes.length).fill(0);
+    let shieldsNeeded = 0;
+    for(const red of reds){
+      let compId = -1;
+      for(let gi=0; gi<greens.length; gi++){
+        if(Math.abs(greens[gi].c - red.c) <= 1 && Math.abs(greens[gi].r - red.r) <= 1){
+          compId = compOf[gi];
+          break;
+        }
+      }
+      if(compId >= 0){
+        shieldsNeeded++;
+        shieldsByComp[compId]++;
+      }
+    }
+
+    // 設置上限を加味した最低BOOM回数計算用：不可分グループのサイズ一覧。
+    const setGroups = shieldsByComp.map(s => 1 + s);
+    for(let i=0; i<uncoveredNormals; i++) setGroups.push(1);
+
     const triggers = compSizes.length;
     const optimalSets = triggers + uncoveredNormals + shieldsNeeded;
     const naiveSets = normals.length + greens.length + shieldsNeeded;
@@ -10449,8 +10472,49 @@ function updateHud(){
       optimalSets,
       naiveSets,
       skillGap:naiveSets - optimalSets,
-      coverageRatio:normals.length ? 1 - uncoveredNormals / Math.max(1,normals.length) : 1
+      coverageRatio:normals.length ? 1 - uncoveredNormals / Math.max(1,normals.length) : 1,
+      setGroups
     };
+  }
+
+  // 一度に設置できる上限(installLimit)を加味し、理論上の最低起爆回数(=最低コマ数)を求める。
+  // 各緑連結成分は「起爆1＋その爆風内の赤のシールド」を同じBOOMで置く必要がある不可分グループ。
+  // 取り残しの通常キューブ直爆は1セットずつ自由に分割できる。
+  function computeMinimumBoomTurns(solution, installLimit){
+    const limit = Math.max(1,Math.floor(Number(installLimit) || 1));
+    const groups = (solution && Array.isArray(solution.setGroups) && solution.setGroups.length)
+      ? solution.setGroups.slice()
+      : [Math.max(1,(solution && solution.optimalSets) || 1)];
+
+    let turns = 0;
+    const bins = [];
+    const packable = [];
+
+    for(const g of groups){
+      const size = Math.max(1,Math.floor(Number(g) || 1));
+      if(size >= limit){
+        // 上限以上の不可分グループは、現実には分割起爆になるため ceil で必要回数へ換算する。
+        turns += Math.ceil(size / limit);
+      }else{
+        packable.push(size);
+      }
+    }
+
+    // First-Fit-Decreasing で残りグループを上限内に詰め、必要BOOM回数を数える。
+    packable.sort((a,b) => b - a);
+    for(const size of packable){
+      let placed = false;
+      for(let i=0; i<bins.length; i++){
+        if(bins[i] + size <= limit){
+          bins[i] += size;
+          placed = true;
+          break;
+        }
+      }
+      if(!placed) bins.push(size);
+    }
+
+    return Math.max(1,turns + bins.length);
   }
 
   // 連鎖の背骨(緑の連結スネーク)＋シールド判断用の赤＋囮の赤、で構成された候補を生成する
@@ -10674,11 +10738,11 @@ function updateHud(){
       return;
     }
 
-    // 計算上の最低コマ数(最初の起爆ターン起点の転がり回数)に対する、現状の実績コマ数を表示する。
+    // 計算上の最低コマ数(最初の起爆ターンを1コマ目とした転がり回数)に対する実績コマ数を表示する。
     const stats = state.currentCutStats;
-    const optimal = Math.max(0,Math.floor(Number(stats.optimalRolls) || 0));
+    const optimal = Math.max(1,Math.floor(Number(stats.optimalRolls) || 1));
     const boomed = (stats.activations || 0) > 0;
-    const current = Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0));
+    const current = boomed ? 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0)) : 0;
 
     const cutNo = Math.min(state.cutNumber || 1,state.cutCount || state.cutNumber || 1);
     const totalCuts = state.cutCount || cutNo;
@@ -10891,34 +10955,11 @@ function updateHud(){
     state.rolling = true;
     const cutSolution = solveCutOptimalPlan(rows,state.activeCols || COLS);
 
-    // 計算上の最低コマ数：最初の起爆ターンを起点にした、必要最小の転がり回数。
-    // 緑爆風の外にある囮の赤は破壊できず、前列を抜けるまで転がり続けるため、
-    // その脱出距離の最大値が理論上の最低コマ数になる(囮赤が無ければ0コマ)。
-    const rollsTargetBack = clamp(
-      (state.frontBufferRows || 6) + count - 1,
-      count - 1,
-      (state.boardRows || ROWS) - 1
-    );
-    let optimalRolls = 0;
-    {
-      const colsActive = clamp(state.activeCols || COLS,1,COLS);
-      const startColActive = getActiveColStart(colsActive);
-      const greensPos = [];
-      for(let i=0; i<rows.length; i++){
-        for(let k=0; k<colsActive; k++){
-          if(rows[i][startColActive + k] === 'G') greensPos.push({i,k});
-        }
-      }
-      const inGreenRange = (i,k) => greensPos.some(g => Math.abs(g.i - i) <= 1 && Math.abs(g.k - k) <= 1);
-      for(let i=0; i<rows.length; i++){
-        for(let k=0; k<colsActive; k++){
-          if(rows[i][startColActive + k] !== 'R') continue;
-          if(inGreenRange(i,k)) continue;
-          const landR = rollsTargetBack - i;
-          optimalRolls = Math.max(optimalRolls,Math.max(0,landR - state.brokenRows + 1));
-        }
-      }
-    }
+    // 計算上の最低コマ数：一度に設置できる上限を加味した、理論上の最低起爆回数。
+    // 緑連結成分ごとの「起爆＋同時シールド」を不可分グループとして上限内に詰め込み、
+    // 赤以外を全て消すのに必要なBOOM回数(最初の起爆=1コマ目)を求める。
+    const installLimitForCut = getInstallLimitFor(state.level,state.activeCols || 5,state.sliceRows || 3);
+    const optimalRolls = computeMinimumBoomTurns(cutSolution,installLimitForCut);
 
     state.currentCutStats = {
       cutNumber:state.cutNumber,
@@ -11176,9 +11217,12 @@ function updateHud(){
     state.lastStep = now;
     state.rolling = moved > 0;
 
-    // 実績コマ数：最初の起爆を行ったターンを起点に、転がり1回ごとにカウントする。
+    // 実績コマ数：最初の起爆ターンを1コマ目とし、赤以外のキューブが
+    // 盤面に残っている間の転がりだけを追加カウントする。
+    // 赤(破壊不可の囮)だけが残って流れていく転がりは評価に含めない。
     const rollStats = state.currentCutStats;
-    if(moved > 0 && rollStats && rollStats.cutNumber === state.cutNumber && (rollStats.activations || 0) > 0){
+    const hasNonRedCubes = state.cubes.some(cube => cube.type !== 'red');
+    if(moved > 0 && hasNonRedCubes && rollStats && rollStats.cutNumber === state.cutNumber && (rollStats.activations || 0) > 0){
       rollStats.rollsAfterBoom = (rollStats.rollsAfterBoom || 0) + 1;
     }
 
