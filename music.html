@@ -590,7 +590,7 @@
             });
         }
 
-        const VISUALIZER_MODES = ['radial', 'nova', 'matrix', 'eco'];
+        const VISUALIZER_MODES = ['radial', 'aether', 'nova', 'matrix', 'eco'];
         window.visualizerMode = 'radial';
         function cycleVisualizerMode() {
             const idx = VISUALIZER_MODES.indexOf(window.visualizerMode);
@@ -1653,6 +1653,7 @@ V:8 nm="Timpani" snm="Timp"
             
             // ドットビジュアライザ用の演奏データを計算
             window.dotTracks = [];
+            window.aetherState = null; // 粒子ビジュアライザの状態をリセット
             const baseUnit = parseAbcBaseUnit(abc);
             const bodies = collectAbcVoiceBodies(abc);
             const secPerBeat = 60 / visualizerTempoBpm;
@@ -1879,6 +1880,119 @@ V:8 nm="Timpani" snm="Timp"
                         });
                         
                         ctx.globalAlpha = 1.0;
+                        ctx.globalCompositeOperation = 'source-over';
+                    } else if (window.visualizerMode === 'aether') {
+                        // 【Aetherモード】微細粒子が乱流の中を超リアルに舞う物理シミュレーション
+                        if (!window.aetherState) {
+                            window.aetherState = { particles: [], prevSec: nowSec, lastFrame: performance.now() };
+                        }
+                        const st = window.aetherState;
+                        const nowMs = performance.now();
+                        const dt = Math.min(0.05, Math.max(0.001, (nowMs - st.lastFrame) / 1000));
+                        st.lastFrame = nowMs;
+                        if (nowSec < st.prevSec - 0.2) st.prevSec = nowSec; // シーク巻き戻し時の重複バースト防止
+                        
+                        const spawnParticle = (x, y, color, energy, type) => {
+                            if (st.particles.length > 700) return;
+                            const a = Math.random() * Math.PI * 2;
+                            const sp = (type === 'burst' ? 30 + Math.random() * 90 : 4 + Math.random() * 14) * (0.5 + energy);
+                            st.particles.push({
+                                x, y,
+                                vx: Math.cos(a) * sp,
+                                vy: Math.sin(a) * sp - (type === 'burst' ? 10 : 20) * energy,
+                                life: 0,
+                                maxLife: type === 'burst' ? 1.2 + Math.random() * 1.4 : 2.4 + Math.random() * 2.6,
+                                size: type === 'burst' ? 0.8 + Math.random() * 2.2 : 0.5 + Math.random() * 1.2,
+                                color,
+                                tw: Math.random() * Math.PI * 2,
+                                seed: Math.random() * 1000
+                            });
+                        };
+                        
+                        // ノート発音の検出（バースト）と持続音からの微細粒子放出
+                        if (window.isPlaying) {
+                            window.dotTracks.forEach((track, idx) => {
+                                const vId = availableVoices[idx]?.id;
+                                if (vId && !activeVoices.includes(vId)) return;
+                                
+                                const vol = vId ? (voiceVolumes[vId] ?? 100) : 100;
+                                const energy = Math.max(0.15, vol / 127);
+                                const color = theme.colors[idx % theme.colors.length];
+                                
+                                track.forEach(note => {
+                                    const started = note.start > st.prevSec && note.start <= nowSec;
+                                    const sounding = nowSec >= note.start && nowSec <= note.end;
+                                    if (!started && !sounding) return;
+                                    
+                                    const seed = note.start * 1357.9 + idx * 864.2;
+                                    note.freqs.forEach((freq, fIdx) => {
+                                        const midi = 69 + 12 * Math.log2(freq / 440);
+                                        const ny = 1 - Math.max(0, Math.min(1, (midi - 36) / 60));
+                                        const x = (Math.sin(seed + fIdx * 13.7) * 0.42 + 0.5) * width;
+                                        const y = 14 + ny * (height - 28);
+                                        
+                                        if (started) {
+                                            const n = Math.round(5 + energy * 9);
+                                            for (let k = 0; k < n; k++) spawnParticle(x, y, color, energy, 'burst');
+                                        } else if (sounding && Math.random() < 0.35 * energy) {
+                                            spawnParticle(x + (Math.random() - 0.5) * 10, y + (Math.random() - 0.5) * 10, color, energy * 0.7, 'drift');
+                                        }
+                                    });
+                                });
+                            });
+                        }
+                        
+                        // 環境ダスト：演奏中は画面下から微細な塵が立ち上る
+                        if ((window.isPlaying || window.isModalPlaying) && Math.random() < 0.5 && st.particles.length < 650) {
+                            spawnParticle(Math.random() * width, height + 4, theme.colors[Math.floor(Math.random() * theme.colors.length)], 0.18, 'drift');
+                        }
+                        st.prevSec = nowSec;
+                        
+                        // 物理更新と描画（乱流・浮力・空気抵抗＋加算合成グロー）
+                        ctx.globalCompositeOperation = 'lighter';
+                        const tSec = nowMs / 1000;
+                        st.particles = st.particles.filter(p => {
+                            p.life += dt;
+                            if (p.life >= p.maxLife) return false;
+                            
+                            // 擬似パーリンノイズ的な乱流フィールド
+                            const turb = Math.sin(p.y * 0.018 + tSec * 0.9 + p.seed) + Math.sin(p.x * 0.011 - tSec * 0.6);
+                            p.vx += turb * 22 * dt;
+                            p.vy += (Math.cos(p.x * 0.014 + tSec * 0.7 + p.seed) * 14 - 9) * dt; // ゆるやかな浮力
+                            const drag = Math.pow(0.6, dt);
+                            p.vx *= drag;
+                            p.vy *= drag;
+                            
+                            const px = p.x, py = p.y;
+                            p.x += p.vx * dt;
+                            p.y += p.vy * dt;
+                            if (p.x < -12 || p.x > width + 12 || p.y < -12 || p.y > height + 12) return false;
+                            
+                            const fade = 1 - p.life / p.maxLife;
+                            const twinkle = 0.65 + 0.35 * Math.sin(tSec * 6 + p.tw);
+                            ctx.globalAlpha = Math.max(0, fade * twinkle * 0.9);
+                            ctx.strokeStyle = p.color;
+                            ctx.fillStyle = p.color;
+                            ctx.shadowColor = p.color;
+                            ctx.shadowBlur = 8 * fade;
+                            
+                            // 速度に応じたモーションストリーク
+                            ctx.lineWidth = p.size;
+                            ctx.lineCap = 'round';
+                            ctx.beginPath();
+                            ctx.moveTo(px, py);
+                            ctx.lineTo(p.x, p.y);
+                            ctx.stroke();
+                            
+                            // 輝点コア
+                            ctx.beginPath();
+                            ctx.arc(p.x, p.y, p.size * 0.9, 0, Math.PI * 2);
+                            ctx.fill();
+                            return true;
+                        });
+                        
+                        ctx.globalAlpha = 1.0;
+                        ctx.shadowBlur = 0;
                         ctx.globalCompositeOperation = 'source-over';
                     } else {
                         // 【マトリクスモード】右から左へ流れるピアノロール
