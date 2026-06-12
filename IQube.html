@@ -10287,7 +10287,8 @@ function updateHud(){
           const a = smartAnalyze(candidate);
 
           if(a.greenCount < 1 || a.specialCount < 2) continue;
-          if(level >= 3 && a.redRisk < 1) continue;
+          // どのレベルでも「守るべき赤」を最低1つは残し、シールド判断を消さない。
+          if(a.redRisk < 1) continue;
 
           const estimate = estimateShieldChainBombs(candidate,level,activeCols);
           if(estimate >= baseScore) continue;
@@ -10318,8 +10319,10 @@ function updateHud(){
         }
       }
     }
+    let injectedCores = 0;
     for (let r = 1; r < grid.length - 1; r++) {
       for (let c = startCol + 1; c < startCol + activeCols - 1; c++) {
+        if (injectedCores >= 1) break;
         if (covered.has(c + ',' + r)) continue;
         let isAllN = true;
         for (let rr = r - 1; rr <= r + 1 && isAllN; rr++) {
@@ -10328,7 +10331,9 @@ function updateHud(){
           }
         }
         if (isAllN) {
-          // 緑の爆風が届かない空白地帯にだけ、新しい連鎖の核を1つ足す
+          // 緑の爆風が届かない「大きな」空白地帯にだけ核を最大1つ足す。
+          // 小さな取り残しは「直爆で消す通常キューブ」としてあえて残す。
+          injectedCores++;
           grid[r][c] = 'G';
           for (let rr = r - 1; rr <= r + 1; rr++) {
             for (let cc = c - 1; cc <= c + 1; cc++) covered.add(cc + ',' + rr);
@@ -10426,8 +10431,9 @@ function updateHud(){
     const placedGreens = [];
 
     // 連結成分(=必要起爆数)はレベルで増やし、複数起点の判断を作る
-    const componentCount = 1 + (level >= 3 && rnd(1) < .55 ? 1 : 0) + (level >= 6 && rnd(2) < .45 ? 1 : 0);
-    const baseLen = clamp(2 + Math.floor((sliceRows * activeCols) / 9),2,7);
+    const componentCount = 1 + (level >= 2 && rnd(1) < .55 ? 1 : 0) + (level >= 5 && rnd(2) < .45 ? 1 : 0);
+    // 緑の背骨は少し短くし、爆風の届かない「通常キューブの取り残し地帯」を意図的に残す。
+    const baseLen = clamp(2 + Math.floor((sliceRows * activeCols) / 13),2,6);
 
     for(let comp=0; comp<componentCount; comp++){
       let r = Math.floor(rnd(10 + comp * 9) * sliceRows);
@@ -10454,10 +10460,16 @@ function updateHud(){
     const inAnyGreenRange = (rr,cc) => placedGreens.some(g => Math.abs(g.r - rr) <= 1 && Math.abs(g.ac - cc) <= 1);
 
     // シールド判断用の赤：あえて爆風内に置く(守らないと誤爆)
-    const shieldRedTarget = clamp(1 + Math.floor(level / 3) + (rnd(40) < .4 ? 1 : 0),1,4);
+    // 緑連鎖偏重を避けるため、レベルと盤面サイズに応じて赤の密度を底上げする。
+    const fieldCells = sliceRows * activeCols;
+    const shieldRedTarget = clamp(
+      1 + Math.floor(level / 2) + Math.floor(fieldCells / 24) + (rnd(40) < .5 ? 1 : 0),
+      1,
+      5
+    );
     let placedShieldReds = 0;
     let guard = 0;
-    while(placedShieldReds < shieldRedTarget && guard++ < 80 && placedGreens.length){
+    while(placedShieldReds < shieldRedTarget && guard++ < 120 && placedGreens.length){
       const g = placedGreens[Math.floor(rnd(41 + guard) * placedGreens.length)];
       const rr = g.r + Math.floor(rnd(42 + guard) * 3) - 1;
       const cc = g.ac + Math.floor(rnd(43 + guard) * 3) - 1;
@@ -10467,10 +10479,11 @@ function updateHud(){
     }
 
     // 囮の赤：爆風の外に置く(守らずに通過させるのが正解になる)
-    const decoyTarget = Math.floor(rnd(60) * (1 + level * .3));
+    // 毎カット最低1個は必ず置き、「この赤は守るべきか」の読みを常に発生させる。
+    const decoyTarget = clamp(1 + Math.floor(rnd(60) * (1 + level * .45)),1,4);
     let placedDecoys = 0;
     guard = 0;
-    while(placedDecoys < decoyTarget && guard++ < 80){
+    while(placedDecoys < decoyTarget && guard++ < 120){
       const rr = Math.floor(rnd(61 + guard) * sliceRows);
       const cc = Math.floor(rnd(62 + guard) * activeCols);
       if(!inField(rr,cc) || cellAt(rr,cc) !== 'N' || inAnyGreenRange(rr,cc)) continue;
@@ -10506,17 +10519,35 @@ function updateHud(){
     if(sol.greens < 1) return -99999;
 
     const targetSets = clamp(2 + Math.round(level * .9),3,10);
+    const shieldTarget = clamp(1 + Math.floor(level / 2),1,4);       // 守るべき赤の目標数
+    const decoyCap = clamp(1 + Math.floor(level / 4),1,3);           // 囮の赤の上限目安
+    const normalTargetMin = 1;                                       // 直爆で消す通常キューブの下限
+    const normalTargetMax = clamp(2 + Math.floor(level / 2),2,6);    // 上限(多すぎると作業になる)
     let score = 200;
 
     score -= Math.abs(sol.optimalSets - targetSets) * 18;            // 最短手数がレベル相応
     score += clamp(sol.skillGap,0,18) * 6;                           // 雑な解と最短解の差=上達の余地
-    score += Math.min(sol.maxChain,6) * 12;                          // 大連鎖の気持ちよさ
+    score += Math.min(sol.maxChain,5) * 9;                           // 連鎖は気持ちいいが偏重させない
     score += sol.triggers >= 2 ? 10 : 0;                             // 複数起点の順序判断
-    score += sol.shieldsNeeded >= 1 ? 26 : -34;                      // シールド判断は必須
-    score -= Math.max(0,sol.shieldsNeeded - clamp(1 + Math.floor(level / 2),1,4)) * 14;
-    score += sol.decoyReds >= 1 ? 8 : 0;                             // 守らない赤(囮)で読みを要求
-    score -= sol.uncoveredNormals * 5;                               // 取り残し直爆は少なく
-    score += sol.coverageRatio * 40;
+
+    // 赤の保護判断：1個以上は必須。レベル相応の数に近いほど高評価。
+    score += sol.shieldsNeeded >= 1 ? 30 : -60;
+    score -= Math.abs(sol.shieldsNeeded - shieldTarget) * 10;
+
+    // 囮の赤：「守らない判断」も毎カット要求する。
+    score += sol.decoyReds >= 1 ? 18 : -22;
+    score -= Math.max(0,sol.decoyReds - decoyCap) * 8;
+
+    // 通常キューブの取り残し：適量を残し「どこへ直爆するか」の判断を作る。
+    if(sol.uncoveredNormals < normalTargetMin){
+      score -= 18;                                                   // 全部が緑連鎖で消える出題は単調
+    }else if(sol.uncoveredNormals <= normalTargetMax){
+      score += 16 + sol.uncoveredNormals * 3;                        // 直爆判断ゾーンが適量
+    }else{
+      score -= (sol.uncoveredNormals - normalTargetMax) * 7;         // 多すぎる直爆は作業化
+    }
+
+    score += sol.coverageRatio * 14;                                 // 緑の効率はほどほどに評価
     score -= smartSimilarityPenalty(smartFingerprint(rows),history); // 直近カットとの類似回避
     score += seededRand(state.queueSeed + level * 577 + cutIndex * 91 + attempt * 13) * 8;
 
