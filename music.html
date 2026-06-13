@@ -191,7 +191,7 @@
         </nav>
     </header>
 
-    <main id="main-content" class="p-4 max-w-md mx-auto space-y-6">
+    <main id="main-content" class="px-4 pt-0 pb-4 -mt-3 max-w-md mx-auto space-y-6">
 
         <section id="view-help" class="hidden space-y-4">
             <div class="glass p-5 rounded-2xl space-y-5">
@@ -573,6 +573,46 @@
             safeCreateIcons();
         }
 
+        function setModalPlaybackState(state) {
+            window.isModalPlaying = state === 'playing';
+            const modalBtn = document.getElementById('btn-modal-play');
+            if (!modalBtn) {
+                updateEcoWakeLock();
+                return;
+            }
+
+            if (state === 'loading') {
+                modalBtn.disabled = true;
+                modalBtn.classList.add('opacity-70');
+                modalBtn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 準備中';
+            } else if (state === 'playing') {
+                modalBtn.disabled = false;
+                modalBtn.classList.remove('opacity-70');
+                modalBtn.innerHTML = '<i data-lucide="square" class="w-4 h-4"></i> 停止';
+            } else {
+                modalBtn.disabled = false;
+                modalBtn.classList.remove('opacity-70');
+                modalBtn.innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
+            }
+
+            updateEcoWakeLock();
+            safeCreateIcons();
+        }
+
+        function drawEcoCanvasOnce() {
+            const canvas = document.getElementById('neon-grid-canvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width = canvas.clientWidth || 300;
+            const h = canvas.height = canvas.clientHeight || 150;
+            ctx.fillStyle = '#0b1120';
+            ctx.fillRect(0, 0, w, h);
+            ctx.fillStyle = '#34d399';
+            ctx.font = 'bold 12px Inter';
+            ctx.textAlign = 'center';
+            ctx.fillText('ECO MODE', w / 2, h / 2 + 4);
+        }
+
         function prepareCurrentSongState(abc, title, meta, libId, rating) {
             currentABC = abc;
             currentMetaRaw = meta;
@@ -689,6 +729,7 @@
             
             if (window.visualizerMode === 'eco') {
                 setVisualizerIdle();
+                drawEcoCanvasOnce();
             } else if (window.isPlaying || window.isModalPlaying) {
                 startVisualizerAnimation(visualizerStartedAt);
             }
@@ -769,6 +810,9 @@
             window.addEventListener('pagehide', stopPlaybackOnClose);
             window.addEventListener('beforeunload', stopPlaybackOnClose);
             document.addEventListener('visibilitychange', updateEcoWakeLock);
+            window.addEventListener('resize', () => {
+                if (window.visualizerMode === 'eco') drawEcoCanvasOnce();
+            });
         }
 
         // --- 初期化 ---
@@ -1355,6 +1399,35 @@ V:8 nm="Timpani" snm="Timp"
             setPlaybackState('stopped');
         }
 
+        function prepareDotTracksForVisualizer(abc) {
+            window.dotTracks = [];
+            window.aetherState = null;
+
+            const baseUnit = parseAbcBaseUnit(abc);
+            const bodies = collectAbcVoiceBodies(abc);
+            const secPerBeat = 60 / visualizerTempoBpm;
+
+            bodies.forEach((body, vIdx) => {
+                const events = parseAbcEventsFromVoice(body, baseUnit);
+                if (!events.length) return;
+                let trackNotes = [];
+                let currentTime = 0;
+                let loopCount = 0;
+
+                while (loopCount < 20 && currentTime < 1200) {
+                    events.forEach(ev => {
+                        const dur = ev.durationBeats * secPerBeat;
+                        if (ev.freqs && ev.freqs.length > 0) {
+                            trackNotes.push({ start: currentTime, end: currentTime + dur, freqs: ev.freqs, voice: vIdx });
+                        }
+                        currentTime += dur;
+                    });
+                    loopCount++;
+                }
+                window.dotTracks.push(trackNotes);
+            });
+        }
+
         function parseVoicesFromABC(abc) {
             const voices = [];
             const lines = abc.split('\n');
@@ -1725,31 +1798,10 @@ V:8 nm="Timpani" snm="Timp"
             const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
             
             // ドットビジュアライザ用の演奏データを計算
-            window.dotTracks = [];
-            window.aetherState = null; // 粒子ビジュアライザの状態をリセット
-            const baseUnit = parseAbcBaseUnit(abc);
-            const bodies = collectAbcVoiceBodies(abc);
-            const secPerBeat = 60 / visualizerTempoBpm;
-            
-            bodies.forEach((body, vIdx) => {
-                const events = parseAbcEventsFromVoice(body, baseUnit);
-                if (!events.length) return;
-                let trackNotes = [];
-                let currentTime = 0;
-                let loopCount = 0;
-                // 繰り返し記号をカバーするため展開。ただし長時間曲での無駄なメモリ消費を避ける
-                while (loopCount < 20 && currentTime < 1200) {
-                    events.forEach(ev => {
-                        const dur = ev.durationBeats * secPerBeat;
-                        if (ev.freqs && ev.freqs.length > 0) {
-                            trackNotes.push({ start: currentTime, end: currentTime + dur, freqs: ev.freqs, voice: vIdx });
-                        }
-                        currentTime += dur;
-                    });
-                    loopCount++;
-                }
-                window.dotTracks.push(trackNotes);
-            });
+            prepareDotTracksForVisualizer(abc);
+            if (window.visualizerMode === 'eco') {
+                drawEcoCanvasOnce();
+            }
 
             // テーマ（曲調）判定ロジック
             const getThemeColors = (abc, meta, bpm) => {
@@ -1770,31 +1822,15 @@ V:8 nm="Timpani" snm="Timp"
             if (!window.dotCanvasRafInit) {
                 window.dotCanvasRafInit = true;
                 let ecoDrawn = false;
-                const scheduleCanvasFrame = (delay = 0) => {
-                    if (delay > 0) {
-                        setTimeout(() => requestAnimationFrame(drawCanvas), delay);
-                    } else {
-                        requestAnimationFrame(drawCanvas);
-                    }
+                const scheduleCanvasFrame = () => {
+                    requestAnimationFrame(drawCanvas);
                 };
                 const drawCanvas = () => {
                     if (window.visualizerMode === 'eco') {
                         if (!ecoDrawn) {
-                            const canvas = document.getElementById('neon-grid-canvas');
-                            if (canvas) {
-                                const ctx = canvas.getContext('2d');
-                                const w = canvas.width = canvas.clientWidth || 300;
-                                const h = canvas.height = canvas.clientHeight || 150;
-                                ctx.fillStyle = '#0b1120';
-                                ctx.fillRect(0, 0, w, h);
-                                ctx.fillStyle = '#34d399';
-                                ctx.font = 'bold 12px Inter';
-                                ctx.textAlign = 'center';
-                                ctx.fillText('ECO MODE', w / 2, h / 2 + 4);
-                            }
+                            drawEcoCanvasOnce();
                             ecoDrawn = true;
                         }
-                        scheduleCanvasFrame(1000);
                         return;
                     }
                     ecoDrawn = false;
@@ -2245,9 +2281,7 @@ V:8 nm="Timpani" snm="Timp"
             }
             if (window.modalMidi && window.isModalPlaying) {
                 window.modalMidi.stop();
-                window.isModalPlaying = false;
-                const modalBtn = document.getElementById('btn-modal-play');
-                if (modalBtn) modalBtn.innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
+                setModalPlaybackState('stopped');
                 changed = true;
             }
             isPlaybackSeeking = false;
@@ -2263,10 +2297,7 @@ V:8 nm="Timpani" snm="Timp"
                 return;
             }
             stopAllMusic();
-            
-            const btn = document.getElementById('btn-modal-play');
-            btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 準備中';
-            lucide.createIcons();
+            setModalPlaybackState('loading');
 
             try {
                 const item = library[idx];
@@ -2278,16 +2309,14 @@ V:8 nm="Timpani" snm="Timp"
                 visualizerTempoBpm = parseTempoFromABC(item.abc);
                 await window.modalMidi.start();
                 
-                window.isModalPlaying = true;
+                setModalPlaybackState('playing');
                 startVisualizerAnimation();
-                btn.innerHTML = '<i data-lucide="square" class="w-4 h-4"></i> 停止';
             } catch (e) {
                 console.error(e);
                 alert("再生に失敗しました");
-                btn.innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
+                setModalPlaybackState('stopped');
                 setVisualizerIdle();
             }
-            lucide.createIcons();
         }
 
         async function rewindMusic() {
@@ -3077,8 +3106,7 @@ V:8 nm="Timpani" snm="Timp"
             document.getElementById('btn-modal-play').onclick = () => {
                 toggleModalPlay(idx);
             };
-            document.getElementById('btn-modal-play').innerHTML = '<i data-lucide="play" class="w-4 h-4"></i> 再生';
-            lucide.createIcons();
+            setModalPlaybackState('stopped');
             document.getElementById('library-modal').classList.remove('hidden');
             document.body.style.overflow = 'hidden';
         }
