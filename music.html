@@ -506,6 +506,7 @@
         let availableVoices = [];
         let voiceVolumes = {};
         let ecoWakeLock = null;
+        let playbackState = 'stopped';
 
         function isEcoWakeLockNeeded() {
             const playerView = document.getElementById('view-player');
@@ -538,6 +539,59 @@
             } catch (e) {
                 console.warn('Wake Lock Request Error:', e);
             }
+        }
+
+        function setPlaybackState(state, options = {}) {
+            playbackState = state;
+            window.isPlaying = state === 'playing';
+
+            const btn = document.getElementById('btn-play-pause');
+            if (btn) {
+                btn.disabled = state === 'loading';
+                btn.classList.toggle('opacity-50', state === 'loading');
+
+                if (state === 'loading') {
+                    btn.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i>';
+                } else if (state === 'playing') {
+                    btn.innerHTML = '<i data-lucide="pause" fill="currentColor"></i>';
+                } else {
+                    btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+                }
+            }
+
+            if (state !== 'playing') {
+                clearPlaybackTimers();
+                setVisualizerIdle();
+            }
+
+            if (options.resetProgress) {
+                playbackPositionSec = 0;
+                updatePlaybackBar(0);
+            }
+
+            updateEcoWakeLock();
+            safeCreateIcons();
+        }
+
+        function prepareCurrentSongState(abc, title, meta, libId, rating) {
+            currentABC = abc;
+            currentMetaRaw = meta;
+            currentLibraryId = libId;
+            currentRating = rating;
+            playbackDurationSec = 0;
+            playbackPositionSec = 0;
+            visualizerTempoBpm = parseTempoFromABC(abc);
+            window.currentMidi = null;
+            document.getElementById('current-title').innerText = title;
+        }
+
+        function updateCurrentSongMetaUI(meta) {
+            const marqueeEl = document.getElementById('meta-marquee');
+            if (marqueeEl) marqueeEl.innerText = meta;
+            const fullWrapEl = document.getElementById('meta-full-wrap');
+            if (fullWrapEl) fullWrapEl.innerText = meta;
+            updatePlayerRatingUI();
+            updateSaveButtonState();
         }
 
         const dbPromise = new Promise((resolve) => {
@@ -1289,8 +1343,6 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function finalizePlayerPlayback(atEnd = false) {
-            clearPlaybackTimers();
-            window.isPlaying = false;
             try {
                 if (window.currentMidi && typeof window.currentMidi.stop === 'function') {
                     window.currentMidi.stop();
@@ -1299,11 +1351,8 @@ V:8 nm="Timpani" snm="Timp"
                 console.warn("Finalize Stop Error:", e);
             }
 
-            const btn = document.getElementById('btn-play-pause');
-            if (btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
             updatePlaybackBar(atEnd ? (playbackDurationSec || 0) : 0);
-            setVisualizerIdle();
-            safeCreateIcons();
+            setPlaybackState('stopped');
         }
 
         function parseVoicesFromABC(abc) {
@@ -1665,23 +1714,10 @@ V:8 nm="Timpani" snm="Timp"
 
         function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false) {
             if (typeof stopAllMusic === 'function') stopAllMusic();
-            currentABC = abc;
-            currentMetaRaw = meta;
-            currentLibraryId = libId;
-            currentRating = rating;
-            playbackDurationSec = 0;
-            playbackPositionSec = 0;
-            visualizerTempoBpm = parseTempoFromABC(abc);
-            window.currentMidi = null;
-            document.getElementById('current-title').innerText = title;
-            const marqueeEl = document.getElementById('meta-marquee');
-            if (marqueeEl) marqueeEl.innerText = meta;
-            const fullWrapEl = document.getElementById('meta-full-wrap');
-            if (fullWrapEl) fullWrapEl.innerText = meta;
-            updatePlayerRatingUI();
-            updateSaveButtonState();
+            prepareCurrentSongState(abc, title, meta, libId, rating);
+            updateCurrentSongMetaUI(meta);
             resetPlaybackBar();
-            setVisualizerIdle();
+            setPlaybackState('stopped', { resetProgress: true });
             
             initInstrumentPanel();
             
@@ -1734,8 +1770,14 @@ V:8 nm="Timpani" snm="Timp"
             if (!window.dotCanvasRafInit) {
                 window.dotCanvasRafInit = true;
                 let ecoDrawn = false;
+                const scheduleCanvasFrame = (delay = 0) => {
+                    if (delay > 0) {
+                        setTimeout(() => requestAnimationFrame(drawCanvas), delay);
+                    } else {
+                        requestAnimationFrame(drawCanvas);
+                    }
+                };
                 const drawCanvas = () => {
-                    requestAnimationFrame(drawCanvas);
                     if (window.visualizerMode === 'eco') {
                         if (!ecoDrawn) {
                             const canvas = document.getElementById('neon-grid-canvas');
@@ -1752,9 +1794,11 @@ V:8 nm="Timpani" snm="Timp"
                             }
                             ecoDrawn = true;
                         }
+                        scheduleCanvasFrame(1000);
                         return;
                     }
                     ecoDrawn = false;
+                    scheduleCanvasFrame();
                     const canvas = document.getElementById('neon-grid-canvas');
                     if (!canvas || !window.dotTracks) return;
                     const playerView = document.getElementById('view-player');
@@ -2123,13 +2167,8 @@ V:8 nm="Timpani" snm="Timp"
             }
             
             // 読込開始時にボタンをローディング状態にする
-            window.isPlaying = false;
             const btn = document.getElementById('btn-play-pause');
-            if(btn) {
-                btn.disabled = true;
-                btn.classList.add('opacity-50');
-                btn.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i>';
-            }
+            setPlaybackState('loading');
             
             if (ABCJS.synth.supportsAudio()) {
                 const midi = new ABCJS.synth.CreateSynth();
@@ -2139,42 +2178,25 @@ V:8 nm="Timpani" snm="Timp"
                         playbackDurationSec = primed && primed.duration ? primed.duration : 0;
                         updatePlaybackBar(0);
                         window.currentMidi = midi;
-                        if(btn) {
-                            btn.disabled = false;
-                            btn.classList.remove('opacity-50');
-                            btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                            lucide.createIcons();
-                        }
+                        setPlaybackState('stopped');
                         if (autoPlay) togglePlay();
                     })
                     .catch(err => {
                         playbackDurationSec = 0;
                         updatePlaybackBar(0);
                         console.error("Audio Init Error:", err);
-                        if(btn) {
-                            btn.disabled = false;
-                            btn.classList.remove('opacity-50');
-                            btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                            lucide.createIcons();
-                        }
+                        setPlaybackState('stopped');
                     });
             } else if (btn) {
-                btn.disabled = false;
-                btn.classList.remove('opacity-50');
-                btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+                setPlaybackState('stopped');
             }
-            lucide.createIcons();
+            safeCreateIcons();
         }
 
         function pausePlayerMusic() {
             if (window.currentMidi && window.isPlaying) {
-                clearPlaybackTimers();
                 window.currentMidi.stop();
-                window.isPlaying = false;
-                const btn = document.getElementById('btn-play-pause');
-                if (btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                setVisualizerIdle();
-                safeCreateIcons();
+                setPlaybackState('paused');
             }
         }
 
@@ -2205,10 +2227,8 @@ V:8 nm="Timpani" snm="Timp"
                 }
 
                 await window.currentMidi.start();
-                btn.innerHTML = '<i data-lucide="pause" fill="currentColor"></i>';
-                window.isPlaying = true;
+                setPlaybackState('playing');
                 startPlaybackTracking(startAt);
-                lucide.createIcons();
             } catch (e) {
                 console.error("Playback Error:", e);
                 finalizePlayerPlayback(false);
@@ -2218,13 +2238,7 @@ V:8 nm="Timpani" snm="Timp"
         function stopAllMusic() {
             let changed = false;
             if (window.currentMidi && window.isPlaying) {
-                clearPlaybackTimers();
                 window.currentMidi.stop();
-                window.isPlaying = false;
-                const btn = document.getElementById('btn-play-pause');
-                if (btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                playbackPositionSec = 0;
-                updatePlaybackBar(0);
                 changed = true;
             } else {
                 clearPlaybackTimers();
@@ -2239,7 +2253,7 @@ V:8 nm="Timpani" snm="Timp"
             isPlaybackSeeking = false;
             const seekTrack = document.getElementById('playback-seek-track');
             if (seekTrack) seekTrack.classList.remove('seeking');
-            setVisualizerIdle();
+            setPlaybackState('stopped', { resetProgress: true });
             if (changed) safeCreateIcons();
         }
 
