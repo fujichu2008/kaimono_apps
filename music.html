@@ -583,12 +583,78 @@
         let availableVoices = [];
         let voiceVolumes = {};
         let ecoWakeLock = null;
+        let ecoKeepAwakeVideo = null;
+        let ecoKeepAwakeStream = null;
         let playbackState = 'stopped';
 
         function isEcoWakeLockNeeded() {
             const playerView = document.getElementById('view-player');
             const isPlayerVisible = playerView && !playerView.classList.contains('hidden');
             return window.visualizerMode === 'eco' && isPlayerVisible && document.visibilityState === 'visible';
+        }
+
+        function ensureEcoKeepAwakeVideo() {
+            if (ecoKeepAwakeVideo) return ecoKeepAwakeVideo;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 2;
+            canvas.height = 2;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, 2, 2);
+
+            const video = document.createElement('video');
+            video.muted = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.setAttribute('playsinline', '');
+            video.setAttribute('webkit-playsinline', '');
+            video.style.position = 'fixed';
+            video.style.left = '-10px';
+            video.style.top = '-10px';
+            video.style.width = '1px';
+            video.style.height = '1px';
+            video.style.opacity = '0';
+            video.style.pointerEvents = 'none';
+            video.setAttribute('aria-hidden', 'true');
+
+            if (canvas.captureStream) {
+                ecoKeepAwakeStream = canvas.captureStream(1);
+                video.srcObject = ecoKeepAwakeStream;
+            }
+
+            document.body.appendChild(video);
+            ecoKeepAwakeVideo = video;
+            return ecoKeepAwakeVideo;
+        }
+
+        async function startEcoKeepAwakeFallback() {
+            try {
+                const video = ensureEcoKeepAwakeVideo();
+                if (video && video.paused && video.srcObject) {
+                    await video.play();
+                }
+            } catch (e) {
+                console.warn('Eco Keep Awake Fallback Error:', e);
+            }
+        }
+
+        function stopEcoKeepAwakeFallback() {
+            try {
+                if (ecoKeepAwakeVideo) {
+                    ecoKeepAwakeVideo.pause();
+                    ecoKeepAwakeVideo.removeAttribute('src');
+                    ecoKeepAwakeVideo.srcObject = null;
+                    ecoKeepAwakeVideo.remove();
+                    ecoKeepAwakeVideo = null;
+                }
+                if (ecoKeepAwakeStream) {
+                    ecoKeepAwakeStream.getTracks().forEach(track => track.stop());
+                    ecoKeepAwakeStream = null;
+                }
+            } catch (e) {
+                console.warn('Eco Keep Awake Fallback Release Error:', e);
+            }
         }
 
         async function updateEcoWakeLock() {
@@ -603,18 +669,32 @@
                     }
                     ecoWakeLock = null;
                 }
+                stopEcoKeepAwakeFallback();
                 return;
             }
 
-            if (ecoWakeLock || !('wakeLock' in navigator)) return;
+            let nativeWakeLockOk = false;
+            if ('wakeLock' in navigator) {
+                if (ecoWakeLock) {
+                    nativeWakeLockOk = true;
+                } else {
+                    try {
+                        ecoWakeLock = await navigator.wakeLock.request('screen');
+                        nativeWakeLockOk = true;
+                        ecoWakeLock.addEventListener('release', () => {
+                            ecoWakeLock = null;
+                            if (isEcoWakeLockNeeded()) {
+                                setTimeout(updateEcoWakeLock, 250);
+                            }
+                        });
+                    } catch (e) {
+                        console.warn('Wake Lock Request Error:', e);
+                    }
+                }
+            }
 
-            try {
-                ecoWakeLock = await navigator.wakeLock.request('screen');
-                ecoWakeLock.addEventListener('release', () => {
-                    ecoWakeLock = null;
-                });
-            } catch (e) {
-                console.warn('Wake Lock Request Error:', e);
+            if (!nativeWakeLockOk) {
+                await startEcoKeepAwakeFallback();
             }
         }
 
@@ -887,6 +967,10 @@
             window.addEventListener('pagehide', stopPlaybackOnClose);
             window.addEventListener('beforeunload', stopPlaybackOnClose);
             document.addEventListener('visibilitychange', updateEcoWakeLock);
+            window.addEventListener('focus', updateEcoWakeLock);
+            window.addEventListener('pointerdown', () => {
+                if (isEcoWakeLockNeeded()) updateEcoWakeLock();
+            }, { passive: true });
             window.addEventListener('resize', () => {
                 if (window.visualizerMode === 'eco') drawEcoCanvasOnce();
             });
