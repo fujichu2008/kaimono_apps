@@ -14,7 +14,8 @@
 html,body{width:100%;height:100%;overflow:hidden;background:var(--ink);
   font-family:"Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
   touch-action:none;color:#f5ead8}
-canvas{position:fixed;inset:0;display:block}
+canvas{position:fixed;inset:0;display:block;cursor:crosshair}
+body.is-fighting canvas{cursor:ew-resize}
 .ui{position:fixed;pointer-events:none;z-index:5}
 /* ---- HUD ---- */
 #hud{top:calc(env(safe-area-inset-top,0px) + 8px);left:0;right:0;display:flex;justify-content:space-between;
@@ -175,6 +176,9 @@ body.scene-asashio .shopTab.active{background:linear-gradient(135deg,#ffe08a,#57
 #rmoney{margin-top:6px;font-size:22px;color:#ffd36b;font-weight:900;text-shadow:0 0 12px rgba(255,200,80,.35)}
 #rhook{margin-top:7px;font-size:13px;font-weight:900;color:#baffd0;letter-spacing:.12em}
 #rspot{margin-top:4px;font-size:11.5px;color:#ffe9c9;opacity:.82}
+#rspot .rline{display:block;margin-top:2px}
+#rspot .research{color:#ffd36b;font-weight:900}
+#rspot .tideWhy{color:#baffd0;font-weight:900}
 #tideChoice{display:none;margin-top:10px;padding:9px 10px;border-radius:14px;
   background:rgba(255,214,160,.07);border:1px solid rgba(255,214,160,.18);text-align:left}
 #tideChoiceNote{font-size:10.8px;line-height:1.45;color:#ffe9c9;opacity:.86;text-align:center;margin-bottom:8px}
@@ -468,6 +472,35 @@ try{
     if(s&&typeof s==='object')Object.assign(P,s);
   }
 }catch(e){}
+function researchNeed(lv){ return 28+Math.max(1,Number(lv)||1)*18; }
+function normalizeFishBookEntry(id,b){
+  b=(b&&typeof b==='object')?b:{};
+  b.count=Math.max(0,Math.floor(Number(b.count)||0));
+  b.spots=(b.spots&&typeof b.spots==='object')?b.spots:{};
+  b.lures=(b.lures&&typeof b.lures==='object')?b.lures:{};
+  b.perfect=Math.max(0,Math.floor(Number(b.perfect)||0));
+  b.lastMood=typeof b.lastMood==='string'?b.lastMood:'';
+  b.researchXp=Math.max(0,Math.floor(Number(b.researchXp)||0));
+  b.researchLv=clamp(Math.floor(Number(b.researchLv)||1),1,10);
+  b.medals=(b.medals&&typeof b.medals==='object')?b.medals:{};
+  ['record','target','signal','perfect','omen'].forEach(k=>{ b.medals[k]=Math.max(0,Math.floor(Number(b.medals[k])||0)); });
+  return b;
+}
+function addResearchProgress(book,gain){
+  book=normalizeFishBookEntry('',book);
+  let up=0;
+  book.researchXp+=Math.max(0,Math.floor(Number(gain)||0));
+  while(book.researchLv<10&&book.researchXp>=researchNeed(book.researchLv)){
+    book.researchXp-=researchNeed(book.researchLv);
+    book.researchLv++;
+    up++;
+  }
+  return {book:book,levelUp:up};
+}
+function researchLabel(book){
+  book=normalizeFishBookEntry('',book);
+  return '研究Lv '+book.researchLv+'（'+book.researchXp+'/'+researchNeed(book.researchLv)+'）';
+}
 function normalizeSave(){
   P.lvl=Number(P.lvl)||1;
   P.xp=Number(P.xp)||0;
@@ -475,6 +508,7 @@ function normalizeSave(){
   P.count=Number(P.count)||0;
   P.records=(P.records&&typeof P.records==='object')?P.records:{};
   P.fishBook=(P.fishBook&&typeof P.fishBook==='object')?P.fishBook:{};
+  Object.keys(P.fishBook).forEach(id=>{ P.fishBook[id]=normalizeFishBookEntry(id,P.fishBook[id]); });
   P.scene=(P.scene&&typeof P.scene==='string')?P.scene:'yunagi';
   P.money=Math.max(0,Math.floor(Number(P.money)||0));
   P.totalEarned=Math.max(0,Math.floor(Number(P.totalEarned)||0));
@@ -603,12 +637,28 @@ function topKey(obj){
 }
 function updateFishBook(ctx){
   const id=ctx.spc.id;
-  const b=P.fishBook[id]||(P.fishBook[id]={count:0,spots:{},lures:{},perfect:0,lastMood:''});
+  const b=normalizeFishBookEntry(id,P.fishBook[id]);
   b.count++;
   if(ctx.spot)b.spots[ctx.spot.id]=(b.spots[ctx.spot.id]||0)+1;
   if(ctx.lure)b.lures[ctx.lure.id]=(b.lures[ctx.lure.id]||0)+1;
-  if(ctx.hookQuality==='PERFECT')b.perfect++;
+  if(ctx.hookQuality==='PERFECT'){ b.perfect++; b.medals.perfect++; }
+  if(ctx.isRec)b.medals.record++;
+  if(ctx.targetHit)b.medals.target++;
+  if(ctx.signalHit)b.medals.signal++;
+  if(ctx.rareOmenHit)b.medals.omen++;
   b.lastMood=getMood().id;
+  let gain=7+Math.max(0,(ctx.spc.rar||1)-1)*2;
+  if(ctx.hookQuality==='PERFECT')gain+=9;
+  else if(ctx.hookQuality==='LATE')gain=Math.max(3,Math.floor(gain*0.65));
+  if(ctx.isRec)gain+=10;
+  if(ctx.targetHit)gain+=10;
+  if(ctx.signalHit)gain+=6;
+  if(ctx.rareOmenHit)gain+=8;
+  if(ctx.tideGain)gain+=ctx.tideGain*4;
+  const beforeLv=b.researchLv;
+  const res=addResearchProgress(b,gain);
+  P.fishBook[id]=res.book;
+  return {gain:gain,lv:res.book.researchLv,levelUp:res.book.researchLv-beforeLv,xp:res.book.researchXp};
 }
 function starGauge(v){
   const n=clamp(Math.round(v),1,4);
@@ -712,6 +762,52 @@ function targetLabel(target){
   return '狙い：'+target.name+(target.reason?'（'+target.reason+'）':'');
 }
 let targetNow=null,targetFocusNow=0,tideSignalLevel=0;
+let rareOmen=null;
+function getRareOmenCandidate(spot){
+  const sid=spot&&spot.id||'open';
+  if(activeSceneId==='asashio'){
+    if(sid==='glow')return {text:'鳥山が遠くに見える。潮目に大物が差す',speciesIds:['saba','suzuki_sea','buri']};
+    if(sid==='deep')return {text:'沖合に大きな波紋。重い魚影が回る',speciesIds:['madai','buri','maguro','madako']};
+    if(sid==='rock')return {text:'底の重い気配。根回りがざわつく',speciesIds:['madako','madai','kasago']};
+    if(sid==='reeds')return {text:'防波堤際がざわつく。群れと底物の気配',speciesIds:['aji','mebaru','madako']};
+    return {text:'潮が一段強く流れた。回遊魚の気配',speciesIds:['aji','saba','suzuki_sea','buri']};
+  }
+  if(sid==='glow')return {text:'金色の反射。光の道が濃くなった',speciesIds:['goldkoi','koi']};
+  if(sid==='deep')return {text:'深場に大きな波紋。大物が回った',speciesIds:['itou','suzuki','goldkoi']};
+  if(sid==='rock')return {text:'岩陰で水面がざわつく',speciesIds:['bass','trout']};
+  if(sid==='reeds')return {text:'葦際が細かく揺れた。岸際の気配',speciesIds:['tenagaebi','bass','funa']};
+  return {text:'水面が一瞬静まった。魚影が濃い',speciesIds:['koi','suzuki','goldkoi']};
+}
+function getRareOmenMulForSpecies(spc,spot){
+  if(!rareOmen||!spc)return 1;
+  const now=performance.now()/1000;
+  if(now>rareOmen.until)return 1;
+  if(rareOmen.spot&&spot&&rareOmen.spot!==spot.id)return 1;
+  if(rareOmen.speciesIds&&rareOmen.speciesIds.indexOf(spc.id)>=0){
+    return (spc.rar>=4||spc.fightType==='boss')?1.55:1.28;
+  }
+  return 1;
+}
+function maybeTriggerRareOmen(dt,t){
+  if(typeof G==='undefined'||G.state!=='wait'||G.bite)return;
+  const now=performance.now()/1000;
+  if(rareOmen&&now<rareOmen.until)return;
+  if(G.lastRareOmenAt&&now-G.lastRareOmenAt<18)return;
+  const spot=G.currentSpot||activeSpot;
+  const mood=getMood();
+  const ready=(tideCombo>=2)||((mood.largeBoost||1)>1.10)||((mood.rarityBoost||1)>1.08)||(spot&&(spot.id==='glow'||spot.id==='deep'));
+  if(!ready)return;
+  const chance=(tideCombo>=3?0.045:0.026)+(((mood.largeBoost||1)>1.12||(mood.rarityBoost||1)>1.10)?0.018:0);
+  if(Math.random()>dt*chance)return;
+  const omen=getRareOmenCandidate(spot);
+  rareOmen={spot:spot&&spot.id,text:omen.text,speciesIds:omen.speciesIds||[],until:now+8.5};
+  G.lastRareOmenAt=now;
+  showCoach(omen.text,1300);
+  setHint('<span class="hintMain">レア予兆：'+omen.text+'</span><span class="hintSub">今の釣り場で短時間だけ気配が濃くなる</span>');
+  addRipple(G.lure.x,G.lure.z,1.15);
+  addRipple(G.lure.x+rand(-1.2,1.2),G.lure.z+rand(-1.2,1.2),0.85);
+  if(typeof resetFishPopulation==='function')resetFishPopulation();
+}
 function isTideRiskSpecies(spc){
   return !!spc&&(spc.rar>=3||spc.max>=70||spc.fightType==='boss'||spc.fightType==='rare'||spc.fightType==='runner'||spc.fightType==='octopus');
 }
@@ -804,75 +900,80 @@ function getHookProfile(spc){
   const type=spc&&spc.fightType;
   const tideRisk=getTideRiskForSpecies(spc);
   const hold=st.hookHoldMul||1;
-  const tight=clamp((d-1)*0.08+tideRisk*0.045,0,0.16);
+  const tight=clamp((d-1)*0.095+tideRisk*0.055,0,0.19);
   let pStart=0.18+tight*0.35;
-  let pEnd=0.46-tight*0.80;
-  let gStart=0.08+tight*0.22;
-  let gEnd=0.70-tight*1.25;
-  let minLeft=0.13+clamp((d-1)*0.035,0,0.05)+tideRisk*0.012;
-  let timeMul=(1-clamp((d-1)*0.20,0,0.26))*getTideHookTimeMul(spc);
+  let pEnd=0.445-tight*0.82;
+  let gStart=0.085+tight*0.24;
+  let gEnd=0.64-tight*1.18;
+  let minLeft=0.145+clamp((d-1)*0.040,0,0.060)+tideRisk*0.014;
+  let timeMul=(1-clamp((d-1)*0.23,0,0.30))*getTideHookTimeMul(spc);
   if(hold>1){
-    gEnd+=Math.min(0.045,(hold-1)*0.12);
-    minLeft-=Math.min(0.020,(hold-1)*0.045);
+    gEnd+=Math.min(0.038,(hold-1)*0.10);
+    minLeft-=Math.min(0.016,(hold-1)*0.040);
   }else if(hold<1){
-    gEnd-=Math.min(0.050,(1-hold)*0.12);
-    minLeft+=Math.min(0.025,(1-hold)*0.050);
+    gEnd-=Math.min(0.055,(1-hold)*0.13);
+    minLeft+=Math.min(0.030,(1-hold)*0.055);
   }
   if(easy){
-    pStart-=0.02; pEnd+=0.02; gStart-=0.015; gEnd+=0.035; minLeft-=0.025; timeMul+=0.035;
+    pStart-=0.015; pEnd+=0.012; gStart-=0.010; gEnd+=0.014; minLeft-=0.016; timeMul+=0.025;
   }
   if(type==='octopus'){
-    pStart+=0.015; pEnd-=0.025; gEnd-=0.045; timeMul-=0.02;
+    pStart+=0.018; pEnd-=0.030; gEnd-=0.060; minLeft+=0.010; timeMul-=0.030;
   }
   if(type==='boss'){
-    pStart+=0.025; pEnd-=0.040; gEnd-=0.070; minLeft+=0.020; timeMul-=0.035;
+    pStart+=0.030; pEnd-=0.045; gEnd-=0.085; minLeft+=0.028; timeMul-=0.050;
   }
   return {
     difficulty:d,
     tideRisk:tideRisk,
-    timeMul:clamp(timeMul,0.58,1.08),
-    perfectStart:clamp(pStart,0.13,0.28),
-    perfectEnd:clamp(Math.max(pEnd,pStart+0.12),0.30,0.50),
-    goodStart:clamp(gStart,0.055,0.14),
-    goodEnd:clamp(Math.max(gEnd,gStart+0.30),0.44,0.76),
-    minLeft:clamp(minLeft,0.08,0.22)
+    timeMul:clamp(timeMul,0.54,1.06),
+    perfectStart:clamp(pStart,0.13,0.29),
+    perfectEnd:clamp(Math.max(pEnd,pStart+0.11),0.29,0.49),
+    goodStart:clamp(gStart,0.060,0.15),
+    goodEnd:clamp(Math.max(gEnd,gStart+0.27),0.40,0.70),
+    minLeft:clamp(minLeft,0.09,0.24)
   };
 }
 function getTensionProfile(spc,F){
   const d=getSpeciesDifficulty(spc);
   const st=getEquipStats();
   const type=spc&&spc.fightType||'steady';
-  let lo=0.30,hi=0.84;
-  if(d<1.08){ lo=0.26; hi=0.88; }
-  lo+=clamp((d-1)*0.052,0,0.075);
-  hi-=clamp((d-1)*0.060,0,0.095);
-  if(type==='boss'){ lo+=0.035; hi-=0.040; }
-  else if(type==='runner'){ lo+=0.020; hi-=0.025; }
-  else if(type==='heavy'){ lo+=0.012; hi-=0.018; }
-  else if(type==='rare'){ lo+=0.020; hi-=0.020; }
+  let lo=0.32,hi=0.81;
+  if(d<1.08){ lo=0.28; hi=0.84; }
+  lo+=clamp((d-1)*0.062,0,0.088);
+  hi-=clamp((d-1)*0.072,0,0.110);
+  if(type==='boss'){ lo+=0.045; hi-=0.055; }
+  else if(type==='runner'){ lo+=0.026; hi-=0.035; }
+  else if(type==='heavy'){ lo+=0.018; hi-=0.026; }
+  else if(type==='rare'){ lo+=0.026; hi-=0.032; }
   else if(type==='octopus'){
-    lo=F&&F.octoStuck?0.36:0.33;
-    hi=F&&F.octoStuck?0.78:0.76;
+    lo=F&&F.octoStuck?0.38:0.35;
+    hi=F&&F.octoStuck?0.75:0.73;
   }else if(type==='shrimp'||type==='nibble'){
-    lo=Math.min(lo,0.27);
-    hi=Math.max(hi,0.87);
+    lo=Math.min(lo,0.29);
+    hi=Math.max(hi,0.83);
   }
   const tideNarrow=getTideTensionNarrow(spc);
   lo+=tideNarrow;
   hi-=tideNarrow;
   if(st.greenBonus){
-    lo-=st.greenBonus*0.55;
-    hi+=st.greenBonus;
+    lo-=st.greenBonus*0.50;
+    hi+=st.greenBonus*0.82;
   }
-  lo=clamp(lo,0.22,0.49);
-  hi=clamp(Math.max(hi,lo+0.20),0.60,0.92);
+  if(F&&F.hookQuality==='LATE'){
+    const lateNarrow=0.018+clamp((d-1)*0.020,0,0.030)+getTideRiskForSpecies(spc)*0.010;
+    lo+=lateNarrow;
+    hi-=lateNarrow*1.15;
+  }
+  lo=clamp(lo,0.24,0.51);
+  hi=clamp(Math.max(hi,lo+0.18),0.57,0.89);
   return {
     difficulty:d,
     tideRisk:getTideRiskForSpecies(spc),
     greenLo:lo,
     greenHi:hi,
-    orangeHi:Math.min(0.98,hi+0.14),
-    mismatchMul:(1+clamp((d-1)*0.22,0,0.26))*(1+clamp(getTideRiskForSpecies(spc)*0.06,0,0.10))
+    orangeHi:Math.min(0.98,hi+0.13),
+    mismatchMul:(1+clamp((d-1)*0.28,0,0.34))*(1+clamp(getTideRiskForSpecies(spc)*0.08,0,0.13))
   };
 }
 function applyTensionZoneUI(profile){
@@ -908,29 +1009,36 @@ function getFishStaminaBase(spc,size,diff){
 function getStaminaDamageProfile(spc,F){
   const type=spc&&spc.fightType||'steady';
   const d=(F&&F.difficulty)||getSpeciesDifficulty(spc);
-  let green=7.4,alignBonus=2.4,perfectBonus=1.05,high=4.2,low=0.35,bossRun=0.18,bossRunAligned=0.65,octoPeel=1.85,octoGreen=2.4;
+  let green=7.2,alignBonus=2.6,perfectBonus=1.20,high=3.15,low=0.18,bossRun=0.18,bossRunAligned=0.65,octoPeel=1.85,octoGreen=2.4;
   if(d<1.08){
-    green=8.6; alignBonus=3.1; perfectBonus=1.35; high=5.4; low=0.75;
+    green=8.0; alignBonus=3.0; perfectBonus=1.55; high=3.65; low=0.32;
   }else{
     const hard=clamp(d-1,0,1.2);
-    green-=hard*1.15;
-    high-=hard*0.90;
-    low-=hard*0.18;
-    alignBonus-=hard*0.65;
-    perfectBonus-=hard*0.35;
+    green-=hard*0.95;
+    high-=hard*1.05;
+    low-=hard*0.16;
+    alignBonus-=hard*0.58;
+    perfectBonus-=hard*0.30;
   }
-  if(type==='heavy'){ green*=0.92; high*=0.78; }
-  else if(type==='runner'){ green*=0.90; high*=0.76; }
-  else if(type==='rare'){ green*=0.86; high*=0.70; perfectBonus*=0.78; }
-  else if(type==='boss'){ green*=0.78; high*=0.62; low*=0.25; alignBonus*=0.70; perfectBonus*=0.65; bossRun=0.22; bossRunAligned=0.72; }
-  else if(type==='octopus'){ green*=0.88; high*=0.68; low*=0.35; octoPeel=1.65; octoGreen=2.05; }
-  else if(type==='shrimp'||type==='nibble'){ green*=1.08; high*=1.05; low*=1.2; }
+  if(type==='heavy'){ green*=0.92; high*=0.68; }
+  else if(type==='runner'){ green*=0.88; high*=0.64; }
+  else if(type==='rare'){ green*=0.84; high*=0.58; perfectBonus*=0.78; }
+  else if(type==='boss'){ green*=0.76; high*=0.48; low*=0.18; alignBonus*=0.68; perfectBonus*=0.62; bossRun=0.22; bossRunAligned=0.72; }
+  else if(type==='octopus'){ green*=0.86; high*=0.54; low*=0.25; octoPeel=1.62; octoGreen=2.00; }
+  else if(type==='shrimp'||type==='nibble'){ green*=1.05; high*=0.92; low*=1.05; }
+  if(F&&F.hookQuality==='LATE'){
+    green*=0.92;
+    high*=0.84;
+    low*=0.75;
+    alignBonus*=0.85;
+    perfectBonus*=0.70;
+  }
   return {
-    green:Math.max(4.6,green),
-    alignBonus:Math.max(1.1,alignBonus),
-    perfectBonus:Math.max(0.45,perfectBonus),
-    high:Math.max(2.2,high),
-    low:Math.max(0.05,low),
+    green:Math.max(4.4,green),
+    alignBonus:Math.max(1.0,alignBonus),
+    perfectBonus:Math.max(0.38,perfectBonus),
+    high:Math.max(1.25,high),
+    low:Math.max(0.02,low),
     bossRun:bossRun,
     bossRunAligned:bossRunAligned,
     octoPeel:octoPeel,
@@ -1037,6 +1145,54 @@ function updateComboUI(perfect){
   el.style.display='block';
   el.textContent=getTideLabel();
   el.classList.toggle('perfect',!!perfect);
+}
+function isSignalMatchedCatch(ctx){
+  const spc=ctx&&ctx.spc,sp=ctx&&ctx.spot,tech=(ctx&&ctx.tech)||getActionStats();
+  if(!spc)return false;
+  if(ctx&&ctx.targetHit&&(ctx.targetFocus||0)>=0.42)return true;
+  if(spc.id==='tenagaebi'||spc.id==='goldkoi'||spc.id==='koi'||spc.id==='kurodai'){
+    return tech.still>2.8&&tech.jerk===0;
+  }
+  if(spc.id==='aji'||spc.id==='gill'||spc.id==='saba'||spc.id==='trout'){
+    return tech.twitch>=2&&tech.twitch<=5;
+  }
+  if(spc.fightType==='octopus'||spc.id==='mebaru'||spc.id==='kasago'){
+    return tech.still>2.0&&tech.jerk<=1&&sp&&(sp.id==='rock'||sp.id==='reeds'||sp.id==='deep');
+  }
+  if(spc.fightType==='runner'||spc.fightType==='dash'||spc.id==='buri'||spc.id==='maguro'){
+    return tech.jerk>=1||tech.twitch>=3;
+  }
+  if(sp&&sp.id==='glow'&&tech.twitch>=2)return true;
+  if(sp&&(sp.id==='rock'||sp.id==='reeds')&&tech.still>2.0)return true;
+  return false;
+}
+function calcSkillTideOutcome(ctx){
+  const before=tideCombo||0;
+  const spc=ctx&&ctx.spc;
+  const q=(ctx&&ctx.hookQuality)||'GOOD';
+  const small=!!spc&&(spc.rar<=1&&spc.max<=42&&spc.fightType!=='boss'&&spc.fightType!=='rare');
+  let gain=0,reasons=[];
+  if(q==='PERFECT'){ gain++; reasons.push('PERFECT'); }
+  if(ctx&&ctx.targetHit){ gain++; reasons.push('狙い的中'); }
+  if(ctx&&ctx.signalHit){ gain++; reasons.push('水面読み'); }
+  if(ctx&&ctx.rareOmenHit){ gain++; reasons.push('予兆回収'); }
+  if(q==='LATE'){
+    gain=Math.max(0,gain-1);
+    if(gain===0){
+      return {before:before,next:before,gain:0,label:before>=2?'潮乗り維持：浅掛かり':'潮乗りなし：浅掛かり',reasons:['浅掛かり']};
+    }
+    reasons.push('浅掛かりで減速');
+  }
+  if(gain>0){
+    const next=clamp(before+gain,1,7);
+    return {before:before,next:next,gain:gain,label:'潮乗り+'+gain+'：'+reasons.slice(0,2).join('・'),reasons:reasons};
+  }
+  if(small){
+    const next=Math.max(before,1);
+    return {before:before,next:next,gain:0,label:'潮乗り維持：小型魚',reasons:['小型魚']};
+  }
+  if(before>=2)return {before:before,next:before,gain:0,label:'潮乗り維持：釣果継続',reasons:['釣果継続']};
+  return {before:before,next:before,gain:0,label:'潮乗り準備：次は狙いを合わせる',reasons:['準備']};
 }
 
 // ---------- species / spot / technique ----------
@@ -1291,6 +1447,8 @@ function pickSpecies(){
     if(tideSignalLevel>=2&&(s.max>=70||s.rar>=3||s.fightType==='boss'||s.fightType==='rare'||s.fightType==='runner'||s.fightType==='octopus')){
       w*=1+getTideSignalBonus()*0.30+getTideRiskForSpecies(s)*0.045;
     }
+    const omenMul=getRareOmenMulForSpecies(s,spot);
+    if(omenMul>1)w*=omenMul;
     if(s.rar>=4)w*=st.rarityBoost*(mood.rarityBoost||1)*st.rareStealth;
     if(s.max<=32)w*=st.smallBoost*st.smallPenalty;
     if(s.max>=90||s.minDist>=22)w*=st.largeBoost*st.largePenalty*(spot.largeBoost||1)*(mood.largeBoost||1);
@@ -1974,7 +2132,7 @@ const G={
   hookQuality:null,
   target:null,targetAnnounced:false,
   targetFocus:0,targetFocusLabel:'低',
-  lastSignal:'',signalT:0,
+  lastSignal:'',signalT:0,hookOmenHit:false,lastRareOmenAt:0,
 };
 let reeling=false,rodDir=0,rodDirTarget=0;
 let tideCombo=0;
@@ -2148,9 +2306,13 @@ function updateFishAI(f,dt,t){
           doNibbleDip();
           f.nt=rand(0.5,1.15);
         }else{
-          let biteChance=clamp((f.spc.bold+0.12+getEquipStats().biteBoldAdd)*moodBiteMul(f.spc),0,0.96);
+          const targetBiteHit=isTargetHit(G.target,f.spc,f.size);
           const precisionMul=getPrecisionBiteMul(f.spc,G.target,G.targetFocus||0);
-          biteChance=clamp(biteChance*precisionMul,0,0.96);
+          const biteCap=(targetBiteHit||precisionMul>1.08)?0.93:0.90;
+          let biteChance=clamp((f.spc.bold+0.05+getEquipStats().biteBoldAdd)*moodBiteMul(f.spc),0,biteCap);
+          biteChance=clamp(biteChance*precisionMul,0,biteCap);
+          const omenMul=getRareOmenMulForSpecies(f.spc,G.currentSpot||activeSpot);
+          if(omenMul>1)biteChance=clamp(biteChance*(1+Math.min(0.18,(omenMul-1)*0.16)),0,0.94);
           if(precisionMul<0.72&&G.techniqueCoachT<=0){
             pushFishSignal('狙いが少し甘い。大物が食い込まない',900,2.8);
           }else if(precisionMul>1.08&&G.techniqueCoachT<=0){
@@ -2203,7 +2365,7 @@ function startBite(f){
   if(precisionMul>1)maxT*=1+Math.min(0.06,(precisionMul-1)*0.25);
   if(precisionMul<0.78)maxT*=0.96;
   maxT=clamp(maxT,0.58,1.25);
-  G.bite={f:f,t:maxT,maxT:maxT,profile:profile,difficulty:diff,precision:precisionMul};
+  G.bite={f:f,t:maxT,maxT:maxT,profile:profile,difficulty:diff,precision:precisionMul,omenHit:getRareOmenMulForSpecies(f.spc,G.currentSpot||activeSpot)>1};
   G.hookQuality=null;
   G.lure.bobT=f.spc.id==='tenagaebi'?-0.30:-0.5;
   addRipple(G.lure.x,G.lure.z,f.spc.id==='tenagaebi'?0.72:1.0);
@@ -2243,6 +2405,7 @@ function hookSet(){
   const f=G.bite.f;
   const diff=(G.bite&&G.bite.difficulty)||getSpeciesDifficulty(f.spc);
   G.hookQuality=q;
+  G.hookOmenHit=!!(G.bite&&G.bite.omenHit);
   G.bite=null; markEl.style.display='none';
   sHit(); vib(q==='PERFECT'?[30,30,60,30,110]:[30,30,80]);
   spawnSplash(G.lure.x,0.15,G.lure.z,14,1.3);
@@ -2309,10 +2472,10 @@ function landLure(){
   const order=ensureOrder();
   if(G.firstSplash){
     G.firstSplash=false;
-    setHint('<span class="hintMain">'+G.currentSpot.name+' ／ '+mood.name+' ／ 依頼：<b>'+order.title+'</b></span><span class="hintSub">タップ＝誘い　上スワイプ＝アワセ　回収は右下</span>'+(getTideLabel()?'<span class="hintTiny">'+getTideLabel()+'</span>':''));
-    setTimeout(()=>{ if(G.state==='wait')setHint('<span class="hintMain">ウキに集中</span><span class="hintSub">タップ＝誘い ／ 沈んだら上スワイプ</span>'); },4500);
+    setHint('<span class="hintMain">'+G.currentSpot.name+' ／ '+mood.name+' ／ 依頼：<b>'+order.title+'</b></span><span class="hintSub">'+getWaitHintSub()+' ／ 回収は右下</span>'+(getTideLabel()?'<span class="hintTiny">'+getTideLabel()+'</span>':''));
+    setTimeout(()=>{ if(G.state==='wait')setHint('<span class="hintMain">ウキに集中</span><span class="hintSub">'+getWaitHintSub()+'</span>'); },4500);
   }else{
-    setHint('<span class="hintMain">'+G.currentSpot.name+' ／ '+mood.name+' ／ 依頼：<b>'+order.title+'</b></span><span class="hintSub">タップ＝誘い ／ 上スワイプ＝アワセ・手前へ</span>'+(getTideLabel()?'<span class="hintTiny">'+getTideLabel()+'</span>':''));
+    setHint('<span class="hintMain">'+G.currentSpot.name+' ／ '+mood.name+' ／ 依頼：<b>'+order.title+'</b></span><span class="hintSub">'+getWaitHintSub()+'</span>'+(getTideLabel()?'<span class="hintTiny">'+getTideLabel()+'</span>':''));
   }
 }
 function twitch(){
@@ -2338,10 +2501,11 @@ function pickup(){
   G.actionLog.length=0;
   G.target=null; G.targetFocus=0; G.targetFocusLabel='低';
   targetNow=null; targetFocusNow=0;
+  rareOmen=null;
   lureGroup.visible=false; markEl.style.display='none';
   $('spotPreview').style.display='none';
   $('btnPickup').style.display='none';
-  setHint('<span class="hintMain">下に引いて離す＝キャスト</span><span class="hintSub">左右で狙い調整 ／ タップ＝誘い</span>');
+  setHint('<span class="hintMain">'+getIdleHintMain()+'</span><span class="hintSub">'+getIdleHintSub()+' ／ '+getWaitHintSub()+'</span>');
 }
 
 // ---------- ファイト ----------
@@ -2364,7 +2528,9 @@ function startFight(f,hookQuality){
     octoStuck:false,octoGrip:0,octoStuckT:0,bossPhase:false,finalSurgeUsed:false,tiredAnnounced:false,
     difficulty:diff,tensionProfile:null,
     hookQuality:q,spot:G.currentSpot||activeSpot,target:G.target,targetFocus:G.targetFocus||0,targetFocusLabel:G.targetFocusLabel||'低',
+    rareOmenHit:!!G.hookOmenHit,
   };
+  G.hookOmenHit=false;
   G.fight.tensionProfile=getTensionProfile(spc,G.fight);
   G.fight.staminaMax=G.fight.stamina;
   if(q==='PERFECT'){
@@ -2372,10 +2538,19 @@ function startFight(f,hookQuality){
     G.fight.runT+=0.42;
   }
   if(q==='LATE'){
-    G.fight.stamina*=1.10+Math.max(0,diff-1)*0.05;
+    const lateRisk=clamp(0.10+Math.max(0,diff-1)*0.11,0.10,0.28);
+    G.fight.stamina*=1+lateRisk;
     G.fight.staminaMax=G.fight.stamina;
+    if(diff>=1.08){
+      G.fight.runT=Math.min(G.fight.runT,rand(0.32,0.86));
+      G.fight.slack=0.18+Math.max(0,diff-1)*0.10;
+    }else{
+      G.fight.slack=0.08;
+    }
+    if(diff>=1.28)G.fight.tension=clamp(G.fight.tension+0.05,0,1.15);
   }
   G.state='fight';
+  document.body.classList.add('is-fighting');
   $('btnPickup').style.display='none';
   $('tens').style.display='block'; $('tlabel').style.display='block';
   $('distwrap').style.display='block';
@@ -2384,7 +2559,7 @@ function startFight(f,hookQuality){
   const typeHint={octopus:'タコ系：張り付いたら緑テンション維持',boss:'大物：緑帯が狭い。走りと左右の竿さばきに注意',dash:'走る魚：巻きすぎず左右を合わせる',runner:'横走り：魚の向きに竿を合わせる',heavy:'重い魚：緑テンションで体力を削る'}[spc.fightType||''];
   if(typeHint)setTimeout(()=>showCoach(typeHint,1100),420);
   const fightTide=getTideLabel();
-  setHint('<span class="hintMain">長押し＝巻く ／ 走ったら離す</span><span class="hintSub">'+((G.currentSpot&&G.currentSpot.name)?G.currentSpot.name+'でヒット中 ／ ':'')+'左右で魚の方向へ竿を向ける</span>'+(fightTide?'<span class="hintTiny">'+fightTide+'</span>':''));
+  setHint('<span class="hintMain">'+getFightHintMain()+'</span><span class="hintSub">'+((G.currentSpot&&G.currentSpot.name)?G.currentSpot.name+'でヒット中 ／ ':'')+getFightHintSub()+'</span>'+(fightTide?'<span class="hintTiny">'+fightTide+'</span>':''));
   // 周囲の魚は散る
   fishes.forEach(o=>{ if(o!==f&&o.state!=='wander'&&o.state!=='hooked'&&o.respawn<=0) fleeFish(o); });
 }
@@ -2404,6 +2579,7 @@ function startRun(F){
   else if(type==='boss')showCoach('大物が走る！巻きすぎ注意',820);
 }
 function endFightUI(){
+  document.body.classList.remove('is-fighting');
   $('tens').style.display='none'; $('tlabel').style.display='none';
   $('distwrap').style.display='none';
   $('arrowL').style.display='none'; $('arrowR').style.display='none';
@@ -2513,15 +2689,15 @@ function updateFight(dt,t){
   rodDir=lerp(rodDir,rodDirTarget,dt*8);
   const nfx=clamp(F.theta/thMax,-1,1);
   const mismatch=Math.abs(nfx-rodDir);
-  const mismatchPower=((type==='dash'||type==='runner'||type==='boss')?1.32:1)*(tprof.mismatchMul||1);
+  const mismatchPower=((type==='dash'||type==='runner'||type==='boss')?1.46:(type==='heavy'||type==='octopus'?1.18:1))*(tprof.mismatchMul||1);
   // テンション
   let dT=0;
   if(reeling){
-    dT+=0.50+pull*0.30+mismatch*0.30*mismatchPower;
-    if(F.running)dT+=0.95*pull;
+    dT+=0.50+pull*0.32+mismatch*0.34*mismatchPower;
+    if(F.running)dT+=1.08*pull;
   }else{
-    dT-=1.05;
-    if(F.running)dT+=0.45*pull;
+    dT-=1.08;
+    if(F.running)dT+=0.50*pull;
   }
   F.tension=clamp(F.tension+dT*dt*getEquipStats().tensionMul,0,1.15);
   if(type==='octopus'&&F.octoStuck){
@@ -2591,7 +2767,9 @@ function updateFight(dt,t){
     if(F.slack>1.4){
       F.slack=0;
       const hold=getEquipStats().hookHoldMul||1;
-      const slackLose=clamp((0.4/hold)*(F.hookQuality==='LATE'?1.25:1),0.18,0.62);
+      const lateMul=F.hookQuality==='LATE'?(1.42+clamp((diff-1)*0.18,0,0.28)):1;
+      const hardMul=(type==='boss'||type==='rare'||type==='runner'||type==='octopus')?1.12:1;
+      const slackLose=clamp((0.4/hold)*lateMul*hardMul,0.18,0.72);
       if(Math.random()<slackLose){ escapeFish('針が外れた…'); return; }
       else showCoach('糸がたるんでる！巻け！',900);
     }
@@ -2778,11 +2956,16 @@ function showResult(){
   const lure=getItemById(P.equipped.lure);
   const target=F.target||G.target;
   const targetHit=isTargetHit(target,spc,size);
-  const nextCombo=tideCombo+1;
+  const techStats=getActionStats();
+  const signalHit=isSignalMatchedCatch({spc:spc,spot:spot,tech:techStats,targetHit:targetHit,targetFocus:F.targetFocus||G.targetFocus||0});
+  const rareOmenHit=!!F.rareOmenHit;
+  const tideOutcome=calcSkillTideOutcome({spc:spc,size:size,spot:spot,hookQuality:q,targetHit:targetHit,signalHit:signalHit,rareOmenHit:rareOmenHit});
+  const nextCombo=tideOutcome.next;
   const comboMul=getTideComboRewardMul(nextCombo);
   let reward=calcFishReward(spc,size,isRec,getEquipStats());
   const bonusTags=[];
-  if(q==='PERFECT'){ reward=Math.round(reward*1.15); bonusTags.push('PERFECT'); }
+  if(q==='PERFECT'){ reward=Math.round(reward*1.18); pts=Math.round(pts*1.08); bonusTags.push('PERFECT'); }
+  else if(q==='LATE'){ reward=Math.round(reward*0.88); pts=Math.round(pts*0.90); bonusTags.push('浅掛かり'); }
   if(targetHit){
     reward=Math.round(reward*1.25);
     pts=Math.round(pts*1.15);
@@ -2793,8 +2976,10 @@ function showResult(){
     reward=Math.round(reward*comboMul);
     bonusTags.push('潮乗り×'+nextCombo);
   }
+  if(rareOmenHit)bonusTags.push('レア予兆');
+  if(signalHit)bonusTags.push('水面読み');
   if(isRec)P.records[spc.id]=Math.round(size*10)/10;
-  updateFishBook({spc:spc,size:size,spot:spot,lure:lure,hookQuality:q});
+  const research=updateFishBook({spc:spc,size:size,spot:spot,lure:lure,hookQuality:q,isRec:isRec,targetHit:targetHit,signalHit:signalHit,rareOmenHit:rareOmenHit,tideGain:tideOutcome.gain});
   const orderBonus=noteCatchForOrder({spc:spc,size:size,spot:spot,lure:lure,hookQuality:q});
   tideCombo=nextCombo;
   P.count++;
@@ -2802,32 +2987,34 @@ function showResult(){
   P.totalEarned+=reward;
   gainXP(pts+(orderBonus.xp||0));
   save();
-  updateComboUI(q==='PERFECT');
-  $('newrec').style.display=(isRec||targetHit)?'block':'none';
-  $('newrec').textContent=targetHit?'✦ TARGET BONUS ✦':(isRec?'✦ NEW RECORD ✦':'✦ NEW RECORD ✦');
+  updateComboUI(q==='PERFECT'||tideOutcome.gain>0);
+  $('newrec').style.display=(isRec||targetHit||research.levelUp>0)?'block':'none';
+  $('newrec').textContent=targetHit?'✦ TARGET BONUS ✦':(research.levelUp>0?'✦ 研究Lv UP ✦':(isRec?'✦ NEW RECORD ✦':'✦ NEW RECORD ✦'));
   $('rfish').innerHTML=fishSVG(spc.color,spc.id);
   $('rname').textContent=spc.name;
   $('rstars').textContent='★'.repeat(spc.rar)+'☆'.repeat(5-spc.rar);
   $('rsize').innerHTML=size.toFixed(1)+'<small> cm</small>';
   $('rsub').textContent='約 '+(kg<1?(kg*1000).toFixed(0)+' g':kg.toFixed(1)+' kg');
-  $('rpts').textContent=(targetHit?'TARGET BONUS ':'')+'+'+(pts+(orderBonus.xp||0))+' pt'+(orderBonus.xp?'（依頼XP込み）':'');
+  $('rpts').textContent=(targetHit?'TARGET BONUS ':'')+'+'+(pts+(orderBonus.xp||0))+' pt'+(orderBonus.xp?'（依頼XP込み）':'')+' ／ 研究 +'+research.gain;
   $('rmoney').textContent='売却額 +'+reward.toLocaleString()+' 円'
     +(orderBonus.money?' ／ 依頼 +'+orderBonus.money.toLocaleString()+' 円':'')
     +(bonusTags.length?' ／ '+bonusTags.join('・'):'');
-  $('rhook').textContent=q+' HOOK'+(nextCombo>=2?' ／ 潮乗り ×'+nextCombo:'');
-  $('rhook').style.color=q==='PERFECT'?'#ffd36b':(targetHit?'#baffd0':(q==='LATE'?'#ffb040':'#baffd0'));
+  $('rhook').textContent=q+' HOOK ／ '+tideOutcome.label+(nextCombo>=2?' ／ 潮乗り×'+nextCombo:'');
+  $('rhook').style.color=q==='PERFECT'||tideOutcome.gain>0?'#ffd36b':(targetHit?'#baffd0':(q==='LATE'?'#ffb040':'#baffd0'));
   const learn=getLearningComment({spc:spc,size:size,spot:spot,lure:lure,target:target,targetHit:targetHit,hookQuality:q,targetFocus:F.targetFocus||G.targetFocus||0,targetFocusLabel:F.targetFocusLabel||G.targetFocusLabel});
-  $('rspot').textContent=(spot?spot.name:'湖心')+' × '+(lure?lure.name:'ルアー')+' ／ 時合い：'+getMood().name
-    +(target?' ／ '+targetLabel(target)+'：'+(targetHit?'成功':'外れ'):'')
-    +(orderBonus.text?' ／ '+orderBonus.text:'')
-    +(learn?' ／ 学び：'+learn:'');
+  $('rspot').innerHTML='<span class="rline">'+(spot?spot.name:'湖心')+' × '+(lure?lure.name:'ルアー')+' ／ 時合い：'+getMood().name+'</span>'
+    +(target?'<span class="rline">'+targetLabel(target)+'：'+(targetHit?'成功':'外れ')+'</span>':'')
+    +(orderBonus.text?'<span class="rline">'+orderBonus.text+'</span>':'')
+    +'<span class="rline tideWhy">'+tideOutcome.label+'</span>'
+    +'<span class="rline research">研究Lv '+research.lv+' ／ +'+research.gain+'研究'+(research.levelUp>0?' ／ Lv UP!':'')+'</span>'
+    +(learn?'<span class="rline">学び：'+learn+'</span>':'');
   const tideChoice=$('tideChoice');
   const tideNote=$('tideChoiceNote');
   const btnNext=$('btnNext');
   if(tideChoice&&tideNote){
     if(nextCombo>=2){
       tideChoice.style.display='block';
-      tideNote.textContent='潮乗り×'+nextCombo+'：次も攻めると報酬+'+Math.round((getTideComboRewardMul(nextCombo)-1)*100)+'%。大物・レア気配↑、ただしアワセと緑帯が厳しくなる。';
+      tideNote.textContent='潮乗り×'+nextCombo+'：'+tideOutcome.label+'。次も攻めると報酬+'+Math.round((getTideComboRewardMul(nextCombo)-1)*100)+'%。大物・レア気配↑、ただしアワセと緑帯が厳しくなる。';
       if(btnNext)btnNext.style.display='none';
     }else{
       tideChoice.style.display='none';
@@ -2837,8 +3024,11 @@ function showResult(){
   $('result').style.display='flex';
   G.state='result';
   if(targetHit)setTimeout(()=>toast('狙い通り！ TARGET BONUS'),260);
-  if(nextCombo>=2)setTimeout(()=>toast('潮乗り ×'+nextCombo+'　報酬+'+Math.round((comboMul-1)*100)+'%'),520);
-  sCatch(); if(isRec||orderBonus.money||targetHit||nextCombo>=2)vib([50,50,50,50,120]);
+  if(tideOutcome.gain>0)setTimeout(()=>toast(tideOutcome.label),520);
+  else if(nextCombo>=2)setTimeout(()=>toast('潮乗り維持 ×'+nextCombo),520);
+  if(research.levelUp>0)setTimeout(()=>toast(spc.name+' 研究Lv '+research.lv+' に上昇'),780);
+  if(rareOmenHit)rareOmen=null;
+  sCatch(); if(isRec||orderBonus.money||targetHit||nextCombo>=2||research.levelUp>0)vib([50,50,50,50,120]);
   // 魚スロットは再抽選
   F.f.mesh.visible=false; F.f.respawn=rand(7,14);
   G.fight=null; G.landAnim=null;
@@ -2850,9 +3040,11 @@ function renderRecords(){
   const el=$('reclist');
   el.innerHTML=SPECIES.map((s,si)=>{
     const b=P.records[s.id];
-    const book=P.fishBook[s.id]||{count:0,spots:{},lures:{},perfect:0};
+    const book=normalizeFishBookEntry(s.id,P.fishBook[s.id]);
+    P.fishBook[s.id]=book;
     const guide=FISH_GUIDE[s.id]||{};
     const count=Number(book.count)||0;
+    const rlv=Number(book.researchLv)||1;
     const bestSpot=topKey(book.spots);
     const bestLure=topKey(book.lures);
     const spotName=(FISHING_SPOTS.find(sp=>sp.id===bestSpot)||{}).name;
@@ -2860,15 +3052,16 @@ function renderRecords(){
     let hints=[];
     if(count<=0)hints.push('未発見。まずは釣って生態メモを開こう。');
     if(count>=1)hints.push('場所：'+(spotName||guide.spots||'調査中'));
-    if(count>=2)hints.push('相性：'+(lureName||guide.lure||'調査中'));
-    if(count>=3)hints.push('誘い：'+(guide.tech||'調査中'));
-    if(count>=5||b)hints.push('攻略：'+(guide.secret||'さらに釣ると判明'));
+    if(count>=2||rlv>=2)hints.push('相性：'+(lureName||guide.lure||'調査中'));
+    if(count>=3||rlv>=3)hints.push('誘い：'+(guide.tech||'調査中'));
+    if(count>=5||b||rlv>=4)hints.push('攻略：'+(guide.secret||'さらに釣ると判明'));
+    if(rlv>=5)hints.push('研究：PERFECT '+book.perfect+'回 ／ 狙い的中 '+(book.medals.target||0)+'回');
     const rare=s.rar>=4;
     const icon=count>0
       ?'<div class="recFishIcon'+(rare?' rare':'')+'" style="--fd:'+(si*0.23).toFixed(2)+'s">'+fishSVG(s.color,s.id)+'</div>'
       :'<div class="recFishIcon locked">'+fishSVG(0x1c2236,s.id,true)+'</div>';
-    return '<div class="recrow">'+icon+'<div><div class="nm">'+s.name+' <span style="opacity:.55;font-size:11px">×'+count+'</span></div><div class="st">'
-      +'★'.repeat(s.rar)+'</div></div>'
+    return '<div class="recrow">'+icon+'<div><div class="nm">'+s.name+' <span style="opacity:.55;font-size:11px">×'+count+'</span> <span style="color:#ffd36b;font-size:10.5px;font-weight:900">研究Lv '+rlv+'</span></div><div class="st">'
+      +'★'.repeat(s.rar)+' ／ 研究 '+book.researchXp+'/'+researchNeed(rlv)+'</div></div>'
       +'<div class="sz'+(b?'':' none')+'">'+(b?b.toFixed(1)+' cm':'─ ─')+'</div>'
       +'<div class="hint">'+hints.join(' ／ ')+'</div></div>';
   }).join('');
@@ -2928,6 +3121,7 @@ function returnToTitle(){
   G.target=null;
   G.targetFocus=0; G.targetFocusLabel='低';
   targetNow=null; targetFocusNow=0;
+  rareOmen=null;
   G.targetAnnounced=false;
   G.actionLog.length=0;
   lureGroup.visible=false;
@@ -2981,8 +3175,8 @@ function startFishing(){
   G.state='idle';
   const o=ensureOrder(),m=getMood();
   const tide=getTideLabel();
-  setHint('<span class="hintMain">依頼：<b>'+o.title+'</b> ／ '+getScene().jpName+'・'+m.name+'</span><span class="hintSub">下に引いて離す＝キャスト　左右＝狙い調整</span>'+(tide?'<span class="hintTiny">'+tide+'</span>':''));
-  setTimeout(()=>{ if(G.state==='idle')setHint('<span class="hintMain">下に引いて離す＝キャスト</span><span class="hintSub">タップ＝誘い ／ 上スワイプ＝アワセ</span>'); },4200);
+  setHint('<span class="hintMain">依頼：<b>'+o.title+'</b> ／ '+getScene().jpName+'・'+m.name+'</span><span class="hintSub">'+getIdleHintSub()+'</span>'+(tide?'<span class="hintTiny">'+tide+'</span>':''));
+  setTimeout(()=>{ if(G.state==='idle')setHint('<span class="hintMain">'+getIdleHintMain()+'</span><span class="hintSub">'+getWaitHintSub()+'</span>'); },4200);
 }
 $('btnStart').addEventListener('click',()=>{
   ensureAudio();
@@ -3039,7 +3233,7 @@ function nextCastFromResult(resetCombo){
   }
   G.state='idle';
   const tide=getTideLabel();
-  setHint('<span class="hintMain">下に引いて離す＝キャスト</span><span class="hintSub">タップ＝誘い ／ 上スワイプ＝アワセ</span>'+(tide?'<span class="hintTiny">'+tide+'</span>':''));
+  setHint('<span class="hintMain">'+getIdleHintMain()+'</span><span class="hintSub">'+getWaitHintSub()+'</span>'+(tide?'<span class="hintTiny">'+tide+'</span>':''));
 }
 $('btnNext').addEventListener('click',()=>{ nextCastFromResult(false); });
 if($('btnTidePush'))$('btnTidePush').addEventListener('click',()=>{
@@ -3054,8 +3248,22 @@ $('btnHome').addEventListener('click',()=>{ returnToTitle(); });
 $('btnPickup').addEventListener('click',()=>{ if(G.state==='wait')pickup(); });
 
 // ---------- 入力 ----------
-const PT={down:false,id:null,x0:0,y0:0,x:0,y:0,t0:0};
+const PT={down:false,id:null,type:'',x0:0,y0:0,x:0,y:0,t0:0};
 function uiTarget(e){ return e.target&&e.target.closest&&e.target.closest('button,.overlay'); }
+function isMouseLike(){
+  try{ return matchMedia('(hover:hover) and (pointer:fine)').matches; }catch(e){ return false; }
+}
+function getIdleHintMain(){ return isMouseLike()?'左ドラッグでキャスト':'下に引いて離す＝キャスト'; }
+function getIdleHintSub(){ return isMouseLike()?'左ボタンを押したまま下へ引き、左右で狙って離す':'下に引いて離す＝キャスト　左右＝狙い調整'; }
+function getWaitHintSub(){ return isMouseLike()?'左クリック＝誘い ／ 本アタリで左クリック・右クリック・ホイール上＝アワセ':'タップ＝誘い ／ 上スワイプ＝アワセ'; }
+function getFightHintMain(){ return isMouseLike()?'左ボタン長押し＝巻く ／ 離す＝緩める':'長押し＝巻く ／ 走ったら離す'; }
+function getFightHintSub(){ return isMouseLike()?'マウス左右移動＝竿さばき':'左右で魚の方向へ竿を向ける'; }
+function doMouseHookOrJerk(){
+  if(G.state!=='wait')return false;
+  if(G.bite){ hookSet(); }
+  else{ jerk(); }
+  return true;
+}
 $('title').addEventListener('pointerdown',()=>{
   ensureAudio();
 });
@@ -3065,12 +3273,24 @@ $('sceneSelect').addEventListener('click',e=>{
   ensureAudio();
   setScene(b.dataset.scene,true);
 });
+window.addEventListener('contextmenu',e=>{
+  if(!uiTarget(e))e.preventDefault();
+});
 window.addEventListener('pointerdown',e=>{
   if(uiTarget(e))return;
   ensureAudio();
   if(G.state==='title'||G.state==='result')return;
+  const isMouse=e.pointerType==='mouse';
+  if(isMouse&&e.button===2){
+    e.preventDefault();
+    doMouseHookOrJerk();
+    return;
+  }
+  if(isMouse&&e.button!==0)return;
   if(PT.down)return;
-  PT.down=true; PT.id=e.pointerId;
+  e.preventDefault();
+  try{ if(e.target&&e.target.setPointerCapture)e.target.setPointerCapture(e.pointerId); }catch(err){}
+  PT.down=true; PT.id=e.pointerId; PT.type=e.pointerType||'mouse';
   PT.x0=PT.x=e.clientX; PT.y0=PT.y=e.clientY; PT.t0=performance.now();
   if(G.state==='idle'){ beginCharge(); }
   else if(G.state==='fight'){
@@ -3079,7 +3299,11 @@ window.addEventListener('pointerdown',e=>{
   }
 },{passive:false});
 window.addEventListener('pointermove',e=>{
+  if(G.state==='fight'&&e.pointerType==='mouse'){
+    rodDirTarget=clamp((e.clientX/innerWidth-0.5)*2.4,-1,1);
+  }
   if(!PT.down||e.pointerId!==PT.id)return;
+  e.preventDefault();
   PT.x=e.clientX; PT.y=e.clientY;
   if(G.state==='charge'){
     G.charge=clamp((PT.y-PT.y0)/(innerHeight*0.34),0,1);
@@ -3091,24 +3315,35 @@ window.addEventListener('pointermove',e=>{
 },{passive:false});
 window.addEventListener('pointerup',e=>{
   if(!PT.down||e.pointerId!==PT.id)return;
+  e.preventDefault();
   PT.down=false;
+  const wasMouse=PT.type==='mouse';
   const dt=performance.now()-PT.t0;
   const dy=PT.y-PT.y0, dx=PT.x-PT.x0;
   const dist=Math.hypot(dx,dy);
+  const quickClick=dist<14&&dt<320;
   if(G.state==='charge'){ releaseCast(); }
   else if(G.state==='wait'){
     const swipeUp=dy<-55&&dt<450;
-    if(G.bite&&swipeUp){ hookSet(); }
+    if(G.bite&&(swipeUp||(wasMouse&&quickClick))){ hookSet(); }
     else if(swipeUp){ jerk(); }
-    else if(dist<14&&dt<320){ twitch(); }
+    else if(quickClick){ twitch(); }
   }
   else if(G.state==='fight'){ reeling=false; }
+  PT.type='';
 });
 window.addEventListener('pointercancel',()=>{
-  PT.down=false;
+  PT.down=false; PT.type='';
   if(G.state==='charge'){ G.charge=0; releaseCast(); }
   reeling=false;
 });
+window.addEventListener('wheel',e=>{
+  if(uiTarget(e))return;
+  if(G.state!=='wait')return;
+  ensureAudio();
+  e.preventDefault();
+  if(e.deltaY<0)doMouseHookOrJerk();
+},{passive:false});
 document.addEventListener('touchmove',e=>{
   if(e.target&&e.target.closest&&e.target.closest('#shopModal .card,#recModal .card'))return;
   e.preventDefault();
@@ -3172,6 +3407,7 @@ function loop(){
     if(k>=1) landLure();
   }
   else if(G.state==='wait'){
+    maybeTriggerRareOmen(dt,t);
     const L=G.lure;
     L.bob+=(L.bobT-L.bob)*Math.min(dt*11,1);
     lureGroup.position.set(L.x,waveH(L.x,L.z,t)*0.7+L.bob,L.z);
