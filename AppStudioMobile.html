@@ -541,7 +541,7 @@
                 <span>🤖 AI指示</span>
             </button>
                         <button class="tool-btn" onclick="handleFixButtonClick(event)" onpointerdown="startFixLongPress(event)" onpointerup="cancelFixLongPress()" onpointerleave="cancelFixLongPress()" onpointercancel="cancelFixLongPress()" oncontextmenu="event.preventDefault()">
-                <span>🛠️ 修正</span>
+                <span>🔁 反映</span>
             </button>
             <button class="tool-btn" onclick="undo()" title="元に戻す" style="min-width: 40px;">
                 <span>↩️</span>
@@ -694,9 +694,9 @@
 
     <div id="fix-modal" class="modal-overlay">
         <div class="modal">
-            <h2>修正ツール</h2>
+            <h2>反映ツール</h2>
                                     <div class="modal-tabs">
-                <button class="modal-tab-btn active" onclick="switchFixTab('auto')">① オート(JSON)</button>
+                <button class="modal-tab-btn active" onclick="switchFixTab('auto')">① 反映</button>
                 <button class="modal-tab-btn" onclick="switchFixTab('manual')" style="display:none;">② 手動修正</button>
             </div>
                         <div id="fix-error" style="display:none; margin: -4px 0 12px 0; padding: 8px 10px; border: 1px solid var(--danger-color); border-radius: 6px; background: rgba(244,67,54,0.12); color: #ffb3b3; font-size: 12px; line-height: 1.5; white-space: pre-wrap;"></div>
@@ -706,14 +706,14 @@
             </div>
 
             <div id="tab-auto" class="tab-content active">
-                <p class="section-desc">AIが生成したJSONを貼り付けて適用します。</p>
+                <p class="section-desc">HTMLフルコードまたはAIが生成したJSONパッチを貼り付けて反映します。</p>
                 <div style="display: flex; gap: 5px; margin-bottom: 5px; justify-content: flex-end;">
                     <button class="btn-action" onclick="pasteToJsonInput()" style="padding: 2px 8px; font-size: 10px; width: auto; flex: none;">📋 貼付</button>
                     <button class="btn-action" onclick="clearJsonInput()" style="padding: 2px 8px; font-size: 10px; width: auto; flex: none; color: var(--danger-color); border-color: var(--danger-color);">🗑 クリア</button>
                 </div>
                 <textarea id="json-input" placeholder='[{"before":"...", "after":"..."}]' style="height:120px;"></textarea>
                 <div class="modal-buttons">
-                    <button class="btn-confirm" onclick="applyAutoFix()">JSON適用</button>
+                    <button class="btn-confirm" onclick="applyReflectInput()">反映</button>
                 </div>
             </div>
 
@@ -790,7 +790,7 @@
                         <span class="step-num">4</span>
                         <div class="step-text">
                             <strong>修正＆改善</strong><br>
-                            「🛠️ 修正」機能や「🧐 AI相談」を使って、バグ修正や機能追加をAIに依頼し、コードを育てていきます。
+                            「🔁 反映」機能や「🧐 AI相談」を使って、バグ修正や機能追加をAIに依頼し、コードを育てていきます。
                         </div>
                     </li>
                 </ul>
@@ -1090,7 +1090,7 @@
                 event.stopPropagation();
                 return;
             }
-            showToast("クリップボードのJSONを確認します...");
+            showToast("クリップボードの内容を判定して反映します...");
             autoApplyFixFromClipboard();
         }
 
@@ -1099,7 +1099,7 @@
             fixLongPressed = false;
             fixLongPressTimer = setTimeout(() => {
                 fixLongPressed = true;
-                showToast("クリップボードのJSONを自動適用します...");
+                showToast("クリップボードの内容を自動判定して反映します...");
                 autoApplyFixFromClipboard();
             }, 650);
         }
@@ -1111,22 +1111,114 @@
             }
         }
 
-        async function autoApplyFixFromClipboard() {
+        function extractFencedClipboardBlock(text, preferredLangs = []) {
+            const trimmed = String(text || "").trim();
+            const fenceRegex = /\x60\x60\x60([a-z0-9_-]*)\s*\n?([\s\S]*?)\n?\x60\x60\x60/gi;
+            const matches = [];
+            let match;
+
+            while ((match = fenceRegex.exec(trimmed)) !== null) {
+                matches.push({
+                    lang: String(match[1] || "").toLowerCase(),
+                    body: String(match[2] || "").trim()
+                });
+            }
+
+            if (!matches.length) return trimmed;
+
+            const preferred = matches.find(item => preferredLangs.includes(item.lang));
+            return (preferred || matches[0]).body;
+        }
+
+        function looksLikeFullHtmlCode(text) {
+            const candidate = String(text || "").trim();
+            if (!candidate) return false;
+
+            return /^(<!doctype\s+html|<html[\s>])/i.test(candidate)
+                || (/<head[\s>]/i.test(candidate) && /<body[\s>]/i.test(candidate) && /<\/html>\s*$/i.test(candidate));
+        }
+
+        function extractJsonPatchText(text) {
+            let candidate = extractFencedClipboardBlock(text, ['json', 'javascript', 'js']);
+            candidate = String(candidate || "").trim();
+
+            const firstOpen = candidate.indexOf('[');
+            const lastClose = candidate.lastIndexOf(']');
+
+            if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+                candidate = candidate.substring(firstOpen, lastClose + 1);
+            }
+
             try {
-                const text = await navigator.clipboard.readText();
-                if (!text || !text.trim()) {
-                    openFixModal();
-                    displayFixError("クリップボードが空です。JSONをコピーしてから、修正ボタンを長押ししてください。");
-                    return;
+                const parsed = JSON.parse(candidate);
+                if (!Array.isArray(parsed)) return null;
+
+                const looksLikePatch = parsed.some(item => {
+                    if (!item || typeof item !== 'object') return false;
+                    const hasBefore = item.before !== undefined || item.search !== undefined;
+                    const hasAfter = item.after !== undefined || item.replace !== undefined;
+                    return hasBefore && hasAfter;
+                });
+
+                return looksLikePatch ? candidate : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function applySmartReflectText(text, options = {}) {
+            const sourceText = String(text || "");
+            const jsonInput = document.getElementById('json-input');
+
+            if (!sourceText.trim()) {
+                openFixModal();
+                displayFixError("反映する内容が空です。HTMLフルコードまたはJSONパッチを貼り付けてください。");
+                return false;
+            }
+
+            const htmlCode = extractFencedClipboardBlock(sourceText, ['html']);
+            if (looksLikeFullHtmlCode(htmlCode)) {
+                if (editor.getValue().trim().length > 0) {
+                    if (!confirm("【警告】\nエディタの内容をすべて削除し、HTMLフルコードで差し替えますか？")) return false;
                 }
-                document.getElementById('json-input').value = text;
+
+                editor.setValue(htmlCode);
+                if (jsonInput) jsonInput.value = "";
+                clearFixError();
+                closeModal('fix-modal');
+                showToast("HTMLフルコードを反映しました");
+                return true;
+            }
+
+            const jsonPatchText = extractJsonPatchText(sourceText);
+            if (jsonPatchText) {
+                if (jsonInput) jsonInput.value = jsonPatchText;
                 const ok = applyAutoFix({ fromLongPress: true });
                 if (!ok) {
                     document.getElementById('fix-modal').style.display = 'flex';
                 }
+                return ok;
+            }
+
+            openFixModal();
+            if (jsonInput) jsonInput.value = sourceText;
+            displayFixError("入力内容をHTMLフルコードまたはJSONパッチとして判定できませんでした。内容を確認してから反映してください。");
+            return false;
+        }
+
+        function applyReflectInput() {
+            const text = document.getElementById('json-input').value;
+            return applySmartReflectText(text, { source: 'input' });
+        }
+
+        async function autoApplyFixFromClipboard() {
+            try {
+                const text = await navigator.clipboard.readText();
+                return applySmartReflectText(text, { source: 'clipboard' });
             } catch (err) {
                 openFixModal();
-                displayFixError("クリップボードの読み取りに失敗しました。ブラウザの権限を確認するか、通常の修正画面から貼り付けてください。");
+                displayFixError("クリップボードの読み取りに失敗しました。ブラウザの権限を確認するか、通常の反映画面から貼り付けてください。");
+                return false;
             }
         }
 
