@@ -682,8 +682,9 @@
                 <span class="run-ctrl-icon">⋯</span><span class="run-ctrl-label">その他</span>
             </button>
             <div id="run-menu" class="run-menu">
-                <button onclick="closeRunMenu(); undoAndReload()">↩️ 戻す</button>
+                <button onclick="closeRunMenu(); restoreReflectSnapshot()">⏪ 反映前に戻す</button>
                 <button onclick="closeRunMenu(); reloadFrame()">↻ リロード</button>
+                <button onclick="closeRunMenu(); openErrorLogModal()">🐞 エラーログ</button>
                 <button onclick="closeRunMenu(); runInNewWindow()">↗ 別窓</button>
                 <button onclick="closeRunMenu(); switchTab('editor')">📝 エディタへ</button>
             </div>
@@ -851,6 +852,21 @@
         </div>
     </div>
 
+            <div id="error-log-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>🐞 エラーログ</h2>
+            <p class="section-desc">実行画面のiframeから受信したconsole.error / JavaScriptエラーを、この実行中だけ蓄積します。リロードするとクリアされます。</p>
+            <div id="error-log-content" style="white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: #ddd; max-height: 50vh; overflow-y: auto; background: rgba(0,0,0,0.22); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px;"></div>
+            <div class="modal-buttons">
+                <button class="btn-action" onclick="copyAllErrorLogs()">📋 全ログコピー</button>
+                <button class="btn-confirm" onclick="consultIframeErrorLogs()">🧐 このエラーをAIに相談</button>
+            </div>
+            <div class="modal-buttons" style="margin-top:20px;">
+                <button class="btn-cancel" onclick="closeModal('error-log-modal')">閉じる</button>
+            </div>
+        </div>
+    </div>
+
             <section id="view-help" class="view" style="overflow-y: auto;">
         <div class="help-container" style="max-width: 800px; margin: 0 auto;">
             <div class="help-header">
@@ -1002,6 +1018,9 @@
         let draftSaveTimer = null;
         let draftIndicatorTimer = null;
         let suppressDraftSave = false;
+        let iframeErrorLogs = [];
+        let reflectSnapshots = [];
+        const REFLECT_SNAPSHOT_LIMIT = 10;
 
                 // --- Editor Logic ---
                 editor.on('change', () => {
@@ -1062,6 +1081,27 @@
         function undoAndReload() {
             editor.undo();
             reloadFrame();
+        }
+
+        function pushReflectSnapshot(code) {
+            const snapshot = String(code || "");
+            if (reflectSnapshots.length && reflectSnapshots[reflectSnapshots.length - 1] === snapshot) return;
+            reflectSnapshots.push(snapshot);
+            if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
+        }
+
+        function restoreReflectSnapshot() {
+            if (!reflectSnapshots.length) {
+                showToast("戻せる反映履歴がありません");
+                return;
+            }
+
+            const currentCode = editor.getValue();
+            const restoreCode = reflectSnapshots.pop();
+            pushReflectSnapshot(currentCode);
+            editor.setValue(restoreCode);
+            reloadFrame();
+            showToast("反映前の状態に戻しました");
         }
 
         function toggleRunMenu(event) {
@@ -1359,6 +1399,7 @@
                     if (!confirm("【警告】\n現在のアプリを破棄し、HTMLフルコードで差し替えますか？")) return false;
                 }
 
+                pushReflectSnapshot(editor.getValue());
                 editor.setValue(htmlCode);
                 if (jsonInput) jsonInput.value = "";
                 clearFixError();
@@ -1683,6 +1724,7 @@ ${currentCode}
             try {
                 const fixes = JSON.parse(jsonStr);
                 let code = editor.getValue();
+                const snapshotBeforeAutoFix = code;
                 code = code.replace(/\r\n/g, '\n'); // 改行正規化
 
                 let count = 0;
@@ -1788,6 +1830,7 @@ ${currentCode}
                 }
 
                 if (count > 0) {
+                    pushReflectSnapshot(snapshotBeforeAutoFix);
                     editor.setValue(code);
                 }
 
@@ -2029,6 +2072,10 @@ nextBtn.onclick=nextStep;
                     console.log = function(...args) { originalLog.apply(console, args); send('log', args); };
                     console.error = function(...args) { originalError.apply(console, args); send('error', args); };
                     window.onerror = function(msg, url, line) { send('error', [msg + " (Line: " + line + ")"]); };
+                    window.addEventListener('unhandledrejection', function(event) {
+                        const reason = event && event.reason ? event.reason : 'Unhandled Promise rejection';
+                        send('error', ['Unhandled Promise rejection: ' + String(reason)]);
+                    });
                 })();
             <\/script>`;
 
@@ -2045,6 +2092,7 @@ nextBtn.onclick=nextStep;
         }
 
                 function reloadFrame() {
+            clearIframeErrorLogs();
             frame.srcdoc = getRunnableCode();
         }
 
@@ -2076,7 +2124,7 @@ nextBtn.onclick=nextStep;
                 renderLibrary();
             }
             if(tabName === 'run') {
-                frame.srcdoc = getRunnableCode();
+                reloadFrame();
                 syncRunBarState();
             }
             if(tabName === 'editor') {
@@ -2478,6 +2526,58 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
             }, 2000);
         }
 
+        function clearIframeErrorLogs() {
+            iframeErrorLogs = [];
+            const content = document.getElementById('error-log-content');
+            if (content) content.textContent = "まだエラーはありません。";
+        }
+
+        function formatIframeErrorLog(log) {
+            return `[${log.time}] ${log.message}`;
+        }
+
+        function getIframeErrorLogText() {
+            if (!iframeErrorLogs.length) return "実行画面のエラーログはありません。";
+            return iframeErrorLogs.map(formatIframeErrorLog).join('\n');
+        }
+
+        function renderErrorLogModal() {
+            const content = document.getElementById('error-log-content');
+            if (!content) return;
+            content.textContent = getIframeErrorLogText();
+        }
+
+        function openErrorLogModal() {
+            renderErrorLogModal();
+            document.getElementById('error-log-modal').style.display = 'flex';
+        }
+
+        function copyAllErrorLogs() {
+            if (!iframeErrorLogs.length) {
+                showToast("コピーするエラーログがありません");
+                return;
+            }
+            writeTextWithFallback(getIframeErrorLogText(), "エラーログをコピーしました");
+        }
+
+        function consultIframeErrorLogs() {
+            if (!iframeErrorLogs.length) {
+                showToast("相談するエラーログがありません");
+                return;
+            }
+
+            const details = `実行画面のiframeで以下のconsoleエラーが出ています。原因と修正方針を分析してください。\n\n[エラーログ]\n${getIframeErrorLogText()}`;
+            const consultText = document.getElementById('consult-text');
+            if (consultText) consultText.value = details;
+
+            document.querySelectorAll('input[name="consult-cat"]').forEach(cb => {
+                cb.checked = cb.value === "バグ特定";
+            });
+
+            closeModal('error-log-modal');
+            openConsultModal();
+        }
+
                 function escapeHtml(text) {
             return String(text)
                 .replace(/&/g, "&amp;")
@@ -2499,8 +2599,19 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
                 // Listen for console messages from iframe
         window.addEventListener('message', (event) => {
             if (event.data && event.data.type === 'console') {
-                const msg = `[${event.data.level.toUpperCase()}] ${event.data.args.join(' ')}`;
+                const level = String(event.data.level || 'log');
+                const args = Array.isArray(event.data.args) ? event.data.args : [];
+                const msg = `[${level.toUpperCase()}] ${args.join(' ')}`;
                 showToast(msg);
+
+                if (level === 'error') {
+                    iframeErrorLogs.push({
+                        time: new Date().toLocaleTimeString(),
+                        message: msg
+                    });
+                    if (iframeErrorLogs.length > 100) iframeErrorLogs.shift();
+                    renderErrorLogModal();
+                }
             }
         });
 
