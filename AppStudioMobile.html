@@ -1016,16 +1016,21 @@
         const DRAFT_ID = '__draft__';
         let draftSaveTimer = null;
         let draftIndicatorTimer = null;
+        let statsUpdateTimer = null;
+        let toastTimer = null;
         let suppressDraftSave = false;
         let iframeErrorLogs = [];
         let reflectSnapshots = [];
+        let reflectRedoSnapshots = [];
+        let frameDirty = true;
         let sessionGhToken = "";
         const REFLECT_SNAPSHOT_LIMIT = 10;
         localStorage.removeItem('gh_token');
 
                 // --- Editor Logic ---
                 editor.on('change', () => {
-            updateStats();
+            frameDirty = true;
+            scheduleStatsUpdate();
             scheduleEditorDraftSave();
             if (!suppressDraftSave) {
                 resetSaveStatusButton();
@@ -1036,7 +1041,12 @@
         function undo() { editor.undo(); }
         function redo() { editor.redo(); }
 
-                function updateStats() {
+                function scheduleStatsUpdate() {
+            clearTimeout(statsUpdateTimer);
+            statsUpdateTimer = setTimeout(updateStats, 150);
+        }
+
+        function updateStats() {
             const text = editor.getValue();
             const lines = editor.lineCount();
             const chars = text.length;
@@ -1090,7 +1100,8 @@
 
             const currentCode = editor.getValue();
             const restoreCode = reflectSnapshots.pop();
-            pushReflectSnapshot(currentCode);
+            reflectRedoSnapshots.push(currentCode);
+            if (reflectRedoSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectRedoSnapshots.shift();
             editor.setValue(restoreCode);
             reloadFrame();
             showToast("反映前の状態に戻しました");
@@ -1215,6 +1226,7 @@
                 if(editor.getValue().trim().length > 0) {
                       if(!confirm("【警告】\n現在のアプリを破棄し、クリップボードの内容で上書きしますか？")) return;
                 }
+                pushReflectSnapshot(editor.getValue());
                 editor.setValue(text);
                 showToast("全コードを貼り付けました");
             } catch (err) {
@@ -1225,6 +1237,7 @@
                         function clearCode() {
             if(confirm("エディタの内容をクリアしますか？\n(編集中の状態もリセットされます)")) {
                 suppressDraftSave = true;
+                pushReflectSnapshot(editor.getValue());
                 editor.setValue("");
                                 currentAppName = "";
                 appNameDisplay.textContent = "(新規作成中)";
@@ -1307,8 +1320,8 @@
             fixLongPressed = false;
             fixLongPressTimer = setTimeout(() => {
                 fixLongPressed = true;
-                showToast("クリップボードの内容を自動判定して反映します...");
-                autoApplyFixFromClipboard();
+                showToast("反映画面を開きました");
+                openFixModal();
             }, 650);
         }
 
@@ -1392,6 +1405,7 @@
 
                 pushReflectSnapshot(editor.getValue());
                 editor.setValue(htmlCode);
+                frameDirty = true;
                 if (jsonInput) jsonInput.value = "";
                 clearFixError();
                 closeModal('fix-modal');
@@ -1851,6 +1865,7 @@ ${currentCode}
                 if (appliedFixes.length > 0) {
                     pushReflectSnapshot(snapshotBeforeAutoFix);
                     editor.setValue(code);
+                    frameDirty = true;
                 }
 
                 const resultSummary = buildResultSummary();
@@ -1928,6 +1943,7 @@ ${currentCode}
             pushReflectSnapshot(code);
             const newCode = code.split(findText).join(replaceText);
             editor.setValue(newCode);
+            frameDirty = true;
             showToast(`${matchCount}箇所を置換しました`);
             closeModal('fix-modal');
         }
@@ -2135,6 +2151,7 @@ nextBtn.onclick=nextStep;
                 function reloadFrame() {
             clearIframeErrorLogs();
             frame.srcdoc = getRunnableCode();
+            frameDirty = false;
         }
 
                 function runInNewWindow() {
@@ -2165,7 +2182,7 @@ nextBtn.onclick=nextStep;
                 renderLibrary();
             }
             if(tabName === 'run') {
-                reloadFrame();
+                if (frameDirty) reloadFrame();
                 syncRunBarState();
             }
             if(tabName === 'editor') {
@@ -2560,7 +2577,8 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
         function showToast(msg) {
             notification.textContent = msg;
             notification.style.opacity = '1';
-            setTimeout(() => {
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => {
                 notification.style.opacity = '0';
             }, 2000);
         }
