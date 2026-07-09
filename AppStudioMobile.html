@@ -881,7 +881,7 @@
                     スマートフォンやタブレットのブラウザ上で動作する、高機能なコードエディタ＆実行環境です。<br>
                     <strong>「ChatGPTやClaudeなどのAI」</strong>と連携することを前提に設計されており、
                     プロンプト作成からコード修正までをスムーズに行うための専用ツールを搭載しています。<br>
-                    サーバー通信を行わず、データはお使いの端末（ブラウザ）内に保存されるため、セキュアで高速に動作します。
+                    CodeMirror等のエディタ部品はCDNから読み込みますが、アプリのコードやローカル保存データを自動で外部送信することはありません。
                 </p>
             </div>
 
@@ -892,30 +892,29 @@
                     <li class="step-item">
                         <span class="step-num">1</span>
                         <div class="step-text">
-                            <strong>AIに指示 (プロンプト作成)</strong><br>
-                            「🤖 AI指示」ボタンから、作りたいアプリのアイデアを入力。<br>
-                            生成されたプロンプトをコピーし、外部のAIチャットに貼り付けます。
+                            <strong>AI指示でプロンプトをコピー</strong><br>
+                            「🤖 AI指示」から作りたい内容を書き、AIに渡すプロンプトをコピーします。
                         </div>
                     </li>
                     <li class="step-item">
                         <span class="step-num">2</span>
                         <div class="step-text">
-                            <strong>コードの適用</strong><br>
-                            AIが生成したコードをエディタに貼り付けます。「📋 ペースト」ボタンで一発上書きも可能です。
+                            <strong>AIの回答を全コピー</strong><br>
+                            外部AIチャットで生成されたHTMLフルコード、またはJSONパッチの回答をそのままコピーします。
                         </div>
                     </li>
                     <li class="step-item">
                         <span class="step-num">3</span>
                         <div class="step-text">
-                            <strong>実行＆確認</strong><br>
-                            「▶ 実行」タブで動作確認。画面が小さい場合は「↗ 別窓で実行」でフルスクリーン表示できます。
+                            <strong>「🔁 反映」ワンタップで自動判定</strong><br>
+                            実行画面の「🔁 反映」を押すと、クリップボード内容をHTMLフルコードかJSONパッチか自動判定して反映します。
                         </div>
                     </li>
                     <li class="step-item">
                         <span class="step-num">4</span>
                         <div class="step-text">
-                            <strong>修正＆改善</strong><br>
-                            「🔁 反映」機能や「🧐 AI相談」を使って、バグ修正や機能追加をAIに依頼し、コードを育てていきます。
+                            <strong>修正はJSONパッチで同じ流れ</strong><br>
+                            追加修正はJSONパッチをAIに出してもらい、同じようにコピーして「🔁 反映」します。
                         </div>
                     </li>
                 </ul>
@@ -979,9 +978,9 @@
             <div class="help-section">
                 <h2>🔒 セキュリティと制約</h2>
                 <p style="font-size: 12px; color: #ccc; line-height: 1.6;">
-                    ・<strong>外部通信禁止</strong>: セキュリティのため、作成するアプリコード内での外部サーバーへの送信（fetch/XHR等）は禁止されています。<br>
-                    ・<strong>データ保存</strong>: すべてのデータはブラウザ内に保存されます。キャッシュクリアすると消える可能性があるため、重要なコードはGitHub等へバックアップしてください。<br>
-                    ・<strong>JavaScript</strong>: 実行画面はサンドボックス化されていますが、悪意あるコードの実行には十分注意してください。
+                    ・<strong>外部通信</strong>: CodeMirror等のエディタ部品はCDNから読み込みます。作成アプリからの外部通信は制限していないため、信頼できないコードは貼らないでください。<br>
+                    ・<strong>データ保存</strong>: アプリのコードやローカル保存データを自動で外部送信することはありません。データはブラウザ内に保存されますが、キャッシュクリアすると消える可能性があるため、重要なコードはGitHub等へバックアップしてください。<br>
+                    ・<strong>JavaScript</strong>: 実行画面は分離表示していますが、完全な隔離ではないため、悪意あるコードの実行には十分注意してください。GitHubトークンは保存せず、この画面を開いている間だけメモリ上に保持します。
                 </p>
             </div>
 
@@ -1020,7 +1019,9 @@
         let suppressDraftSave = false;
         let iframeErrorLogs = [];
         let reflectSnapshots = [];
+        let sessionGhToken = "";
         const REFLECT_SNAPSHOT_LIMIT = 10;
+        localStorage.removeItem('gh_token');
 
                 // --- Editor Logic ---
                 editor.on('change', () => {
@@ -1072,15 +1073,6 @@
                     ? '<span class="run-ctrl-icon">✅</span><span class="run-ctrl-label">保存済</span>'
                     : '<span class="run-ctrl-icon">💾</span><span class="run-ctrl-label">保存</span>';
             }
-        }
-
-        function syncRunControls() {
-            syncRunBarState();
-        }
-
-        function undoAndReload() {
-            editor.undo();
-            reloadFrame();
         }
 
         function pushReflectSnapshot(code) {
@@ -1292,7 +1284,6 @@
                 let fixLongPressTimer = null;
         let fixLongPressed = false;
         let lastFailedAutoFixes = [];
-        let lastAutoFixSnapshotCode = "";
 
         function openFixModal() {
             clearFixError();
@@ -1451,15 +1442,19 @@
             if (jump) jump.style.display = 'block';
         }
 
-                function displayFixRecovery(failedFixes, appliedCount) {
+                function displayFixRecovery(failedFixes, appliedCount, alreadyAppliedCount = 0) {
             lastFailedAutoFixes = Array.isArray(failedFixes) ? failedFixes : [];
-            lastAutoFixSnapshotCode = editor.getValue();
 
             const box = document.getElementById('fix-recovery');
             const text = document.getElementById('fix-recovery-text');
             if (!box || !text) return;
 
-            text.textContent = `${appliedCount}箇所は適用済みです。\nJSON入力欄には、未適用の${lastFailedAutoFixes.length}件だけを残しています。\nリカバリープロンプトはフルコードを添付せず、AIが最新版コードを記憶している前提で作成します。`;
+            const resultParts = [];
+            if (appliedCount > 0) resultParts.push(`適用${appliedCount}件`);
+            if (alreadyAppliedCount > 0) resultParts.push(`適用済み${alreadyAppliedCount}件`);
+            if (!resultParts.length) resultParts.push("適用0件");
+
+            text.textContent = `${resultParts.join(" / ")}です。\nJSON入力欄には、未適用の${lastFailedAutoFixes.length}件だけを残しています。\nリカバリープロンプトはフルコードを添付せず、AIが最新版コードを記憶している前提で作成します。`;
             box.style.display = 'block';
         }
 
@@ -1490,7 +1485,6 @@
             if (recovery) recovery.style.display = 'none';
             if (recoveryText) recoveryText.textContent = "";
             lastFailedAutoFixes = [];
-            lastAutoFixSnapshotCode = "";
         }
 
         function switchFixTab(tab) {
@@ -1727,7 +1721,8 @@ ${currentCode}
                 const snapshotBeforeAutoFix = code;
                 code = code.replace(/\r\n/g, '\n'); // 改行正規化
 
-                let count = 0;
+                const appliedFixes = [];
+                const alreadyAppliedFixes = [];
                 const failedFixes = [];
 
                 if (!Array.isArray(fixes)) throw new Error("配列ではありません");
@@ -1745,6 +1740,14 @@ ${currentCode}
                         index += needle.length;
                     }
                     return found;
+                };
+
+                const buildResultSummary = () => {
+                    const parts = [];
+                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
+                    if (alreadyAppliedFixes.length > 0) parts.push(`適用済み${alreadyAppliedFixes.length}件`);
+                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
+                    return parts.length ? parts.join(" / ") : "適用0件";
                 };
 
                 for (const fix of fixes) {
@@ -1768,6 +1771,7 @@ ${currentCode}
 
                     let bestMatch = null;
                     let totalFound = 0;
+                    let bestMatchWasTrimmed = false;
 
                     // 1. 完全一致スキャン
                     for (const cand of variants) {
@@ -1781,22 +1785,35 @@ ${currentCode}
                     // 2. ヒットなしならTrim一致スキャン
                     if (totalFound === 0) {
                         const variantsTrim = new Set();
-                        for (const v of variants) variantsTrim.add(v.trim());
+                        for (const v of variants) {
+                            const trimmed = v.trim();
+                            if (trimmed) variantsTrim.add(trimmed);
+                        }
 
                         for (const cand of variantsTrim) {
                             const occurrences = countOccurrences(code, cand);
                             if (occurrences > 0) {
                                 totalFound += occurrences;
-                                if (!bestMatch) bestMatch = cand;
+                                if (!bestMatch) {
+                                    bestMatch = cand;
+                                    bestMatchWasTrimmed = true;
+                                }
                             }
                         }
                     }
 
                     if (totalFound === 0) {
                         const replacementFound = countOccurrences(code, replacement);
+                        if (replacementFound === 1 && replacement.length >= 30) {
+                            alreadyAppliedFixes.push({ reason: "afterが既に1箇所だけ存在するため適用済みと判断", fix });
+                            continue;
+                        }
+
                         if (replacementFound > 0) {
                             failedFixes.push({
-                                reason: "afterが既にコードに存在するため適用済みと判断。再出力不要",
+                                reason: replacement.length < 30
+                                    ? `afterは既に${replacementFound}箇所存在しますが、30文字未満のため適用済み判定せず未適用`
+                                    : `afterが既に${replacementFound}箇所存在するため、誤判定防止のため未適用`,
                                 fix
                             });
                             continue;
@@ -1823,16 +1840,20 @@ ${currentCode}
                         else if (bestMatch === encodeEnt(target)) replacement = encodeEnt(replacement);
                         else if (bestMatch === decodeEnt(decodeEnt(target))) replacement = decodeEnt(decodeEnt(replacement));
 
+                        if (bestMatchWasTrimmed) replacement = replacement.trim();
+
                                                 // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
                         code = code.replace(bestMatch, () => replacement);
-                        count++;
+                        appliedFixes.push(fix);
                     }
                 }
 
-                if (count > 0) {
+                if (appliedFixes.length > 0) {
                     pushReflectSnapshot(snapshotBeforeAutoFix);
                     editor.setValue(code);
                 }
+
+                const resultSummary = buildResultSummary();
 
                 if (failedFixes.length > 0) {
                     document.getElementById('fix-modal').style.display = 'flex';
@@ -1845,15 +1866,15 @@ ${currentCode}
                     document.getElementById('manual-find').value = firstBefore ? String(firstBefore) : "";
                     document.getElementById('manual-replace').value = firstAfter !== undefined ? String(firstAfter) : "";
 
-                    displayFixError(`${count}箇所は適用済みです。未適用が${failedFixes.length}件あります。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
-                    displayFixRecovery(failedFixes, count);
-                    showToast(`${count}箇所を適用 / ${failedFixes.length}件は未適用`);
+                    displayFixError(`${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
+                    displayFixRecovery(failedFixes, appliedFixes.length, alreadyAppliedFixes.length);
+                    showToast(resultSummary);
                     return false;
                 }
 
-                showToast(`${count}箇所の修正を適用しました\n(形式ゆらぎ自動補正)`);
                 document.getElementById('json-input').value = "";
                 closeModal('fix-modal');
+                showToast(resultSummary);
                 switchTab('run');
                 return true;
 
@@ -1880,15 +1901,35 @@ ${currentCode}
 
             if (!findText) return showToast("検索文字列を入力してください");
 
+            const countOccurrences = (base, needle) => {
+                if (!needle) return 0;
+                let index = 0;
+                let found = 0;
+                while ((index = base.indexOf(needle, index)) !== -1) {
+                    found++;
+                    index += needle.length;
+                }
+                return found;
+            };
+
             let code = editor.getValue();
-            if (code.includes(findText)) {
-                const newCode = code.split(findText).join(replaceText);
-                editor.setValue(newCode);
-                showToast("置換しました");
-                closeModal('fix-modal');
-            } else {
+            const matchCount = countOccurrences(code, findText);
+
+            if (matchCount === 0) {
                 showToast("対象文字列が見つかりませんでした");
+                return;
             }
+
+            if (matchCount > 1 && !confirm(`${matchCount}箇所に一致しました。すべて置換しますか？`)) {
+                showToast("手動置換を中止しました");
+                return;
+            }
+
+            pushReflectSnapshot(code);
+            const newCode = code.split(findText).join(replaceText);
+            editor.setValue(newCode);
+            showToast(`${matchCount}箇所を置換しました`);
+            closeModal('fix-modal');
         }
        
        
@@ -2276,12 +2317,12 @@ nextBtn.onclick=nextStep;
             if(!code.trim()) return showToast("コードが空です");
 
             // Load Config
-            const savedToken = localStorage.getItem('gh_token') || "";
             const savedRepo = localStorage.getItem('gh_repo') || "";
 
             // 1. Token Input
-            const token = prompt("GitHub Personal Access Token (repo権限) を入力してください:", savedToken);
+            const token = prompt("GitHub Personal Access Token (repo権限) を入力してください:\n※トークンは保存せず、この画面を開いている間だけ保持します。", sessionGhToken);
             if(!token) return;
+            sessionGhToken = token;
 
             // 2. Repo Input
             const repo = prompt("アップロード先のリポジトリを入力してください (例: user/repo):\n※リポジトリは事前に作成しておく必要があります", savedRepo);
@@ -2291,7 +2332,6 @@ nextBtn.onclick=nextStep;
             }
 
             // Save Config
-            localStorage.setItem('gh_token', token);
             localStorage.setItem('gh_repo', repo);
 
             const name = filenameInput.value || "index";
@@ -2597,6 +2637,7 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
 
                 // Listen for console messages from iframe
         window.addEventListener('message', (event) => {
+            if (event.source !== frame.contentWindow) return;
             if (event.data && event.data.type === 'console') {
                 const level = String(event.data.level || 'log');
                 const args = Array.isArray(event.data.args) ? event.data.args : [];
