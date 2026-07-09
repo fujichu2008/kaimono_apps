@@ -10485,44 +10485,212 @@ function updateHud(){
     };
   }
 
-  // 一度に設置できる上限(installLimit)を加味し、理論上の最低起爆回数(=最低コマ数)を求める。
-  // 各緑連結成分は「起爆1＋その爆風内の赤のシールド」を同じBOOMで置く必要がある不可分グループ。
-  // 取り残しの通常キューブ直爆は1セットずつ自由に分割できる。
-  function computeMinimumBoomTurns(solution, installLimit){
+    // 設置上限(installLimit)と盤面の並び順を加味し、理論上の最低コマ数を波(BOOMターン)単位で求める。
+  // 数え方は実績と同じ：最初の起爆を1コマ目とし、赤以外が全て消えるまでの転がり回数を加算する。
+  // モデル化しているルール：
+  //  - 1コマ目は着地前の先置きなので、赤の真後ろを含む全対象へ自由に設置できる。
+  //  - 2コマ目以降は「キューブが次に転がる前方マス」へ置くため、前方のキューブが消えていない対象には
+  //    直爆もシールドも置けない。赤は消えないため、赤の真後ろは以後直爆不可(初手か誘爆のみ)。
+  //  - 緑は連結成分単位で誘爆(起爆1＋爆風内の赤のシールドを同じBOOMで消費)。
+  //  - 各BOOMの設置合計はinstallLimit以下。連続するBOOMの間には必ず1回の転がりが入る。
+  // 各波で最大効率の起爆から採用する貪欲法のため厳密最小の近似だが、計算はセル数×成分数程度で軽い。
+  function computeMinimumBoomTurns(rows, activeCols, installLimit){
     const limit = Math.max(1,Math.floor(Number(installLimit) || 1));
-    const groups = (solution && Array.isArray(solution.setGroups) && solution.setGroups.length)
-      ? solution.setGroups.slice()
-      : [Math.max(1,(solution && solution.optimalSets) || 1)];
+    const cols = clamp(activeCols || COLS,1,COLS);
+    const startCol = getActiveColStart(cols);
+    const sliceRows = Array.isArray(rows) ? rows.length : 0;
+    if(sliceRows <= 0) return 1;
 
-    let turns = 0;
-    const bins = [];
-    const packable = [];
+    // grid[i][k]：i=0が最奥、i=sliceRows-1が最前列。出題は全マスにキューブが存在する。
+    const grid = [];
+    const greens = [];
+    for(let i=0; i<sliceRows; i++){
+      const line = String(rows[i] || '');
+      const row = [];
+      for(let k=0; k<cols; k++){
+        const ch = line[startCol + k];
+        const type = ch === 'G' ? 'green' : ch === 'R' ? 'red' : 'normal';
+        const cell = {i,k,type,alive:true,comp:-1};
+        row.push(cell);
+        if(type === 'green') greens.push(cell);
+      }
+      grid.push(row);
+    }
 
-    for(const g of groups){
-      const size = Math.max(1,Math.floor(Number(g) || 1));
-      if(size >= limit){
-        // 上限以上の不可分グループは、現実には分割起爆になるため ceil で必要回数へ換算する。
-        turns += Math.ceil(size / limit);
-      }else{
-        packable.push(size);
+    // 緑の連結成分(チェビシェフ距離1以内=誘爆で繋がる)
+    let compCount = 0;
+    for(const g of greens){
+      if(g.comp >= 0) continue;
+      const id = compCount++;
+      const stack = [g];
+      g.comp = id;
+      while(stack.length){
+        const a = stack.pop();
+        for(const b of greens){
+          if(b.comp >= 0) continue;
+          if(Math.abs(a.i - b.i) <= 1 && Math.abs(a.k - b.k) <= 1){
+            b.comp = id;
+            stack.push(b);
+          }
+        }
       }
     }
 
-    // First-Fit-Decreasing で残りグループを上限内に詰め、必要BOOM回数を数える。
-    packable.sort((a,b) => b - a);
-    for(const size of packable){
-      let placed = false;
-      for(let i=0; i<bins.length; i++){
-        if(bins[i] + size <= limit){
-          bins[i] += size;
-          placed = true;
+    const compGreens = Array.from({length:compCount},() => []);
+    for(const g of greens) compGreens[g.comp].push(g);
+
+    const compCover = Array.from({length:compCount},() => new Set());
+    for(let id=0; id<compCount; id++){
+      for(const g of compGreens[id]){
+        for(let di=-1; di<=1; di++){
+          for(let dk=-1; dk<=1; dk++){
+            const ii = g.i + di;
+            const kk = g.k + dk;
+            if(ii < 0 || ii >= sliceRows || kk < 0 || kk >= cols) continue;
+            compCover[id].add(ii * cols + kk);
+          }
+        }
+      }
+    }
+
+    const compTriggered = new Array(compCount).fill(false);
+    let aliveNonRed = 0;
+    for(const row of grid){
+      for(const cell of row){
+        if(cell.type !== 'red') aliveNonRed++;
+      }
+    }
+    if(aliveNonRed <= 0) return 1;
+
+    // 前方(転がり先)が空いているか。赤は消えないため、赤の真後ろは2コマ目以降ずっと封鎖される。
+    const frontOpen = cell => {
+      if(cell.i >= sliceRows - 1) return true;
+      return !grid[cell.i + 1][cell.k].alive;
+    };
+    const canPlaceAt = (cell,wave) => wave === 1 || frontOpen(cell);
+    const isForeverBlockedCell = cell =>
+      cell.i < sliceRows - 1 && grid[cell.i + 1][cell.k].type === 'red';
+    const compForeverBlocked = id =>
+      compGreens[id].every(g => isForeverBlockedCell(g));
+
+    const evalTrigger = (id,wave) => {
+      if(compTriggered[id]) return null;
+
+      let triggerOk = false;
+      for(const g of compGreens[id]){
+        if(g.alive && canPlaceAt(g,wave)){
+          triggerOk = true;
           break;
         }
       }
-      if(!placed) bins.push(size);
+      if(!triggerOk) return null;
+
+      let kills = 0;
+      let shields = 0;
+      let blockedShield = false;
+      compCover[id].forEach(key => {
+        const cell = grid[Math.floor(key / cols)][key % cols];
+        if(cell.type === 'red'){
+          if(!canPlaceAt(cell,wave)) blockedShield = true;
+          else shields++;
+        }else if(cell.alive){
+          kills++;
+        }
+      });
+
+      // 爆風内の赤にシールドが置けないコマでは誤爆確定になるため、その波では起爆できない。
+      if(blockedShield || kills <= 0) return null;
+      return {id,kills,cost:1 + shields};
+    };
+
+    const MAX_WAVES = 24;
+    let wave = 0;
+
+    while(aliveNonRed > 0 && wave < MAX_WAVES){
+      wave++;
+      let budget = limit;
+      let killedThisWave = 0;
+      let progressed = true;
+
+      while(progressed && budget > 0 && aliveNonRed > 0){
+        progressed = false;
+
+        // 1) 誘爆起爆：消去数の多い成分から採用。1コマ目は「以後起爆不能になる成分」を最優先。
+        let best = null;
+        for(let id=0; id<compCount; id++){
+          const t = evalTrigger(id,wave);
+          if(!t || t.cost > budget) continue;
+          const urgent = wave === 1 && compForeverBlocked(id) ? 1 : 0;
+          const score = urgent * 100000 + t.kills * 100 - t.cost;
+          if(!best || score > best.score) best = {id:t.id,kills:t.kills,cost:t.cost,score};
+        }
+
+        if(best){
+          compTriggered[best.id] = true;
+          budget -= best.cost;
+          compCover[best.id].forEach(key => {
+            const cell = grid[Math.floor(key / cols)][key % cols];
+            if(cell.alive && cell.type !== 'red'){
+              cell.alive = false;
+              aliveNonRed--;
+              killedThisWave++;
+            }
+          });
+          progressed = true;
+          continue;
+        }
+
+        // 2) 直爆：誘爆で消える見込みのない通常キューブを1個ずつ。
+        //    1コマ目は「赤の真後ろで以後直爆不能になるキューブ」を最優先。
+        let target = null;
+        for(const row of grid){
+          for(const cell of row){
+            if(!cell.alive || cell.type !== 'normal') continue;
+            if(!canPlaceAt(cell,wave)) continue;
+
+            const key = cell.i * cols + cell.k;
+            let covered = false;
+            for(let id=0; id<compCount; id++){
+              if(compTriggered[id]) continue;
+              if(wave > 1 && compForeverBlocked(id)) continue;
+              if(compCover[id].has(key)){
+                covered = true;
+                break;
+              }
+            }
+            if(covered) continue;
+
+            const urgent = wave === 1 && isForeverBlockedCell(cell) ? 1 : 0;
+            if(!target || urgent > target.urgent){
+              target = {cell,urgent};
+              if(urgent) break;
+            }
+          }
+          if(target && target.urgent) break;
+        }
+
+        if(target){
+          target.cell.alive = false;
+          aliveNonRed--;
+          killedThisWave++;
+          budget--;
+          progressed = true;
+        }
+      }
+
+      if(killedThisWave === 0){
+        // 理論上手が出せない配置(残り全てが赤の真後ろ等)。残りは上限詰めの概算で打ち切る。
+        wave += Math.max(0,Math.ceil(aliveNonRed / limit) - 1);
+        aliveNonRed = 0;
+        break;
+      }
     }
 
-    return Math.max(1,turns + bins.length);
+    if(aliveNonRed > 0){
+      wave += Math.ceil(aliveNonRed / limit);
+    }
+
+    return Math.max(1,wave);
   }
 
   // 連鎖の背骨(緑の連結スネーク)＋シールド判断用の赤＋囮の赤、で構成された候補を生成する
@@ -10864,7 +11032,7 @@ function updateHud(){
     const normalizedRows = rows.map((line,i) => normalizeLine(line,i));
     const briefSolution = solveCutOptimalPlan(normalizedRows,activeCols);
     const briefInstallLimit = getInstallLimitFor(state.level,state.activeCols || activeCols,state.sliceRows || rows.length || 3);
-    const briefMinBooms = computeMinimumBoomTurns(briefSolution,briefInstallLimit);
+        const briefMinBooms = computeMinimumBoomTurns(normalizedRows,activeCols,briefInstallLimit);
     const tacticHints = [];
 
     if((briefSolution.maxChain || 0) >= 2){
@@ -10883,7 +11051,7 @@ function updateHud(){
       tacticHints.push(`通常${briefSolution.uncoveredNormals}個は直爆候補`);
     }
 
-    tacticHints.push(`最短 BOOM ${briefMinBooms}回`);
+        tacticHints.push(`最短 ${briefMinBooms}コマ`);
 
     const cells = normalizedRows.map(line => {
       const normalized = normalizeLine(line);
@@ -10900,7 +11068,7 @@ function updateHud(){
       'top:22%;padding:10px 12px;border-radius:18px;background:rgba(3,9,21,.78);' +
       'border-color:rgba(57,216,255,.42);box-shadow:0 18px 45px rgba(0,0,0,.42);';
     dom.message.innerHTML =
-      `<div style='font-size:11px;color:#9bdcff;font-weight:950;letter-spacing:.12em;margin-bottom:5px;'>LEVEL ${state.level} / CUT ${Math.min(state.cutNumber + 1,state.cutCount)}/${state.cutCount} / 最短 BOOM ${briefMinBooms}回</div>` +
+      `<div style='font-size:11px;color:#9bdcff;font-weight:950;letter-spacing:.12em;margin-bottom:5px;'>LEVEL ${state.level} / CUT ${Math.min(state.cutNumber + 1,state.cutCount)}/${state.cutCount} / 最短 ${briefMinBooms}コマ</div>` +
       `<div style='font-size:10px;color:#fff2bd;font-weight:900;letter-spacing:.04em;margin-bottom:7px;line-height:1.35;'>${tacticHints.slice(0,3).join(' / ')}</div>` +
       `<div style='display:grid;grid-template-columns:repeat(${activeCols},18px);gap:4px;justify-content:center;'>${cells}</div>`;
     dom.message.classList.add('show');
@@ -10987,11 +11155,10 @@ function updateHud(){
     state.rolling = true;
     const cutSolution = solveCutOptimalPlan(rows,state.activeCols || COLS);
 
-    // 計算上の最低コマ数：一度に設置できる上限を加味した、理論上の最低起爆回数。
-    // 緑連結成分ごとの「起爆＋同時シールド」を不可分グループとして上限内に詰め込み、
-    // 赤以外を全て消すのに必要なBOOM回数(最初の起爆=1コマ目)を求める。
+        // 計算上の最低コマ数：設置上限・赤による設置封鎖・誘爆/シールド/直爆の組み合わせを
+    // 波(BOOMターン)単位でシミュレートし、最初の起爆を1コマ目として赤以外を消し切る回数を求める。
     const installLimitForCut = getInstallLimitFor(state.level,state.activeCols || 5,state.sliceRows || 3);
-    const optimalRolls = computeMinimumBoomTurns(cutSolution,installLimitForCut);
+    const optimalRolls = computeMinimumBoomTurns(rows,state.activeCols || COLS,installLimitForCut);
 
     state.currentCutStats = {
       cutNumber:state.cutNumber,
@@ -13531,17 +13698,19 @@ function updateHud(){
 
 
 
+
+
 <script id="lfs-meta" type="application/json">
 {
   "appId": "dc88910f3d3446a9dc9470ef08fad724",
   "createdAt": "2026-06-07T14:20:24.080Z",
   "schema": 2,
   "title": "IQube",
-  "savedAt": "2026-06-11T18:19:15.606Z",
-  "aiInstruction": "同じ音楽のレベル（レベル１→レベル２など）は、音楽を途切れさせずシームレスに移行するように",
-  "comment": "同じ音楽のレベル（レベル１→レベル２など）は、音楽を途切れさせずシームレスに移行するように",
+  "savedAt": "2026-07-09T14:44:01.376Z",
+  "aiInstruction": "このゲームの最小手数の算出が、1か2しか出ないのはおかしい。\n・各ステージで設定された、一度に設置可能な爆弾の制限\n・禁止キューブの後ろのキューブを爆破するには禁止キューブが流れるのを待たねばならないので、できるだけ最初の手で爆破するのが有利。そうするとそこを突破口に次の起爆ができる\n・誘爆、保護シールドと、通常キューブの１つずつの爆破のバランス。なるべく初手でたくさん、効率よく爆破が吉\n・転がっているキューブの下には、爆弾設置できない。\nこれらの要素をくみあわせたとき、最初の起爆を１と数えて、なんかいキューブが回転したら禁止キューブ以外のすべてのキューブがなくなるかを、理論的かつスマホの負荷に極力ならないよう計算し、できるだけ正確な最小手数を算出してほしい。\nなお、実績手数も数え方は、最初の起爆を１と数えて、なんかいキューブが回転したら禁止キューブ以外のすべてのキューブがなくなるかである",
+  "comment": "このゲームの最小手数の算出が、1か2しか出ないのはおかしい。\n・各ステージで設定された、一度に設置可能な爆弾の制限\n・禁止キューブの後ろのキューブを爆破するには禁止キューブが流れるのを待たねばならないので、できるだけ最初の手で爆破するのが有利。そうするとそこを突破口に次の起爆ができる\n・誘爆、保護シールドと、通常キューブの１つずつの爆破のバランス。なるべく初手でたくさん、効率よく爆破が吉\n・転がっているキューブの下には、爆弾設置できない。\nこれらの要素をくみあわせたとき、最初の起爆を１と数えて、なんかいキューブが回転したら禁止キューブ以外のすべてのキューブがなくなるかを、理論的かつスマホの負荷に極力ならないよう計算し、できるだけ正確な最小手数を算出してほしい。\nなお、実績手数も数え方は、最初の起爆を１と数えて、なんかいキューブが回転したら禁止キューブ以外のすべてのキューブがなくなるかである",
   "sourceMode": "project",
-  "runId": "d60b2153e754ee7a0d9b1003a39f089e"
+  "runId": "0db9c42e1009977f918733fdc579dfd6"
 }
 </script>
 </body>
