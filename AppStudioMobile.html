@@ -792,7 +792,7 @@
             <button class="run-ctrl-btn" onclick="openPromptModal()">
                 <span class="run-ctrl-icon">🤖</span><span class="run-ctrl-label">指示</span>
             </button>
-            <button class="run-ctrl-btn" onclick="handleFixButtonClick(event)">
+            <button class="run-ctrl-btn" onclick="handleFixButtonClick(event)" onpointerdown="startFixLongPress(event)" onpointerup="cancelFixLongPress()" onpointerleave="cancelFixLongPress()" onpointercancel="cancelFixLongPress()" oncontextmenu="event.preventDefault()">
                 <span class="run-ctrl-icon">🔁</span><span class="run-ctrl-label">反映</span>
             </button>
             <button class="run-ctrl-btn" onclick="openConsultModal()">
@@ -807,6 +807,7 @@
             <div id="run-menu" class="run-menu">
                 <button onclick="closeRunMenu(); restoreReflectSnapshot()">⏪ 反映前に戻す</button>
                 <button onclick="closeRunMenu(); reloadFrame()">↻ リロード</button>
+                <button id="runtime-mode-toggle-btn" onclick="closeRunMenu(); toggleRuntimeMode()">🛡 安全実行へ切替</button>
                 <button onclick="closeRunMenu(); openErrorLogModal()">🐞 エラーログ</button>
                 <button onclick="closeRunMenu(); openDevStatsModal()">📊 開発統計</button>
                 <button onclick="closeRunMenu(); switchTab('editor')">📝 エディタへ</button>
@@ -980,7 +981,7 @@
             <div id="error-log-modal" class="modal-overlay">
         <div class="modal">
             <h2>🐞 エラーログ</h2>
-            <p class="section-desc">実行画面のiframeから受信したconsole.error / JavaScriptエラーを、この実行中だけ蓄積します。リロードするとクリアされます。</p>
+            <p class="section-desc">実行画面のiframeから受信したconsole.error / JavaScriptエラーを、この実行中だけ蓄積します。リロードするとクリアされます。短時間に連続した同一エラーは ×N件 として集約します。安全実行中は、localStorageやIndexedDBへのアクセスがSecurityErrorになる場合があります(自動では互換実行へ切り替えません)。</p>
             <div id="error-log-content" style="white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: #ddd; max-height: 50vh; overflow-y: auto; background: rgba(0,0,0,0.22); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px;"></div>
             <div class="modal-buttons">
                 <button class="btn-action" onclick="copyAllErrorLogs()">📋 全ログコピー</button>
@@ -1141,7 +1142,10 @@
                 <p style="font-size: 12px; color: #ccc; line-height: 1.6;">
                     ・<strong>外部通信</strong>: CodeMirror等のエディタ部品はCDNから読み込みます。作成アプリからの外部通信は制限していないため、信頼できないコードは貼らないでください。<br>
                     ・<strong>データ保存</strong>: アプリのコードやローカル保存データを自動で外部送信することはありません。データはブラウザ内に保存されますが、キャッシュクリアすると消える可能性があるため、重要なコードはGitHub等へバックアップしてください。<br>
-                    ・<strong>JavaScript</strong>: 実行画面は分離表示していますが、完全な隔離ではないため、悪意あるコードの実行には十分注意してください。GitHubトークンは保存せず、この画面を開いている間だけメモリ上に保持します。
+                    ・<strong>互換実行（初期状態）</strong>: 作成アプリはAppStudio本体と同じlocalStorage・IndexedDB空間を使用します。作成アプリがlocalStorage.clear()を実行すると、本体のGitHubリポジトリ設定や開発統計が消える可能性があります。作成アプリがindexedDB.deleteDatabase("AppStudioDB")を実行すると、ライブラリや保存アプリが消える可能性があります。複数の作成アプリが同じlocalStorageキーを使用すると、セーブデータが衝突する可能性があります。また、作成アプリから親画面のDOMや関数へアクセスできる可能性があります。信頼できないコードを実行しないでください。<br>
+                    ・<strong>安全実行</strong>: 実行画面の「その他」メニューから切り替えます。作成アプリからAppStudio本体へのアクセスを制限しますが、localStorageやIndexedDBが使用できない場合があり、通常実行のセーブデータが共有されない場合があります。その際SecurityErrorが発生する場合があります。未確認コードの最初の動作確認に向いていますが、完全なセキュリティ保証ではありません。<br>
+                    ・<strong>別窓実行</strong>: window.openerによる親画面の直接参照を遮断します。ただしAppStudio本体と同一オリジンで動作し、localStorage・IndexedDBは本体と共有します。iframeの安全実行とは異なるため、信頼できるコードだけを実行してください。<br>
+                    ・<strong>GitHubトークン</strong>: 保存せず、この画面を開いている間だけメモリ上に保持します。
                 </p>
             </div>
 
@@ -1185,6 +1189,17 @@
         let reflectRedoSnapshots = [];
         let frameDirty = true;
         let sessionGhToken = "";
+        // 実行モード: "compat"(互換実行) / "safe"(安全実行)
+        // localStorageへは保存せず、ページ再読み込み後は必ず互換実行へ戻す。
+        // DOMの文言やclassではなく、この変数を唯一の正本とする。
+        let runtimeMode = "compat";
+        // 次の1回だけ安全実行するためのフラグ。null または "safe" のみを持つ。
+        let nextRunMode = null;
+        // 現在のiframe実行を識別するトークン。reloadFrame()ごとに再生成する。
+        let currentRuntimeToken = "";
+        // 現在のiframeが実際に使っている実行モード。恒久的なruntimeModeとは別に、
+        // nextRunModeによる1回限りの安全実行も正しくエラーログへ記録するために保持する。
+        let currentRunEffectiveMode = "compat";
         let devStatsScope = 'all';
         let devStatsPeriod = 'all';
         const REFLECT_SNAPSHOT_LIMIT = 10;
@@ -1288,6 +1303,49 @@
             if (menu) menu.classList.remove('open');
         }
 
+        function createRuntimeToken() {
+            const values = new Uint32Array(4);
+            crypto.getRandomValues(values);
+            return Array.from(values, value =>
+                value.toString(16).padStart(8, "0")
+            ).join("");
+        }
+
+        function applyRuntimeSandbox(mode) {
+            const sandboxValue = mode === "safe"
+                ? "allow-scripts allow-forms allow-popups allow-modals"
+                : "allow-scripts allow-forms allow-popups allow-modals allow-same-origin";
+            frame.setAttribute("sandbox", sandboxValue);
+        }
+
+        function updateRuntimeModeMenuLabel() {
+            const btn = document.getElementById('runtime-mode-toggle-btn');
+            if (!btn) return;
+            btn.textContent = runtimeMode === "safe" ? "⚠ 互換実行へ戻す" : "🛡 安全実行へ切替";
+        }
+
+        function toggleRuntimeMode() {
+            if (runtimeMode === "compat") {
+                const msg = "安全実行では、作成アプリからAppStudio本体へのアクセスを制限します。\nただし、作成アプリ内のlocalStorageやIndexedDBが使えない、または通常実行のセーブデータが引き継がれない場合があります。\n信頼できないコードを確認するときに使用してください。";
+                if (!confirm(msg)) return;
+                runtimeMode = "safe";
+            } else {
+                const msg = "互換実行では、作成アプリのlocalStorageやIndexedDBが利用しやすくなります。\n一方、作成アプリはAppStudio本体と同じオリジンで動作するため、信頼できないコードを実行すると、本体の設定・ライブラリ・通信処理へ影響する可能性があります。\n信頼できるコードだけを実行してください。";
+                if (!confirm(msg)) return;
+                runtimeMode = "compat";
+            }
+            updateRuntimeModeMenuLabel();
+            reloadFrame();
+            showToast(runtimeMode === "safe" ? "現在: 安全実行" : "現在: 互換実行");
+        }
+
+        function confirmSafeRunForUntrustedHtml() {
+            const msg = "未確認のHTMLフルコードを反映しました。\n最初の1回だけ安全実行で確認しますか？\n安全実行ではAppStudio本体へのアクセスを制限できますが、localStorageやIndexedDBを使うセーブ機能は動かない場合があります。\nOK: 次の1回だけ安全実行\nキャンセル: 現在の実行モードで実行";
+            if (confirm(msg)) {
+                nextRunMode = "safe";
+            }
+        }
+
         document.addEventListener('click', (e) => {
             const menu = document.getElementById('run-menu');
             if (menu && menu.classList.contains('open') && !menu.contains(e.target)) {
@@ -1333,11 +1391,13 @@
 
         window.addEventListener('pagehide', () => {
             flushEditorDraftSave();
+            flushIframeErrorStats();
         });
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 flushEditorDraftSave();
+                flushIframeErrorStats();
             }
         });
 
@@ -1399,6 +1459,13 @@
                 pushReflectSnapshot(editor.getValue());
                 editor.setValue(text);
                 showToast("全コードを貼り付けました");
+                // 未確認フルHTMLの貼り付け1回につき、初回安全実行の確認を1回だけ表示する。
+                // 反映経路と異なり、生テキストのまま判定する(コードフェンス除去は行わない)。
+                // HTMLと判定できないテキストは自動実行せず、エディタへ貼り付けるだけとする。
+                if (looksLikeFullHtmlCode(text)) {
+                    confirmSafeRunForUntrustedHtml();
+                    switchTab('run');
+                }
             } catch (err) {
                 showToast("貼り付け失敗: 権限を確認してください");
             }
@@ -1619,6 +1686,8 @@
                 recordDevLog('reflect_success', 'success', '', 'html_full');
                 closeModal('fix-modal');
                 showToast("HTMLフルコードを反映しました");
+                // 未確認フルHTMLの反映1回につき、初回安全実行の確認を1回だけ表示する
+                confirmSafeRunForUntrustedHtml();
                 switchTab('run');
                 return true;
             }
@@ -2342,6 +2411,28 @@ nextBtn.onclick=nextStep;
 </html>`;
         }
 
+        // デバッグスクリプトを、作成アプリのスクリプトより先に実行される位置へ挿入する。
+        // 優先順位: 開始headタグ直後 > 開始bodyタグ直後 > DOCTYPE直後 > コード先頭。
+        // DOCTYPEより前へは挿入しない。大文字小文字・属性付きタグ(<HEAD>, <body class="game">等)へ対応する。
+        function injectDebugScript(code, debugScript) {
+            const headMatch = code.match(/<head\b[^>]*>/i);
+            if (headMatch) {
+                const pos = headMatch.index + headMatch[0].length;
+                return code.slice(0, pos) + debugScript + code.slice(pos);
+            }
+            const bodyMatch = code.match(/<body\b[^>]*>/i);
+            if (bodyMatch) {
+                const pos = bodyMatch.index + bodyMatch[0].length;
+                return code.slice(0, pos) + debugScript + code.slice(pos);
+            }
+            const doctypeMatch = code.match(/<!doctype\b[^>]*>/i);
+            if (doctypeMatch) {
+                const pos = doctypeMatch.index + doctypeMatch[0].length;
+                return code.slice(0, pos) + debugScript + code.slice(pos);
+            }
+            return debugScript + code;
+        }
+
         function getRunnableCode() {
             let code = editor.getValue();
             if(!code.trim()) {
@@ -2352,11 +2443,14 @@ nextBtn.onclick=nextStep;
             const debugScript = `
             <script>
                 (function(){
+                    const RUNTIME_TOKEN = ${JSON.stringify(currentRuntimeToken)};
                     const send = (type, args) => {
                         try {
+                            // targetOriginはsandbox互換性のため"*"のまま。runtimeTokenで実行単位を識別する。
                             window.parent.postMessage({
                                 type: 'console',
                                 level: type,
+                                runtimeToken: RUNTIME_TOKEN,
                                 args: Array.from(args).map(a => String(a))
                             }, '*');
                         } catch(e) {}
@@ -2365,7 +2459,13 @@ nextBtn.onclick=nextStep;
                     const originalError = console.error;
                     console.log = function(...args) { originalLog.apply(console, args); send('log', args); };
                     console.error = function(...args) { originalError.apply(console, args); send('error', args); };
-                    window.onerror = function(msg, url, line) { send('error', [msg + " (Line: " + line + ")"]); };
+                    // window.onerrorの上書きは廃止。作成アプリ自身のerrorリスナーを壊さないaddEventListenerで取得する。
+                    window.addEventListener('error', function(event) {
+                        const message = event && event.message ? event.message : 'Script error';
+                        const line = event && event.lineno ? event.lineno : 0;
+                        const col = event && event.colno ? event.colno : 0;
+                        send('error', [message + " (Line: " + line + ", Col: " + col + ")"]);
+                    });
                     window.addEventListener('unhandledrejection', function(event) {
                         const reason = event && event.reason ? event.reason : 'Unhandled Promise rejection';
                         send('error', ['Unhandled Promise rejection: ' + String(reason)]);
@@ -2373,12 +2473,7 @@ nextBtn.onclick=nextStep;
                 })();
             <\/script>`;
 
-            if (code.includes('<head>')) {
-                code = code.replace('<head>', '<head>' + debugScript);
-            } else {
-                code = debugScript + code;
-            }
-            return code;
+            return injectDebugScript(code, debugScript);
         }
 
         function runCode() {
@@ -2386,21 +2481,47 @@ nextBtn.onclick=nextStep;
         }
 
                 function reloadFrame() {
+            // 旧iframeの未保存エラー統計を、実行終了時点でまず確定する。
+            // 帰属情報は発生時点で固定済みのため、この順序が崩れても誤帰属はしないが、
+            // 旧実行のエラーが新実行開始後に遅れて保存されるのを防ぐためここでflushする。
+            // 初回起動時は空バッファのため何も保存されない。
+            flushIframeErrorStats();
             clearIframeErrorLogs();
+            // 1. 今回の実行に使うモードを決定(nextRunModeがあれば次の1回だけ優先)
+            const effectiveMode = nextRunMode || runtimeMode;
+            // 2. sandbox属性を設定(srcdoc代入前に必ず設定する)
+            applyRuntimeSandbox(effectiveMode);
+            // この実行が実際に使うモードをエラーログ記録用に保持する
+            currentRunEffectiveMode = effectiveMode;
+            // 3. 実行トークンを再生成
+            currentRuntimeToken = createRuntimeToken();
+            // 4. 実行コードを生成し、5. srcdocへ代入
             frame.srcdoc = getRunnableCode();
             frameDirty = false;
+            // 6. nextRunModeを消費した場合はnullへ戻す(恒久的なruntimeModeは変更しない)
+            if (nextRunMode) {
+                nextRunMode = null;
+            }
+            updateRuntimeModeMenuLabel();
         }
 
                 function runInNewWindow() {
             const code = editor.getValue();
             const win = window.open("", "_blank");
-            if(win) {
-                win.document.open();
-                win.document.write(code);
-                win.document.close();
-            } else {
+            if (!win) {
                 showToast("ポップアップがブロックされました");
+                return;
             }
+            // window.openerによる親画面の直接参照を遮断する。
+            // ただしこれは完全な安全化ではない。別窓はAppStudio本体と同一オリジンで動作し、
+            // localStorage・IndexedDBを本体と共有する。iframeの安全実行とも異なる。
+            // 信頼できるコードだけを実行すること。
+            try {
+                win.opener = null;
+            } catch (e) {}
+            win.document.open();
+            win.document.write(code);
+            win.document.close();
         }
 
                         // --- Navigation Logic ---
@@ -2827,8 +2948,180 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
             if (content) content.textContent = "まだエラーはありません。";
         }
 
+        // --- iframeエラーの集約(エラーストーム対策) ---
+        const IFRAME_ERROR_DEDUP_MS = 2000;
+        // 1実行あたりに個別追跡するユニークエラーメッセージ数の上限(メモリ保護)
+        const IFRAME_ERROR_UNIQUE_CAP = 200;
+        let errorLogRenderTimer = null;
+        // runtimeTokenをキーとした実行単位のエラーバッファ。
+        // iframeエラーの帰属情報(appName等)は最初のエラー発生時点で固定する。
+        // reload前flushの順序だけに正しさを依存させず、別アプリ読込後も
+        // 旧実行のエラーを正しいアプリへ記録するため。
+        let iframeErrorStatsBuffer = {};
+        let iframeErrorStatsFlushTimer = null;
+
+        // 直近2秒以内に同じ実行モード・同じメッセージのエラーが連続した場合は、
+        // 新しい行を追加せず直前ログのcountを加算する。
+        function addIframeErrorLog(message) {
+            const now = Date.now();
+            const last = iframeErrorLogs[iframeErrorLogs.length - 1];
+            if (last
+                && last.message === message
+                && last.runtimeMode === currentRunEffectiveMode
+                && (now - (last.lastTime || 0)) <= IFRAME_ERROR_DEDUP_MS) {
+                last.count = (last.count || 1) + 1;
+                last.lastTime = now;
+            } else {
+                iframeErrorLogs.push({
+                    time: new Date().toLocaleTimeString(),
+                    message: message,
+                    runtimeMode: currentRunEffectiveMode,
+                    count: 1,
+                    lastTime: now
+                });
+                if (iframeErrorLogs.length > 100) iframeErrorLogs.shift();
+            }
+            bufferIframeErrorForStats(message);
+            scheduleErrorLogRender();
+        }
+
+        // エラーログモーダルが開いているときだけ、描画をデバウンスして更新する
+        function scheduleErrorLogRender() {
+            const modal = document.getElementById('error-log-modal');
+            if (!modal || modal.style.display !== 'flex') return;
+            if (errorLogRenderTimer) return;
+            errorLogRenderTimer = setTimeout(() => {
+                errorLogRenderTimer = null;
+                renderErrorLogModal();
+            }, 300);
+        }
+
+        // 開発統計へは直接recordDevLog()せず、runtimeToken単位の専用バッファへ集約する。
+        // 帰属情報はエラーの最初の発生時点で固定し、以後別アプリを読み込んでも変更しない。
+        function bufferIframeErrorForStats(message) {
+            const tokenKey = currentRuntimeToken || "(no-token)";
+            let entry = iframeErrorStatsBuffer[tokenKey];
+            if (!entry) {
+                const nowIso = new Date().toISOString();
+                entry = iframeErrorStatsBuffer[tokenKey] = {
+                    runtimeToken: currentRuntimeToken,
+                    runtimeMode: currentRunEffectiveMode,
+                    appName: getCurrentDevLogAppName(),
+                    projectName: currentAppName || getCurrentDevLogAppName() || "未保存ドラフト",
+                    codeLength: editor.getValue().length,
+                    lineCount: editor.lineCount(),
+                    firstTime: nowIso,
+                    lastTime: nowIso,
+                    totalCount: 0,
+                    overflowCount: 0,
+                    errors: {},
+                    dirty: false
+                };
+            }
+            entry.totalCount++;
+            entry.lastTime = new Date().toISOString();
+            entry.dirty = true;
+            if (entry.errors[message] !== undefined) {
+                entry.errors[message]++;
+            } else if (Object.keys(entry.errors).length < IFRAME_ERROR_UNIQUE_CAP) {
+                entry.errors[message] = 1;
+            } else {
+                // ユニーク上限超過分はメモリ保護のため個別追跡せず件数だけ累積する
+                entry.overflowCount++;
+            }
+            if (!iframeErrorStatsFlushTimer) {
+                iframeErrorStatsFlushTimer = setTimeout(flushIframeErrorStats, 1000);
+            }
+        }
+
+        // 集約したiframeエラーを最低1秒間隔で開発統計へ保存する。
+        // 1つのruntimeTokenにつき開発統計ログは最大1レコード。同一実行のエラーが増えた場合は
+        // 追加ではなく同じidのレコードを上書き更新する。これによりpagehideと
+        // visibilitychangeが連続しても重複せず、長時間のエラーストームでもログ件数が増え続けない。
+        // getDevLogs()とsaveDevLogs()は1回のflushにつき各1回だけ呼ぶ。
+        // iframeエラー以外のrecordDevLog()呼び出しは従来どおり即時のまま。
+        function flushIframeErrorStats() {
+            if (iframeErrorStatsFlushTimer) {
+                clearTimeout(iframeErrorStatsFlushTimer);
+                iframeErrorStatsFlushTimer = null;
+            }
+            const dirtyEntries = Object.values(iframeErrorStatsBuffer).filter(entry => entry.dirty);
+            if (!dirtyEntries.length) {
+                pruneStaleIframeErrorBuffers();
+                return;
+            }
+            try {
+                const logs = getDevLogs();
+                dirtyEntries.forEach(entry => {
+                    const record = buildIframeErrorRecord(entry);
+                    const index = logs.findIndex(log => log && log.id === record.id);
+                    if (index >= 0) {
+                        logs[index] = record;
+                    } else {
+                        logs.push(record);
+                    }
+                });
+                // 保存成功を確認してからdirtyを解除する。saveDevLogs()は内部で例外を
+                // catchするため、失敗検知は戻り値でのみ可能。失敗時は全エントリの
+                // dirtyを維持し(部分解除しない)、次回flushで累積値ごと再試行する。
+                // dirty維持中のバッファはpruneでも削除されないため、データは失われない。
+                if (saveDevLogs(logs)) {
+                    dirtyEntries.forEach(entry => {
+                        entry.dirty = false;
+                    });
+                }
+            } catch (e) {
+                console.warn("iframeエラー統計の保存に失敗しました:", e);
+            }
+            pruneStaleIframeErrorBuffers();
+        }
+
+        // 旧runtimeTokenのバッファは保存確定後に破棄する。現在実行中のトークンは
+        // 累積カウントを保持し続ける。全消去すると次のflushで作るレコードの件数が
+        // 「前回flush以降の増分」になり、同じidの上書きで累積値が巻き戻るため。
+        function pruneStaleIframeErrorBuffers() {
+            Object.keys(iframeErrorStatsBuffer).forEach(key => {
+                const entry = iframeErrorStatsBuffer[key];
+                if (!entry.dirty && entry.runtimeToken !== currentRuntimeToken) {
+                    delete iframeErrorStatsBuffer[key];
+                }
+            });
+        }
+
+        // 1実行分のバッファから開発統計用レコードを生成する。帰属情報は
+        // バッファ登録時(発生時点)に固定した値を使い、現在画面の値で上書きしない。
+        function buildIframeErrorRecord(entry) {
+            const counts = Object.values(entry.errors);
+            const uniqueCount = counts.length;
+            const maxCount = counts.length ? Math.max(...counts) : entry.totalCount;
+            const modeLabel = entry.runtimeMode === "safe" ? "安全" : "互換";
+            const overflowSuffix = entry.overflowCount > 0 ? "以上" : "";
+            const detail = `[${modeLabel}] 合計${entry.totalCount}件 / ${uniqueCount}種類${overflowSuffix} / 最多${maxCount}件`.slice(0, 200);
+            return {
+                id: `iframe_error_${entry.runtimeToken || "unknown"}`,
+                time: entry.firstTime,
+                lastTime: entry.lastTime,
+                appName: entry.appName,
+                projectName: entry.projectName,
+                type: "iframe_error",
+                result: "failed",
+                reason: "iframe_error",
+                detail: detail,
+                codeLength: entry.codeLength,
+                lineCount: entry.lineCount,
+                runtimeToken: entry.runtimeToken,
+                runtimeMode: entry.runtimeMode,
+                iframeErrorCount: entry.totalCount,
+                iframeUniqueErrorCount: uniqueCount
+            };
+        }
+
         function formatIframeErrorLog(log) {
-            return `[${log.time}] ${log.message}`;
+            // 実行モードを日本語表示する。旧形式ログ(runtimeMode/countなし)は互換・1件として扱う。
+            const modeLabel = log.runtimeMode === "safe" ? "安全" : "互換";
+            const count = log.count || 1;
+            const countSuffix = count > 1 ? ` ×${count}件` : "";
+            return `[${log.time}] [${modeLabel}] ${log.message}${countSuffix}`;
         }
 
         function getIframeErrorLogText() {
@@ -2890,12 +3183,17 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
             }
         }
 
+        // 保存の成否をtrue/falseで返す。内部で例外をcatchするため、
+        // 呼び出し側のtry-catchでは失敗(QuotaExceededError等)を検知できない。
+        // 失敗検知が必要な呼び出し元は必ず戻り値を確認すること。
         function saveDevLogs(logs) {
             try {
                 const safeLogs = Array.isArray(logs) ? logs.slice(-DEV_LOG_LIMIT) : [];
                 localStorage.setItem(DEV_LOG_KEY, JSON.stringify(safeLogs));
+                return true;
             } catch (e) {
                 console.warn("開発ログの保存に失敗しました:", e);
+                return false;
             }
         }
 
@@ -3102,21 +3400,23 @@ if(confirm("アップロード完了！\nGitHub PagesのURLをコピーします
 
                 // Listen for console messages from iframe
         window.addEventListener('message', (event) => {
+            // このトークンは、旧iframeからの残留メッセージや第三者ウィンドウからの偽装を
+            // 除外するための実行識別子であり、実行中アプリ自身の偽装を防ぐ認証情報ではない。
+            // トークン一致を根拠に、iframeからライブラリ削除・コード更新・GitHub送信などの
+            // 危険な親操作を許可してはならない。
             if (event.source !== frame.contentWindow) return;
-            if (event.data && event.data.type === 'console') {
+            if (!event.data || event.data.runtimeToken !== currentRuntimeToken) return;
+            if (event.data.type === 'console') {
                 const level = String(event.data.level || 'log');
                 const args = Array.isArray(event.data.args) ? event.data.args : [];
                 const msg = `[${level.toUpperCase()}] ${args.join(' ')}`;
-                showToast(msg);
 
+                // console.logはToast表示しない。console.errorとJavaScriptエラーだけToast表示し、
+                // エラーログへは集約処理(addIframeErrorLog)経由で保存する。
+                // SecurityErrorが発生しても自動的に互換実行へは切り替えない。
                 if (level === 'error') {
-                    iframeErrorLogs.push({
-                        time: new Date().toLocaleTimeString(),
-                        message: msg
-                    });
-                    recordDevLog('iframe_error', 'failed', 'iframe_error', msg);
-                    if (iframeErrorLogs.length > 100) iframeErrorLogs.shift();
-                    renderErrorLogModal();
+                    showToast(msg);
+                    addIframeErrorLog(msg);
                 }
             }
         });
