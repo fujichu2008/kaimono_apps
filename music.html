@@ -526,9 +526,14 @@
                         <p class="text-[11px] text-slate-400 leading-relaxed">各楽器のON/OFFと音量を調整できます。音量は演奏中にも現在位置を保って反映されます。</p>
                         <div id="instrument-list" class="space-y-2 text-xs">
                         </div>
-                        <button onclick="overwriteCurrentSongWithTuning()" class="w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2">
-                            <i data-lucide="save" class="w-4 h-4"></i> この音量バランスで楽曲を上書き
-                        </button>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button onclick="resetPreviewTuning()" class="min-h-[44px] py-2 px-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-1.5 border border-slate-700">
+                                <i data-lucide="rotate-ccw" class="w-4 h-4"></i> 調整をリセット
+                            </button>
+                            <button onclick="saveAdjustedVersion()" class="min-h-[44px] py-2 px-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-1.5">
+                                <i data-lucide="save" class="w-4 h-4"></i> 調整版として保存
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -562,6 +567,24 @@
                 <p id="audio-export-status" class="text-[11px] text-slate-400 text-center leading-relaxed">
                     再生時と同じABCJS SoundFont音源でWAV化します。
                 </p>
+            </div>
+
+            <div id="game-ready-panel" class="hidden glass rounded-2xl overflow-hidden border border-slate-700/80">
+                <button id="game-ready-toggle" type="button" onclick="toggleGameReadyPanel()" class="w-full min-h-[44px] px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-slate-800/60 transition-colors" aria-expanded="false" aria-controls="game-ready-body">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span id="game-ready-state-dot" class="w-2.5 h-2.5 rounded-full bg-slate-500 shrink-0"></span>
+                            <span class="text-xs font-bold tracking-widest text-sky-300">GAME READY CHECK</span>
+                        </div>
+                        <p id="game-ready-summary" class="text-[11px] text-slate-400 mt-1 truncate">楽曲読み込み後に解析します</p>
+                    </div>
+                    <i id="game-ready-chevron" data-lucide="chevron-down" class="w-5 h-5 text-slate-400 shrink-0 transition-transform"></i>
+                </button>
+                <div id="game-ready-body" class="hidden border-t border-slate-700/70 p-3 space-y-3">
+                    <div id="game-ready-counts" class="text-[11px] text-slate-400"></div>
+                    <div id="game-ready-list" class="space-y-2"></div>
+                    <p class="text-[10px] text-slate-500 leading-relaxed">小節数・再生時間・無音判定はABC文字列からの推定を含みます。音楽的な良し悪しは判定しません。</p>
+                </div>
             </div>
 
             <div id="refine-modal" class="hidden fixed inset-0 z-[70] bg-slate-950/80 backdrop-blur-sm p-4 flex items-center justify-center">
@@ -688,7 +711,10 @@
         };
         const INSTRUMENTS = ["Piano", "Pipe Organ", "Choir", "Violin", "Viola", "Cello", "Timpani", "Distortion Guitar", "Harp", "Flute", "Trumpet", "Drums", "Shakuhachi", "Koto"];
 
+        let originalABC = "";
         let currentABC = "";
+        let previewABC = "";
+        let currentTuning = null;
         let currentMetaRaw = "";
         let currentLibraryId = null;
         let currentRating = 0;
@@ -719,6 +745,8 @@
         let ecoKeepAwakeStream = null;
         let isPocketLocked = false;
         let playbackState = 'stopped';
+        let lastCompositionBrief = null;
+        let gameReadyAnalysisToken = 0;
 
         function isEcoWakeLockNeeded() {
             const playerView = document.getElementById('view-player');
@@ -956,14 +984,26 @@
             ctx.fillText('ECO MODE', w / 2, h / 2 + 4);
         }
 
-        function prepareCurrentSongState(abc, title, meta, libId, rating) {
-            currentABC = abc;
+        function prepareCurrentSongState(abc, title, meta, libId, rating, tuning = null) {
+            originalABC = String(abc || "");
+            currentABC = originalABC;
+            previewABC = currentABC;
+            currentTuning = tuning && typeof tuning === 'object'
+                ? {
+                    activeVoices: Array.isArray(tuning.activeVoices)
+                        ? tuning.activeVoices.map(String)
+                        : null,
+                    voiceVolumes: tuning.voiceVolumes && typeof tuning.voiceVolumes === 'object'
+                        ? { ...tuning.voiceVolumes }
+                        : {}
+                }
+                : null;
             currentMetaRaw = meta;
             currentLibraryId = libId;
             currentRating = rating;
             playbackDurationSec = 0;
             playbackPositionSec = 0;
-            visualizerTempoBpm = parseTempoFromABC(abc);
+            visualizerTempoBpm = parseTempoFromABC(currentABC);
             window.currentMidi = null;
             document.getElementById('current-title').innerText = title;
         }
@@ -1409,6 +1449,7 @@ V:8 nm="Timpani" snm="Timp"
 
             try {
                 registerPlaybackCleanupHandlers();
+                loadLastCompositionBrief();
                 safeCreateIcons();
                 setVisualizerIdle();
                 initPlaybackSeekControls();
@@ -1558,6 +1599,22 @@ V:8 nm="Timpani" snm="Timp"
                 loop: document.getElementById('loop-check').checked ? 'あり' : 'なし',
                 memo: document.getElementById('free-text').value || '特になし'
             };
+
+            lastCompositionBrief = {
+                genre: promptData.genre,
+                style: promptData.style,
+                situation: promptData.situation,
+                measures: promptData.measures,
+                parts: promptData.parts,
+                instruments: selectedInstruments.slice(),
+                loop: promptData.loop,
+                tempoFeel: document.getElementById('tempo-feel').value,
+                moodTone: document.getElementById('mood-tone').value,
+                songShape: document.getElementById('song-shape').value,
+                density: document.getElementById('sound-density').value,
+                memo: promptData.memo
+            };
+            saveLastCompositionBrief();
 
             const measureHint = promptData.measures === '4' ? '（短いジングル/ファンファーレ用。短くても起承転結が感じられる構成に）' : '';
             const extraLines = [
@@ -1837,6 +1894,334 @@ V:8 nm="Timpani" snm="Timp"
             throw finalError;
         }
 
+        function loadLastCompositionBrief() {
+            try {
+                const saved = localStorage.getItem('sonicforge_last_composition_brief');
+                lastCompositionBrief = saved ? JSON.parse(saved) : null;
+            } catch (e) {
+                console.warn("Composition Brief Read Error:", e);
+                lastCompositionBrief = null;
+            }
+        }
+
+        function saveLastCompositionBrief() {
+            try {
+                if (lastCompositionBrief) {
+                    localStorage.setItem('sonicforge_last_composition_brief', JSON.stringify(lastCompositionBrief));
+                }
+            } catch (e) {
+                console.warn("Composition Brief Write Error:", e);
+            }
+        }
+
+        function createGameReadyItem(label, status, message) {
+            return { label, status, message };
+        }
+
+        function getBriefInstrumentList(brief) {
+            if (!brief || !brief.instruments) return [];
+            if (Array.isArray(brief.instruments)) return brief.instruments.map(String).filter(Boolean);
+            const value = String(brief.instruments).trim();
+            return !value || value === '指定なし'
+                ? []
+                : value.split(/[,、]/).map(v => v.trim()).filter(Boolean);
+        }
+
+        function normalizeInstrumentName(value) {
+            return String(value || "").toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]/g, "");
+        }
+
+        function countApproximateNotes(body = "") {
+            const cleaned = String(body)
+                .replace(/"[^"]*"/g, " ")
+                .replace(/![^!]*!/g, " ")
+                .replace(/\+[^+]*\+/g, " ");
+            const notes = cleaned.match(/(?:\^\^|__|\^|_|=)?[A-Ga-g][,']*\d*(?:\/+\d*)?/g);
+            return notes ? notes.length : 0;
+        }
+
+        function collectGameReadyParts(abc = "") {
+            const names = new Map(parseVoicesFromABC(abc).map(v => [v.id, v.name]));
+            const parts = [];
+            const byId = new Map();
+            let currentVoice = null;
+
+            const ensurePart = (id) => {
+                const key = String(id || '1');
+                if (!byId.has(key)) {
+                    const part = {
+                        id: key,
+                        name: names.get(key) || `パート ${key}`,
+                        hasMidiProgram: false,
+                        noteCount: 0
+                    };
+                    byId.set(key, part);
+                    parts.push(part);
+                }
+                return byId.get(key);
+            };
+
+            String(abc).replace(/\r/g, "").split("\n").forEach(line => {
+                const voice = line.match(/^V:\s*(\S+)/) || line.match(/^\s*\[V:([^\]\s]+)\]/);
+                if (voice) currentVoice = voice[1];
+                if (currentVoice) ensurePart(currentVoice);
+
+                const program = line.match(/^%%MIDI\s+program\s+\d+/i);
+                if (program && currentVoice) ensurePart(currentVoice).hasMidiProgram = true;
+            });
+
+            const bodies = collectAbcVoiceBodies(abc);
+            if (!parts.length && bodies.length) ensurePart('1');
+            bodies.forEach((body, index) => {
+                const part = parts[index] || ensurePart(String(index + 1));
+                part.noteCount = countApproximateNotes(body);
+            });
+            return parts;
+        }
+
+        function estimateGameReadyMeasures(abc = "") {
+            const body = collectAbcVoiceBodies(abc)[0] || "";
+            const bars = body.match(/\|:|:\||\|\]|\[\||\|\||\|/g) || [];
+            if (bars.length) return bars.length;
+
+            const meter = String(abc).match(/^M:\s*(\d+)\s*\/\s*(\d+)/mi);
+            const beatsPerMeasure = meter ? Number(meter[1]) * 4 / Math.max(1, Number(meter[2])) : 4;
+            const events = parseAbcEventsFromVoice(body, parseAbcBaseUnit(abc));
+            const beats = events.reduce((sum, event) => sum + event.durationBeats, 0);
+            return beats > 0 ? Math.max(1, Math.round(beats / beatsPerMeasure)) : 0;
+        }
+
+        function estimateGameReadyDuration(abc = "", bpm = 120) {
+            const baseUnit = parseAbcBaseUnit(abc);
+            return collectAbcVoiceBodies(abc).reduce((maxSec, body) => {
+                const beats = parseAbcEventsFromVoice(body, baseUnit)
+                    .reduce((sum, event) => sum + event.durationBeats, 0);
+                return Math.max(maxSec, beats * 60 / Math.max(1, bpm));
+            }, 0);
+        }
+
+        function analyzeGameReadyStatus(abc, brief) {
+            const runtime = brief && brief.__runtime ? brief.__runtime : {};
+            const requested = brief && Object.prototype.hasOwnProperty.call(brief, '__compositionBrief')
+                ? brief.__compositionBrief
+                : brief;
+            const safeAbc = String(abc || "");
+            const items = [];
+            const add = (label, status, message) => items.push(createGameReadyItem(label, status, message));
+            const bpm = parseTempoFromABC(safeAbc);
+            const parts = collectGameReadyParts(safeAbc);
+            const partCount = countAbcVoicesForExport(safeAbc);
+            const measures = estimateGameReadyMeasures(safeAbc);
+            const duration = runtime.durationSec > 0
+                ? runtime.durationSec
+                : estimateGameReadyDuration(safeAbc, bpm);
+            const loopStart = /\|:/.test(safeAbc);
+            const loopEnd = /:\|/.test(safeAbc);
+            const completeLoop = loopStart && loopEnd;
+
+            add(
+                '楽譜レンダリング',
+                runtime.renderOk ? 'ok' : 'error',
+                runtime.renderOk ? 'ABCJSでレンダリングできました。' : `レンダリング失敗: ${runtime.renderError || 'ABC記法を確認してください。'}`
+            );
+            add(
+                '音源準備',
+                runtime.primeOk ? 'ok' : 'error',
+                runtime.primeOk ? 'ABCJS Synthのprimeに成功しました。' : `prime失敗: ${runtime.primeError || '音源またはABC記法を確認してください。'}`
+            );
+            add('実際のパート数', partCount > 0 ? 'ok' : 'error', `${partCount}パートを検出しました。`);
+
+            const noProgram = parts.filter(part => !part.hasMidiProgram);
+            add(
+                'MIDI program',
+                noProgram.length ? 'warning' : 'ok',
+                noProgram.length
+                    ? `未設定: ${noProgram.map(part => part.name).join('、')}`
+                    : '全パートに%%MIDI programがあります。'
+            );
+
+            add('BPM', bpm > 0 ? 'ok' : 'warning', bpm > 0 ? `BPM ${Math.round(bpm)}です。` : '判定できません。');
+            add('推定小節数', measures > 0 ? 'ok' : 'warning', measures > 0 ? `約${measures}小節です。` : '推定できません。');
+            add('推定再生時間', duration > 0 ? 'ok' : 'warning', duration > 0 ? `約${formatPlaybackTime(duration)}です。` : '推定できません。');
+            add(
+                'ループ記号',
+                loopStart !== loopEnd ? 'warning' : 'ok',
+                completeLoop ? '|: と :| があります。' : (loopStart || loopEnd ? '片側だけです。' : 'ループ記号はありません。')
+            );
+
+            const silent = parts.filter(part => part.noteCount === 0);
+            const sparse = parts.filter(part => part.noteCount > 0 && part.noteCount < 4);
+            add(
+                '無音・極端に少ないパート',
+                silent.length ? 'error' : (sparse.length ? 'warning' : 'ok'),
+                silent.length
+                    ? `無音と推定: ${silent.map(part => part.name).join('、')}`
+                    : (sparse.length ? `音符が極端に少ない可能性: ${sparse.map(part => part.name).join('、')}` : '問題は検出されませんでした。')
+            );
+
+            const extreme = duration > 0 && (duration < 4 || duration > 600);
+            add(
+                '曲の長さ',
+                extreme ? 'warning' : 'ok',
+                duration > 0 && duration < 4
+                    ? '4秒未満で、通常BGMとしては短すぎる可能性があります。'
+                    : (duration > 600 ? '10分超です。容量・メモリ負荷を確認してください。' : '機械的に極端な長さではありません。')
+            );
+
+            if (requested && typeof requested === 'object') {
+                const requestedParts = Number(requested.parts);
+                if (requestedParts > 0) {
+                    add(
+                        '指定パート数との比較',
+                        requestedParts === partCount ? 'ok' : 'warning',
+                        `指定${requestedParts} / 実際${partCount}パートです。`
+                    );
+                }
+
+                const requestedMeasures = Number(requested.measures);
+                if (requestedMeasures > 0 && measures > 0) {
+                    const tolerance = Math.max(1, Math.round(requestedMeasures * 0.15));
+                    add(
+                        '指定小節数との比較',
+                        Math.abs(requestedMeasures - measures) <= tolerance ? 'ok' : 'warning',
+                        `指定${requestedMeasures} / 推定約${measures}小節です。`
+                    );
+                }
+
+                if (requested.loop === 'あり' || requested.loop === 'なし') {
+                    const matched = requested.loop === 'あり' ? completeLoop : !loopStart && !loopEnd;
+                    add(
+                        'ループ指定との比較',
+                        matched ? 'ok' : 'warning',
+                        `指定「${requested.loop}」とABC内の記号状態${matched ? 'は一致しています。' : 'が一致しません。'}`
+                    );
+                }
+
+                const required = getBriefInstrumentList(requested);
+                if (required.length) {
+                    const normalizedAbc = normalizeInstrumentName(safeAbc);
+                    const missing = required.filter(name => !normalizedAbc.includes(normalizeInstrumentName(name)));
+                    add(
+                        '必須楽器との比較',
+                        missing.length ? 'warning' : 'ok',
+                        missing.length ? `ABC内で確認できません: ${missing.join('、')}` : '指定楽器名をABC内で確認できました。'
+                    );
+                }
+
+                const tempoRanges = {
+                    'ゆったり': [50, 90],
+                    'ふつう': [80, 125],
+                    '軽快': [110, 150],
+                    '疾走感': [135, 190]
+                };
+                const range = tempoRanges[requested.tempoFeel];
+                if (range) {
+                    const matched = bpm >= range[0] && bpm <= range[1];
+                    add(
+                        'テンポ感との比較',
+                        matched ? 'ok' : 'warning',
+                        `指定「${requested.tempoFeel}」 / BPM ${Math.round(bpm)}です。`
+                    );
+                }
+            }
+
+            return {
+                status: items.some(item => item.status === 'error')
+                    ? 'error'
+                    : (items.some(item => item.status === 'warning') ? 'warning' : 'ok'),
+                items
+            };
+        }
+
+        function setGameReadyLoadingState() {
+            const panel = document.getElementById('game-ready-panel');
+            const summary = document.getElementById('game-ready-summary');
+            const dot = document.getElementById('game-ready-state-dot');
+            const list = document.getElementById('game-ready-list');
+            if (panel) panel.classList.remove('hidden');
+            if (summary) summary.textContent = '楽曲を解析しています...';
+            if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-sky-400 shrink-0 animate-pulse';
+            if (list) list.replaceChildren();
+        }
+
+        function renderGameReadyStatus(report) {
+            const panel = document.getElementById('game-ready-panel');
+            const summary = document.getElementById('game-ready-summary');
+            const dot = document.getElementById('game-ready-state-dot');
+            const counts = document.getElementById('game-ready-counts');
+            const list = document.getElementById('game-ready-list');
+            if (!panel || !summary || !dot || !counts || !list || !report) return;
+
+            panel.classList.remove('hidden');
+            const totals = {
+                ok: report.items.filter(item => item.status === 'ok').length,
+                warning: report.items.filter(item => item.status === 'warning').length,
+                error: report.items.filter(item => item.status === 'error').length
+            };
+            summary.textContent = report.status === 'ok'
+                ? '重大な機械的問題は検出されませんでした'
+                : `エラー${totals.error}件・警告${totals.warning}件`;
+            dot.className = `w-2.5 h-2.5 rounded-full shrink-0 ${
+                report.status === 'error' ? 'bg-red-400' : (report.status === 'warning' ? 'bg-amber-400' : 'bg-emerald-400')
+            }`;
+            counts.textContent = `正常 ${totals.ok} / 警告 ${totals.warning} / エラー ${totals.error}`;
+            list.replaceChildren();
+
+            const styles = {
+                ok: ['正常', 'text-emerald-300 border-emerald-500/30'],
+                warning: ['警告', 'text-amber-300 border-amber-500/30'],
+                error: ['エラー', 'text-red-300 border-red-500/30']
+            };
+            report.items.forEach(item => {
+                const card = document.createElement('div');
+                card.className = 'rounded-xl border border-slate-700 bg-slate-900/50 p-3';
+                const row = document.createElement('div');
+                row.className = 'flex items-start justify-between gap-3';
+                const title = document.createElement('div');
+                title.className = 'text-xs font-bold text-slate-200';
+                title.textContent = item.label;
+                const badge = document.createElement('span');
+                badge.className = `shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-bold ${styles[item.status][1]}`;
+                badge.textContent = styles[item.status][0];
+                const message = document.createElement('p');
+                message.className = 'text-[11px] text-slate-400 leading-relaxed mt-1.5';
+                message.textContent = item.message;
+                row.append(title, badge);
+                card.append(row, message);
+                list.appendChild(card);
+            });
+        }
+
+        function toggleGameReadyPanel() {
+            const body = document.getElementById('game-ready-body');
+            const toggle = document.getElementById('game-ready-toggle');
+            const chevron = document.getElementById('game-ready-chevron');
+            if (!body || !toggle) return;
+            const open = body.classList.contains('hidden');
+            body.classList.toggle('hidden', !open);
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+        }
+
+        function beginGameReadyAnalysis(abc) {
+            setGameReadyLoadingState();
+            return {
+                token: ++gameReadyAnalysisToken,
+                abc: String(abc || ""),
+                brief: lastCompositionBrief ? JSON.parse(JSON.stringify(lastCompositionBrief)) : null
+            };
+        }
+
+        function completeGameReadyAnalysis(context, runtime) {
+            setTimeout(() => {
+                if (!context || context.token !== gameReadyAnalysisToken) return;
+                renderGameReadyStatus(analyzeGameReadyStatus(context.abc, {
+                    __runtime: runtime || {},
+                    __compositionBrief: context.brief
+                }));
+            }, 0);
+        }
+
         async function loadJsonFromClipboard() {
             let text = "";
             try {
@@ -2058,21 +2443,25 @@ V:8 nm="Timpani" snm="Timp"
 
         function parseVoicesFromABC(abc) {
             const voices = [];
-            const lines = abc.split('\n');
+            const lines = String(abc || '').split('\n');
+
             lines.forEach(line => {
                 const match = line.match(/^V:\s*(\S+)/);
-                if (match) {
-                    const id = match[1];
-                    if (!voices.find(v => v.id === id)) {
-                        let name = `パート ${id}`;
-                        const nameMatch = line.match(/(?:nm|name)="([^"]+)"/);
-                        if (nameMatch) {
-                            name = nameMatch[1];
-                        }
-                        voices.push({ id, name });
-                    }
+                if (!match) return;
+
+                const id = match[1];
+                if (voices.some(voice => voice.id === id)) return;
+
+                let name = `パート ${id}`;
+                const nameMatch = line.match(/(?:^|\s)(?:nm|name)\s*=\s*(?:"([^"]+)"|“([^”]+)”|”([^“]+)“|'([^']+)'|([^\s]+))/i);
+                if (nameMatch) {
+                    const parsedName = nameMatch.slice(1).find(value => typeof value === 'string' && value.trim());
+                    if (parsedName) name = parsedName.trim();
                 }
+
+                voices.push({ id, name });
             });
+
             return voices;
         }
 
@@ -2098,14 +2487,42 @@ V:8 nm="Timpani" snm="Timp"
             return volumes;
         }
 
+        function normalizeTuningForABC(abc, tuning = null) {
+            const voices = parseVoicesFromABC(abc);
+            const voiceIds = voices.map(voice => String(voice.id));
+            const parsedVolumes = parseVoiceVolumesFromABC(abc);
+            const savedActiveVoices = tuning && Array.isArray(tuning.activeVoices)
+                ? tuning.activeVoices.map(String)
+                : null;
+            const savedVolumes = tuning && tuning.voiceVolumes && typeof tuning.voiceVolumes === 'object'
+                ? tuning.voiceVolumes
+                : {};
+            const normalizedVolumes = {};
+
+            voiceIds.forEach(id => {
+                const savedValue = Number(savedVolumes[id]);
+                const fallbackValue = Number(parsedVolumes[id] ?? 100);
+                normalizedVolumes[id] = Math.max(
+                    0,
+                    Math.min(127, Number.isFinite(savedValue) ? savedValue : fallbackValue)
+                );
+            });
+
+            return {
+                activeVoices: savedActiveVoices === null
+                    ? voiceIds.slice()
+                    : voiceIds.filter(id => savedActiveVoices.includes(id)),
+                voiceVolumes: normalizedVolumes
+            };
+        }
+
         function initInstrumentPanel() {
             availableVoices = parseVoicesFromABC(currentABC);
-            activeVoices = availableVoices.map(v => v.id);
-            const parsedVolumes = parseVoiceVolumesFromABC(currentABC);
-            voiceVolumes = {};
-            availableVoices.forEach(v => {
-                voiceVolumes[v.id] = parsedVolumes[v.id] ?? 100;
-            });
+            const normalizedTuning = normalizeTuningForABC(currentABC, currentTuning);
+            activeVoices = normalizedTuning.activeVoices.slice();
+            voiceVolumes = { ...normalizedTuning.voiceVolumes };
+            currentTuning = getCurrentTuningSnapshot();
+            previewABC = buildPreviewABC(currentABC, currentTuning);
             renderInstrumentList();
             const panel = document.getElementById('instrument-panel');
             if (panel && !panel.classList.contains('hidden')) {
@@ -2121,24 +2538,62 @@ V:8 nm="Timpani" snm="Timp"
         function renderInstrumentList() {
             const list = document.getElementById('instrument-list');
             if (!list) return;
+
+            list.replaceChildren();
+
             if (availableVoices.length === 0) {
-                list.innerHTML = '<div class="text-slate-500 text-center py-2">楽器情報が取得できません</div>';
+                const emptyMessage = document.createElement('div');
+                emptyMessage.className = 'text-slate-500 text-center py-2';
+                emptyMessage.textContent = '楽器情報が取得できません';
+                list.appendChild(emptyMessage);
                 return;
             }
-            list.innerHTML = availableVoices.map(v => {
-                const isChecked = activeVoices.includes(v.id) ? 'checked' : '';
-                const volume = voiceVolumes[v.id] ?? 100;
-                return `
-                    <div class="bg-slate-800 p-2 rounded-lg border border-slate-700">
-                        <div class="instrument-row">
-                            <input type="checkbox" value="${v.id}" ${isChecked} onchange="onInstrumentChange(this)" class="w-4 h-4 accent-sky-400">
-                            <span class="truncate text-slate-300">${v.name}</span>
-                            <span id="vol-label-${v.id}" class="text-[10px] text-sky-300 text-right">${volume}</span>
-                        </div>
-                        <input type="range" min="0" max="127" value="${volume}" data-voice="${v.id}" oninput="onInstrumentVolumeInput(this)" onchange="onInstrumentVolumeCommit()" class="volume-slider mt-2">
-                    </div>
-                `;
-            }).join('');
+
+            const fragment = document.createDocumentFragment();
+
+            availableVoices.forEach(voice => {
+                const voiceId = String(voice.id || '');
+                const volume = Math.max(0, Math.min(127, Number(voiceVolumes[voiceId] ?? 100)));
+
+                const card = document.createElement('div');
+                card.className = 'bg-slate-800 p-2 rounded-lg border border-slate-700';
+
+                const row = document.createElement('div');
+                row.className = 'instrument-row';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = voiceId;
+                checkbox.checked = activeVoices.includes(voiceId);
+                checkbox.className = 'w-4 h-4 accent-sky-400';
+                checkbox.addEventListener('change', () => onInstrumentChange(checkbox));
+
+                const name = document.createElement('span');
+                name.className = 'truncate text-slate-300';
+                name.textContent = String(voice.name || `パート ${voiceId}`);
+
+                const volumeLabel = document.createElement('span');
+                volumeLabel.id = `vol-label-${voiceId}`;
+                volumeLabel.className = 'text-[10px] text-sky-300 text-right';
+                volumeLabel.textContent = String(volume);
+
+                row.append(checkbox, name, volumeLabel);
+
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.min = '0';
+                slider.max = '127';
+                slider.value = String(volume);
+                slider.dataset.voice = voiceId;
+                slider.className = 'volume-slider mt-2';
+                slider.addEventListener('input', () => onInstrumentVolumeInput(slider));
+                slider.addEventListener('change', onInstrumentVolumeCommit);
+
+                card.append(row, slider);
+                fragment.appendChild(card);
+            });
+
+            list.appendChild(fragment);
             safeCreateIcons();
         }
 
@@ -2175,150 +2630,161 @@ V:8 nm="Timpani" snm="Timp"
             return Math.max(0, Math.min(127, Number(voiceVolumes[vId] ?? 100)));
         }
 
-        function volumeToAbcDynamic(volume) {
-            const v = Math.max(0, Math.min(127, Number(volume) || 0));
-            if (v <= 8) return null;
-            if (v <= 24) return '!ppp!';
-            if (v <= 40) return '!pp!';
-            if (v <= 56) return '!p!';
-            if (v <= 72) return '!mp!';
-            if (v <= 88) return '!mf!';
-            if (v <= 104) return '!f!';
-            if (v <= 118) return '!ff!';
-            return '!fff!';
+        function getCurrentTuningSnapshot() {
+            const volumes = {};
+            availableVoices.forEach(voice => {
+                volumes[String(voice.id)] = getVoiceVolumeValue(voice.id);
+            });
+
+            return {
+                activeVoices: availableVoices
+                    .map(voice => String(voice.id))
+                    .filter(id => activeVoices.includes(id)),
+                voiceVolumes: volumes
+            };
         }
 
-        function stripSonicForgeDynamics(line) {
-            return line
-                .replace(/!(ppp|pp|p|mp|mf|f|ff|fff)!/g, '')
-                .replace(/\s{2,}/g, ' ')
-                .trimStart();
-        }
+        function buildPreviewABC(abc, tuning) {
+            const source = String(abc || "");
+            const normalized = normalizeTuningForABC(source, tuning);
+            const enabled = new Set(normalized.activeVoices.map(String));
+            const lines = source.split('\n');
+            const output = [];
+            const declaredVoices = new Set();
+            let pendingVoice = null;
 
-        function addDynamicToMusicLine(line, voiceId) {
-            const volume = getVoiceVolumeValue(voiceId);
-            const dynamic = volumeToAbcDynamic(volume);
-            const cleaned = stripSonicForgeDynamics(line);
-            if (!dynamic) return '% (muted by volume) ' + cleaned;
+            const getPreviewVolume = (voiceId) => {
+                if (!enabled.has(String(voiceId))) return 0;
+                return Math.max(
+                    0,
+                    Math.min(127, Number(normalized.voiceVolumes[String(voiceId)] ?? 100))
+                );
+            };
 
-            const inlineVMatch = cleaned.match(/^(\s*\[V:[^\]]+\]\s*)(.*)$/);
-            if (inlineVMatch) {
-                return inlineVMatch[1] + dynamic + inlineVMatch[2];
-            }
-            return dynamic + cleaned;
+            const appendPreviewControl = (voiceId) => {
+                if (!voiceId) return;
+                const volume = getPreviewVolume(voiceId);
+                output.push(`%SonicForgePreviewVolume ${voiceId} ${volume}`);
+                output.push(`%%MIDI control 7 ${volume}`);
+            };
+
+            const flushPendingVoice = () => {
+                if (!pendingVoice) return;
+                appendPreviewControl(pendingVoice);
+                pendingVoice = null;
+            };
+
+            lines.forEach(line => {
+                const declaration = line.match(/^V:\s*(\S+)/);
+                if (declaration) {
+                    flushPendingVoice();
+                    pendingVoice = String(declaration[1]);
+                    declaredVoices.add(pendingVoice);
+                    output.push(line);
+                    return;
+                }
+
+                const trimmed = line.trim();
+                if (pendingVoice && (trimmed === '' || trimmed.startsWith('%'))) {
+                    output.push(line);
+                    return;
+                }
+
+                if (pendingVoice) flushPendingVoice();
+
+                const inlineVoice = line.match(/^\s*\[V:([^\]\s]+)\]/);
+                if (inlineVoice) {
+                    const voiceId = String(inlineVoice[1]);
+                    if (!declaredVoices.has(voiceId)) {
+                        output.push(`V:${voiceId}`);
+                        appendPreviewControl(voiceId);
+                        declaredVoices.add(voiceId);
+                    }
+                }
+
+                output.push(line);
+            });
+
+            flushPendingVoice();
+            return output.join('\n');
         }
 
         function generateTunedABC() {
-            const lines = currentABC.split('\n');
-            const newLines = [];
-            let currentVoice = null;
-            let savedVolumeInserted = new Set();
-
-            const rememberVolumeIfNeeded = () => {
-                if (currentVoice && availableVoices.some(v => v.id === currentVoice) && !savedVolumeInserted.has(currentVoice)) {
-                    newLines.push(`%SonicForgeVolume ${currentVoice} ${getVoiceVolumeValue(currentVoice)}`);
-                    savedVolumeInserted.add(currentVoice);
-                }
-            };
-            
-            lines.forEach(line => {
-                const processedLine = line;
-
-                if (processedLine.trim() === '') {
-                    newLines.push(processedLine);
-                    return;
-                }
-
-                if (processedLine.match(/^%%MIDI\s+control\s+7\s+\d+/i) || processedLine.match(/^%SonicForgeVolume\s+/i)) {
-                    return;
-                }
-
-                // 1. パート宣言 (V:1 nm="...")
-                const vMatch = processedLine.match(/^V:\s*(\S+)/);
-                if (vMatch) {
-                    currentVoice = vMatch[1];
-                    newLines.push(processedLine);
-                    rememberVolumeIfNeeded();
-                    return;
-                }
-
-                // 2. インラインパート宣言 ([V:1] C D E)
-                const inlineVMatch = processedLine.match(/^\s*\[V:([^\]\s]+)\]/);
-                if (inlineVMatch) {
-                    currentVoice = inlineVMatch[1];
-                    if (!activeVoices.includes(currentVoice)) {
-                        newLines.push('% (muted) ' + stripSonicForgeDynamics(processedLine));
-                        return;
-                    }
-                    newLines.push(addDynamicToMusicLine(processedLine, currentVoice));
-                    return;
-                }
-
-                // 3. ヘッダやディレクティブ、コメント行
-                if (processedLine.match(/^[A-Za-z]:/) || processedLine.startsWith('%%') || processedLine.startsWith('%')) {
-                    newLines.push(processedLine);
-                    return;
-                }
-
-                // 4. 音符行 (メロディデータ)
-                if (currentVoice && !activeVoices.includes(currentVoice)) {
-                    newLines.push('% (muted) ' + stripSonicForgeDynamics(processedLine));
-                } else if (currentVoice && availableVoices.some(v => v.id === currentVoice)) {
-                    newLines.push(addDynamicToMusicLine(processedLine, currentVoice));
-                } else {
-                    newLines.push(processedLine);
-                }
-            });
-            
-            return newLines.join('\n');
+            return buildPreviewABC(currentABC, getCurrentTuningSnapshot());
         }
 
-        async function overwriteCurrentSongWithTuning() {
+        function resetPreviewTuning() {
+            if (!currentABC) return;
+
+            const originalVolumes = parseVoiceVolumesFromABC(originalABC || currentABC);
+            activeVoices = availableVoices.map(voice => String(voice.id));
+            voiceVolumes = {};
+            availableVoices.forEach(voice => {
+                voiceVolumes[String(voice.id)] = originalVolumes[String(voice.id)] ?? 100;
+            });
+
+            currentTuning = getCurrentTuningSnapshot();
+            renderInstrumentList();
+            applyInstrumentTuning();
+        }
+
+        async function saveAdjustedVersion() {
             if (!currentABC) {
-                alert("上書きする楽曲データがありません。");
+                alert("保存する楽曲データがありません。");
                 return;
             }
-            const tunedABC = generateTunedABC();
-            currentABC = tunedABC;
-            const title = document.getElementById('current-title').innerText;
-            const meta = currentMetaRaw;
-            const libId = currentLibraryId;
-            const rating = currentRating;
 
-            if (libId !== null) {
-                try {
-                    const db = await dbPromise;
-                    const tx = db.transaction('library', 'readwrite');
-                    const store = tx.objectStore('library');
-                    const req = store.get(libId);
-                    req.onsuccess = () => {
-                        const data = req.result;
-                        if (data) {
-                            data.abc = tunedABC;
-                            data.description = meta;
-                            data.rating = rating;
-                            store.put(data);
-                        }
-                    };
-                    tx.oncomplete = async () => {
-                        await loadLibraryFromDB();
-                        updateLibraryList();
-                    };
-                } catch (e) {
-                    console.error("Overwrite Save Error:", e);
-                }
+            const tuning = getCurrentTuningSnapshot();
+            const currentTitle = document.getElementById('current-title').innerText;
+            const adjustedTitle = currentTitle.includes('調整版')
+                ? currentTitle
+                : `${currentTitle}（調整版）`;
+            const item = {
+                title: adjustedTitle,
+                abc: currentABC,
+                description: currentMetaRaw,
+                rating: currentRating,
+                date: new Date().toLocaleDateString(),
+                tuning
+            };
+
+            try {
+                const db = await dbPromise;
+                if (!db) throw new Error("IndexedDBを利用できません。");
+
+                const tx = db.transaction('library', 'readwrite');
+                const req = tx.objectStore('library').add(item);
+                req.onsuccess = event => {
+                    currentLibraryId = event.target.result;
+                };
+                tx.oncomplete = async () => {
+                    currentTuning = tuning;
+                    previewABC = buildPreviewABC(currentABC, currentTuning);
+                    document.getElementById('current-title').innerText = adjustedTitle;
+                    updateSaveButtonState();
+                    await loadLibraryFromDB();
+                    updateLibraryList();
+                    alert("原本ABCを保持したまま、調整版を保存しました。");
+                };
+                tx.onerror = () => {
+                    console.error("Adjusted Version Save Error:", tx.error);
+                    alert("調整版の保存に失敗しました。");
+                };
+            } catch (e) {
+                console.error("Adjusted Version Save Error:", e);
+                alert("調整版の保存に失敗しました。");
             }
-
-            renderMusic(tunedABC, title, meta, libId, rating);
-            alert("現在の音量バランスで楽曲を上書きしました。");
         }
 
         let tuningGeneration = 0;
         async function applyInstrumentTuning() {
             const currentGen = ++tuningGeneration;
             const wasPlaying = window.isPlaying;
+            const previousPlaybackState = playbackState;
             const currentPos = playbackPositionSec;
-            const tunedABC = generateTunedABC();
+            currentTuning = getCurrentTuningSnapshot();
+            previewABC = generateTunedABC();
+            const tunedABC = previewABC;
             const scratch = document.createElement('div');
             scratch.style.position = 'fixed';
             scratch.style.left = '-99999px';
@@ -2334,13 +2800,7 @@ V:8 nm="Timpani" snm="Timp"
                 clearPlaybackTimers();
             }
 
-            const btn = document.getElementById('btn-play-pause');
-            if(btn) {
-                btn.disabled = true;
-                btn.classList.add('opacity-50');
-                btn.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i>';
-                lucide.createIcons();
-            }
+            setPlaybackState('loading');
 
             try {
                 const midi = new ABCJS.synth.CreateSynth();
@@ -2356,31 +2816,19 @@ V:8 nm="Timpani" snm="Timp"
                 }
                 window.currentMidi = midi;
 
-                if(btn) {
-                    btn.disabled = false;
-                    btn.classList.remove('opacity-50');
-                }
-
                 if (wasPlaying) {
                     if (typeof window.currentMidi.seek === 'function') {
                         window.currentMidi.seek(currentPos, "seconds");
                     }
                     await window.currentMidi.start();
-                    window.isPlaying = true;
-                    if(btn) btn.innerHTML = '<i data-lucide="pause" fill="currentColor"></i>';
+                    setPlaybackState('playing');
                     startPlaybackTracking(currentPos);
                 } else {
-                    if(btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+                    setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
                 }
-                lucide.createIcons();
             } catch (e) {
                 console.error("Tuning Apply Error:", e);
-                if(btn) {
-                    btn.disabled = false;
-                    btn.classList.remove('opacity-50');
-                    btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                    lucide.createIcons();
-                }
+                setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
             } finally {
                 scratch.remove();
             }
@@ -2413,20 +2861,28 @@ V:8 nm="Timpani" snm="Timp"
             }, remainingMs + 150);
         }
 
-        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false) {
+        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null) {
             if (typeof stopAllMusic === 'function') stopAllMusic();
-            prepareCurrentSongState(abc, title, meta, libId, rating);
+            prepareCurrentSongState(abc, title, meta, libId, rating, tuning);
             updateCurrentSongMetaUI(meta);
             resetPlaybackBar();
             setPlaybackState('stopped', { resetProgress: true });
             
             initInstrumentPanel();
+            const playbackABC = previewABC || currentABC;
             
             // 楽譜は非表示のまま音声合成用にレンダリング
-            const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
+            let visualObj = null;
+            let notationRenderError = "";
+            try {
+                visualObj = ABCJS.renderAbc("notation-paper", playbackABC, { responsive: "resize" })[0] || null;
+            } catch (e) {
+                notationRenderError = e && e.message ? e.message : String(e);
+                console.error("Notation Render Error:", e);
+            }
             
             // ドットビジュアライザ用の演奏データを計算
-            prepareDotTracksForVisualizer(abc);
+            prepareDotTracksForVisualizer(playbackABC);
             if (window.visualizerMode === 'eco') {
                 drawEcoCanvasOnce();
             }
@@ -2834,10 +3290,10 @@ V:8 nm="Timpani" snm="Timp"
             }
             
             // 読込開始時にボタンをローディング状態にする
-            const btn = document.getElementById('btn-play-pause');
+            const gameReadyContext = beginGameReadyAnalysis(abc);
             setPlaybackState('loading');
             
-            if (ABCJS.synth.supportsAudio()) {
+            if (visualObj && ABCJS.synth.supportsAudio()) {
                 const midi = new ABCJS.synth.CreateSynth();
                 midi.init({ visualObj: visualObj })
                     .then(() => midi.prime())
@@ -2846,6 +3302,13 @@ V:8 nm="Timpani" snm="Timp"
                         updatePlaybackBar(0);
                         window.currentMidi = midi;
                         setPlaybackState('stopped');
+                        completeGameReadyAnalysis(gameReadyContext, {
+                            renderOk: true,
+                            renderError: "",
+                            primeOk: true,
+                            primeError: "",
+                            durationSec: playbackDurationSec
+                        });
                         if (autoPlay) togglePlay();
                     })
                     .catch(err => {
@@ -2853,18 +3316,70 @@ V:8 nm="Timpani" snm="Timp"
                         updatePlaybackBar(0);
                         console.error("Audio Init Error:", err);
                         setPlaybackState('stopped');
+                        completeGameReadyAnalysis(gameReadyContext, {
+                            renderOk: true,
+                            renderError: "",
+                            primeOk: false,
+                            primeError: err && err.message ? err.message : String(err),
+                            durationSec: 0
+                        });
                     });
-            } else if (btn) {
+            } else {
                 setPlaybackState('stopped');
+                completeGameReadyAnalysis(gameReadyContext, {
+                    renderOk: !!visualObj,
+                    renderError: notationRenderError || (visualObj ? "" : "有効な楽譜オブジェクトが返りませんでした。"),
+                    primeOk: false,
+                    primeError: visualObj ? "このブラウザではABCJS音源を利用できません。" : "楽譜レンダリングに失敗したため音源準備を実行できません。",
+                    durationSec: 0
+                });
             }
             safeCreateIcons();
         }
 
-        function pausePlayerMusic() {
-            if (window.currentMidi && window.isPlaying) {
-                window.currentMidi.stop();
-                setPlaybackState('paused');
+        function stopOtherAudioSources() {
+            try {
+                if (window.modalMidi && typeof window.modalMidi.stop === 'function') {
+                    window.modalMidi.stop();
+                }
+            } catch (e) {
+                console.warn("Modal Audio Stop Error:", e);
             }
+
+            window.modalMidi = null;
+            setModalPlaybackState('stopped');
+
+            if (!window.isPlaying) {
+                setVisualizerIdle();
+            }
+        }
+
+        function pausePlayerMusic() {
+            if (!window.currentMidi || !window.isPlaying) return;
+
+            try {
+                window.currentMidi.stop();
+            } catch (e) {
+                console.warn("Player Pause Error:", e);
+            }
+
+            setPlaybackState('paused');
+        }
+
+        function stopPlayerMusic(resetPosition = true) {
+            try {
+                if (window.currentMidi && typeof window.currentMidi.stop === 'function') {
+                    window.currentMidi.stop();
+                }
+            } catch (e) {
+                console.warn("Player Stop Error:", e);
+            }
+
+            isPlaybackSeeking = false;
+            const seekTrack = document.getElementById('playback-seek-track');
+            if (seekTrack) seekTrack.classList.remove('seeking');
+
+            setPlaybackState('stopped', { resetProgress: resetPosition });
         }
 
         async function togglePlay() {
@@ -2872,18 +3387,15 @@ V:8 nm="Timpani" snm="Timp"
                 alert("音源（SoundFont）を読み込み中です。数秒待ってから再度お試しください。");
                 return;
             }
-            const btn = document.getElementById('btn-play-pause');
+
             if (window.isPlaying) {
                 pausePlayerMusic();
                 return;
             }
 
-            stopAllMusic();
-            
-            // 再生開始前の準備中アニメーションを表示
-            btn.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i>';
-            lucide.createIcons();
-            
+            stopOtherAudioSources();
+            setPlaybackState('loading');
+
             try {
                 const startAt = (playbackDurationSec > 0 && playbackPositionSec >= playbackDurationSec - 0.05)
                     ? 0
@@ -2898,41 +3410,30 @@ V:8 nm="Timpani" snm="Timp"
                 startPlaybackTracking(startAt);
             } catch (e) {
                 console.error("Playback Error:", e);
-                finalizePlayerPlayback(false);
+                stopPlayerMusic(false);
             }
         }
 
         function stopAllMusic() {
-            let changed = false;
-            if (window.currentMidi && window.isPlaying) {
-                window.currentMidi.stop();
-                changed = true;
-            } else {
-                clearPlaybackTimers();
-            }
-            if (window.modalMidi && window.isModalPlaying) {
-                window.modalMidi.stop();
-                setModalPlaybackState('stopped');
-                changed = true;
-            }
-            isPlaybackSeeking = false;
-            const seekTrack = document.getElementById('playback-seek-track');
-            if (seekTrack) seekTrack.classList.remove('seeking');
-            setPlaybackState('stopped', { resetProgress: true });
-            if (changed) safeCreateIcons();
+            stopOtherAudioSources();
+            stopPlayerMusic(true);
         }
 
         async function toggleModalPlay(idx) {
             if (window.isModalPlaying) {
-                stopAllMusic();
+                stopOtherAudioSources();
                 return;
             }
-            stopAllMusic();
+
+            pausePlayerMusic();
+            stopOtherAudioSources();
             setModalPlaybackState('loading');
 
             try {
                 const item = library[idx];
-                const visualObj = ABCJS.renderAbc("hidden-modal-paper", item.abc)[0];
+                const modalTuning = normalizeTuningForABC(item.abc, item.tuning || null);
+                const modalABC = buildPreviewABC(item.abc, modalTuning);
+                const visualObj = ABCJS.renderAbc("hidden-modal-paper", modalABC)[0];
                 
                 window.modalMidi = new ABCJS.synth.CreateSynth();
                 await window.modalMidi.init({ visualObj: visualObj });
@@ -3591,7 +4092,8 @@ V:8 nm="Timpani" snm="Timp"
             const originalHtml = btn ? btn.innerHTML : "";
 
             try {
-                if (typeof stopAllMusic === "function") stopAllMusic();
+                stopOtherAudioSources();
+                pausePlayerMusic();
 
                 if (btn) {
                     btn.disabled = true;
@@ -3605,7 +4107,7 @@ V:8 nm="Timpani" snm="Timp"
 
                 const title = document.getElementById("current-title")?.innerText || "sonicforge-song";
                 const filename = `${sanitizeAudioFileName(title)}.wav`;
-                const result = await synthesizeAbcToWavBlob(currentABC);
+                const result = await synthesizeAbcToWavBlob(previewABC || currentABC);
                 const file = typeof File !== "undefined" ? new File([result.blob], filename, { type: "audio/wav" }) : null;
 
                 showAudioExportLink(result.blob, filename, result.durationSec, result.voiceCount);
@@ -3690,7 +4192,8 @@ V:8 nm="Timpani" snm="Timp"
                 alert("コピーする楽曲データがありません。");
                 return;
             }
-            copyTextToClipboard(currentABC, "楽曲のコード(ABC記法)をコピーしました！\nお手持ちのゲームエンジンや自作アプリ内でご活用ください。");
+            const exportABC = previewABC || currentABC;
+            copyTextToClipboard(exportABC, "現在の試聴バランスを反映した楽曲コード(ABC記法)をコピーしました！\n原本ABC自体は変更されていません。");
         }
 
         function toggleMetaDisplay() {
@@ -3729,10 +4232,11 @@ V:8 nm="Timpani" snm="Timp"
             const title = document.getElementById('current-title').innerText;
             const item = { 
                 title, 
-                abc: generateTunedABC(), 
+                abc: currentABC, 
                 description: currentMetaRaw, 
                 rating: currentRating, 
-                date: new Date().toLocaleDateString() 
+                date: new Date().toLocaleDateString(),
+                tuning: getCurrentTuningSnapshot()
             };
 
             try {
@@ -3849,39 +4353,84 @@ V:8 nm="Timpani" snm="Timp"
         function updateLibraryList() {
             const list = document.getElementById('library-list');
             if (!list) return;
+
             const filtered = getFilteredLibraryItems();
             const count = document.getElementById('library-count');
-            if (count) count.innerText = `${filtered.length}/${library.length}曲`;
+            if (count) count.textContent = `${filtered.length}/${library.length}曲`;
             updateLibraryFiltersPanel();
+            list.replaceChildren();
 
             if (filtered.length === 0) {
-                list.innerHTML = `
-                <div class="glass p-5 rounded-xl text-center text-sm text-slate-400 leading-relaxed">
-                    条件に合う曲がありません。<br>
-                    検索ワードやフィルタを変更してください。
-                </div>
-                `;
+                const emptyMessage = document.createElement('div');
+                emptyMessage.className = 'glass p-5 rounded-xl text-center text-sm text-slate-400 leading-relaxed';
+
+                const firstLine = document.createElement('div');
+                firstLine.textContent = '条件に合う曲がありません。';
+
+                const secondLine = document.createElement('div');
+                secondLine.textContent = '検索ワードやフィルタを変更してください。';
+
+                emptyMessage.append(firstLine, secondLine);
+                list.appendChild(emptyMessage);
                 safeCreateIcons();
                 return;
             }
 
-            list.innerHTML = filtered.map(({ item, idx, genre }) => {
-                const stars = '★'.repeat(item.rating || 0) + '☆'.repeat(5 - (item.rating || 0));
+            const fragment = document.createDocumentFragment();
+
+            filtered.forEach(({ item, idx, genre }) => {
+                const rating = Math.max(0, Math.min(5, Number(item.rating) || 0));
+                const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
                 const genreLabel = getLibraryGenreLabel(genre);
-                return `
-                <div class="glass p-3 rounded-xl flex justify-between items-center cursor-pointer hover:bg-slate-800 transition" onclick="showLibraryModal(${idx})">
-                    <div class="min-w-0 pr-2">
-                        <div class="font-bold text-sm truncate">${item.title}</div>
-                        <div class="text-[10px] text-slate-500 flex flex-wrap items-center gap-2 mt-1">
-                            <span>${item.date}</span>
-                            <span class="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-sky-300">${genreLabel}</span>
-                            <span class="text-yellow-400 text-xs">${stars}</span>
-                        </div>
-                    </div>
-                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500 shrink-0"></i>
-                </div>
-                `;
-            }).join('');
+
+                const card = document.createElement('div');
+                card.className = 'glass p-3 rounded-xl flex justify-between items-center cursor-pointer hover:bg-slate-800 transition';
+                card.setAttribute('role', 'button');
+                card.setAttribute('tabindex', '0');
+                card.setAttribute('aria-label', `${String(item.title || '曲名未設定')}の詳細を開く`);
+
+                const openModal = () => showLibraryModal(idx);
+                card.addEventListener('click', openModal);
+                card.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openModal();
+                    }
+                });
+
+                const content = document.createElement('div');
+                content.className = 'min-w-0 pr-2';
+
+                const title = document.createElement('div');
+                title.className = 'font-bold text-sm truncate';
+                title.textContent = String(item.title || '曲名未設定');
+
+                const metadata = document.createElement('div');
+                metadata.className = 'text-[10px] text-slate-500 flex flex-wrap items-center gap-2 mt-1';
+
+                const date = document.createElement('span');
+                date.textContent = String(item.date || '日付不明');
+
+                const genreBadge = document.createElement('span');
+                genreBadge.className = 'px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-sky-300';
+                genreBadge.textContent = genreLabel;
+
+                const ratingText = document.createElement('span');
+                ratingText.className = 'text-yellow-400 text-xs';
+                ratingText.textContent = stars;
+
+                metadata.append(date, genreBadge, ratingText);
+                content.append(title, metadata);
+
+                const chevron = document.createElement('i');
+                chevron.setAttribute('data-lucide', 'chevron-right');
+                chevron.className = 'w-4 h-4 text-slate-500 shrink-0';
+
+                card.append(content, chevron);
+                fragment.appendChild(card);
+            });
+
+            list.appendChild(fragment);
             safeCreateIcons();
         }
 
@@ -3926,7 +4475,7 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function closeLibraryModal() {
-            if (typeof stopAllMusic === 'function') stopAllMusic();
+            if (typeof stopOtherAudioSources === 'function') stopOtherAudioSources();
             document.getElementById('library-modal').classList.add('hidden');
             document.body.style.overflow = '';
         }
@@ -3966,7 +4515,15 @@ V:8 nm="Timpani" snm="Timp"
             if (options.recordHistory !== false) {
                 pushPlaybackHistoryIfNeeded();
             }
-            renderMusic(item.abc, item.title, item.description || "Saved from library", item.id, item.rating || 0, autoPlay);
+            renderMusic(
+                item.abc,
+                item.title,
+                item.description || "Saved from library",
+                item.id,
+                item.rating || 0,
+                autoPlay,
+                item.tuning || null
+            );
             toggleView('player');
         }
     </script>
