@@ -3396,12 +3396,14 @@
   const BEST_KEY = "cube_trap_3d_best_v2";
   const RANKING_KEY = "cube_trap_3d_ranking_v1";
   const MUSIC_MUTED_KEY = "iqube_music_muted_v1";
-    const HIDDEN_STAGE_UNLOCK_KEY = "iqube_hidden_stage_unlocked_v1";
+  const HIDDEN_STAGE_UNLOCK_KEY = "iqube_hidden_stage_unlocked_v1";
+
+  // 一時デバッグ用：true の間だけ、エンディング未到達でもレベル7メニューを表示する。
+  // 本番に戻す時は false に変更する。
+  const DEBUG_SHOW_LEVEL7_MENU = true;
 
   function hasSeenEnding(){
-    // DEBUG: ステージ7確認のため、隠しステージを一時的にタイトルへ開放する。
-    // 本番へ戻す時は、下のreturnを localStorage 判定に戻すこと。
-    return true;
+    return DEBUG_SHOW_LEVEL7_MENU || localStorage.getItem(HIDDEN_STAGE_UNLOCK_KEY) === "1";
   }
 
   const $ = id => document.getElementById(id);
@@ -8910,6 +8912,7 @@ function updateHud(){
 
     stats.activations += Number(data.activations || 0);
     stats.removed += Number(data.removed || 0);
+    if(Number(data.removed || 0) > 0) stats.effectiveBooms = (stats.effectiveBooms || 0) + 1;
     stats.greens += Number(data.greens || 0);
     stats.reds += Number(data.reds || 0);
     stats.redSaved += Number(data.redSaved || 0);
@@ -8937,10 +8940,15 @@ function updateHud(){
 
     // 赤保護は内部評価・統計には残すが、CUT直後のトーストには表示しない。
 
-    // 最低コマ数評価：最初の起爆ターンを1コマ目として、赤以外を消し切るまでのコマ数で判定する。
+    // 最低手数評価は、最初にキューブを消した有効爆破を1手目とする。
+    // その後は爆破の有無にかかわらず、自動ロール1回ごとに1手加算する。
+    // 追加BOOM自体は加算せず、最後のキューブを消した時点で実績手数を確定する。
     const minimumRolls = Math.max(1,Math.floor(Number(stats.optimalRolls) || 1));
-    const actualRolls = 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0));
-    if((stats.activations || 0) > 0 && actualRolls <= minimumRolls && (stats.emptyBooms || 0) === 0){
+    const hasFirstExplosion = (stats.removed || 0) > 0;
+    const actualRolls = hasFirstExplosion
+      ? 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0))
+      : 0;
+    if(hasFirstExplosion && actualRolls <= minimumRolls && (stats.emptyBooms || 0) === 0){
       labels.push('MINIMUM STEP');
     }
 
@@ -8952,7 +8960,7 @@ function updateHud(){
 
     if((stats.maxChain || 0) > 0) details.unshift(`${stats.maxChain}CHAIN`);
     if((stats.removed || 0) > 0) details.push(`${stats.removed}個消去`);
-    if((stats.activations || 0) > 0) details.push(`${1 + (stats.rollsAfterBoom || 0)}/${Math.max(1,Math.floor(Number(stats.optimalRolls) || 1))}コマ`);
+    if(hasFirstExplosion) details.push(`${actualRolls}/${Math.max(1,Math.floor(Number(stats.optimalRolls) || 1))}手`);
 
     stats.judged = true;
     state.lastCutJudgeKey = `${state.level}-${state.cutNumber}`;
@@ -10483,230 +10491,1343 @@ function updateHud(){
       naiveSets,
       skillGap:naiveSets - optimalSets,
       coverageRatio:normals.length ? 1 - uncoveredNormals / Math.max(1,normals.length) : 1,
-      setGroups
+      setGroups,
+      // 最小手数の時間軸シミュレーション用に、カットの実配置も保持する。
+      rows:rows.map((line,i) => normalizeLine(line,i)),
+      activeCols:cols,
+      sliceRows,
+      startCol
     };
   }
 
-    // 設置上限(installLimit)と盤面の並び順を加味し、理論上の最低コマ数を波(BOOMターン)単位で求める。
-  // 数え方は実績と同じ：最初の起爆を1コマ目とし、赤以外が全て消えるまでの転がり回数を加算する。
-  // モデル化しているルール：
-  //  - 1コマ目は着地前の先置きなので、赤の真後ろを含む全対象へ自由に設置できる。
-  //  - 2コマ目以降は「キューブが次に転がる前方マス」へ置くため、前方のキューブが消えていない対象には
-  //    直爆もシールドも置けない。赤は消えないため、赤の真後ろは以後直爆不可(初手か誘爆のみ)。
-  //  - 緑は連結成分単位で誘爆(起爆1＋爆風内の赤のシールドを同じBOOMで消費)。
-  //  - 各BOOMの設置合計はinstallLimit以下。連続するBOOMの間には必ず1回の転がりが入る。
-  // 各波で最大効率の起爆から採用する貪欲法のため厳密最小の近似だが、計算はセル数×成分数程度で軽い。
-  function computeMinimumBoomTurns(rows, activeCols, installLimit){
+  // 一度に設置できる上限(installLimit)を加味し、理論上の最低起爆回数(=最低コマ数)を求める。
+  // 各緑連結成分は「起爆1＋その爆風内の赤のシールド」を同じBOOMで置く必要がある不可分グループ。
+  // 取り残しの通常キューブ直爆は1セットずつ自由に分割できる。
+  function computeMinimumBoomTurns(solution, installLimit){
     const limit = Math.max(1,Math.floor(Number(installLimit) || 1));
-    const cols = clamp(activeCols || COLS,1,COLS);
-    const startCol = getActiveColStart(cols);
-    const sliceRows = Array.isArray(rows) ? rows.length : 0;
-    if(sliceRows <= 0) return 1;
 
-    // grid[i][k]：i=0が最奥、i=sliceRows-1が最前列。出題は全マスにキューブが存在する。
-    const grid = [];
-    const greens = [];
-    for(let i=0; i<sliceRows; i++){
-      const line = String(rows[i] || '');
-      const row = [];
-      for(let k=0; k<cols; k++){
-        const ch = line[startCol + k];
+    const fallbackBySetGroups = () => {
+      const groups = (solution && Array.isArray(solution.setGroups) && solution.setGroups.length)
+        ? solution.setGroups.slice()
+        : [Math.max(1,(solution && solution.optimalSets) || 1)];
+
+      let turns = 0;
+      const bins = [];
+      const packable = [];
+
+      for(const g of groups){
+        const size = Math.max(1,Math.floor(Number(g) || 1));
+        if(size >= limit){
+          turns += Math.ceil(size / limit);
+        }else{
+          packable.push(size);
+        }
+      }
+
+      packable.sort((a,b) => b - a);
+      for(const size of packable){
+        let placed = false;
+        for(let i=0; i<bins.length; i++){
+          if(bins[i] + size <= limit){
+            bins[i] += size;
+            placed = true;
+            break;
+          }
+        }
+        if(!placed) bins.push(size);
+      }
+
+      return Math.max(1,turns + bins.length);
+    };
+
+    // 旧ロジックは「必要セット数を設置上限に詰める」だけだったため、ほぼ1〜2になっていた。
+    // ここでは、各キューブが1ターンごとに手前へ転がる前提で、
+    // 1) どのターンでBOOMするか
+    // 2) その時点で赤が緑3×3に巻き込まれるならシールドが必要か
+    // 3) 1回のBOOMで置ける最大設置数
+    // 4) 待ってから起爆した方がシールドを節約できるか
+    // を同時に評価する。完全全探索はスマホで重いため、上位候補だけを残すビーム探索にする。
+    if(!solution || !Array.isArray(solution.rows) || solution.rows.length === 0){
+      return fallbackBySetGroups();
+    }
+
+    const rows = solution.rows.map((line,i) => normalizeLine(line,i));
+    const activeCols = clamp(Math.floor(Number(solution.activeCols) || COLS),1,COLS);
+    const startCol = getActiveColStart(activeCols);
+    const sliceRows = rows.length;
+    const frontBuffer = clamp(Math.floor(Number(state.frontBufferRows) || 6),4,18);
+    const cubes = [];
+    const nonRedBits = new Map();
+    let bitIndex = 0;
+
+    for(let r=0; r<sliceRows; r++){
+      const line = rows[r];
+      for(let i=0; i<activeCols; i++){
+        const c = startCol + i;
+        const ch = line[c];
         const type = ch === 'G' ? 'green' : ch === 'R' ? 'red' : 'normal';
-        const cell = {i,k,type,alive:true,comp:-1};
-        row.push(cell);
-        if(type === 'green') greens.push(cell);
+        const cube = {
+          id:cubes.length,
+          c,
+          // spawnWave() と同じく、rows[0]が奥、rows末尾が手前になる。
+          r0:frontBuffer + (sliceRows - 1 - r),
+          type
+        };
+        cubes.push(cube);
+
+        if(type !== 'red'){
+          nonRedBits.set(cube.id,1n << BigInt(bitIndex));
+          bitIndex++;
+        }
       }
-      grid.push(row);
     }
 
-    // 緑の連結成分(チェビシェフ距離1以内=誘爆で繋がる)
-    let compCount = 0;
-    for(const g of greens){
-      if(g.comp >= 0) continue;
-      const id = compCount++;
-      const stack = [g];
-      g.comp = id;
-      while(stack.length){
-        const a = stack.pop();
-        for(const b of greens){
-          if(b.comp >= 0) continue;
-          if(Math.abs(a.i - b.i) <= 1 && Math.abs(a.k - b.k) <= 1){
-            b.comp = id;
-            stack.push(b);
+    if(bitIndex === 0) return 1;
+
+    const fullMask = (1n << BigInt(bitIndex)) - 1n;
+    const rowAt = (cube,time) => cube.r0 - time;
+    const isRemaining = (mask,cube) => {
+      const bit = nonRedBits.get(cube.id);
+      return bit ? (mask & bit) !== 0n : false;
+    };
+    const popCount = mask => {
+      let n = 0;
+      let v = mask;
+      while(v > 0n){
+        if(v & 1n) n++;
+        v >>= 1n;
+      }
+      return n;
+    };
+    const maskKey = mask => mask.toString(36);
+
+    const remainingHasLeaked = (mask,time) => {
+      for(const cube of cubes){
+        if(cube.type === 'red' || !isRemaining(mask,cube)) continue;
+        if(rowAt(cube,time) < 0) return true;
+      }
+      return false;
+    };
+
+    const inGreenRange = (cube,green,time) => {
+      return Math.abs(cube.c - green.c) <= 1 && Math.abs(rowAt(cube,time) - rowAt(green,time)) <= 1;
+    };
+
+    const buildBoomCandidates = (mask,time) => {
+      if(remainingHasLeaked(mask,time)) return [];
+
+      const activeNonReds = cubes.filter(cube => cube.type !== 'red' && isRemaining(mask,cube) && rowAt(cube,time) >= 0);
+      if(activeNonReds.length === 0) return [];
+
+      const activeReds = cubes.filter(cube => cube.type === 'red' && rowAt(cube,time) >= 0);
+      const activeGreens = activeNonReds.filter(cube => cube.type === 'green');
+      const greenComponents = [];
+      const seenGreens = new Set();
+
+      for(const green of activeGreens){
+        if(seenGreens.has(green.id)) continue;
+
+        const component = [];
+        const stack = [green];
+        seenGreens.add(green.id);
+
+        while(stack.length){
+          const g = stack.pop();
+          component.push(g);
+
+          for(const other of activeGreens){
+            if(seenGreens.has(other.id)) continue;
+            if(Math.abs(other.c - g.c) <= 1 && Math.abs(rowAt(other,time) - rowAt(g,time)) <= 1){
+              seenGreens.add(other.id);
+              stack.push(other);
+            }
           }
         }
+
+        greenComponents.push(component);
       }
-    }
 
-    const compGreens = Array.from({length:compCount},() => []);
-    for(const g of greens) compGreens[g.comp].push(g);
+      const greenActions = [];
 
-    const compCover = Array.from({length:compCount},() => new Set());
-    for(let id=0; id<compCount; id++){
-      for(const g of compGreens[id]){
-        for(let di=-1; di<=1; di++){
-          for(let dk=-1; dk<=1; dk++){
-            const ii = g.i + di;
-            const kk = g.k + dk;
-            if(ii < 0 || ii >= sliceRows || kk < 0 || kk >= cols) continue;
-            compCover[id].add(ii * cols + kk);
+      for(const component of greenComponents){
+        let removeMask = 0n;
+        const shieldIds = new Set();
+
+        for(const cube of activeNonReds){
+          if(component.some(g => inGreenRange(cube,g,time))){
+            removeMask |= nonRedBits.get(cube.id);
           }
         }
-      }
-    }
 
-    const compTriggered = new Array(compCount).fill(false);
-    let aliveNonRed = 0;
-    for(const row of grid){
-      for(const cell of row){
-        if(cell.type !== 'red') aliveNonRed++;
-      }
-    }
-    if(aliveNonRed <= 0) return 1;
+        for(const red of activeReds){
+          if(component.some(g => inGreenRange(red,g,time))){
+            shieldIds.add(red.id);
+          }
+        }
 
-        // 前方(転がり先)が空いているか。赤は消えないため、赤の真後ろは2コマ目以降ずっと封鎖される。
-    // 重要：設置(直爆・起爆・シールド)は「そのBOOMの転がり前」に行う。したがって、同じ波の中で
-    // 前方のキューブが消えても、その波では後ろのキューブに設置できない。波開始時点の状態で固定判定する。
-    const frontOpenNow = cell => {
-      if(cell.i >= sliceRows - 1) return true;
-      return !grid[cell.i + 1][cell.k].alive;
+        const removeCount = popCount(removeMask);
+        const cost = 1 + shieldIds.size;
+
+        if(removeCount > 0 && cost <= limit){
+          greenActions.push({
+            kind:'green',
+            cost,
+            removeMask,
+            removeCount,
+            chain:component.length,
+            shieldCount:shieldIds.size,
+            score:removeCount * 120 + component.length * 22 - shieldIds.size * 18 - cost * 5
+          });
+        }
+      }
+
+      greenActions.sort((a,b) => b.score - a.score || b.removeCount - a.removeCount || a.cost - b.cost);
+
+      const topGreens = greenActions.slice(0,8);
+      const candidates = [];
+      const subsetCount = 1 << topGreens.length;
+
+      for(let subset=0; subset<subsetCount; subset++){
+        let cost = 0;
+        let removeMask = 0n;
+        let chain = 0;
+        let shieldCount = 0;
+        let valid = true;
+
+        for(let i=0; i<topGreens.length; i++){
+          if(!(subset & (1 << i))) continue;
+          const action = topGreens[i];
+          if(cost + action.cost > limit){
+            valid = false;
+            break;
+          }
+          cost += action.cost;
+          removeMask |= action.removeMask;
+          chain += action.chain;
+          shieldCount += action.shieldCount;
+        }
+
+        if(!valid) continue;
+
+        const directBudget = limit - cost;
+        const directNormals = activeNonReds
+          .filter(cube => cube.type === 'normal' && (removeMask & nonRedBits.get(cube.id)) === 0n)
+          .sort((a,b) => rowAt(a,time) - rowAt(b,time) || a.c - b.c)
+          .slice(0,directBudget);
+
+        for(const cube of directNormals){
+          removeMask |= nonRedBits.get(cube.id);
+          cost++;
+        }
+
+        const removeCount = popCount(removeMask);
+        if(removeCount <= 0) continue;
+
+        candidates.push({
+          cost,
+          removeMask,
+          removeCount,
+          chain,
+          shieldCount,
+          score:removeCount * 140 + chain * 20 - shieldCount * 14 - cost * 4
+        });
+      }
+
+      candidates.sort((a,b) => b.score - a.score || b.removeCount - a.removeCount || a.cost - b.cost);
+
+      const unique = [];
+      const seen = new Set();
+      for(const cand of candidates){
+        const key = cand.removeMask.toString();
+        if(seen.has(key)) continue;
+        seen.add(key);
+        unique.push(cand);
+        if(unique.length >= 10) break;
+      }
+
+      return unique;
     };
-    let waveOpenSnapshot = null;
-    const snapshotWaveOpen = () => {
-      waveOpenSnapshot = new Uint8Array(sliceRows * cols);
-      for(let si=0; si<sliceRows; si++){
-        for(let sk=0; sk<cols; sk++){
-          waveOpenSnapshot[si * cols + sk] = frontOpenNow(grid[si][sk]) ? 1 : 0;
+
+    const maxTime = frontBuffer + sliceRows + 6;
+    const beamLimit = 54;
+    let best = Infinity;
+    let beam = [{time:0,steps:0,mask:fullMask}];
+    const seen = new Map();
+
+    for(let guard=0; guard<80 && beam.length; guard++){
+      const next = [];
+
+      for(const item of beam){
+        if(item.steps >= best) continue;
+        if(item.mask === 0n){
+          best = Math.min(best,item.steps);
+          continue;
+        }
+        if(item.time > maxTime || remainingHasLeaked(item.mask,item.time)) continue;
+
+        const seenKey = item.time + ':' + maskKey(item.mask);
+        const prev = seen.get(seenKey);
+        if(prev !== undefined && prev <= item.steps) continue;
+        seen.set(seenKey,item.steps);
+
+        const candidates = buildBoomCandidates(item.mask,item.time);
+        for(const cand of candidates){
+          const nextMask = item.mask & ~cand.removeMask;
+          const nextSteps = item.steps + 1;
+
+          if(nextMask === 0n){
+            best = Math.min(best,nextSteps);
+          }else if(nextSteps < best){
+            next.push({time:item.time,steps:nextSteps,mask:nextMask});
+          }
+        }
+
+        // 待つことで赤が緑3×3範囲から抜け、シールドなしで後ろのキューブを起爆できる場合がある。
+        // そのため、BOOMだけでなく「1ロール待つ」分岐も必ず残す。
+        if(item.time < maxTime && item.steps + 1 < best){
+          next.push({time:item.time + 1,steps:item.steps + 1,mask:item.mask});
         }
       }
-    };
-    const canPlaceAt = (cell,wave) =>
-      wave === 1 || !!(waveOpenSnapshot && waveOpenSnapshot[cell.i * cols + cell.k]);
-    const isForeverBlockedCell = cell =>
-      cell.i < sliceRows - 1 && grid[cell.i + 1][cell.k].type === 'red';
-    const compForeverBlocked = id =>
-      compGreens[id].every(g => isForeverBlockedCell(g));
 
-    const evalTrigger = (id,wave) => {
-      if(compTriggered[id]) return null;
-
-      let triggerOk = false;
-      for(const g of compGreens[id]){
-        if(g.alive && canPlaceAt(g,wave)){
-          triggerOk = true;
-          break;
-        }
-      }
-      if(!triggerOk) return null;
-
-      let kills = 0;
-      let shields = 0;
-      let blockedShield = false;
-      compCover[id].forEach(key => {
-        const cell = grid[Math.floor(key / cols)][key % cols];
-        if(cell.type === 'red'){
-          if(!canPlaceAt(cell,wave)) blockedShield = true;
-          else shields++;
-        }else if(cell.alive){
-          kills++;
-        }
+      next.sort((a,b) => {
+        const ar = popCount(a.mask);
+        const br = popCount(b.mask);
+        const ah = a.steps + Math.ceil(ar / Math.max(1,limit)) + Math.max(0,3 - a.time) * .05;
+        const bh = b.steps + Math.ceil(br / Math.max(1,limit)) + Math.max(0,3 - b.time) * .05;
+        return ah - bh || ar - br || a.time - b.time;
       });
 
-      // 爆風内の赤にシールドが置けないコマでは誤爆確定になるため、その波では起爆できない。
-      if(blockedShield || kills <= 0) return null;
-      return {id,kills,cost:1 + shields};
+      const compact = [];
+      const compactKeys = new Set();
+      for(const item of next){
+        const key = item.time + ':' + maskKey(item.mask);
+        if(compactKeys.has(key)) continue;
+        compactKeys.add(key);
+        compact.push(item);
+        if(compact.length >= beamLimit) break;
+      }
+
+      beam = compact;
+    }
+
+    if(Number.isFinite(best)){
+      return Math.max(1,Math.floor(best));
+    }
+
+    return fallbackBySetGroups();
+  }
+
+  function computeMinimumBoomTurns(solution, installLimit){
+    const limit = Math.max(1,Math.floor(Number(installLimit) || 1));
+
+    const fallbackBySetGroups = () => {
+      const groups = (solution && Array.isArray(solution.setGroups) && solution.setGroups.length)
+        ? solution.setGroups.slice()
+        : [Math.max(1,(solution && solution.optimalSets) || 1)];
+
+      let turns = 0;
+      const bins = [];
+      const packable = [];
+
+      for(const g of groups){
+        const size = Math.max(1,Math.floor(Number(g) || 1));
+        if(size >= limit){
+          turns += Math.ceil(size / limit);
+        }else{
+          packable.push(size);
+        }
+      }
+
+      packable.sort((a,b) => b - a);
+      for(const size of packable){
+        let placed = false;
+        for(let i=0; i<bins.length; i++){
+          if(bins[i] + size <= limit){
+            bins[i] += size;
+            placed = true;
+            break;
+          }
+        }
+        if(!placed) bins.push(size);
+      }
+
+      return Math.max(1,turns + bins.length);
     };
 
-    const MAX_WAVES = 24;
-    let wave = 0;
+    // 最小手数は、実ゲームと同じ「先置きできた設置物だけがBOOMで作動する」前提で推定する。
+    // PLACEは現在キューブがいない空きマスにだけ許可し、WAITでキューブがその上へ来てからBOOMする。
+    // 表示定義は「有効BOOM回数」のみ。ロールはtickで自動進行する時間経過であり、
+    // プレイヤーの意思決定ではないため手数に含めない。MIN=最少何回のBOOMで消し切れるか。
+    if(!solution || !Array.isArray(solution.rows) || solution.rows.length === 0){
+      return fallbackBySetGroups();
+    }
 
-        while(aliveNonRed > 0 && wave < MAX_WAVES){
-      wave++;
-      snapshotWaveOpen();
-      let budget = limit;
-      let killedThisWave = 0;
-      let progressed = true;
+    const rows = solution.rows.map((line,i) => normalizeLine(line,i));
+    const activeCols = clamp(Math.floor(Number(solution.activeCols) || COLS),1,COLS);
+    const startCol = getActiveColStart(activeCols);
+    const sliceRows = rows.length;
+    const frontBuffer = clamp(Math.floor(Number(state.frontBufferRows) || 6),4,18);
+    const cubes = [];
+    const nonRedBits = new Map();
+    let bitIndex = 0;
 
-      while(progressed && budget > 0 && aliveNonRed > 0){
-        progressed = false;
+    for(let r=0; r<sliceRows; r++){
+      const line = rows[r];
+      for(let i=0; i<activeCols; i++){
+        const c = startCol + i;
+        const ch = line[c];
+        const type = ch === 'G' ? 'green' : ch === 'R' ? 'red' : 'normal';
+        const cube = {
+          id:cubes.length,
+          c,
+          // spawnWave() と同じく、rows[0]が奥、rows末尾が手前になる。
+          r0:frontBuffer + (sliceRows - 1 - r),
+          type
+        };
+        cubes.push(cube);
 
-        // 1) 誘爆起爆：消去数の多い成分から採用。1コマ目は「以後起爆不能になる成分」を最優先。
-        let best = null;
-        for(let id=0; id<compCount; id++){
-          const t = evalTrigger(id,wave);
-          if(!t || t.cost > budget) continue;
-          const urgent = wave === 1 && compForeverBlocked(id) ? 1 : 0;
-          const score = urgent * 100000 + t.kills * 100 - t.cost;
-          if(!best || score > best.score) best = {id:t.id,kills:t.kills,cost:t.cost,score};
+        if(type !== 'red'){
+          nonRedBits.set(cube.id,1n << BigInt(bitIndex));
+          bitIndex++;
+        }
+      }
+    }
+
+    if(bitIndex === 0) return 1;
+
+    const fullMask = (1n << BigInt(bitIndex)) - 1n;
+    const maxTime = frontBuffer + sliceRows + 6;
+    const beamLimit = 56;
+    const lookAhead = clamp(5 + Math.floor(sliceRows / 2),5,9);
+    const maxPlaceCandidates = 26;
+
+    const rowAt = (cube,time) => cube.r0 - time;
+    const cellKey = (c,r) => c + ',' + r;
+    const installKey = install => install.kind + ':' + install.c + ':' + install.r;
+    const isRemaining = (mask,cube) => {
+      const bit = nonRedBits.get(cube.id);
+      return bit ? (mask & bit) !== 0n : false;
+    };
+    const popCount = mask => {
+      let n = 0;
+      let v = mask;
+      while(v > 0n){
+        if(v & 1n) n++;
+        v >>= 1n;
+      }
+      return n;
+    };
+    const maskKey = mask => mask.toString(36);
+    const installsKey = installs => installs
+      .map(installKey)
+      .sort()
+      .join('|');
+
+    const remainingHasLeaked = (mask,time) => {
+      for(const cube of cubes){
+        if(cube.type === 'red' || !isRemaining(mask,cube)) continue;
+        if(rowAt(cube,time) < 0) return true;
+      }
+      return false;
+    };
+
+    const findCubeAtTime = (c,r,time,mask) => {
+      for(const cube of cubes){
+        const rr = rowAt(cube,time);
+        if(cube.c !== c || rr !== r || rr < 0) continue;
+        if(cube.type === 'red' || isRemaining(mask,cube)) return cube;
+      }
+      return null;
+    };
+
+    const cellHasCubeAtTime = (c,r,time,mask) => !!findCubeAtTime(c,r,time,mask);
+    const installExistsAt = (installs,c,r) => installs.some(install => install.c === c && install.r === r);
+
+    const canPlaceInstall = (c,r,kind,time,mask,installs) => {
+      if(installs.length >= limit) return false;
+      if(c < startCol || c >= startCol + activeCols) return false;
+      if(r < 0 || r >= ROWS) return false;
+      if(installExistsAt(installs,c,r)) return false;
+
+      // 実ゲームの placeBomb() と同じ制約：現在キューブが乗っているマスには新規設置できない。
+      // ここを見ないと、赤の後ろのキューブを「赤がどく前に直接狙える」過小評価になる。
+      if(cellHasCubeAtTime(c,r,time,mask)) return false;
+
+      return kind === 'bomb' || kind === 'shield';
+    };
+
+    const inGreenRangeAtTime = (cube,green,time) => {
+      return Math.abs(cube.c - green.c) <= 1 && Math.abs(rowAt(cube,time) - rowAt(green,time)) <= 1;
+    };
+
+    const simulateBoomWithInstalls = (mask,time,installs) => {
+      const bombs = installs.filter(install => install.kind === 'bomb');
+      if(bombs.length === 0) return null;
+
+      let removeMask = 0n;
+      let redDanger = 0;
+      let chainCount = 0;
+      let shieldCount = 0;
+
+      const shieldKeys = new Set(
+        installs
+          .filter(install => install.kind === 'shield')
+          .map(install => cellKey(install.c,install.r))
+      );
+      const greenQueue = [];
+      const greenQueued = new Set();
+      const greenExpanded = new Set();
+
+      const enqueueGreen = cube => {
+        if(!cube || cube.type !== 'green') return;
+        if(greenQueued.has(cube.id) || greenExpanded.has(cube.id)) return;
+        greenQueued.add(cube.id);
+        greenQueue.push(cube);
+      };
+
+      const markHit = (cube,reason) => {
+        if(!cube) return;
+
+        if(cube.type === 'red'){
+          if(reason === 'green-chain' && shieldKeys.has(cellKey(cube.c,rowAt(cube,time)))){
+            shieldCount++;
+            return;
+          }
+
+          // 赤を直接爆破、またはシールドなしで緑3×3に巻き込む手順は最適解候補から除外する。
+          redDanger++;
+          return;
         }
 
-        if(best){
-          compTriggered[best.id] = true;
-          budget -= best.cost;
-          compCover[best.id].forEach(key => {
-            const cell = grid[Math.floor(key / cols)][key % cols];
-            if(cell.alive && cell.type !== 'red'){
-              cell.alive = false;
-              aliveNonRed--;
-              killedThisWave++;
+        const bit = nonRedBits.get(cube.id);
+        if(bit) removeMask |= bit;
+        if(cube.type === 'green') enqueueGreen(cube);
+      };
+
+      for(const bomb of bombs){
+        const target = findCubeAtTime(bomb.c,bomb.r,time,mask);
+        if(!target) continue;
+
+        if(target.type === 'normal'){
+          markHit(target,'normal-direct');
+        }else if(target.type === 'green'){
+          markHit(target,'bomb-trigger');
+        }else if(target.type === 'red'){
+          markHit(target,'red-under-bomb');
+        }
+      }
+
+      while(greenQueue.length){
+        const green = greenQueue.shift();
+        if(!green || greenExpanded.has(green.id)) continue;
+
+        greenExpanded.add(green.id);
+        chainCount++;
+
+        for(const cube of cubes){
+          const rr = rowAt(cube,time);
+          if(rr < 0) continue;
+          if(cube.type !== 'red' && !isRemaining(mask,cube)) continue;
+
+          if(inGreenRangeAtTime(cube,green,time)){
+            markHit(cube,'green-chain');
+          }
+        }
+      }
+
+      const removedCount = popCount(removeMask);
+      if(redDanger > 0 || removedCount <= 0) return null;
+
+      return {
+        removeMask,
+        removedCount,
+        chainCount,
+        shieldCount,
+        score:removedCount * 140 + chainCount * 24 - shieldCount * 10 - installs.length * 3
+      };
+    };
+
+    const buildPlaceCandidates = item => {
+      // 戻り値は常に {singles, byDt} 形式に統一する。旧形式の [] を返すと
+      // 呼び出し側の placeCands.singles が undefined になり TypeError で探索全体が落ちる。
+      if(item.installs.length >= limit) return {singles:[],byDt:new Map()};
+
+      const seen = new Set();
+      const candidates = [];
+      const addCandidate = (kind,c,r,score,dt) => {
+        const key = kind + ':' + c + ':' + r;
+        if(seen.has(key)) return;
+        seen.add(key);
+        if(!canPlaceInstall(c,r,kind,item.time,item.mask,item.installs)) return;
+        candidates.push({kind,c,r,score,dt});
+      };
+
+      for(let dt=1; dt<=lookAhead; dt++){
+        const futureTime = item.time + dt;
+
+        for(const cube of cubes){
+          if(cube.type === 'red' || !isRemaining(item.mask,cube)) continue;
+
+          const r = rowAt(cube,futureTime);
+          if(r < 0) continue;
+
+          // 非赤キューブが将来通る空きマスだけを青BOOM候補にする。
+          // 現在そこに赤や別キューブがいれば、PLACE不可として落ちる。
+          addCandidate(
+            'bomb',
+            cube.c,
+            r,
+            (cube.type === 'green' ? 120 : 78) + (lookAhead - dt) * 8 + Math.max(0,12 - r),
+            dt
+          );
+
+          if(cube.type !== 'green') continue;
+
+          for(const red of cubes){
+            if(red.type !== 'red') continue;
+            const redR = rowAt(red,futureTime);
+            if(redR < 0) continue;
+
+            if(Math.abs(red.c - cube.c) <= 1 && Math.abs(redR - r) <= 1){
+              addCandidate(
+                'shield',
+                red.c,
+                redR,
+                112 + (lookAhead - dt) * 7 + Math.max(0,12 - redR),
+                dt
+              );
             }
-          });
-          progressed = true;
+          }
+        }
+      }
+
+      candidates.sort((a,b) => b.score - a.score || a.r - b.r || a.c - b.c);
+
+      // dtごとのフルボレー用バケット。グローバル上位だけ残すと、スコアのdt小優遇により
+      // dtが大きい候補（深い行の同時起爆に必須）が全滅し、一括ボレーが構築不能になる。
+      // これがMINを過大評価させる原因（例：3行ブロックで真の4手が5手と算出される）。
+      const byDt = new Map();
+      for(const cand of candidates){
+        const bucket = byDt.get(cand.dt) || [];
+        if(bucket.length < limit){
+          bucket.push(cand);
+          byDt.set(cand.dt,bucket);
+        }
+      }
+
+      return {
+        singles:candidates.slice(0,maxPlaceCandidates),
+        byDt
+      };
+    };
+
+    let best = Infinity;
+    let beam = [{
+      time:0,
+      steps:0,
+      mask:fullMask,
+      installs:[],
+      firstBoom:false
+    }];
+    const seenStates = new Map();
+
+    for(let guard=0; guard<140 && beam.length; guard++){
+      if(best <= 1) break;
+
+      const next = [];
+
+      for(const item of beam){
+        if(item.time > maxTime || remainingHasLeaked(item.mask,item.time)) continue;
+        if(item.firstBoom && item.steps >= best) continue;
+
+        if(item.mask === 0n){
+          if(item.firstBoom) best = Math.min(best,item.steps);
           continue;
         }
 
-        // 2) 直爆：誘爆で消える見込みのない通常キューブを1個ずつ。
-        //    1コマ目は「赤の真後ろで以後直爆不能になるキューブ」を最優先。
-        let target = null;
-        for(const row of grid){
-          for(const cell of row){
-            if(!cell.alive || cell.type !== 'normal') continue;
-            if(!canPlaceAt(cell,wave)) continue;
+        const key =
+          (item.firstBoom ? '1' : '0') + ':' +
+          item.time + ':' +
+          maskKey(item.mask) + ':' +
+          installsKey(item.installs);
 
-            const key = cell.i * cols + cell.k;
-            let covered = false;
-            for(let id=0; id<compCount; id++){
-              if(compTriggered[id]) continue;
-              if(wave > 1 && compForeverBlocked(id)) continue;
-              if(compCover[id].has(key)){
-                covered = true;
-                break;
-              }
-            }
-            if(covered) continue;
+        const prev = seenStates.get(key);
+        if(prev !== undefined && prev <= item.steps) continue;
+        seenStates.set(key,item.steps);
 
-            const urgent = wave === 1 && isForeverBlockedCell(cell) ? 1 : 0;
-            if(!target || urgent > target.urgent){
-              target = {cell,urgent};
-              if(urgent) break;
+        const boomResult = simulateBoomWithInstalls(item.mask,item.time,item.installs);
+        if(boomResult){
+          const nextMask = item.mask & ~boomResult.removeMask;
+          // 有効BOOMは毎回1手。手数はBOOM回数のみで構成する。
+          const nextSteps = item.steps + 1;
+          const boomedState = {
+            time:item.time,
+            steps:nextSteps,
+            mask:nextMask,
+            installs:[],
+            firstBoom:true
+          };
+
+          if(nextMask === 0n){
+            best = Math.min(best,nextSteps);
+          }else if(nextSteps < best){
+            next.push(boomedState);
+          }
+        }
+
+        const placeCands = buildPlaceCandidates(item);
+
+        for(const cand of placeCands.singles){
+          next.push({
+            time:item.time,
+            steps:item.steps,
+            mask:item.mask,
+            installs:item.installs.concat({c:cand.c,r:cand.r,kind:cand.kind}),
+            firstBoom:item.firstBoom
+          });
+        }
+
+        // 同一到達タイミング(dt)のフルボレーを1展開で生成する。
+        // バケットはdtごとに設置上限ぶんまで保持しているため、深い行(dt大)を含む
+        // 同時起爆ボレーも欠けずに構築できる。
+        for(const group of placeCands.byDt.values()){
+          if(group.length < 2) continue;
+          const batch = item.installs.slice();
+          for(const cand of group){
+            if(batch.length >= limit) break;
+            if(batch.some(b => b.c === cand.c && b.r === cand.r)) continue;
+            batch.push({c:cand.c,r:cand.r,kind:cand.kind});
+          }
+          if(batch.length > item.installs.length + 1){
+            next.push({
+              time:item.time,
+              steps:item.steps,
+              mask:item.mask,
+              installs:batch,
+              firstBoom:item.firstBoom
+            });
+          }
+        }
+
+        // WAIT: キューブを1ロール進める。初回有効爆破前のWAITは表示手数に含めない。
+        // 初回爆破後は「爆破を1として、その後何回転がったか」の実績表示に合わせて+1する。
+        if(item.time < maxTime){
+          // WAITは手数に含めない（BOOM回数のみを数える）。待ちの長さはmaxTimeで制限済み。
+          const waitSteps = item.steps;
+          if(waitSteps < best){
+            next.push({
+              time:item.time + 1,
+              steps:waitSteps,
+              mask:item.mask,
+              installs:item.installs.slice(),
+              firstBoom:item.firstBoom
+            });
+          }
+        }
+      }
+
+      next.sort((a,b) => {
+        const ar = popCount(a.mask);
+        const br = popCount(b.mask);
+        const ah =
+          a.steps +
+          Math.ceil(ar / Math.max(1,limit)) * .72 +
+          (a.firstBoom ? 0 : .85) +
+          a.installs.length * -.12 +
+          a.time * .012;
+        const bh =
+          b.steps +
+          Math.ceil(br / Math.max(1,limit)) * .72 +
+          (b.firstBoom ? 0 : .85) +
+          b.installs.length * -.12 +
+          b.time * .012;
+
+        return ah - bh || br - ar || b.installs.length - a.installs.length || a.time - b.time;
+      });
+
+      const compact = [];
+      const compactKeys = new Set();
+
+      for(const item of next){
+        const compactKey =
+          (item.firstBoom ? '1' : '0') + ':' +
+          item.time + ':' +
+          maskKey(item.mask) + ':' +
+          installsKey(item.installs);
+
+        if(compactKeys.has(compactKey)) continue;
+        compactKeys.add(compactKey);
+        compact.push(item);
+        if(compact.length >= beamLimit) break;
+      }
+
+      beam = compact;
+    }
+
+    if(Number.isFinite(best)){
+      return Math.max(1,Math.floor(best));
+    }
+
+    return fallbackBySetGroups();
+  }
+
+  // --- ミニマム手数計算 v3 ---
+  // 旧同名関数は互換用に残し、この時点で新プランナーへ差し替える。
+  // 最初にキューブを消した有効BOOMを1手目とし、それ以前の待機ロールは数えない。
+  // 初回有効BOOM後は自動ロール1回ごとに1手加算し、追加BOOM自体は加算しない。
+  // 最後のキューブを消したBOOMの時点で、その直前までの手数を最終値とする。
+  // 設置そのものは0手だが、現在キューブがあるセルには置けず、将来起爆するセルが
+  // 起爆前のどこかで空いていることを必須とする。
+  function computeMinimumBoomPlanUncached(solution, installLimit){
+    const limit = Math.max(1,Math.floor(Number(installLimit) || 1));
+    const fallbackBooms = Math.max(1,Math.ceil(Math.max(1,Number(solution && solution.optimalSets) || 1) / limit));
+
+    if(!solution || !Array.isArray(solution.rows) || solution.rows.length === 0){
+      return {turns:fallbackBooms,firstBoomRolls:0,explored:0,exact:false};
+    }
+
+    const rows = solution.rows.map((line,i) => normalizeLine(line,i));
+    const activeCols = clamp(Math.floor(Number(solution.activeCols) || COLS),1,COLS);
+    const startCol = getActiveColStart(activeCols);
+    const sliceRows = rows.length;
+    const frontBuffer = clamp(Math.floor(Number(state.frontBufferRows) || 6),4,18);
+    const cubes = [];
+    const nonRedBits = new Map();
+    let bitIndex = 0;
+
+    for(let r=0; r<sliceRows; r++){
+      const line = rows[r];
+      for(let i=0; i<activeCols; i++){
+        const c = startCol + i;
+        const ch = line[c];
+        const type = ch === 'G' ? 'green' : ch === 'R' ? 'red' : 'normal';
+        const cube = {id:cubes.length,c,r0:frontBuffer + (sliceRows - 1 - r),type};
+        cubes.push(cube);
+        if(type !== 'red'){
+          nonRedBits.set(cube.id,1n << BigInt(bitIndex));
+          bitIndex++;
+        }
+      }
+    }
+
+    if(bitIndex === 0){
+      return {turns:1,firstBoomRolls:0,explored:0,exact:true};
+    }
+
+    const fullMask = (1n << BigInt(bitIndex)) - 1n;
+    const rowAt = (cube,time) => cube.r0 - time;
+    const cellKey = (c,r) => c + ',' + r;
+    const bitOf = cube => nonRedBits.get(cube.id) || 0n;
+    const isRemaining = (mask,cube) => cube.type === 'red' || (mask & bitOf(cube)) !== 0n;
+    const popCount = mask => {
+      let n = 0;
+      let v = mask;
+      while(v > 0n){
+        n += Number(v & 1n);
+        v >>= 1n;
+      }
+      return n;
+    };
+    const maskKey = mask => mask.toString(36);
+
+    const remainingHasLeaked = (mask,time) => {
+      for(const cube of cubes){
+        if(cube.type === 'red' || !isRemaining(mask,cube)) continue;
+        if(rowAt(cube,time) < 0) return true;
+      }
+      return false;
+    };
+
+    const latestSafeTime = mask => {
+      let latest = Infinity;
+      for(const cube of cubes){
+        if(cube.type === 'red' || !isRemaining(mask,cube)) continue;
+        latest = Math.min(latest,cube.r0);
+      }
+      return Number.isFinite(latest) ? latest : 0;
+    };
+
+    const cubeAtTime = (mask,c,r,time) => {
+      for(const cube of cubes){
+        if(!isRemaining(mask,cube)) continue;
+        if(cube.c === c && rowAt(cube,time) === r && r >= 0) return cube;
+      }
+      return null;
+    };
+
+    const canArmCell = (mask,fromTime,boomTime,c,r) => {
+      if(c < startCol || c >= startCol + activeCols || r < 0 || r >= ROWS) return false;
+
+      // 起爆時にはキューブが乗っていてよいが、起爆前のどこかで一度は空いていなければ設置できない。
+      // 赤が連続してセルを塞ぐ場合は、赤が通過するまで候補にならない。
+      for(let time=fromTime; time<boomTime; time++){
+        if(!cubeAtTime(mask,c,r,time)) return true;
+      }
+      return false;
+    };
+
+    const actionCache = new Map();
+
+    const buildBoomActions = (mask,fromTime,boomTime) => {
+      const cacheKey = maskKey(mask) + ':' + fromTime + ':' + boomTime;
+      if(actionCache.has(cacheKey)) return actionCache.get(cacheKey);
+
+      if(boomTime <= fromTime || remainingHasLeaked(mask,boomTime)){
+        actionCache.set(cacheKey,[]);
+        return [];
+      }
+
+      const activeNonReds = [];
+      const activeReds = [];
+
+      for(const cube of cubes){
+        const r = rowAt(cube,boomTime);
+        if(r < 0) continue;
+
+        if(cube.type === 'red'){
+          activeReds.push(cube);
+        }else if(isRemaining(mask,cube)){
+          activeNonReds.push(cube);
+        }
+      }
+
+      const activeGreens = activeNonReds.filter(cube => cube.type === 'green');
+      const components = [];
+      const seenGreenIds = new Set();
+
+      // 緑同士がチェビシェフ距離1以内なら、同じ起爆連鎖成分として扱う。
+      for(const green of activeGreens){
+        if(seenGreenIds.has(green.id)) continue;
+
+        const stack = [green];
+        const component = [];
+        seenGreenIds.add(green.id);
+
+        while(stack.length){
+          const current = stack.pop();
+          component.push(current);
+
+          for(const other of activeGreens){
+            if(seenGreenIds.has(other.id)) continue;
+
+            if(
+              Math.abs(other.c - current.c) <= 1 &&
+              Math.abs(rowAt(other,boomTime) - rowAt(current,boomTime)) <= 1
+            ){
+              seenGreenIds.add(other.id);
+              stack.push(other);
             }
           }
-          if(target && target.urgent) break;
         }
 
-        if(target){
-          target.cell.alive = false;
-          aliveNonRed--;
-          killedThisWave++;
-          budget--;
-          progressed = true;
+        components.push(component);
+      }
+
+      const greenActions = [];
+
+      for(const component of components){
+        // 同じ緑連鎖なら、設置可能な緑を1個だけ起点にする。
+        const triggers = component
+          .filter(green => canArmCell(mask,fromTime,boomTime,green.c,rowAt(green,boomTime)))
+          .sort((a,b) => rowAt(a,boomTime) - rowAt(b,boomTime));
+
+        if(!triggers.length) continue;
+
+        let removeMask = 0n;
+        let urgency = Infinity;
+
+        for(const cube of activeNonReds){
+          const hit = component.some(green =>
+            Math.abs(cube.c - green.c) <= 1 &&
+            Math.abs(rowAt(cube,boomTime) - rowAt(green,boomTime)) <= 1
+          );
+
+          if(!hit) continue;
+
+          removeMask |= bitOf(cube);
+          urgency = Math.min(urgency,rowAt(cube,boomTime));
+        }
+
+        const shieldCells = [];
+        let shieldable = true;
+
+        for(const red of activeReds){
+          const hit = component.some(green =>
+            Math.abs(red.c - green.c) <= 1 &&
+            Math.abs(rowAt(red,boomTime) - rowAt(green,boomTime)) <= 1
+          );
+
+          if(!hit) continue;
+
+          const rr = rowAt(red,boomTime);
+          if(!canArmCell(mask,fromTime,boomTime,red.c,rr)){
+            shieldable = false;
+            break;
+          }
+
+          shieldCells.push({c:red.c,r:rr,kind:'shield'});
+        }
+
+        if(!shieldable) continue;
+
+        const installs = [
+          {c:triggers[0].c,r:rowAt(triggers[0],boomTime),kind:'bomb'}
+        ].concat(shieldCells);
+
+        const uniqueInstalls = new Map();
+        let conflict = false;
+
+        for(const install of installs){
+          const key = cellKey(install.c,install.r);
+          const previous = uniqueInstalls.get(key);
+
+          if(previous && previous.kind !== install.kind){
+            conflict = true;
+            break;
+          }
+
+          uniqueInstalls.set(key,install);
+        }
+
+        if(conflict || uniqueInstalls.size > limit || removeMask === 0n) continue;
+
+        greenActions.push({
+          removeMask,
+          installs:Array.from(uniqueInstalls.values()),
+          chain:component.length,
+          shields:shieldCells.length,
+          urgency:Number.isFinite(urgency) ? urgency : 99,
+          value:popCount(removeMask)
+        });
+      }
+
+      greenActions.sort((a,b) =>
+        (b.value * 120 + b.chain * 18 - b.shields * 12 - b.installs.length * 4 - b.urgency * 2) -
+        (a.value * 120 + a.chain * 18 - a.shields * 12 - a.installs.length * 4 - a.urgency * 2)
+      );
+
+      // 連鎖成分が極端に多い場合は上位7成分だけを組み合わせ、2^Nの増大を抑える。
+      const selectedGreenActions = greenActions.slice(0,7);
+      const subsetCount = 1 << selectedGreenActions.length;
+      const actionByMask = new Map();
+
+      const addAction = (removeMask,installs,chain,shields,urgency) => {
+        if(removeMask === 0n || installs.length === 0 || installs.length > limit) return;
+
+        const key = maskKey(removeMask);
+        const removedCount = popCount(removeMask);
+        const score =
+          removedCount * 150 +
+          chain * 20 -
+          shields * 10 -
+          installs.length * 3 -
+          urgency * 2;
+
+        const candidate = {
+          removeMask,
+          removedCount,
+          installs:installs.length,
+          chain,
+          shields,
+          urgency,
+          score
+        };
+
+        const previous = actionByMask.get(key);
+
+        // 同じ消去結果なら、設置数が少ない候補、または評価値が高い候補だけを残す。
+        if(!previous || candidate.installs < previous.installs || candidate.score > previous.score){
+          actionByMask.set(key,candidate);
+        }
+      };
+
+      for(let subset=0; subset<subsetCount; subset++){
+        let removeMask = 0n;
+        let chain = 0;
+        let shields = 0;
+        let urgency = Infinity;
+        let valid = true;
+        const installMap = new Map();
+
+        for(let i=0; i<selectedGreenActions.length; i++){
+          if(!(subset & (1 << i))) continue;
+
+          const action = selectedGreenActions[i];
+          removeMask |= action.removeMask;
+          chain += action.chain;
+          shields += action.shields;
+          urgency = Math.min(urgency,action.urgency);
+
+          for(const install of action.installs){
+            const key = cellKey(install.c,install.r);
+            const previous = installMap.get(key);
+
+            if(previous && previous.kind !== install.kind){
+              valid = false;
+              break;
+            }
+
+            installMap.set(key,install);
+          }
+
+          if(!valid || installMap.size > limit) break;
+        }
+
+        if(!valid || installMap.size > limit) continue;
+
+        // 選択済みの緑連鎖で消える通常キューブは、直爆候補から除外する。
+        // これにより、緑の3×3範囲と重複する無駄な青BOOMを置かない。
+        const directCandidates = activeNonReds
+          .filter(cube => cube.type === 'normal' && (removeMask & bitOf(cube)) === 0n)
+          .filter(cube => canArmCell(mask,fromTime,boomTime,cube.c,rowAt(cube,boomTime)))
+          .map(cube => {
+            const r = rowAt(cube,boomTime);
+            let behind = 0;
+            let redAhead = 0;
+
+            for(const other of activeNonReds){
+              if(other.c === cube.c && rowAt(other,boomTime) > r) behind++;
+            }
+
+            for(const red of activeReds){
+              if(red.c === cube.c && rowAt(red,boomTime) < r) redAhead++;
+            }
+
+            // 手前のキューブと、後続キューブの設置経路を塞いでいるキューブを優先する。
+            return {
+              cube,
+              r,
+              score:320 - r * 14 + behind * 22 + redAhead * 10
+            };
+          });
+
+        const budget = limit - installMap.size;
+        const orders = [
+          directCandidates.slice().sort((a,b) =>
+            b.score - a.score || a.r - b.r || a.cube.c - b.cube.c
+          ),
+          directCandidates.slice().sort((a,b) =>
+            a.r - b.r || b.score - a.score || a.cube.c - b.cube.c
+          ),
+          directCandidates.slice().sort((a,b) =>
+            b.r - a.r || b.score - a.score || a.cube.c - b.cube.c
+          )
+        ];
+
+        if(directCandidates.length === 0 || budget <= 0){
+          addAction(
+            removeMask,
+            Array.from(installMap.values()),
+            chain,
+            shields,
+            Number.isFinite(urgency) ? urgency : 99
+          );
+          continue;
+        }
+
+        // 手前優先、通路解放優先、奥側優先の複数候補を残し、
+        // 単純な消去個数だけで将来の突破口を潰さないようにする。
+        for(const order of orders){
+          let candidateMask = removeMask;
+          const candidateInstalls = new Map(installMap);
+          let directUrgency = urgency;
+
+          for(const item of order){
+            if(candidateInstalls.size >= limit) break;
+
+            const install = {c:item.cube.c,r:item.r,kind:'bomb'};
+            const key = cellKey(install.c,install.r);
+            if(candidateInstalls.has(key)) continue;
+
+            candidateInstalls.set(key,install);
+            candidateMask |= bitOf(item.cube);
+            directUrgency = Math.min(directUrgency,item.r);
+          }
+
+          addAction(
+            candidateMask,
+            Array.from(candidateInstalls.values()),
+            chain,
+            shields,
+            Number.isFinite(directUrgency) ? directUrgency : 99
+          );
         }
       }
 
-      if(killedThisWave === 0){
-        // 理論上手が出せない配置(残り全てが赤の真後ろ等)。残りは上限詰めの概算で打ち切る。
-        wave += Math.max(0,Math.ceil(aliveNonRed / limit) - 1);
-        aliveNonRed = 0;
-        break;
+      const actions = Array.from(actionByMask.values());
+      actions.sort((a,b) =>
+        b.score - a.score ||
+        b.removedCount - a.removedCount ||
+        a.installs - b.installs
+      );
+
+      const compact = actions.slice(0,12);
+      actionCache.set(cacheKey,compact);
+      return compact;
+    };
+
+    const initialLatest = latestSafeTime(fullMask);
+    let firstBoomRolls = null;
+    let initialBest = Infinity;
+    const initialStates = [];
+
+    // 初回有効BOOMまでの待機ロールは手数に含めない。
+    // 早い時点で部分爆破できても、さらに待つことで一発全消去できる場合はMIN 1とする。
+    // どのboomTimeを選んでも、それが最初の有効BOOMなら必ず1手目になる。
+    for(let boomTime=1; boomTime<=initialLatest; boomTime++){
+      const actions = buildBoomActions(fullMask,0,boomTime);
+      if(!actions.length) continue;
+
+      if(firstBoomRolls == null) firstBoomRolls = boomTime;
+
+      for(const action of actions){
+        const mask = fullMask & ~action.removeMask;
+        const hands = 1;
+
+        if(mask === 0n){
+          initialBest = 1;
+          break;
+        }
+
+        initialStates.push({time:boomTime,hands,mask,booms:1});
+      }
+
+      if(initialBest === 1) break;
+    }
+
+    if(firstBoomRolls == null){
+      return {turns:fallbackBooms,firstBoomRolls:0,explored:0,exact:false};
+    }
+
+    if(initialBest === 1){
+      return {turns:1,firstBoomRolls,explored:0,exact:true};
+    }
+
+    initialStates.sort((a,b) =>
+      a.hands - b.hands ||
+      popCount(a.mask) - popCount(b.mask) ||
+      a.time - b.time
+    );
+
+    const open = initialStates.slice(0,72);
+    const seen = new Map();
+    let best = initialBest;
+    let explored = 0;
+
+    // 盤面サイズに応じて探索上限を調整する。最大320状態に制限し、スマホでの長時間停止を防ぐ。
+    const maxExpansions = clamp(160 + activeCols * sliceRows * 2,180,320);
+
+    while(open.length && explored < maxExpansions){
+      open.sort((a,b) => {
+        const ah =
+          a.hands +
+          Math.ceil(popCount(a.mask) / limit) * .35 +
+          a.time * .002;
+        const bh =
+          b.hands +
+          Math.ceil(popCount(b.mask) / limit) * .35 +
+          b.time * .002;
+
+        return ah - bh || popCount(a.mask) - popCount(b.mask) || a.time - b.time;
+      });
+
+      const item = open.shift();
+      if(!item || item.hands >= best) continue;
+
+      explored++;
+
+      const stateKey = item.time + ':' + maskKey(item.mask);
+      const previousHands = seen.get(stateKey);
+      if(previousHands !== undefined && previousHands <= item.hands) continue;
+      seen.set(stateKey,item.hands);
+
+      const latest = latestSafeTime(item.mask);
+
+      // 前回BOOM後、1ロール以上進んだ各時点を次の起爆候補にする。
+      // 赤が前を塞いでいるセルは、通過後にはじめてcanArmCellがtrueになる。
+      for(let boomTime=item.time + 1; boomTime<=latest; boomTime++){
+        const actions = buildBoomActions(item.mask,item.time,boomTime);
+        if(!actions.length) continue;
+
+        for(const action of actions){
+          const nextMask = item.mask & ~action.removeMask;
+
+          // 初回有効BOOM後は、次の起爆までに進んだ自動ロール数だけを手数に加算する。
+          // 追加BOOM自体は加算せず、そのBOOMで全消去した時点の値を最終手数とする。
+          const nextHands = item.hands + (boomTime - item.time);
+          if(nextHands >= best) continue;
+
+          if(nextMask === 0n){
+            best = Math.min(best,nextHands);
+            continue;
+          }
+
+          open.push({
+            time:boomTime,
+            hands:nextHands,
+            mask:nextMask,
+            booms:item.booms + 1
+          });
+        }
+      }
+
+      // 候補が増えすぎた場合は、有望な96状態だけを残す。
+      if(open.length > 120){
+        open.sort((a,b) => {
+          const ah = a.hands + Math.ceil(popCount(a.mask) / limit) * .35;
+          const bh = b.hands + Math.ceil(popCount(b.mask) / limit) * .35;
+          return ah - bh || popCount(a.mask) - popCount(b.mask) || a.time - b.time;
+        });
+        open.length = 96;
       }
     }
 
-    if(aliveNonRed > 0){
-      wave += Math.ceil(aliveNonRed / limit);
+    if(Number.isFinite(best)){
+      return {
+        turns:Math.max(1,Math.floor(best)),
+        firstBoomRolls,
+        explored,
+        exact:explored < maxExpansions
+      };
     }
 
-    return Math.max(1,wave);
+    return {
+      turns:Math.max(1,fallbackBooms),
+      firstBoomRolls,
+      explored,
+      exact:false
+    };
   }
+
+  const minimumBoomPlanCache = new Map();
+
+  function computeMinimumBoomPlan(solution, installLimit){
+    const rows = solution && Array.isArray(solution.rows) ? solution.rows : [];
+    const cacheKey = [
+      Math.max(1,Math.floor(Number(installLimit) || 1)),
+      Math.floor(Number(solution && solution.activeCols) || COLS),
+      Math.floor(Number(state.frontBufferRows) || 0),
+      rows.join('/')
+    ].join(':');
+
+    if(minimumBoomPlanCache.has(cacheKey)){
+      return minimumBoomPlanCache.get(cacheKey);
+    }
+
+    const result = computeMinimumBoomPlanUncached(solution,installLimit);
+    minimumBoomPlanCache.set(cacheKey,result);
+
+    if(minimumBoomPlanCache.size > 24){
+      const firstKey = minimumBoomPlanCache.keys().next().value;
+      minimumBoomPlanCache.delete(firstKey);
+    }
+
+    return result;
+  }
+
+  computeMinimumBoomTurns = function(solution, installLimit){
+    return computeMinimumBoomPlan(solution,installLimit).turns;
+  };
 
   // 連鎖の背骨(緑の連結スネーク)＋シールド判断用の赤＋囮の赤、で構成された候補を生成する
   function buildChainCutCandidate(level, cutIndex, sliceRows, activeCols, attempt){
@@ -10929,17 +12050,21 @@ function updateHud(){
       return;
     }
 
-    // 計算上の最低コマ数(最初の起爆ターンを1コマ目とした転がり回数)に対する実績コマ数を表示する。
+    // 実績手数は、最初にキューブを消した爆破を1手目として表示する。
+    // 初回爆破後は、爆破の有無にかかわらず自動ロール1回ごとに1手加算する。
+    // 追加BOOM自体は加算せず、全消去した時点の値を最終手数とする。
     const stats = state.currentCutStats;
     const optimal = Math.max(1,Math.floor(Number(stats.optimalRolls) || 1));
-    const boomed = (stats.activations || 0) > 0;
-    const current = boomed ? 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0)) : 0;
+    const boomed = (stats.removed || 0) > 0;
+    const current = boomed
+      ? 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0))
+      : 0;
 
     const cutNo = Math.min(state.cutNumber || 1,state.cutCount || state.cutNumber || 1);
     const totalCuts = state.cutCount || cutNo;
 
     el.classList.remove('meterGood','meterWarn','meterOver');
-    if(!boomed || current <= optimal){
+    if(current <= optimal){
       el.classList.add('meterGood');
     }else if(current <= optimal + 2){
       el.classList.add('meterWarn');
@@ -10948,8 +12073,8 @@ function updateHud(){
     }
 
     el.innerHTML =
-      `<div class="nextCutHead"><span>ROLLS / MIN</span><b>CUT ${cutNo}/${totalCuts}</b></div>` +
-      `<div class="setMeterValue">${boomed ? current : '–'} <small>/ MIN ${optimal}${boomed ? '' : ' ・未起爆'}</small></div>`;
+      `<div class="nextCutHead"><span>STEP / MIN</span><b>CUT ${cutNo}/${totalCuts}</b></div>` +
+      `<div class="setMeterValue">${current} <small>/ MIN ${optimal}${boomed ? '' : ' ・未爆破'}</small></div>`;
     el.classList.remove('hidden');
   }
 
@@ -11047,7 +12172,12 @@ function updateHud(){
     const normalizedRows = rows.map((line,i) => normalizeLine(line,i));
     const briefSolution = solveCutOptimalPlan(normalizedRows,activeCols);
     const briefInstallLimit = getInstallLimitFor(state.level,state.activeCols || activeCols,state.sliceRows || rows.length || 3);
-        const briefMinBooms = computeMinimumBoomTurns(normalizedRows,activeCols,briefInstallLimit);
+    let briefMinBooms;
+    try{
+      briefMinBooms = computeMinimumBoomTurns(briefSolution,briefInstallLimit);
+    }catch(_){
+      briefMinBooms = Math.max(1,briefSolution.optimalSets || 1);
+    }
     const tacticHints = [];
 
     if((briefSolution.maxChain || 0) >= 2){
@@ -11066,7 +12196,7 @@ function updateHud(){
       tacticHints.push(`通常${briefSolution.uncoveredNormals}個は直爆候補`);
     }
 
-        tacticHints.push(`最短 ${briefMinBooms}コマ`);
+    tacticHints.push(`最短 ${briefMinBooms}手`);
 
     const cells = normalizedRows.map(line => {
       const normalized = normalizeLine(line);
@@ -11083,7 +12213,7 @@ function updateHud(){
       'top:22%;padding:10px 12px;border-radius:18px;background:rgba(3,9,21,.78);' +
       'border-color:rgba(57,216,255,.42);box-shadow:0 18px 45px rgba(0,0,0,.42);';
     dom.message.innerHTML =
-      `<div style='font-size:11px;color:#9bdcff;font-weight:950;letter-spacing:.12em;margin-bottom:5px;'>LEVEL ${state.level} / CUT ${Math.min(state.cutNumber + 1,state.cutCount)}/${state.cutCount} / 最短 ${briefMinBooms}コマ</div>` +
+      `<div style='font-size:11px;color:#9bdcff;font-weight:950;letter-spacing:.12em;margin-bottom:5px;'>LEVEL ${state.level} / CUT ${Math.min(state.cutNumber + 1,state.cutCount)}/${state.cutCount} / 最短 ${briefMinBooms}手</div>` +
       `<div style='font-size:10px;color:#fff2bd;font-weight:900;letter-spacing:.04em;margin-bottom:7px;line-height:1.35;'>${tacticHints.slice(0,3).join(' / ')}</div>` +
       `<div style='display:grid;grid-template-columns:repeat(${activeCols},18px);gap:4px;justify-content:center;'>${cells}</div>`;
     dom.message.classList.add('show');
@@ -11170,16 +12300,29 @@ function updateHud(){
     state.rolling = true;
     const cutSolution = solveCutOptimalPlan(rows,state.activeCols || COLS);
 
-        // 計算上の最低コマ数：設置上限・赤による設置封鎖・誘爆/シールド/直爆の組み合わせを
-    // 波(BOOMターン)単位でシミュレートし、最初の起爆を1コマ目として赤以外を消し切る回数を求める。
+    // 計算上の最低コマ数：一度に設置できる上限を加味した、理論上の最低起爆回数。
+    // 緑連結成分ごとの「起爆＋同時シールド」を不可分グループとして上限内に詰め込み、
+    // 赤以外を全て消すのに必要なBOOM回数(最初の起爆=1コマ目)を求める。
     const installLimitForCut = getInstallLimitFor(state.level,state.activeCols || 5,state.sliceRows || 3);
-    const optimalRolls = computeMinimumBoomTurns(rows,state.activeCols || COLS,installLimitForCut);
+    // ソルバーは表示用の推定器。例外でゲーム進行を止めないよう防御し、失敗時は粗い推定へ。
+    let optimalRolls;
+    let optimalFirstBoomRolls = 1;
+    try{
+      const minimumPlan = computeMinimumBoomPlan(cutSolution,installLimitForCut);
+      optimalRolls = Math.max(1,Math.floor(Number(minimumPlan.turns) || 1));
+      optimalFirstBoomRolls = Math.max(0,Math.floor(Number(minimumPlan.firstBoomRolls) || 0));
+    }catch(err){
+      console.warn('minimum-step solver failed',err);
+      optimalRolls = Math.max(1,Math.ceil((cutSolution.optimalSets || 1) / Math.max(1,installLimitForCut)));
+    }
 
     state.currentCutStats = {
       cutNumber:state.cutNumber,
       startSets:state.stageBombsUsed || 0,
       optimalSets:cutSolution.optimalSets,
       optimalRolls,
+      optimalFirstBoomRolls,
+      preBoomRolls:0,
       rollsAfterBoom:0,
       usedSets:0,
       cubesSpawned:count * (state.activeCols || COLS),
@@ -11191,6 +12334,7 @@ function updateHud(){
       redDanger:0,
       maxChain:0,
       emptyBooms:0,
+      effectiveBooms:0,
       judged:false
     };
 
@@ -11431,13 +12575,17 @@ function updateHud(){
     state.lastStep = now;
     state.rolling = moved > 0;
 
-    // 実績コマ数：最初の起爆ターンを1コマ目とし、赤以外のキューブが
-    // 盤面に残っている間の転がりだけを追加カウントする。
-    // 赤(破壊不可の囮)だけが残って流れていく転がりは評価に含めない。
+    // preBoomRolls は解析用として初回有効BOOMまでのロールを保持するが、実績手数には含めない。
+    // rollsAfterBoom は初回有効爆破後、禁止キューブ以外が残っている間のロールだけを保持する。
+    // 一度の有効BOOMで全消去できた場合は rollsAfterBoom が0となり、実績は必ず1になる。
     const rollStats = state.currentCutStats;
     const hasNonRedCubes = state.cubes.some(cube => cube.type !== 'red');
-    if(moved > 0 && hasNonRedCubes && rollStats && rollStats.cutNumber === state.cutNumber && (rollStats.activations || 0) > 0){
-      rollStats.rollsAfterBoom = (rollStats.rollsAfterBoom || 0) + 1;
+    if(moved > 0 && hasNonRedCubes && rollStats && rollStats.cutNumber === state.cutNumber){
+      if((rollStats.removed || 0) > 0){
+        rollStats.rollsAfterBoom = (rollStats.rollsAfterBoom || 0) + 1;
+      }else{
+        rollStats.preBoomRolls = (rollStats.preBoomRolls || 0) + 1;
+      }
     }
 
     if(!state.rolling){
@@ -13713,21 +14861,17 @@ function updateHud(){
 
 
 
-
-
-
-
 <script id="lfs-meta" type="application/json">
 {
   "appId": "dc88910f3d3446a9dc9470ef08fad724",
   "createdAt": "2026-06-07T14:20:24.080Z",
   "schema": 2,
   "title": "IQube",
-  "savedAt": "2026-07-09T15:05:55.516Z",
-  "aiInstruction": "デバッグ用　レベル7解放",
-  "comment": "デバッグ用　レベル7解放",
+  "savedAt": "2026-06-11T18:19:15.606Z",
+  "aiInstruction": "同じ音楽のレベル（レベル１→レベル２など）は、音楽を途切れさせずシームレスに移行するように",
+  "comment": "同じ音楽のレベル（レベル１→レベル２など）は、音楽を途切れさせずシームレスに移行するように",
   "sourceMode": "project",
-  "runId": "33af94f699da1b8b6cf07cb699f4466e"
+  "runId": "d60b2153e754ee7a0d9b1003a39f089e"
 }
 </script>
 </body>
