@@ -3777,6 +3777,53 @@ const G={
   lastSignal:'',signalT:0,hookOmenHit:false,lastRareOmenAt:0,
 };
 let reeling=false,rodDir=0,rodDirTarget=0;
+let autoReelActive=false;
+const autoReelButton=document.createElement('button');
+autoReelButton.id='btnAutoReel';
+autoReelButton.type='button';
+autoReelButton.textContent='⚡ オートリール';
+autoReelButton.setAttribute('aria-label','オートリールで魚を高速に手繰り寄せる');
+Object.assign(autoReelButton.style,{
+  position:'fixed',
+  right:'calc(14px + env(safe-area-inset-right))',
+  bottom:'calc(92px + env(safe-area-inset-bottom))',
+  minWidth:'132px',
+  height:'46px',
+  padding:'0 16px',
+  display:'none',
+  alignItems:'center',
+  justifyContent:'center',
+  border:'1px solid rgba(255,232,154,.78)',
+  borderRadius:'23px',
+  background:'linear-gradient(180deg,rgba(45,65,82,.96),rgba(15,25,38,.96))',
+  color:'#fff5c8',
+  fontSize:'14px',
+  fontWeight:'800',
+  letterSpacing:'.04em',
+  boxShadow:'0 5px 18px rgba(0,0,0,.45),inset 0 1px rgba(255,255,255,.16)',
+  zIndex:'42',
+  touchAction:'manipulation',
+  userSelect:'none',
+  WebkitUserSelect:'none'
+});
+document.body.appendChild(autoReelButton);
+autoReelButton.addEventListener('click',e=>{
+  e.preventDefault();
+  e.stopPropagation();
+  if(G.state!=='fight'||!G.fight||G.fight.stamina>0)return;
+  autoReelActive=!autoReelActive;
+  autoReelButton.textContent=autoReelActive?'⚡ 高速巻き取り中':'⚡ オートリール';
+  autoReelButton.style.background=autoReelActive
+    ?'linear-gradient(180deg,rgba(245,174,60,.98),rgba(174,83,28,.98))'
+    :'linear-gradient(180deg,rgba(45,65,82,.96),rgba(15,25,38,.96))';
+  autoReelButton.style.color=autoReelActive?'#ffffff':'#fff5c8';
+  if(autoReelActive){
+    showCoach('オートリール開始！高速で手繰り寄せる',900);
+    vib([25,30,55]);
+  }else{
+    showCoach('オートリール停止',650);
+  }
+});
 let tideCombo=0;
 // ---- ジュース演出（ヒットストップ / 白フラッシュ / FOVキック） ----
 let hitStop=0,fovKick=0;
@@ -4186,6 +4233,11 @@ function pickup(){
 
 // ---------- ファイト ----------
 function startFight(f,hookQuality){
+  autoReelActive=false;
+  autoReelButton.style.display='none';
+  autoReelButton.textContent='⚡ オートリール';
+  autoReelButton.style.background='linear-gradient(180deg,rgba(45,65,82,.96),rgba(15,25,38,.96))';
+  autoReelButton.style.color='#fff5c8';
   f.state='hooked';
   G.lureBusy=null;
   const dx=G.lure.x, dz=P0Z-G.lure.z;
@@ -4256,6 +4308,11 @@ function startRun(F){
   else if(type==='boss')showCoach('大物が走る！巻きすぎ注意',820);
 }
 function endFightUI(){
+  autoReelActive=false;
+  autoReelButton.style.display='none';
+  autoReelButton.textContent='⚡ オートリール';
+  autoReelButton.style.background='linear-gradient(180deg,rgba(45,65,82,.96),rgba(15,25,38,.96))';
+  autoReelButton.style.color='#fff5c8';
   document.body.classList.remove('is-fighting');
   $('tens').style.display='none'; $('tlabel').style.display='none';
   $('distwrap').style.display='none';
@@ -4292,6 +4349,33 @@ function updateFight(dt,t){
   const diff=F.difficulty||getSpeciesDifficulty(F.spc);
   const tprof=getTensionProfile(F.spc,F);
   const dprof=getStaminaDamageProfile(F.spc,F);
+  const canAutoReel=tired&&G.state==='fight';
+  if(canAutoReel){
+    autoReelButton.style.display='flex';
+    if(!F.autoReelReadyNotified){
+      F.autoReelReadyNotified=true;
+      showCoach('魚が弱った！オートリール使用可能',1050);
+      vib([25,35,45]);
+    }
+  }else{
+    autoReelActive=false;
+    autoReelButton.style.display='none';
+  }
+  if(canAutoReel&&autoReelActive){
+    F.running=false;
+    F.tele=false;
+    F.runT=999;
+    F.octoStuck=false;
+    F.octoGrip=0;
+    F.over=0;
+    F.slack=0;
+  }
+  const reelNow=reeling||(canAutoReel&&autoReelActive);
+  // オートリールは一定速度で吸い寄せず、巻き取りと小休止を滑らかに繰り返す。
+  const autoReelPulse=(canAutoReel&&autoReelActive)
+    ?0.72+0.28*(0.5+0.5*Math.sin(t*6.2))
+    :1;
+  const autoReelMul=(canAutoReel&&autoReelActive)?2.2:1;
   F.tensionProfile=tprof;
   applyTensionZoneUI(tprof);
   let pull=F.pull*(tired?getTiredPullMul(F.spc,F):1);
@@ -4371,7 +4455,12 @@ function updateFight(dt,t){
   const mismatchPower=((type==='dash'||type==='runner'||type==='boss')?1.46:(type==='heavy'||type==='octopus'?1.18:1))*(tprof.mismatchMul||1);
   // テンション
   let dT=0;
-  if(reeling){
+  if(canAutoReel&&autoReelActive){
+    const greenCenter=(tprof.greenLo+tprof.greenHi)*0.5;
+    const greenWidth=Math.max(0.04,tprof.greenHi-tprof.greenLo);
+    const autoSafeTension=greenCenter+Math.sin(t*3.1)*greenWidth*0.08;
+    dT+=(autoSafeTension-F.tension)*(5.2+autoReelPulse*1.8);
+  }else if(reelNow){
     dT+=0.50+pull*0.32+mismatch*0.34*mismatchPower;
     if(F.running)dT+=1.08*pull;
   }else{
@@ -4405,11 +4494,12 @@ function updateFight(dt,t){
     }
   }
   // 距離
-  if(reeling&&F.tension<1.0){
+  if(reelNow&&F.tension<1.0){
     const tiredReelMul=tired?getTiredReelMul(F.spc,F):1;
-    F.dist-=reelBase()*(1.0-0.45*F.tension)*tiredReelMul*(F.running?0.25:1)*dt;
+    const retrievePulse=(canAutoReel&&autoReelActive)?autoReelPulse:1;
+    F.dist-=reelBase()*(1.0-0.45*F.tension)*tiredReelMul*(F.running?0.25:1)*autoReelMul*retrievePulse*dt;
   }
-  if(F.running){ F.dist+=(reeling?0.6:2.2)*pull*dt; }
+  if(F.running){ F.dist+=(reelNow?0.6:2.2)*pull*dt; }
   F.dist=clamp(F.dist,1.5,80);
   if(F.dist>=74){ lineBreak(); return; }
   // 体力
@@ -4456,17 +4546,25 @@ function updateFight(dt,t){
   // コーチング
   G.coachT-=dt;
   if(G.coachT<=0){
-    if(F.running&&reeling&&F.tension>tprof.greenHi){ showCoach('強引すぎる。少し緩めろ',760); G.coachT=1.0; }
+    if(canAutoReel&&autoReelActive){
+      showCoach('オートリール中　あと '+F.dist.toFixed(1)+'m',620);
+      G.coachT=0.9;
+    }
+    else if(F.running&&reelNow&&F.tension>tprof.greenHi){ showCoach('強引すぎる。少し緩めろ',760); G.coachT=1.0; }
     else if(mismatch>0.62&&(type==='runner'||type==='dash'||type==='boss')){ showCoach('魚の走る方向に竿を合わせろ',760); G.coachT=1.0; }
-    else if(!reeling&&!F.running&&F.tension<tprof.greenLo*0.75){ showCoach('糸がたるんでいる',800); G.coachT=1.35; }
-    else if(!reeling&&!F.running&&F.tension<tprof.greenLo){ showCoach('長押しで巻け！',800); G.coachT=1.4; }
+    else if(!reelNow&&!F.running&&F.tension<tprof.greenLo*0.75){ showCoach('糸がたるんでいる',800); G.coachT=1.35; }
+    else if(!reelNow&&!F.running&&F.tension<tprof.greenLo){ showCoach('長押しで巻け！',800); G.coachT=1.4; }
   }
   // 魚の位置・演出
   const f=F.f;
   const depth=-(0.30+0.95*staRatio);
+  if(canAutoReel&&autoReelActive){
+    const tiredSway=Math.sin(t*2.4)*0.012*(0.35+Math.min(F.dist,30)/30);
+    F.theta=clamp(F.theta+tiredSway*dt,-thMax,thMax);
+  }
   f.pos.set(Math.sin(F.theta)*F.dist,depth,P0Z-Math.cos(F.theta)*F.dist);
-  f.heading=F.theta+Math.PI+Math.sin(t*6)*0.25;
-  f.tailPivot.rotation.y=Math.sin(t*(F.running?16:9))*0.7;
+  f.heading=F.theta+Math.PI+Math.sin(t*(autoReelActive?3.8:6))*0.25;
+  f.tailPivot.rotation.y=Math.sin(t*(F.running?16:(autoReelActive?6.2:9)))*0.7;
   f.mat.opacity=clamp(0.55+depth*0.2,0.15,0.5);
   f.mesh.position.set(f.pos.x,f.pos.y+waveH(f.pos.x,f.pos.z,t)*0.3,f.pos.z);
   f.mesh.rotation.y=f.heading;
@@ -4480,9 +4578,12 @@ function updateFight(dt,t){
   G.lure.x=f.pos.x; G.lure.z=f.pos.z;
   lureGroup.position.set(f.pos.x,-0.12,f.pos.z);
   // リール音
-  if(reeling){
+  if(reelNow){
     G.reelSndT-=dt;
-    if(G.reelSndT<=0){ G.reelSndT=0.09; sReel(); }
+    if(G.reelSndT<=0){
+      G.reelSndT=autoReelActive?(0.075+(1-autoReelPulse)*0.055):0.09;
+      sReel();
+    }
   }
   // UI
   const tp=F.tension/1.15*100;
@@ -4496,7 +4597,13 @@ function updateFight(dt,t){
   $('arrowL').style.display=(sc.x<0)?'block':'none';
   $('arrowR').style.display=(sc.x>innerWidth)?'block':'none';
   // ロッド
-  rodBend=F.tension*(F.running?1.15:1.0);
+  if(canAutoReel&&autoReelActive){
+    const reelPump=0.94+Math.sin(t*6.2)*0.055;
+    rodBend=F.tension*reelPump;
+    rodDirTarget=lerp(rodDirTarget,clamp(F.theta/thMax,-1,1)*0.42,Math.min(dt*2.2,1));
+  }else{
+    rodBend=F.tension*(F.running?1.15:1.0);
+  }
   // 取り込み
   if(F.dist<=2.3) landFish();
 }
