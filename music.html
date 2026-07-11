@@ -534,6 +534,9 @@
                                 <i data-lucide="save" class="w-4 h-4"></i> 調整版として保存
                             </button>
                         </div>
+                        <button onclick="copyCommittedTuningSettings()" class="w-full min-h-[44px] py-2 px-3 bg-sky-950/70 hover:bg-sky-900 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2 border border-sky-700/70 text-sky-200">
+                            <i data-lucide="copy" class="w-4 h-4"></i> 調整設定コピー
+                        </button>
                     </div>
                 </div>
 
@@ -1007,6 +1010,7 @@
             playbackPositionSec = 0;
             visualizerTempoBpm = parseTempoFromABC(currentABC);
             window.currentMidi = null;
+            currentMidiOwner = null;
             document.getElementById('current-title').innerText = title;
         }
 
@@ -2897,6 +2901,7 @@ V:8 nm="Timpani" snm="Timp"
         let tuningGeneration = 0;
         let musicLoadGeneration = 0;
         let playbackIntentGeneration = 0;
+        let currentMidiOwner = null;
 
         function invalidatePendingTuning() {
             tuningGeneration++;
@@ -2916,6 +2921,26 @@ V:8 nm="Timpani" snm="Timp"
             }
         }
 
+        function isMidiOwnerGenerationCurrent(ownerId) {
+            const match = String(ownerId || '').match(/^(music|tuning):(\d+)$/);
+            if (!match) return true;
+
+            const generation = Number(match[2]);
+            return match[1] === 'music'
+                ? generation === musicLoadGeneration
+                : generation === tuningGeneration;
+        }
+
+        function stopSynthIfOwned(synth, ownerId, contextLabel) {
+            if (!synth) return false;
+            if (window.currentMidi !== synth) return false;
+            if (currentMidiOwner !== ownerId) return false;
+            if (!isMidiOwnerGenerationCurrent(ownerId)) return false;
+
+            stopTransientSynth(synth, contextLabel);
+            return true;
+        }
+
         function cloneTuningState(tuning) {
             const normalized = normalizeTuningForABC(currentABC, tuning);
             return {
@@ -2933,13 +2958,19 @@ V:8 nm="Timpani" snm="Timp"
 
         async function applyInstrumentTuning() {
             const currentGen = ++tuningGeneration;
+            const midiOwnerId = `tuning:${currentGen}`;
             const intentGen = playbackIntentGeneration;
             const wasPlaying = window.isPlaying;
             const previousPlaybackState = playbackState;
             const previousMidi = window.currentMidi;
+            const previousMidiOwner = currentMidiOwner;
             const previousDurationSec = playbackDurationSec;
             const previousTuning = cloneTuningState(currentTuning);
             const previousPreviewABC = previewABC;
+
+            if (previousMidi && window.currentMidi === previousMidi) {
+                currentMidiOwner = midiOwnerId;
+            }
 
             const candidateTuning = getCurrentTuningSnapshot();
             const candidatePreviewABC = buildPreviewABC(currentABC, candidateTuning);
@@ -2974,7 +3005,7 @@ V:8 nm="Timpani" snm="Timp"
 
                 const requestedPosition = Math.max(0, playbackPositionSec || 0);
 
-                stopTransientSynth(previousMidi, "Previous Tuning Synth");
+                stopSynthIfOwned(previousMidi, midiOwnerId, "Previous Tuning Synth");
                 clearPlaybackTimers();
 
                 currentTuning = cloneTuningState(candidateTuning);
@@ -2982,6 +3013,7 @@ V:8 nm="Timpani" snm="Timp"
                 playbackDurationSec = primed && primed.duration ? primed.duration : 0;
                 committedPosition = clampPlaybackTime(requestedPosition);
                 window.currentMidi = nextMidi;
+                currentMidiOwner = midiOwnerId;
                 committed = true;
                 updatePlaybackBar(committedPosition);
 
@@ -2995,20 +3027,22 @@ V:8 nm="Timpani" snm="Timp"
                     await nextMidi.start();
 
                     if (currentGen !== tuningGeneration || intentGen !== playbackIntentGeneration) {
-                        stopTransientSynth(nextMidi, "Stale Started Tuning Synth");
+                        stopSynthIfOwned(nextMidi, midiOwnerId, "Stale Started Tuning Synth");
                         return;
                     }
 
                     setPlaybackState('playing');
                     startPlaybackTracking(committedPosition);
-                } else {
-                    if (intentGen === playbackIntentGeneration) {
-                        setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
-                        updatePlaybackBar(committedPosition);
-                    }
+                } else if (intentGen === playbackIntentGeneration) {
+                    setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
+                    updatePlaybackBar(committedPosition);
                 }
             } catch (e) {
-                stopTransientSynth(nextMidi, "Failed Tuning Synth");
+                if (committed) {
+                    stopSynthIfOwned(nextMidi, midiOwnerId, "Failed Tuning Synth");
+                } else {
+                    stopTransientSynth(nextMidi, "Failed Tuning Synth");
+                }
 
                 if (currentGen !== tuningGeneration) {
                     return;
@@ -3021,11 +3055,15 @@ V:8 nm="Timpani" snm="Timp"
                 restoreInstrumentTuningUI(previousTuning);
 
                 if (!committed) {
+                    if (window.currentMidi === previousMidi && currentMidiOwner === midiOwnerId) {
+                        currentMidiOwner = previousMidiOwner;
+                    }
                     return;
                 }
 
-                if (window.currentMidi === nextMidi) {
+                if (window.currentMidi === nextMidi && currentMidiOwner === midiOwnerId) {
                     window.currentMidi = previousMidi;
+                    currentMidiOwner = previousMidiOwner;
                     playbackDurationSec = previousDurationSec;
                 }
 
@@ -3052,7 +3090,6 @@ V:8 nm="Timpani" snm="Timp"
                         await previousMidi.start();
 
                         if (currentGen !== tuningGeneration || intentGen !== playbackIntentGeneration) {
-                            stopTransientSynth(previousMidi, "Stale Rollback Synth");
                             return;
                         }
 
@@ -3105,6 +3142,7 @@ V:8 nm="Timpani" snm="Timp"
 
         function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null, compositionBrief = null) {
             const loadGen = ++musicLoadGeneration;
+            const midiOwnerId = `music:${loadGen}`;
             invalidatePendingTuning();
 
             if (typeof stopAllMusic === 'function') stopAllMusic();
@@ -3558,6 +3596,7 @@ V:8 nm="Timpani" snm="Timp"
                         playbackDurationSec = primed && primed.duration ? primed.duration : 0;
                         updatePlaybackBar(0);
                         window.currentMidi = midi;
+                        currentMidiOwner = midiOwnerId;
                         setPlaybackState('stopped');
                         completeGameReadyAnalysis(gameReadyContext, {
                             renderOk: true,
@@ -4492,46 +4531,92 @@ V:8 nm="Timpani" snm="Timp"
             }, 2200);
         }
 
+        function updateAbcCopyButtonLabel() {
+            const button = document.querySelector('button[onclick="copyAbcCode()"]');
+            if (!button) return;
+
+            const icon = document.createElement('i');
+            icon.setAttribute('data-lucide', 'copy');
+            icon.className = 'w-4 h-4';
+
+            button.replaceChildren(icon, document.createTextNode(' 原本ABCコピー'));
+            button.setAttribute('aria-label', '試聴用調整を含まない原本ABCをコピー');
+            button.title = '試聴用の音量・ミュート設定を含まない原本ABCをコピーします';
+            safeCreateIcons();
+        }
+
+        async function writeTextToClipboardWithoutAlert(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-99999px';
+            textarea.style.top = '0';
+            textarea.style.opacity = '0';
+            textarea.style.pointerEvents = 'none';
+            document.body.appendChild(textarea);
+            textarea.select();
+            textarea.setSelectionRange(0, textarea.value.length);
+
+            try {
+                const copied = document.execCommand('copy');
+                if (!copied) {
+                    throw new Error("ブラウザのコピー処理に失敗しました。");
+                }
+            } finally {
+                textarea.remove();
+            }
+        }
+
         async function copyAbcCode() {
             if (!currentABC) {
                 showAbcCopyNotice("コピーする楽曲データがありません。", true);
                 return;
             }
 
-            // previewABCにはSonicForge内の試聴専用MIDI音量命令が含まれるため、
-            // 外部で確実に再生できる採用中ABCから専用命令を除いてコピーする。
             const exportABC = stripSonicForgePreviewDirectives(currentABC);
 
             try {
-                if (navigator.clipboard && window.isSecureContext) {
-                    await navigator.clipboard.writeText(exportABC);
-                } else {
-                    const textarea = document.createElement('textarea');
-                    textarea.value = exportABC;
-                    textarea.setAttribute('readonly', '');
-                    textarea.style.position = 'fixed';
-                    textarea.style.left = '-99999px';
-                    textarea.style.top = '0';
-                    textarea.style.opacity = '0';
-                    textarea.style.pointerEvents = 'none';
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    textarea.setSelectionRange(0, textarea.value.length);
-
-                    const copied = document.execCommand('copy');
-                    textarea.remove();
-
-                    if (!copied) {
-                        throw new Error("ブラウザのコピー処理に失敗しました。");
-                    }
-                }
-
-                // alertを使わず、Web Audioの再生を妨げない通知にする。
-                showAbcCopyNotice("再生可能なABCコードをコピーしました。");
+                await writeTextToClipboardWithoutAlert(exportABC);
+                showAbcCopyNotice("試聴用調整を含まない原本ABCをコピーしました。");
             } catch (e) {
                 console.error("ABC Copy Error:", e);
-                showAbcCopyNotice("ABCコードのコピーに失敗しました。", true);
+                showAbcCopyNotice("原本ABCのコピーに失敗しました。", true);
             }
+        }
+
+        async function copyCommittedTuningSettings() {
+            if (!currentABC) {
+                showAbcCopyNotice("コピーする調整設定がありません。", true);
+                return;
+            }
+
+            const committedTuning = currentTuning
+                ? cloneTuningState(currentTuning)
+                : cloneTuningState(normalizeTuningForABC(currentABC, null));
+            const payload = {
+                activeVoices: committedTuning.activeVoices.slice(),
+                voiceVolumes: { ...committedTuning.voiceVolumes }
+            };
+
+            try {
+                await writeTextToClipboardWithoutAlert(JSON.stringify(payload, null, 2));
+                showAbcCopyNotice("確定済みの調整設定をJSONでコピーしました。");
+            } catch (e) {
+                console.error("Tuning Settings Copy Error:", e);
+                showAbcCopyNotice("調整設定のコピーに失敗しました。", true);
+            }
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', updateAbcCopyButtonLabel, { once: true });
+        } else {
+            updateAbcCopyButtonLabel();
         }
 
         function toggleMetaDisplay() {
