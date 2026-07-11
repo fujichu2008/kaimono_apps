@@ -713,8 +713,12 @@ class Kart {
     this.patchGrip=1; this.patchSlow=1;
     this.items=[]; this.pendingItem=null; this.rouletteT=0;
     this.hits=0; this.finished=false; this.finishTime=0; this.rank=1;
-    this.aiItemT = 2+Math.random()*4;
+    this.aiItemT = .9+Math.random()*1.4;
     this.aiTargetLat = 0;
+    this.aiSkill=1;
+    this.aiSpeedMul=1;
+    this.aiAccelMul=1;
+    this.aiLineBias=0;
     this.wallCd=0;
     this.mesh = this.buildMesh();
     this._v=new THREE.Vector3(); this._t=new THREE.Vector3(); this._u=new THREE.Vector3();
@@ -836,11 +840,14 @@ class Kart {
     }
     // grip
     let g = cfg.grip * stage.grip * this.patchGrip;
-    // speed
-    let maxS = cfg.maxSpd * (this.boostT>0?1.45:1) * (this.ramT>0?1.22:1)
+    // speed（AIのみ個体差・追い上げ補正を実速度へ反映）
+    const speedMul=this.isPlayer?1:this.aiSpeedMul;
+    const accelMul=this.isPlayer?1:this.aiAccelMul;
+    let maxS = cfg.maxSpd * speedMul * (this.boostT>0?1.45:1) * (this.ramT>0?1.22:1)
                * (this.slowT>0?.55:1) * this.patchSlow;
     if(this.spinT>0) maxS = 7;
-    const accel = (this.brakeHeld? -46 : (this.accelHeld? cfg.accel : -14));
+    const driveAccel=cfg.accel*accelMul;
+    const accel = (this.brakeHeld? -46 : (this.accelHeld? driveAccel : -14));
     this.spd += accel*dt;
     if(this.spd>maxS) this.spd += (maxS-this.spd)*Math.min(1,dt*4);
     if(this.spd<0) this.spd=0;
@@ -894,51 +901,83 @@ class Kart {
   }
   aiUpdate(dt, race){
     const tr=this.track;
-    const lookS = this.p + 8 + this.spd*.32;
-    // レーシングライン: カーブ内側へ
-    let target = THREE.MathUtils.clamp(-tr.kapAt(lookS)*260, -(HALF_W-2.6), HALF_W-2.6);
-    // 障害物・バナナ回避
+    const lookS=this.p+14+this.spd*.5;
+    // 先読み距離を伸ばし、個体ごとのライン差を残しながらカーブ内側へ寄せる
+    let target=THREE.MathUtils.clamp(
+      -tr.kapAt(lookS)*315+this.aiLineBias,
+      -(HALF_W-2.3), HALF_W-2.3
+    );
+    // 最も近い障害物だけを評価し、自車位置から空いている側へ回避
+    let nearestHazard=null, nearestHazardD=1e9;
     for(const o of race.hazards()){
-      let dp = tr.wrap(o.p - this.p);
-      if(dp<26 && Math.abs(o.lat-this.lat)<3.0){
-        target = o.lat > 0 ? o.lat-4.2 : o.lat+4.2;
-        target = THREE.MathUtils.clamp(target, -(HALF_W-1.6), HALF_W-1.6);
-        break;
+      const dp=tr.wrap(o.p-this.p);
+      if(dp<34 && dp<nearestHazardD && Math.abs(o.lat-this.lat)<3.4){
+        nearestHazard=o; nearestHazardD=dp;
       }
     }
-    // アイテムボックスへは寄る
-    if((this.items.length + (this.pendingItem?1:0)) < 2){
+    if(nearestHazard){
+      const passRight=nearestHazard.lat<=this.lat;
+      target=THREE.MathUtils.clamp(
+        nearestHazard.lat+(passRight?4.5:-4.5),
+        -(HALF_W-1.5), HALF_W-1.5
+      );
+    }
+    // 中身が見える箱から、順位と状況に合うアイテムを選ぶ
+    if(!nearestHazard && (this.items.length+(this.pendingItem?1:0))<2){
+      const value={banana:1.2,boost:2.5,missile:2.4,shield:1.9,ram:2.0,thunder:this.rank>=5?3.5:-99};
+      let bestBox=null, bestScore=-1e9;
       for(const b of race.boxes){
         if(!b.alive) continue;
         const dp=tr.wrap(b.p-this.p);
-        if(dp<40 && Math.abs(b.lat-this.lat)<5){ target=b.lat; break; }
+        if(dp>=65) continue;
+        const situational=((b.item==='boost' && this.rank>=3)?.7:0)
+          +((b.item==='missile' && this.rank>1)?.5:0)
+          +((b.item==='shield' && race.projectiles.some(ms=>ms.target===this))?.9:0);
+        const score=(value[b.item]||1)+situational-dp*.018-Math.abs(b.lat-this.lat)*.12;
+        if(score>bestScore){ bestScore=score; bestBox=b; }
       }
+      if(bestBox) target=bestBox.lat;
     }
-    this.steer = THREE.MathUtils.clamp((target-this.lat)*.42 - this.latV*.11, -1, 1);
-    // ブレーキ判断
-    const km = tr.kapAhead(this.p, 18+this.spd*.6);
-    const safe = Math.sqrt( (this.cfg.grip*this.stage.grip*9.5) / Math.max(km,1e-4) ) * 1.15;
-    this.brakeHeld = this.spd > safe+6;
-    this.accelHeld = !this.brakeHeld;
-    // ラバーバンド
-    const gap = race.player.p - this.p;
-    this.rubber = THREE.MathUtils.clamp(1 + gap/900, .86, 1.16);
-    // ちょい実装: maxSpdへ直接効かせるためcfgを一時変形せずspd上限側で吸収
-    if(this.spd > this.cfg.maxSpd*this.rubber) this.spd = this.cfg.maxSpd*this.rubber;
-    // アイテム使用判断
+    this.steer=THREE.MathUtils.clamp(
+      (target-this.lat)*(.46+this.aiSkill*.04)-this.latV*.14,
+      -1,1
+    );
+    // 不要な減速を減らし、カーブがある時だけ適正速度までブレーキ
+    const km=tr.kapAhead(this.p,24+this.spd*.75);
+    const safe=Math.sqrt(
+      (this.cfg.grip*this.stage.grip*9.5)/Math.max(km,1e-4)
+    )*(1.22+(this.aiSkill-1)*.55);
+    this.brakeHeld=km>.0028 && this.spd>safe+8;
+    this.accelHeld=!this.brakeHeld || this.spd<safe-2;
+    // 後方時は実際の最高速・加速へ補正し、先行時は過剰に逃げ切らない
+    const gap=race.player.p-this.p;
+    const catchUp=THREE.MathUtils.clamp(gap/420,-.035,.11);
+    this.aiSpeedMul=THREE.MathUtils.clamp(this.aiSkill+catchUp,.94,1.11);
+    this.aiAccelMul=THREE.MathUtils.clamp(
+      this.aiSkill+Math.max(0,gap)/700*.12,
+      .98,1.18
+    );
+    // アイテムを短い間隔で状況判断。被ロック中のシールドは即時使用
     this.aiItemT-=dt;
-    if(this.items.length>0 && this.aiItemT<=0){
-      this.aiItemT = 1.5+Math.random()*3;
-      const ahead = race.karts.find(k=>k!==this && tr.wrap(k.p-this.p)<70 && tr.wrap(k.p-this.p)>2);
-      const behind= race.karts.find(k=>k!==this && tr.wrap(this.p-k.p)<25 && tr.wrap(this.p-k.p)>1);
+    const threatened=race.projectiles.some(ms=>ms.target===this && ms.life>0);
+    if(this.items.length>0 && (this.aiItemT<=0 || (this.items[0]==='shield'&&threatened))){
+      this.aiItemT=.65+Math.random()*1.4;
+      let aheadD=1e9, behindD=1e9;
+      for(const k of race.karts){
+        if(k===this) continue;
+        const da=tr.wrap(k.p-this.p);
+        const db=tr.wrap(this.p-k.p);
+        if(da>2 && da<aheadD) aheadD=da;
+        if(db>1 && db<behindD) behindD=db;
+      }
       const it=this.items[0];
-      if(it==='missile' && ahead) this.useItem(race);
-      else if(it==='banana' && behind) this.useItem(race);
-      else if(it==='boost' && Math.abs(tr.kapAhead(this.p,40))<.006) this.useItem(race);
-      else if(it==='ram' && (ahead||behind)) this.useItem(race);
-      else if(it==='shield') this.useItem(race);
-      else if(it==='thunder') this.useItem(race);
-      else if(Math.random()<.25) this.useItem(race);
+      if(it==='missile' && aheadD<95) this.useItem(race);
+      else if(it==='banana' && behindD<34) this.useItem(race);
+      else if(it==='boost' && (gap>18 || Math.abs(tr.kapAhead(this.p,45))<.01)) this.useItem(race);
+      else if(it==='ram' && (aheadD<20 || behindD<11)) this.useItem(race);
+      else if(it==='shield' && (threatened || Math.random()<.55)) this.useItem(race);
+      else if(it==='thunder' && this.rank>=4) this.useItem(race);
+      else if(Math.random()<.38) this.useItem(race);
     }
   }
 }
@@ -1019,6 +1058,10 @@ class Race {
       k.p = -8 - Math.floor(i/2)*7; // ライン手前(負値)から。wrap()が負を吸収
       k.lat = (i%2===0? -3.2 : 3.2);
       if(!isP){
+        // 後方グリッドほど少し高スキルにし、全車が同じ走りにならない個体差も付与
+        const rivalIndex=i-1;
+        k.aiSkill=.96+rivalIndex*.018+Math.random()*.015;
+        k.aiLineBias=(Math.random()-.5)*.8;
         // AI色をばらす
         const hue=Math.random();
         k.mesh.traverse(o=>{ if(o.isMesh && o.material.color && o.material.shininess===90)
