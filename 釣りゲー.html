@@ -2541,19 +2541,133 @@ const CAM_BASE=new THREE.Vector3(0,3.0,6.6);
 camera.position.copy(CAM_BASE);
 const P0Z=4.6; // プレイヤー(桟橋先端)基準z
 
-scene.add(new THREE.HemisphereLight(0xffd0a0,0x20304a,0.95));
+const hemi=new THREE.HemisphereLight(0xffd0a0,0x20304a,0.95);
+scene.add(hemi);
 const sun=new THREE.DirectionalLight(0xffb070,0.85);
 sun.position.set(-25,20,-60); scene.add(sun);
+
+// --- 朝潮・大嵐イベント ---
+// 通常運用ではfalse。朝潮へ出航するたびに低確率で大嵐を抽選する。
+const ASASHIO_STORM_DEBUG_ALWAYS=false;
+const ASASHIO_STORM_CHANCE=0.08;
+const stormState={
+  randomActive:false,
+  level:0,
+  lightning:0,
+  lightningT:rand(1.5,4.0),
+  thunderDelay:0,
+  announced:false
+};
+function prepareAsashioStormForTrip(){
+  stormState.randomActive=activeSceneId==='asashio'
+    &&Math.random()<ASASHIO_STORM_CHANCE;
+  stormState.announced=false;
+  stormState.lightning=0;
+  stormState.lightningT=rand(1.5,4.0);
+  stormState.thunderDelay=0;
+}
+const stormFogYunagi=new THREE.Color(0xc76a4a);
+const stormFogAsashio=new THREE.Color(0xa9c8d6);
+const stormFogYoito=new THREE.Color(0x273448);
+const stormFogDark=new THREE.Color(0x172735);
+const stormCloudClear=new THREE.Color(0xfdf6ea);
+const stormCloudDark=new THREE.Color(0x263747);
+const stormSunYunagi=new THREE.Color(0xffb070);
+const stormSunAsashio=new THREE.Color(0xffefd0);
+const stormSunYoito=new THREE.Color(0xaab8c8);
+const stormSunDark=new THREE.Color(0x8fa9bb);
+function isAsashioStorm(){
+  return activeSceneId==='asashio'&&(ASASHIO_STORM_DEBUG_ALWAYS||stormState.randomActive);
+}
+function updateStormState(dt,t){
+  const active=isAsashioStorm();
+  const target=active?1:0;
+  stormState.level=lerp(stormState.level,target,Math.min(dt*(active?0.72:1.25),1));
+  const lv=stormState.level;
+  const visualStorm=activeSceneId==='asashio'?lv:0;
+  const baseFog=activeSceneId==='asashio'
+    ?stormFogAsashio
+    :(activeSceneId==='yoito'?stormFogYoito:stormFogYunagi);
+  const baseSun=activeSceneId==='asashio'
+    ?stormSunAsashio
+    :(activeSceneId==='yoito'?stormSunYoito:stormSunYunagi);
+
+  skyMat.uniforms.uStorm.value=visualStorm;
+  waterMat.uniforms.uStorm.value=visualStorm;
+  scene.fog.color.copy(baseFog);
+  sun.color.copy(baseSun);
+  cloudMat.color.copy(stormCloudClear);
+
+  if(visualStorm>0){
+    scene.fog.color.lerp(stormFogDark,visualStorm);
+    sun.color.lerp(stormSunDark,visualStorm);
+    cloudMat.color.lerp(stormCloudDark,visualStorm);
+  }
+
+  sun.intensity=lerp(0.85,0.28,visualStorm)+stormState.lightning*1.7;
+  hemi.intensity=lerp(0.95,0.36,visualStorm)+stormState.lightning*0.48;
+  cloudMat.opacity=lerp(0.82,0.94,visualStorm);
+
+  if(activeSceneId==='asashio'){
+    scene.fog.near=lerp(55,24,visualStorm);
+    scene.fog.far=lerp(155,88,visualStorm);
+  }
+  camSwayAmp=Math.max(camSwayAmp,visualStorm*0.30);
+  rainLines.visible=isRaining()||visualStorm>0.04;
+  rainLines.material.opacity=0.38+visualStorm*0.34;
+
+  if(active&&lv>0.18)startRainSound();
+  else if(!isRaining()&&lv<0.04)stopRainSound();
+
+  if(active&&G.state!=='title'&&!stormState.announced){
+    stormState.announced=true;
+    showMsg('大嵐が来た――海が一変する！',1900,true);
+    showCoach('大型魚の気配が濃い。波と突進に注意',1500);
+    vib([45,45,85,40,120]);
+  }
+  if(!active)stormState.announced=false;
+
+  if(active&&lv>0.72){
+    stormState.lightningT-=dt;
+    if(stormState.lightningT<=0){
+      stormState.lightningT=rand(3.8,8.5);
+      stormState.lightning=1;
+      stormState.thunderDelay=rand(0.12,0.48);
+      triggerFlash();
+    }
+  }
+  if(stormState.thunderDelay>0){
+    stormState.thunderDelay-=dt;
+    if(stormState.thunderDelay<=0&&active){
+      noiseBurst(1.05,0.105,190);
+      tone(48,0.72,'sine',0.10,32);
+      vib([25,50,70]);
+    }
+  }
+  stormState.lightning=Math.max(0,stormState.lightning-dt*3.0);
+  skyMat.uniforms.uFlash.value=stormState.lightning;
+}
 
 // --- 空ドーム ---
 const skyMat=new THREE.ShaderMaterial({
   side:THREE.BackSide,depthWrite:false,
-  uniforms:{uSun:{value:new THREE.Vector3(-0.12,0.075,-1).normalize()},uMorning:{value:0}},
+  uniforms:{
+    uSun:{value:new THREE.Vector3(-0.12,0.075,-1).normalize()},
+    uMorning:{value:0},
+    uTime:{value:0},
+    uStorm:{value:0},
+    uFlash:{value:0}
+  },
   vertexShader:`
     varying vec3 vD;
     void main(){ vD=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
   fragmentShader:`
-    varying vec3 vD; uniform vec3 uSun; uniform float uMorning;
+    varying vec3 vD;
+    uniform vec3 uSun;
+    uniform float uMorning;
+    uniform float uTime;
+    uniform float uStorm;
+    uniform float uFlash;
     void main(){
       vec3 d=normalize(vD);
       float h=clamp(d.y,0.0,1.0);
@@ -2567,6 +2681,15 @@ const skyMat=new THREE.ShaderMaterial({
       vec3 sunCol=mix(vec3(1.0,0.8,0.5),vec3(1.0,0.95,0.8),uMorning);
       vec3 haloCol=mix(vec3(1.0,0.5,0.3),vec3(1.0,0.85,0.6),uMorning);
       col+=sunCol*sg*1.3+haloCol*halo*0.4;
+      float stormNoise=
+        sin(d.x*21.0+uTime*0.38)
+        +sin(d.z*27.0-uTime*0.31)
+        +sin((d.x+d.z)*39.0+uTime*0.22);
+      float stormCloud=smoothstep(0.15,1.65,stormNoise);
+      vec3 stormSky=mix(vec3(0.15,0.22,0.28),vec3(0.025,0.045,0.075),h);
+      col=mix(col,stormSky,uStorm*0.84);
+      col=mix(col,vec3(0.025,0.035,0.050),stormCloud*uStorm*0.68);
+      col+=vec3(0.75,0.84,1.0)*uFlash;
       gl_FragColor=vec4(col,1.0);
     }`
 });
@@ -3063,8 +3186,13 @@ scene.add(rainLines);
 let rainRippleT=0;
 function updateRainVisual(dt){
   if(!rainLines.visible)return;
+  const storm=(typeof stormState!=='undefined')?stormState.level:0;
+  const rainSpeedMul=1+storm*1.75;
+  const wind=storm*5.2;
   for(let ri=0;ri<RAIN_N;ri++){
-    let ry=rainPosArr[ri*6+1]-dt*(9+(ri%5));
+    let ry=rainPosArr[ri*6+1]-dt*(9+(ri%5))*rainSpeedMul;
+    rainPosArr[ri*6]+=wind*dt;
+    rainPosArr[ri*6+3]=rainPosArr[ri*6]+0.05+storm*0.42;
     if(ry<0.05){
       ry=rand(11,16);
       const rx=rand(-30,30),rz=P0Z-rand(-3,50);
@@ -3151,15 +3279,21 @@ const waterMat=new THREE.ShaderMaterial({
     uMoodTint:{value:new THREE.Vector3(1,1,1)},
     uStreakBoost:{value:1},
     uCity:{value:0},
+    uStorm:{value:0},
   },
   vertexShader:`
     uniform float uTime;
+    uniform float uStorm;
     varying vec3 vW; varying float vH;
     void main(){
       vec3 p=position;
-      float h=sin(p.x*0.35+uTime*1.1)*0.12
+      float baseWave=sin(p.x*0.35+uTime*1.1)*0.12
              +sin(p.y*0.28+uTime*0.9)*0.10
              +sin((p.x+p.y)*0.5+uTime*1.7)*0.05;
+      float stormWave=sin(p.x*0.72+uTime*2.4)*0.18
+             +sin(p.y*0.58-uTime*2.0)*0.15
+             +sin((p.x-p.y)*1.05+uTime*3.1)*0.08;
+      float h=baseWave*(1.0+uStorm*2.15)+stormWave*uStorm;
       p.z+=h; vH=h;
       vec4 wp=modelMatrix*vec4(p,1.0);
       vW=wp.xyz;
@@ -3167,7 +3301,7 @@ const waterMat=new THREE.ShaderMaterial({
     }`,
   fragmentShader:`
     uniform float uTime; uniform vec3 uCam; uniform vec4 uRip[10];
-    uniform float uMorning; uniform vec3 uMoodTint; uniform float uStreakBoost; uniform float uCity;
+    uniform float uMorning; uniform vec3 uMoodTint; uniform float uStreakBoost; uniform float uCity; uniform float uStorm;
     varying vec3 vW; varying float vH;
     void main(){
       vec3 view=normalize(uCam-vW);
@@ -3192,6 +3326,14 @@ const waterMat=new THREE.ShaderMaterial({
         col+=vec3(0.95,0.45,0.70)*neonBand*cityFade*0.30*uStreakBoost;
         col+=vec3(0.55,0.95,0.95)*pow(max(sin(vW.x*0.24+1.3),0.0),26.0)*cityFade*0.22;
       }
+      float stormFoam=pow(max(
+        sin(vW.x*1.9+uTime*3.2)
+        *sin(vW.z*1.45-uTime*2.7)
+        +vH*1.8,
+        0.0
+      ),3.0);
+      col=mix(col,vec3(0.025,0.075,0.095),uStorm*0.56);
+      col+=vec3(0.72,0.84,0.88)*stormFoam*uStorm*0.72;
       for(int i=0;i<10;i++){
         vec4 r=uRip[i];
         float age=uTime-r.z;
@@ -3212,7 +3354,14 @@ water.renderOrder=2;
 scene.add(water);
 function waveH(x,z,t){
   const ly=-(z-(-60)); // plane local y = -(worldZ - meshZ)
-  return Math.sin(x*0.35+t*1.1)*0.12+Math.sin(ly*0.28+t*0.9)*0.10+Math.sin((x+ly)*0.5+t*1.7)*0.05;
+  const storm=(typeof stormState!=='undefined')?stormState.level:0;
+  const base=Math.sin(x*0.35+t*1.1)*0.12
+    +Math.sin(ly*0.28+t*0.9)*0.10
+    +Math.sin((x+ly)*0.5+t*1.7)*0.05;
+  const rough=Math.sin(x*0.72+t*2.4)*0.18
+    +Math.sin(ly*0.58-t*2.0)*0.15
+    +Math.sin((x-ly)*1.05+t*3.1)*0.08;
+  return base*(1+storm*2.15)+rough*storm;
 }
 function addRipple(x,z,strength){
   ripArr[ripIdx].set(x,z,waterMat.uniforms.uTime.value,strength);
@@ -3723,8 +3872,33 @@ function makeFishSlot(){
   fishes.push(f);
   return f;
 }
+function pickStormSpecies(fallback){
+  if(!isAsashioStorm()||!SPECIES||!SPECIES.length)return fallback;
+  let total=0;
+  const weighted=SPECIES.map(s=>{
+    let w=1;
+    const ft=s.fightType||'';
+    if(s.rar>=5)w*=6.5;
+    else if(s.rar===4)w*=4.2;
+    else if(s.rar===3)w*=1.9;
+    else w*=0.48;
+    if(ft==='boss'||ft==='dash'||ft==='runner')w*=2.1;
+    else if(ft==='heavy'||ft==='rare')w*=1.65;
+    else if(ft==='shrimp'||ft==='nibble')w*=0.34;
+    if(s.id==='same')w*=2.4;
+    total+=w;
+    return {s:s,w:w};
+  });
+  let r=Math.random()*total;
+  for(let i=0;i<weighted.length;i++){
+    r-=weighted[i].w;
+    if(r<=0)return weighted[i].s;
+  }
+  return fallback;
+}
 function assignFish(f,initial){
-  const spc=pickSpecies();
+  let spc=pickSpecies();
+  spc=pickStormSpecies(spc);
   f.spc=spc; f.size=rollSize(spc);
   if(f.builtFor!==spc.id||!f.parts){ buildFishMesh(f); f.builtFor=spc.id; }
   else f.mat.color.setHex(spc.color);
@@ -3734,9 +3908,13 @@ function assignFish(f,initial){
   f.pos.set(Math.sin(a)*d,-rand(0.7,1.6),P0Z-Math.cos(a)*d);
   f.depthBase=spc.id==='same'?-0.18:f.pos.y;
   if(spc.id==='same')f.pos.y=f.depthBase;
+  if(isAsashioStorm()&&spc.id!=='same'){
+    f.depthBase=clamp(f.depthBase+rand(-0.42,0.38),-1.9,-0.28);
+    f.pos.y=f.depthBase;
+  }
   f.heading=rand(0,Math.PI*2);
-  f.speed=spc.speed*rand(0.85,1.15);
-  f.state='wander'; f.interest=0; f.cool=initial?0:rand(1,4);
+  f.speed=spc.speed*rand(0.85,1.15)*(isAsashioStorm()?rand(1.22,1.58):1);
+  f.state='wander'; f.interest=0; f.cool=initial?0:(isAsashioStorm()?rand(0.3,2.2):rand(1,4));
   f.wpT=0; f.respawn=0;
   f.mesh.visible=true;
 }
@@ -3930,7 +4108,13 @@ function updateFishAI(f,dt,t){
   }
   if(f.state==='hooked')return;
   if(f.cool>0)f.cool-=dt;
-  f.tailPivot.rotation.y=Math.sin(t*7*f.speed+f.phase)*0.55;
+  const storm=isAsashioStorm();
+  const stormLv=storm?Math.max(0.35,stormState.level):0;
+  if(storm&&f.state!=='hooked'){
+    f.heading+=Math.sin(t*(2.4+f.speed)+f.phase)*dt*0.22*stormLv;
+    if(Math.random()<dt*(0.10+stormLv*0.16))f.wpT=0;
+  }
+  f.tailPivot.rotation.y=Math.sin(t*(storm?10:7)*f.speed+f.phase)*(storm?0.72:0.55);
   const lp=lurePos3();
   const inWait=(G.state==='wait'&&!G.bite);
 
@@ -3947,9 +4131,10 @@ function updateFishAI(f,dt,t){
       let da=tgt-f.heading;
       while(da>Math.PI)da-=Math.PI*2; while(da<-Math.PI)da+=Math.PI*2;
       f.heading+=clamp(da,-1.2*dt,1.2*dt);
-      f.pos.x+=Math.sin(f.heading)*f.speed*0.55*dt;
-      f.pos.z+=Math.cos(f.heading)*f.speed*0.55*dt;
-      f.pos.y=f.depthBase+Math.sin(t*0.6+f.phase)*0.25;
+      const wanderMul=storm?(0.76+Math.sin(t*2.2+f.phase)*0.12):0.55;
+      f.pos.x+=Math.sin(f.heading)*f.speed*wanderMul*dt;
+      f.pos.z+=Math.cos(f.heading)*f.speed*wanderMul*dt;
+      f.pos.y=f.depthBase+Math.sin(t*(storm?1.55:0.6)+f.phase)*(storm?0.42:0.25);
       if(inWait&&f.cool<=0){
         const d=f.pos.distanceTo(lp);
         if(d<attractR()){
@@ -3969,16 +4154,17 @@ function updateFishAI(f,dt,t){
       if(!inWait){f.state='wander';break;}
       const dx=lp.x-f.pos.x,dz=lp.z-f.pos.z;
       f.heading=Math.atan2(dx,dz);
-      f.pos.x+=Math.sin(f.heading)*f.speed*0.95*dt;
-      f.pos.z+=Math.cos(f.heading)*f.speed*0.95*dt;
-      f.pos.y=lerp(f.pos.y,-0.45,dt*1.5);
+      const approachMul=storm?(1.22+Math.sin(t*3.1+f.phase)*0.16):0.95;
+      f.pos.x+=Math.sin(f.heading)*f.speed*approachMul*dt;
+      f.pos.z+=Math.cos(f.heading)*f.speed*approachMul*dt;
+      f.pos.y=lerp(f.pos.y,storm?(-0.32+Math.sin(t*2.8+f.phase)*0.16):-0.45,dt*(storm?2.3:1.5));
       if(Math.hypot(dx,dz)<1.25){ f.state='circle'; f.circleT=rand(1.2,3.2); f.circleA=Math.atan2(f.pos.x-lp.x,f.pos.z-lp.z); }
       break;
     }
     case 'circle':{
       if(!inWait&&G.state!=='wait'){f.state='wander';break;}
-      f.circleA+=dt*1.6;
-      const r=1.05;
+      f.circleA+=dt*(storm?2.35:1.6);
+      const r=storm?(1.0+Math.sin(t*3.4+f.phase)*0.28):1.05;
       const nx=lp.x+Math.sin(f.circleA)*r, nz=lp.z+Math.cos(f.circleA)*r;
       f.heading=Math.atan2(nx-f.pos.x,nz-f.pos.z);
       f.pos.x=lerp(f.pos.x,nx,dt*4); f.pos.z=lerp(f.pos.z,nz,dt*4);
@@ -4013,6 +4199,10 @@ function updateFishAI(f,dt,t){
           const biteCap=(targetBiteHit||precisionMul>1.08)?0.93:0.90;
           let biteChance=clamp((f.spc.bold+0.05+getEquipStats().biteBoldAdd)*moodBiteMul(f.spc),0,biteCap);
           biteChance=clamp(biteChance*precisionMul,0,biteCap);
+          if(storm){
+            const stormBiteMul=f.spc.rar>=4?1.34:(f.spc.rar===3?1.12:0.76);
+            biteChance=clamp(biteChance*stormBiteMul,0,Math.min(0.96,biteCap+0.03));
+          }
           const omenMul=getRareOmenMulForSpecies(f.spc,G.currentSpot||activeSpot);
           if(omenMul>1)biteChance=clamp(biteChance*(1+Math.min(0.18,(omenMul-1)*0.16)),0,0.94);
           if(precisionMul<0.72&&G.techniqueCoachT<=0){
@@ -4384,6 +4574,15 @@ function updateFight(dt,t){
   if(type==='rare')pull*=0.95;
   if(type==='shrimp')pull*=0.48;
   if(F.hookQuality==='LATE')pull*=1.08;
+  if(isAsashioStorm()){
+    const stormPower=Math.max(0.35,stormState.level);
+    pull*=1.10+stormPower*0.12;
+    if(!tired){
+      F.runT-=dt*(0.28+stormPower*0.42);
+      F.latVel+=Math.sin(t*4.6+F.size*0.03)*dt*(0.045+stormPower*0.085);
+      F.tension=clamp(F.tension+Math.sin(t*7.2)*dt*0.028*stormPower,0,1.15);
+    }
+  }
 
   // 魚種別の特殊挙動：タコの張り付き / 大物の第二段階
   if(type==='octopus'&&!tired&&!F.octoStuck&&!F.running&&F.dist>5.5&&Math.random()<dt*0.075){
@@ -4935,7 +5134,8 @@ function showResult(){
   if(rareOmenHit)rareOmen=null;
   sCatch(); if(isRec||orderBonus.money||targetHit||nextCombo>=2||research.levelUp>0)vib([50,50,50,50,120]);
   // 魚スロットは再抽選
-  F.f.mesh.visible=false; F.f.respawn=rand(7,14);
+  F.f.mesh.visible=false;
+  F.f.respawn=isAsashioStorm()?rand(3.0,7.0):rand(7,14);
   G.fight=null; G.landAnim=null;
   lureGroup.visible=false;
 }
@@ -5160,6 +5360,8 @@ function updateSceneModalMeta(){
   });
 }
 function startFishing(){
+  // 出航ごとに朝潮の大嵐を一度だけ抽選し、その結果を魚の再配置にも反映する。
+  prepareAsashioStormForTrip();
   resetFishPopulation();
   $('title').style.display='none';
   if($('sceneModal'))$('sceneModal').style.display='none';
@@ -5361,8 +5563,10 @@ function loop(){
   elapsed+=dt;
   const t=elapsed;
   waterMat.uniforms.uTime.value=t;
+  skyMat.uniforms.uTime.value=t;
   updateMood(dt);
   updateRainEvent(dt);
+  updateStormState(dt,t);
   if(G.techniqueCoachT>0)G.techniqueCoachT-=dt;
 
   // カメラ（微揺れ＋竿さばき追従＋走りシェイク＋朝潮の船揺れ）
@@ -5435,10 +5639,15 @@ function loop(){
         0.09
       );
     }
-    seaClouds.forEach(c=>{ c.position.x+=c.userData.speed*dt; if(c.position.x>110)c.position.x=-110; });
+    const stormWind=1+stormState.level*3.8;
+    seaClouds.forEach(c=>{
+      c.position.x+=c.userData.speed*stormWind*dt;
+      c.position.y+=Math.sin(t*0.8+c.userData.speed)*stormState.level*0.018;
+      if(c.position.x>110)c.position.x=-110;
+    });
     seaBirds.forEach(b=>{
-      b.position.x+=b.userData.sp*dt;
-      b.position.y+=Math.sin(t*1.4+b.userData.ph)*0.45*dt;
+      b.position.x+=b.userData.sp*(1+stormState.level*1.9)*dt;
+      b.position.y+=Math.sin(t*(1.4+stormState.level*2.0)+b.userData.ph)*(0.45+stormState.level*0.85)*dt;
       b.rotation.y=Math.PI/2;
       b.rotation.z=Math.sin(t*0.9+b.userData.ph)*0.12;
       const glide=Math.sin(t*0.35+b.userData.ph)>0.55;
@@ -5492,8 +5701,9 @@ function loop(){
         wp.rotation.z=lerp(wp.rotation.z,tg,Math.min(dt*10,1));
       });
     });
-    updateRainVisual(dt);
   }
+  // 雨は宵灯の小雨だけでなく、朝潮の大嵐でも全体更新する。
+  updateRainVisual(dt);
   // 岩礁：岩に当たる波の波紋
   if(typeof reefGroup!=='undefined'&&reefGroup.visible&&Math.random()<dt*0.9){
     const rr=reefRocks[Math.floor(Math.random()*reefRocks.length)];
