@@ -715,6 +715,7 @@
         let currentABC = "";
         let previewABC = "";
         let currentTuning = null;
+        let currentCompositionBrief = null;
         let currentMetaRaw = "";
         let currentLibraryId = null;
         let currentRating = 0;
@@ -984,7 +985,7 @@
             ctx.fillText('ECO MODE', w / 2, h / 2 + 4);
         }
 
-        function prepareCurrentSongState(abc, title, meta, libId, rating, tuning = null) {
+        function prepareCurrentSongState(abc, title, meta, libId, rating, tuning = null, compositionBrief = null) {
             originalABC = String(abc || "");
             currentABC = originalABC;
             previewABC = currentABC;
@@ -998,6 +999,7 @@
                         : {}
                 }
                 : null;
+            currentCompositionBrief = cloneCompositionBrief(compositionBrief);
             currentMetaRaw = meta;
             currentLibraryId = libId;
             currentRating = rating;
@@ -1894,6 +1896,16 @@ V:8 nm="Timpani" snm="Timp"
             throw finalError;
         }
 
+        function cloneCompositionBrief(brief) {
+            if (!brief || typeof brief !== 'object') return null;
+            try {
+                return JSON.parse(JSON.stringify(brief));
+            } catch (e) {
+                console.warn("Composition Brief Clone Error:", e);
+                return null;
+            }
+        }
+
         function loadLastCompositionBrief() {
             try {
                 const saved = localStorage.getItem('sonicforge_last_composition_brief');
@@ -1912,6 +1924,19 @@ V:8 nm="Timpani" snm="Timp"
             } catch (e) {
                 console.warn("Composition Brief Write Error:", e);
             }
+        }
+
+        function consumeLastCompositionBrief() {
+            const brief = cloneCompositionBrief(lastCompositionBrief);
+            lastCompositionBrief = null;
+
+            try {
+                localStorage.removeItem('sonicforge_last_composition_brief');
+            } catch (e) {
+                console.warn("Composition Brief Remove Error:", e);
+            }
+
+            return brief;
         }
 
         function createGameReadyItem(label, status, message) {
@@ -2203,12 +2228,12 @@ V:8 nm="Timpani" snm="Timp"
             if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
         }
 
-        function beginGameReadyAnalysis(abc) {
+        function beginGameReadyAnalysis(abc, compositionBrief = null) {
             setGameReadyLoadingState();
             return {
                 token: ++gameReadyAnalysisToken,
                 abc: String(abc || ""),
-                brief: lastCompositionBrief ? JSON.parse(JSON.stringify(lastCompositionBrief)) : null
+                brief: cloneCompositionBrief(compositionBrief)
             };
         }
 
@@ -2232,8 +2257,18 @@ V:8 nm="Timpani" snm="Timp"
                 
                 if(!result.abc || !result.title) throw new Error("title または abc が不足しています");
 
-                // 読み込み成功時は自動再生を有効にするため第6引数にtrueを渡す
-                renderMusic(result.abc, result.title, result.description || "", null, 0, true);
+                // localStorageの作曲条件は、正常に解析できた次のAI生成曲だけへ関連付ける
+                const compositionBrief = consumeLastCompositionBrief();
+                renderMusic(
+                    result.abc,
+                    result.title,
+                    result.description || "",
+                    null,
+                    0,
+                    true,
+                    null,
+                    compositionBrief
+                );
             } catch (e) {
                 console.error(e);
                 const message = e && e.message ? e.message : "JSONの読み込みに失敗しました";
@@ -2644,8 +2679,30 @@ V:8 nm="Timpani" snm="Timp"
             };
         }
 
+        function stripSonicForgePreviewDirectives(abc) {
+            const lines = String(abc || "").replace(/\r\n/g, "\n").split("\n");
+            const cleaned = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const isPreviewMarker = /^\s*%SonicForgePreviewVolume\s+\S+\s+\d+\s*$/i.test(line);
+
+                if (!isPreviewMarker) {
+                    cleaned.push(line);
+                    continue;
+                }
+
+                const nextLine = lines[i + 1];
+                if (nextLine !== undefined && /^\s*%%MIDI\s+control\s+7\s+\d+\s*$/i.test(nextLine)) {
+                    i++;
+                }
+            }
+
+            return cleaned.join("\n");
+        }
+
         function buildPreviewABC(abc, tuning) {
-            const source = String(abc || "");
+            const source = stripSonicForgePreviewDirectives(abc);
             const normalized = normalizeTuningForABC(source, tuning);
             const enabled = new Set(normalized.activeVoices.map(String));
             const lines = source.split('\n');
@@ -2745,7 +2802,8 @@ V:8 nm="Timpani" snm="Timp"
                 description: currentMetaRaw,
                 rating: currentRating,
                 date: new Date().toLocaleDateString(),
-                tuning
+                tuning,
+                compositionBrief: cloneCompositionBrief(currentCompositionBrief)
             };
 
             try {
@@ -2777,6 +2835,16 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         let tuningGeneration = 0;
+
+        function stopTransientSynth(synth, contextLabel) {
+            if (!synth || typeof synth.stop !== 'function') return;
+            try {
+                synth.stop();
+            } catch (e) {
+                console.warn(`${contextLabel} Stop Error:`, e);
+            }
+        }
+
         async function applyInstrumentTuning() {
             const currentGen = ++tuningGeneration;
             const wasPlaying = window.isPlaying;
@@ -2793,40 +2861,60 @@ V:8 nm="Timpani" snm="Timp"
             scratch.style.height = '1px';
             scratch.style.overflow = 'hidden';
             document.body.appendChild(scratch);
-            const visualObjForAudio = ABCJS.renderAbc(scratch, tunedABC, { responsive: 'resize' })[0];
 
-            if (window.currentMidi) {
-                window.currentMidi.stop();
-                clearPlaybackTimers();
-            }
-
-            setPlaybackState('loading');
+            let midi = null;
 
             try {
-                const midi = new ABCJS.synth.CreateSynth();
-                await midi.init({ visualObj: visualObjForAudio });
-                const primed = await midi.prime();
-                
-                if (currentGen !== tuningGeneration) {
-                    return; // 別のチューニング処理が開始されたため中断
+                const visualObjForAudio = ABCJS.renderAbc(scratch, tunedABC, { responsive: 'resize' })[0];
+                if (!visualObjForAudio) {
+                    throw new Error("チューニング用の楽譜を生成できませんでした。");
                 }
 
-                if (primed && primed.duration) {
-                    playbackDurationSec = primed.duration;
+                stopTransientSynth(window.currentMidi, "Previous Tuning Synth");
+                window.currentMidi = null;
+                clearPlaybackTimers();
+                setPlaybackState('loading');
+
+                midi = new ABCJS.synth.CreateSynth();
+                await midi.init({ visualObj: visualObjForAudio });
+                const primed = await midi.prime();
+
+                if (currentGen !== tuningGeneration) {
+                    stopTransientSynth(midi, "Stale Tuning Synth");
+                    return;
                 }
+
+                playbackDurationSec = primed && primed.duration ? primed.duration : 0;
                 window.currentMidi = midi;
 
                 if (wasPlaying) {
-                    if (typeof window.currentMidi.seek === 'function') {
-                        window.currentMidi.seek(currentPos, "seconds");
+                    if (typeof midi.seek === 'function') {
+                        midi.seek(currentPos, "seconds");
                     }
-                    await window.currentMidi.start();
+
+                    await midi.start();
+
+                    if (currentGen !== tuningGeneration) {
+                        stopTransientSynth(midi, "Stale Started Tuning Synth");
+                        return;
+                    }
+
                     setPlaybackState('playing');
                     startPlaybackTracking(currentPos);
                 } else {
                     setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
                 }
             } catch (e) {
+                stopTransientSynth(midi, "Failed Tuning Synth");
+
+                if (currentGen !== tuningGeneration) {
+                    return;
+                }
+
+                if (window.currentMidi === midi) {
+                    window.currentMidi = null;
+                }
+
                 console.error("Tuning Apply Error:", e);
                 setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
             } finally {
@@ -2861,9 +2949,9 @@ V:8 nm="Timpani" snm="Timp"
             }, remainingMs + 150);
         }
 
-        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null) {
+        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null, compositionBrief = null) {
             if (typeof stopAllMusic === 'function') stopAllMusic();
-            prepareCurrentSongState(abc, title, meta, libId, rating, tuning);
+            prepareCurrentSongState(abc, title, meta, libId, rating, tuning, compositionBrief);
             updateCurrentSongMetaUI(meta);
             resetPlaybackBar();
             setPlaybackState('stopped', { resetProgress: true });
@@ -3290,7 +3378,7 @@ V:8 nm="Timpani" snm="Timp"
             }
             
             // 読込開始時にボタンをローディング状態にする
-            const gameReadyContext = beginGameReadyAnalysis(abc);
+            const gameReadyContext = beginGameReadyAnalysis(abc, currentCompositionBrief);
             setPlaybackState('loading');
             
             if (visualObj && ABCJS.synth.supportsAudio()) {
@@ -4236,7 +4324,8 @@ V:8 nm="Timpani" snm="Timp"
                 description: currentMetaRaw, 
                 rating: currentRating, 
                 date: new Date().toLocaleDateString(),
-                tuning: getCurrentTuningSnapshot()
+                tuning: getCurrentTuningSnapshot(),
+                compositionBrief: cloneCompositionBrief(currentCompositionBrief)
             };
 
             try {
@@ -4522,7 +4611,8 @@ V:8 nm="Timpani" snm="Timp"
                 item.id,
                 item.rating || 0,
                 autoPlay,
-                item.tuning || null
+                item.tuning || null,
+                item.compositionBrief || null
             );
             toggleView('player');
         }
