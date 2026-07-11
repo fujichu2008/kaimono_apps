@@ -526,8 +526,8 @@
                         <p class="text-[11px] text-slate-400 leading-relaxed">各楽器のON/OFFと音量を調整できます。音量は演奏中にも現在位置を保って反映されます。</p>
                         <div id="instrument-list" class="space-y-2 text-xs">
                         </div>
-                        <button onclick="overwriteCurrentSongWithTuning()" class="w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2">
-                            <i data-lucide="save" class="w-4 h-4"></i> この音量バランスで楽曲を上書き
+                        <button onclick="saveCurrentTuningAsVersion()" class="w-full min-h-11 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2">
+                            <i data-lucide="copy-plus" class="w-4 h-4"></i> 調整版として保存
                         </button>
                     </div>
                 </div>
@@ -688,7 +688,10 @@
         };
         const INSTRUMENTS = ["Piano", "Pipe Organ", "Choir", "Violin", "Viola", "Cello", "Timpani", "Distortion Guitar", "Harp", "Flute", "Trumpet", "Drums", "Shakuhachi", "Koto"];
 
+        let originalABC = "";
         let currentABC = "";
+        let previewABC = "";
+        let currentTuning = { activeVoices: [], voiceVolumes: {}, hasActiveVoices: false };
         let currentMetaRaw = "";
         let currentLibraryId = null;
         let currentRating = 0;
@@ -956,14 +959,44 @@
             ctx.fillText('ECO MODE', w / 2, h / 2 + 4);
         }
 
-        function prepareCurrentSongState(abc, title, meta, libId, rating) {
-            currentABC = abc;
+        function normalizeTuningState(tuning) {
+            const source = tuning && typeof tuning === 'object' ? tuning : {};
+            const hasActiveVoices = Array.isArray(source.activeVoices);
+            const active = hasActiveVoices ? source.activeVoices.map(id => String(id)) : [];
+            const volumes = {};
+
+            if (source.voiceVolumes && typeof source.voiceVolumes === 'object') {
+                Object.entries(source.voiceVolumes).forEach(([id, value]) => {
+                    const volume = Math.max(0, Math.min(127, Number(value)));
+                    if (Number.isFinite(volume)) volumes[String(id)] = volume;
+                });
+            }
+
+            return { activeVoices: active, voiceVolumes: volumes, hasActiveVoices };
+        }
+
+        function getCurrentTuningSnapshot() {
+            const volumes = {};
+            availableVoices.forEach(voice => {
+                volumes[voice.id] = getVoiceVolumeValue(voice.id);
+            });
+            return {
+                activeVoices: [...activeVoices],
+                voiceVolumes: volumes
+            };
+        }
+
+        function prepareCurrentSongState(abc, title, meta, libId, rating, tuning = null) {
+            originalABC = String(abc || "");
+            currentABC = originalABC;
+            previewABC = currentABC;
+            currentTuning = normalizeTuningState(tuning);
             currentMetaRaw = meta;
             currentLibraryId = libId;
             currentRating = rating;
             playbackDurationSec = 0;
             playbackPositionSec = 0;
-            visualizerTempoBpm = parseTempoFromABC(abc);
+            visualizerTempoBpm = parseTempoFromABC(currentABC);
             window.currentMidi = null;
             document.getElementById('current-title').innerText = title;
         }
@@ -2058,21 +2091,24 @@ V:8 nm="Timpani" snm="Timp"
 
         function parseVoicesFromABC(abc) {
             const voices = [];
-            const lines = abc.split('\n');
+            const lines = String(abc || "").split('\n');
+
             lines.forEach(line => {
                 const match = line.match(/^V:\s*(\S+)/);
-                if (match) {
-                    const id = match[1];
-                    if (!voices.find(v => v.id === id)) {
-                        let name = `パート ${id}`;
-                        const nameMatch = line.match(/(?:nm|name)="([^"]+)"/);
-                        if (nameMatch) {
-                            name = nameMatch[1];
-                        }
-                        voices.push({ id, name });
-                    }
+                if (!match) return;
+
+                const id = match[1];
+                if (voices.find(v => v.id === id)) return;
+
+                let name = `パート ${id}`;
+                const nameMatch = line.match(/(?:nm|name)\s*=\s*(?:"([^"]+)"|'([^']+)'|“([^”]+)”|‘([^’]+)’|([^\s]+))/);
+                if (nameMatch) {
+                    name = nameMatch[1] || nameMatch[2] || nameMatch[3] || nameMatch[4] || nameMatch[5] || name;
                 }
+
+                voices.push({ id, name });
             });
+
             return voices;
         }
 
@@ -2100,12 +2136,24 @@ V:8 nm="Timpani" snm="Timp"
 
         function initInstrumentPanel() {
             availableVoices = parseVoicesFromABC(currentABC);
-            activeVoices = availableVoices.map(v => v.id);
             const parsedVolumes = parseVoiceVolumesFromABC(currentABC);
+            const savedActiveVoices = Array.isArray(currentTuning.activeVoices)
+                ? currentTuning.activeVoices
+                : [];
+
+            activeVoices = currentTuning.hasActiveVoices
+                ? availableVoices.map(v => v.id).filter(id => savedActiveVoices.includes(id))
+                : availableVoices.map(v => v.id);
+
             voiceVolumes = {};
             availableVoices.forEach(v => {
-                voiceVolumes[v.id] = parsedVolumes[v.id] ?? 100;
+                const savedVolume = currentTuning.voiceVolumes
+                    ? currentTuning.voiceVolumes[v.id]
+                    : undefined;
+                voiceVolumes[v.id] = savedVolume ?? parsedVolumes[v.id] ?? 100;
             });
+
+            currentTuning = getCurrentTuningSnapshot();
             renderInstrumentList();
             const panel = document.getElementById('instrument-panel');
             if (panel && !panel.classList.contains('hidden')) {
@@ -2116,6 +2164,15 @@ V:8 nm="Timpani" snm="Timp"
         function toggleInstrumentPanel() {
             const panel = document.getElementById('instrument-panel');
             if (panel) panel.classList.toggle('hidden');
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replace(/&/g, "&")
+                .replace(/</g, "<")
+                .replace(/>/g, ">")
+                .replace(/"/g, """)
+                .replace(/'/g, "&#39;");
         }
 
         function renderInstrumentList() {
@@ -2131,11 +2188,11 @@ V:8 nm="Timpani" snm="Timp"
                 return `
                     <div class="bg-slate-800 p-2 rounded-lg border border-slate-700">
                         <div class="instrument-row">
-                            <input type="checkbox" value="${v.id}" ${isChecked} onchange="onInstrumentChange(this)" class="w-4 h-4 accent-sky-400">
-                            <span class="truncate text-slate-300">${v.name}</span>
-                            <span id="vol-label-${v.id}" class="text-[10px] text-sky-300 text-right">${volume}</span>
+                            <input type="checkbox" value="${escapeHtml(v.id)}" ${isChecked} onchange="onInstrumentChange(this)" class="w-4 h-4 accent-sky-400">
+                            <span class="truncate text-slate-300">${escapeHtml(v.name)}</span>
+                            <span id="vol-label-${escapeHtml(v.id)}" class="text-[10px] text-sky-300 text-right">${volume}</span>
                         </div>
-                        <input type="range" min="0" max="127" value="${volume}" data-voice="${v.id}" oninput="onInstrumentVolumeInput(this)" onchange="onInstrumentVolumeCommit()" class="volume-slider mt-2">
+                        <input type="range" min="0" max="127" value="${volume}" data-voice="${escapeHtml(v.id)}" oninput="onInstrumentVolumeInput(this)" onchange="onInstrumentVolumeCommit()" class="volume-slider mt-2">
                     </div>
                 `;
             }).join('');
@@ -2208,7 +2265,31 @@ V:8 nm="Timpani" snm="Timp"
             return dynamic + cleaned;
         }
 
-        function generateTunedABC() {
+        function generatePreviewABC(baseABC = currentABC) {
+            const lines = String(baseABC || "").split('\n');
+            const output = [];
+            const knownVoiceIds = new Set(availableVoices.map(v => v.id));
+
+            lines.forEach(line => {
+                if (/^%%MIDI\s+control\s+7\s+\d+/i.test(line) || /^%SonicForgeVolume\s+/i.test(line)) {
+                    return;
+                }
+
+                const voiceMatch = line.match(/^V:\s*(\S+)/);
+                output.push(line);
+
+                if (voiceMatch && knownVoiceIds.has(voiceMatch[1])) {
+                    const voiceId = voiceMatch[1];
+                    const volume = activeVoices.includes(voiceId) ? getVoiceVolumeValue(voiceId) : 0;
+                    output.push(`%SonicForgeVolume ${voiceId} ${volume}`);
+                    output.push(`%%MIDI control 7 ${volume}`);
+                }
+            });
+
+            return output.join('\n');
+        }
+
+        function generateLegacyDestructiveTunedABC() {
             const lines = currentABC.split('\n');
             const newLines = [];
             let currentVoice = null;
@@ -2273,12 +2354,63 @@ V:8 nm="Timpani" snm="Timp"
             return newLines.join('\n');
         }
 
-        async function overwriteCurrentSongWithTuning() {
+        async function saveCurrentTuningAsVersion() {
+            if (!currentABC) {
+                alert("保存する楽曲データがありません。");
+                return;
+            }
+
+            const db = await dbPromise;
+            if (!db) {
+                alert("保存機能を利用できません。");
+                return;
+            }
+
+            const baseTitle = document.getElementById('current-title').innerText || "曲名未定";
+            const versionTitle = /（調整版）$/.test(baseTitle) ? baseTitle : `${baseTitle}（調整版）`;
+            const tuning = getCurrentTuningSnapshot();
+            const item = {
+                title: versionTitle,
+                abc: currentABC,
+                description: currentMetaRaw,
+                rating: currentRating,
+                date: new Date().toLocaleDateString(),
+                tuning
+            };
+
+            try {
+                const tx = db.transaction('library', 'readwrite');
+                const req = tx.objectStore('library').add(item);
+
+                req.onsuccess = (event) => {
+                    currentLibraryId = event.target.result;
+                    currentTuning = normalizeTuningState(tuning);
+                };
+
+                tx.oncomplete = async () => {
+                    document.getElementById('current-title').innerText = versionTitle;
+                    updateSaveButtonState();
+                    await loadLibraryFromDB();
+                    updateLibraryList();
+                    alert("原本を残したまま、調整版をライブラリに保存しました。");
+                };
+
+                tx.onerror = () => {
+                    console.error("Tuning Version Save Error:", tx.error);
+                    alert("調整版の保存に失敗しました。");
+                };
+            } catch (e) {
+                console.error("Tuning Version Save Error:", e);
+                alert("調整版の保存に失敗しました。");
+            }
+        }
+
+        async function overwriteCurrentSongWithTuningLegacy() {
             if (!currentABC) {
                 alert("上書きする楽曲データがありません。");
                 return;
             }
-            const tunedABC = generateTunedABC();
+            const tunedABC = generateLegacyDestructiveTunedABC();
             currentABC = tunedABC;
             const title = document.getElementById('current-title').innerText;
             const meta = currentMetaRaw;
@@ -2316,9 +2448,10 @@ V:8 nm="Timpani" snm="Timp"
         let tuningGeneration = 0;
         async function applyInstrumentTuning() {
             const currentGen = ++tuningGeneration;
-            const wasPlaying = window.isPlaying;
+            const wasPlaying = playbackState === 'playing';
             const currentPos = playbackPositionSec;
-            const tunedABC = generateTunedABC();
+            currentTuning = getCurrentTuningSnapshot();
+            previewABC = generatePreviewABC(currentABC);
             const scratch = document.createElement('div');
             scratch.style.position = 'fixed';
             scratch.style.left = '-99999px';
@@ -2327,12 +2460,13 @@ V:8 nm="Timpani" snm="Timp"
             scratch.style.height = '1px';
             scratch.style.overflow = 'hidden';
             document.body.appendChild(scratch);
-            const visualObjForAudio = ABCJS.renderAbc(scratch, tunedABC, { responsive: 'resize' })[0];
+            const visualObjForAudio = ABCJS.renderAbc(scratch, previewABC, { responsive: 'resize' })[0];
 
             if (window.currentMidi) {
                 window.currentMidi.stop();
                 clearPlaybackTimers();
             }
+            setPlaybackState('loading');
 
             const btn = document.getElementById('btn-play-pause');
             if(btn) {
@@ -2365,22 +2499,21 @@ V:8 nm="Timpani" snm="Timp"
                     if (typeof window.currentMidi.seek === 'function') {
                         window.currentMidi.seek(currentPos, "seconds");
                     }
-                    await window.currentMidi.start();
-                    window.isPlaying = true;
-                    if(btn) btn.innerHTML = '<i data-lucide="pause" fill="currentColor"></i>';
+                    const startResult = window.currentMidi.start();
+                    if (startResult && typeof startResult.then === 'function') {
+                        await startResult;
+                    }
+                    setPlaybackState('playing');
                     startPlaybackTracking(currentPos);
                 } else {
-                    if(btn) btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
+                    updatePlaybackBar(currentPos);
+                    setPlaybackState(currentPos > 0 ? 'paused' : 'stopped');
                 }
                 lucide.createIcons();
             } catch (e) {
                 console.error("Tuning Apply Error:", e);
-                if(btn) {
-                    btn.disabled = false;
-                    btn.classList.remove('opacity-50');
-                    btn.innerHTML = '<i data-lucide="play" fill="currentColor"></i>';
-                    lucide.createIcons();
-                }
+                updatePlaybackBar(currentPos);
+                setPlaybackState(currentPos > 0 ? 'paused' : 'stopped');
             } finally {
                 scratch.remove();
             }
@@ -2413,20 +2546,22 @@ V:8 nm="Timpani" snm="Timp"
             }, remainingMs + 150);
         }
 
-        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false) {
+        function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null) {
             if (typeof stopAllMusic === 'function') stopAllMusic();
-            prepareCurrentSongState(abc, title, meta, libId, rating);
+            prepareCurrentSongState(abc, title, meta, libId, rating, tuning);
             updateCurrentSongMetaUI(meta);
             resetPlaybackBar();
             setPlaybackState('stopped', { resetProgress: true });
             
             initInstrumentPanel();
+            previewABC = generatePreviewABC(currentABC);
+            const playbackABC = previewABC || currentABC;
             
             // 楽譜は非表示のまま音声合成用にレンダリング
-            const visualObj = ABCJS.renderAbc("notation-paper", abc, { responsive: "resize" })[0];
+            const visualObj = ABCJS.renderAbc("notation-paper", playbackABC, { responsive: "resize" })[0];
             
             // ドットビジュアライザ用の演奏データを計算
-            prepareDotTracksForVisualizer(abc);
+            prepareDotTracksForVisualizer(currentABC);
             if (window.visualizerMode === 'eco') {
                 drawEcoCanvasOnce();
             }
@@ -2861,9 +2996,36 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function pausePlayerMusic() {
-            if (window.currentMidi && window.isPlaying) {
+            if (window.currentMidi && playbackState === 'playing') {
                 window.currentMidi.stop();
                 setPlaybackState('paused');
+            }
+        }
+
+        function stopOtherAudioSources() {
+            if (window.modalMidi && window.isModalPlaying) {
+                try {
+                    window.modalMidi.stop();
+                } catch (e) {
+                    console.warn("Modal Stop Error:", e);
+                }
+                setModalPlaybackState('stopped');
+            }
+        }
+
+        function stopPlayerMusic(resetPosition = true) {
+            if (window.currentMidi && typeof window.currentMidi.stop === 'function') {
+                try {
+                    window.currentMidi.stop();
+                } catch (e) {
+                    console.warn("Player Stop Error:", e);
+                }
+            }
+
+            if (resetPosition) {
+                setPlaybackState('stopped', { resetProgress: true });
+            } else {
+                setPlaybackState(playbackPositionSec > 0 ? 'paused' : 'stopped');
             }
         }
 
@@ -2903,23 +3065,14 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function stopAllMusic() {
-            let changed = false;
-            if (window.currentMidi && window.isPlaying) {
-                window.currentMidi.stop();
-                changed = true;
-            } else {
-                clearPlaybackTimers();
-            }
-            if (window.modalMidi && window.isModalPlaying) {
-                window.modalMidi.stop();
-                setModalPlaybackState('stopped');
-                changed = true;
-            }
+            stopOtherAudioSources();
+            stopPlayerMusic(true);
+
             isPlaybackSeeking = false;
             const seekTrack = document.getElementById('playback-seek-track');
             if (seekTrack) seekTrack.classList.remove('seeking');
-            setPlaybackState('stopped', { resetProgress: true });
-            if (changed) safeCreateIcons();
+
+            safeCreateIcons();
         }
 
         async function toggleModalPlay(idx) {
@@ -3605,7 +3758,7 @@ V:8 nm="Timpani" snm="Timp"
 
                 const title = document.getElementById("current-title")?.innerText || "sonicforge-song";
                 const filename = `${sanitizeAudioFileName(title)}.wav`;
-                const result = await synthesizeAbcToWavBlob(currentABC);
+                const result = await synthesizeAbcToWavBlob(previewABC || currentABC);
                 const file = typeof File !== "undefined" ? new File([result.blob], filename, { type: "audio/wav" }) : null;
 
                 showAudioExportLink(result.blob, filename, result.durationSec, result.voiceCount);
@@ -3690,7 +3843,7 @@ V:8 nm="Timpani" snm="Timp"
                 alert("コピーする楽曲データがありません。");
                 return;
             }
-            copyTextToClipboard(currentABC, "楽曲のコード(ABC記法)をコピーしました！\nお手持ちのゲームエンジンや自作アプリ内でご活用ください。");
+            copyTextToClipboard(previewABC || currentABC, "現在の試聴調整を反映した楽曲コード(ABC記法)をコピーしました！\n原本のABCは変更されていません。");
         }
 
         function toggleMetaDisplay() {
@@ -3729,10 +3882,11 @@ V:8 nm="Timpani" snm="Timp"
             const title = document.getElementById('current-title').innerText;
             const item = { 
                 title, 
-                abc: generateTunedABC(), 
+                abc: currentABC, 
                 description: currentMetaRaw, 
                 rating: currentRating, 
-                date: new Date().toLocaleDateString() 
+                date: new Date().toLocaleDateString(),
+                tuning: getCurrentTuningSnapshot() 
             };
 
             try {
@@ -3871,7 +4025,7 @@ V:8 nm="Timpani" snm="Timp"
                 return `
                 <div class="glass p-3 rounded-xl flex justify-between items-center cursor-pointer hover:bg-slate-800 transition" onclick="showLibraryModal(${idx})">
                     <div class="min-w-0 pr-2">
-                        <div class="font-bold text-sm truncate">${item.title}</div>
+                        <div class="font-bold text-sm truncate">${escapeHtml(item.title)}</div>
                         <div class="text-[10px] text-slate-500 flex flex-wrap items-center gap-2 mt-1">
                             <span>${item.date}</span>
                             <span class="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-sky-300">${genreLabel}</span>
@@ -3966,7 +4120,7 @@ V:8 nm="Timpani" snm="Timp"
             if (options.recordHistory !== false) {
                 pushPlaybackHistoryIfNeeded();
             }
-            renderMusic(item.abc, item.title, item.description || "Saved from library", item.id, item.rating || 0, autoPlay);
+            renderMusic(item.abc, item.title, item.description || "Saved from library", item.id, item.rating || 0, autoPlay, item.tuning || null);
             toggleView('player');
         }
     </script>
