@@ -8929,6 +8929,13 @@ function updateHud(){
 
     stats.usedSets = Math.max(0,(state.stageBombsUsed || 0) - (stats.startSets || 0));
 
+    // 禁止キューブを誤爆したCUTには、成功系の戦術評価を付けない。
+    if((stats.redDanger || 0) > 0){
+      stats.judged = true;
+      state.lastCutJudgeKey = `${state.level}-${state.cutNumber}`;
+      return null;
+    }
+
     const labels = [];
     const details = [];
 
@@ -8948,7 +8955,12 @@ function updateHud(){
     const actualRolls = hasFirstExplosion
       ? 1 + Math.max(0,Math.floor(Number(stats.rollsAfterBoom) || 0))
       : 0;
-    if(hasFirstExplosion && actualRolls <= minimumRolls && (stats.emptyBooms || 0) === 0){
+    if(
+      hasFirstExplosion &&
+      actualRolls <= minimumRolls &&
+      (stats.emptyBooms || 0) === 0 &&
+      (stats.redDanger || 0) === 0
+    ){
       labels.push('MINIMUM STEP');
     }
 
@@ -8969,6 +8981,78 @@ function updateHud(){
       label:labels.slice(0,2).join(' / '),
       detail:details.join(' / ')
     };
+  }
+
+  function finalizeCurrentCutScore(){
+    const stats = state.currentCutStats;
+
+    if(!stats || stats.cutNumber !== state.cutNumber) return false;
+    if(stats.scoreAwarded) return false;
+
+    // 非禁止キューブが盤面に残っている間は、実績手数とスコアを確定しない。
+    if(state.cubes.some(cube => cube.type !== 'red')) return false;
+
+    stats.scoreAwarded = true;
+    stats.usedSets = Math.max(
+      0,
+      (state.stageBombsUsed || 0) - (stats.startSets || 0)
+    );
+
+    const redDanger = Math.max(
+      0,
+      Math.floor(Number(stats.redDanger) || 0)
+    );
+
+    // 赤誤爆が1回でもあるCUTは、手数ボーナスを与えず一括で減点する。
+    // scoreAwardedによって、同じCUTで複数回呼ばれても減点は一度だけとなる。
+    if(redDanger > 0){
+      const penalty = redDanger * 100;
+      state.combo = 0;
+      state.score = Math.max(0,state.score - penalty);
+      stats.judged = true;
+      state.lastCutJudgeKey = `${state.level}-${state.cutNumber}`;
+      updateHud();
+      toast(`RED PENALTY -${penalty}`,900);
+      return true;
+    }
+
+    const actualSteps = (stats.removed || 0) > 0
+      ? 1 + Math.max(
+          0,
+          Math.floor(Number(stats.rollsAfterBoom) || 0)
+        )
+      : 0;
+
+    const minimumSteps = Math.max(
+      1,
+      Math.floor(Number(stats.optimalRolls) || 1)
+    );
+
+    let bonus = 0;
+    let label = '';
+
+    if(actualSteps > 0 && actualSteps <= minimumSteps){
+      bonus = 300 + state.level * 40;
+      label = 'MINIMUM STEP';
+    }else if(actualSteps === minimumSteps + 1){
+      bonus = 180 + state.level * 25;
+      label = 'NEAR MIN';
+    }else if(actualSteps === minimumSteps + 2){
+      bonus = 80 + state.level * 15;
+      label = 'TACTICAL CLEAR';
+    }
+
+    if(bonus > 0){
+      state.score += bonus;
+      stats.judged = true;
+      state.lastCutJudgeKey = `${state.level}-${state.cutNumber}`;
+      updateHud();
+      toast(`${label} +${bonus}`,900);
+      return true;
+    }
+
+    updateHud();
+    return false;
   }
 
   function showCutTacticalEvaluation(){
@@ -9602,8 +9686,22 @@ function updateHud(){
         chain:greenEvents.length
       });
 
-      state.combo++;
-      state.score += removed.length * 18 + greens * 35 + Math.max(0,state.combo - 1) * 8;
+      // 禁止キューブ自身には基本消去点を与えない。
+      const safeRemoved = Math.max(0,removed.length - reds);
+
+      // 赤誤爆があった爆破ではコンボを即時リセットし、コンボ加点も行わない。
+      // 赤の100点減点は、CUT終了時にfinalizeCurrentCutScore()で一度だけ適用する。
+      if(reds > 0){
+        state.combo = 0;
+      }else{
+        state.combo++;
+      }
+
+      const comboBonus = reds > 0
+        ? 0
+        : Math.max(0,state.combo - 1) * 8;
+
+      state.score += safeRemoved * 18 + greens * 35 + comboBonus;
 
       const protectText = protectedReds.size > 0 ? ` / 赤${protectedReds.size}個 シールド保護` : '';
 
@@ -9629,7 +9727,6 @@ function updateHud(){
         }
 
         playRedCubeSound();
-        state.score = Math.max(0,state.score - reds * 28);
         for(let i=0; i<reds; i++) collapseFrontRow();
         toast(`赤キューブ爆破！ 前列が${reds}列崩れる${protectText}`);
         haptic(160);
@@ -12335,7 +12432,8 @@ function updateHud(){
       maxChain:0,
       emptyBooms:0,
       effectiveBooms:0,
-      judged:false
+      judged:false,
+      scoreAwarded:false
     };
 
     const activeCols = state.activeCols || COLS;
@@ -12429,7 +12527,17 @@ function updateHud(){
 
   function checkLevelComplete(){
     if(!state.running || state.rolling || state.stageClearing) return false;
-   
+
+    // 赤以外が残っている間は、現在CUTの手数とスコアを確定しない。
+    if(state.cubes.some(cube => cube.type !== 'red')){
+      return false;
+    }
+
+    // 最後の非禁止キューブが消えた時点で、現在の実績手数を固定し、
+    // MINボーナスまたは赤誤爆ペナルティを一度だけ適用する。
+    const scoreFeedbackShown = finalizeCurrentCutScore();
+
+    // 赤キューブだけが残っている場合は、AUTOで盤外へ抜けるまで次CUTへ進めない。
     if(state.cubes.length > 0){
       return false;
     }
@@ -12438,7 +12546,8 @@ function updateHud(){
     // これにより、ゲームのテンポを損なわずに次へ進める。
     if(state.queueIndex < state.stageRows.length){
       if(!state.awaitingNextCut){
-        const judged = showCutTacticalEvaluation();
+        // スコア確定トーストが出た場合は、それを戦術評価トーストより優先する。
+        const judged = scoreFeedbackShown || showCutTacticalEvaluation();
 
         state.awaitingNextCut = true;
         state.lastStep = performance.now();
@@ -12455,7 +12564,7 @@ function updateHud(){
           state.lastStep = performance.now() + 1400;
           updateSkipButton();
           updateHud();
-        }, judged ? 760 : 50);
+        }, scoreFeedbackShown ? 980 : judged ? 760 : 50);
       }
       updateHud();
       return false;
