@@ -1966,9 +1966,14 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function collectGameReadyParts(abc = "") {
-            const names = new Map(parseVoicesFromABC(abc).map(v => [v.id, v.name]));
-            const parts = [];
-            const byId = new Map();
+            const definitions = collectAbcVoiceDefinitions(abc);
+            const parts = definitions.map(definition => ({
+                id: definition.id,
+                name: definition.name,
+                hasMidiProgram: false,
+                noteCount: 0
+            }));
+            const byId = new Map(parts.map(part => [part.id, part]));
             let currentVoice = null;
 
             const ensurePart = (id) => {
@@ -1976,7 +1981,7 @@ V:8 nm="Timpani" snm="Timp"
                 if (!byId.has(key)) {
                     const part = {
                         id: key,
-                        name: names.get(key) || `パート ${key}`,
+                        name: `パート ${key}`,
                         hasMidiProgram: false,
                         noteCount: 0
                     };
@@ -1986,21 +1991,32 @@ V:8 nm="Timpani" snm="Timp"
                 return byId.get(key);
             };
 
-            String(abc).replace(/\r/g, "").split("\n").forEach(line => {
-                const voice = line.match(/^V:\s*(\S+)/) || line.match(/^\s*\[V:([^\]\s]+)\]/);
-                if (voice) currentVoice = voice[1];
-                if (currentVoice) ensurePart(currentVoice);
+            String(abc || '').replace(/\r/g, '').split('\n').forEach(line => {
+                const declaration = line.match(/^\s*V:\s*([^\s]+)/i);
+                if (declaration) {
+                    currentVoice = declaration[1];
+                    ensurePart(currentVoice);
+                }
 
-                const program = line.match(/^%%MIDI\s+program\s+\d+/i);
-                if (program && currentVoice) ensurePart(currentVoice).hasMidiProgram = true;
+                const inlineVoice = line.match(/\[V:([^\]\s]+)[^\]]*\]/i);
+                if (!declaration && inlineVoice) {
+                    currentVoice = inlineVoice[1];
+                    ensurePart(currentVoice);
+                }
+
+                if (/^\s*%%MIDI\s+program\s+\d+/i.test(line) && currentVoice) {
+                    ensurePart(currentVoice).hasMidiProgram = true;
+                }
             });
 
             const bodies = collectAbcVoiceBodies(abc);
             if (!parts.length && bodies.length) ensurePart('1');
+
             bodies.forEach((body, index) => {
                 const part = parts[index] || ensurePart(String(index + 1));
                 part.noteCount = countApproximateNotes(body);
             });
+
             return parts;
         }
 
@@ -2476,28 +2492,72 @@ V:8 nm="Timpani" snm="Timp"
             });
         }
 
-        function parseVoicesFromABC(abc) {
-            const voices = [];
-            const lines = String(abc || '').split('\n');
+        function extractAbcVoiceName(source) {
+            const nameMatch = String(source || '').match(/(?:^|\s)(?:nm|name)\s*=\s*(?:"([^"]+)"|“([^”]+)”|”([^“]+)“|'([^']+)'|([^\s\]]+))/i);
+            if (!nameMatch) return null;
 
-            lines.forEach(line => {
-                const match = line.match(/^V:\s*(\S+)/);
-                if (!match) return;
+            const parsedName = nameMatch
+                .slice(1)
+                .find(value => typeof value === 'string' && value.trim());
 
-                const id = match[1];
-                if (voices.some(voice => voice.id === id)) return;
+            return parsedName ? parsedName.trim() : null;
+        }
 
-                let name = `パート ${id}`;
-                const nameMatch = line.match(/(?:^|\s)(?:nm|name)\s*=\s*(?:"([^"]+)"|“([^”]+)”|”([^“]+)“|'([^']+)'|([^\s]+))/i);
-                if (nameMatch) {
-                    const parsedName = nameMatch.slice(1).find(value => typeof value === 'string' && value.trim());
-                    if (parsedName) name = parsedName.trim();
+        function collectAbcVoiceDefinitions(abc) {
+            const definitions = [];
+            const definitionsById = new Map();
+
+            const registerVoice = (rawId, source, inlineOnly) => {
+                const id = String(rawId || '').trim();
+                if (!id) return;
+
+                const parsedName = extractAbcVoiceName(source);
+                const fallbackName = `パート ${id}`;
+                const existing = definitionsById.get(id);
+
+                if (existing) {
+                    const wasInlineOnly = existing.inlineOnly;
+
+                    if (!inlineOnly) {
+                        existing.inlineOnly = false;
+                    }
+
+                    if (parsedName && (existing.name === fallbackName || (wasInlineOnly && !inlineOnly))) {
+                        existing.name = parsedName;
+                    }
+                    return;
                 }
 
-                voices.push({ id, name });
+                const definition = {
+                    id,
+                    name: parsedName || fallbackName,
+                    inlineOnly: !!inlineOnly
+                };
+
+                definitionsById.set(id, definition);
+                definitions.push(definition);
+            };
+
+            String(abc || '').replace(/\r/g, '').split('\n').forEach(line => {
+                const declaration = line.match(/^\s*V:\s*([^\s]+)/i);
+                if (declaration) {
+                    registerVoice(declaration[1], line, false);
+                }
+
+                const inlineMatches = line.matchAll(/\[V:([^\]\s]+)([^\]]*)\]/gi);
+                for (const inlineMatch of inlineMatches) {
+                    registerVoice(inlineMatch[1], inlineMatch[2] || '', true);
+                }
             });
 
-            return voices;
+            return definitions;
+        }
+
+        function parseVoicesFromABC(abc) {
+            return collectAbcVoiceDefinitions(abc).map(voice => ({
+                id: voice.id,
+                name: voice.name
+            }));
         }
 
         function parseVoiceVolumesFromABC(abc) {
@@ -2523,7 +2583,7 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function normalizeTuningForABC(abc, tuning = null) {
-            const voices = parseVoicesFromABC(abc);
+            const voices = collectAbcVoiceDefinitions(abc);
             const voiceIds = voices.map(voice => String(voice.id));
             const parsedVolumes = parseVoiceVolumesFromABC(abc);
             const savedActiveVoices = tuning && Array.isArray(tuning.activeVoices)
@@ -2835,6 +2895,17 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         let tuningGeneration = 0;
+        let musicLoadGeneration = 0;
+        let playbackIntentGeneration = 0;
+
+        function invalidatePendingTuning() {
+            tuningGeneration++;
+        }
+
+        function advancePlaybackIntent() {
+            playbackIntentGeneration++;
+            return playbackIntentGeneration;
+        }
 
         function stopTransientSynth(synth, contextLabel) {
             if (!synth || typeof synth.stop !== 'function') return;
@@ -2845,14 +2916,34 @@ V:8 nm="Timpani" snm="Timp"
             }
         }
 
+        function cloneTuningState(tuning) {
+            const normalized = normalizeTuningForABC(currentABC, tuning);
+            return {
+                activeVoices: normalized.activeVoices.slice(),
+                voiceVolumes: { ...normalized.voiceVolumes }
+            };
+        }
+
+        function restoreInstrumentTuningUI(tuning) {
+            const restored = cloneTuningState(tuning);
+            activeVoices = restored.activeVoices.slice();
+            voiceVolumes = { ...restored.voiceVolumes };
+            renderInstrumentList();
+        }
+
         async function applyInstrumentTuning() {
             const currentGen = ++tuningGeneration;
+            const intentGen = playbackIntentGeneration;
             const wasPlaying = window.isPlaying;
             const previousPlaybackState = playbackState;
-            const currentPos = playbackPositionSec;
-            currentTuning = getCurrentTuningSnapshot();
-            previewABC = generateTunedABC();
-            const tunedABC = previewABC;
+            const previousMidi = window.currentMidi;
+            const previousDurationSec = playbackDurationSec;
+            const previousTuning = cloneTuningState(currentTuning);
+            const previousPreviewABC = previewABC;
+
+            const candidateTuning = getCurrentTuningSnapshot();
+            const candidatePreviewABC = buildPreviewABC(currentABC, candidateTuning);
+
             const scratch = document.createElement('div');
             scratch.style.position = 'fixed';
             scratch.style.left = '-99999px';
@@ -2862,61 +2953,124 @@ V:8 nm="Timpani" snm="Timp"
             scratch.style.overflow = 'hidden';
             document.body.appendChild(scratch);
 
-            let midi = null;
+            let nextMidi = null;
+            let committed = false;
+            let committedPosition = playbackPositionSec;
 
             try {
-                const visualObjForAudio = ABCJS.renderAbc(scratch, tunedABC, { responsive: 'resize' })[0];
+                const visualObjForAudio = ABCJS.renderAbc(scratch, candidatePreviewABC, { responsive: 'resize' })[0];
                 if (!visualObjForAudio) {
                     throw new Error("チューニング用の楽譜を生成できませんでした。");
                 }
 
-                stopTransientSynth(window.currentMidi, "Previous Tuning Synth");
-                window.currentMidi = null;
-                clearPlaybackTimers();
-                setPlaybackState('loading');
-
-                midi = new ABCJS.synth.CreateSynth();
-                await midi.init({ visualObj: visualObjForAudio });
-                const primed = await midi.prime();
+                nextMidi = new ABCJS.synth.CreateSynth();
+                await nextMidi.init({ visualObj: visualObjForAudio });
+                const primed = await nextMidi.prime();
 
                 if (currentGen !== tuningGeneration) {
-                    stopTransientSynth(midi, "Stale Tuning Synth");
+                    stopTransientSynth(nextMidi, "Stale Prepared Tuning Synth");
                     return;
                 }
 
-                playbackDurationSec = primed && primed.duration ? primed.duration : 0;
-                window.currentMidi = midi;
+                const requestedPosition = Math.max(0, playbackPositionSec || 0);
 
-                if (wasPlaying) {
-                    if (typeof midi.seek === 'function') {
-                        midi.seek(currentPos, "seconds");
+                stopTransientSynth(previousMidi, "Previous Tuning Synth");
+                clearPlaybackTimers();
+
+                currentTuning = cloneTuningState(candidateTuning);
+                previewABC = candidatePreviewABC;
+                playbackDurationSec = primed && primed.duration ? primed.duration : 0;
+                committedPosition = clampPlaybackTime(requestedPosition);
+                window.currentMidi = nextMidi;
+                committed = true;
+                updatePlaybackBar(committedPosition);
+
+                const shouldAutoResume = wasPlaying && intentGen === playbackIntentGeneration;
+
+                if (shouldAutoResume) {
+                    if (typeof nextMidi.seek === 'function') {
+                        nextMidi.seek(committedPosition, "seconds");
                     }
 
-                    await midi.start();
+                    await nextMidi.start();
 
-                    if (currentGen !== tuningGeneration) {
-                        stopTransientSynth(midi, "Stale Started Tuning Synth");
+                    if (currentGen !== tuningGeneration || intentGen !== playbackIntentGeneration) {
+                        stopTransientSynth(nextMidi, "Stale Started Tuning Synth");
                         return;
                     }
 
                     setPlaybackState('playing');
-                    startPlaybackTracking(currentPos);
+                    startPlaybackTracking(committedPosition);
                 } else {
-                    setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
+                    if (intentGen === playbackIntentGeneration) {
+                        setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
+                        updatePlaybackBar(committedPosition);
+                    }
                 }
             } catch (e) {
-                stopTransientSynth(midi, "Failed Tuning Synth");
+                stopTransientSynth(nextMidi, "Failed Tuning Synth");
 
                 if (currentGen !== tuningGeneration) {
                     return;
                 }
 
-                if (window.currentMidi === midi) {
-                    window.currentMidi = null;
+                console.error("Tuning Apply Error:", e);
+
+                currentTuning = cloneTuningState(previousTuning);
+                previewABC = previousPreviewABC;
+                restoreInstrumentTuningUI(previousTuning);
+
+                if (!committed) {
+                    return;
                 }
 
-                console.error("Tuning Apply Error:", e);
-                setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
+                if (window.currentMidi === nextMidi) {
+                    window.currentMidi = previousMidi;
+                    playbackDurationSec = previousDurationSec;
+                }
+
+                if (intentGen !== playbackIntentGeneration) {
+                    return;
+                }
+
+                const rollbackPosition = previousDurationSec > 0
+                    ? Math.max(0, Math.min(committedPosition, previousDurationSec))
+                    : Math.max(0, committedPosition);
+
+                if (!previousMidi) {
+                    setPlaybackState('stopped');
+                    updatePlaybackBar(rollbackPosition);
+                    return;
+                }
+
+                try {
+                    if (typeof previousMidi.seek === 'function') {
+                        previousMidi.seek(rollbackPosition, "seconds");
+                    }
+
+                    if (wasPlaying) {
+                        await previousMidi.start();
+
+                        if (currentGen !== tuningGeneration || intentGen !== playbackIntentGeneration) {
+                            stopTransientSynth(previousMidi, "Stale Rollback Synth");
+                            return;
+                        }
+
+                        setPlaybackState('playing');
+                        startPlaybackTracking(rollbackPosition);
+                    } else {
+                        setPlaybackState(previousPlaybackState === 'paused' ? 'paused' : 'stopped');
+                        updatePlaybackBar(rollbackPosition);
+                    }
+                } catch (rollbackError) {
+                    if (currentGen !== tuningGeneration) {
+                        return;
+                    }
+
+                    console.error("Tuning Rollback Error:", rollbackError);
+                    setPlaybackState('stopped');
+                    updatePlaybackBar(rollbackPosition);
+                }
             } finally {
                 scratch.remove();
             }
@@ -2950,7 +3104,11 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function renderMusic(abc, title, meta, libId = null, rating = 0, autoPlay = false, tuning = null, compositionBrief = null) {
+            const loadGen = ++musicLoadGeneration;
+            invalidatePendingTuning();
+
             if (typeof stopAllMusic === 'function') stopAllMusic();
+            const autoPlayIntentGen = playbackIntentGeneration;
             prepareCurrentSongState(abc, title, meta, libId, rating, tuning, compositionBrief);
             updateCurrentSongMetaUI(meta);
             resetPlaybackBar();
@@ -3384,8 +3542,19 @@ V:8 nm="Timpani" snm="Timp"
             if (visualObj && ABCJS.synth.supportsAudio()) {
                 const midi = new ABCJS.synth.CreateSynth();
                 midi.init({ visualObj: visualObj })
-                    .then(() => midi.prime())
+                    .then(() => {
+                        if (loadGen !== musicLoadGeneration) {
+                            stopTransientSynth(midi, "Stale Initialized Music Synth");
+                            return null;
+                        }
+                        return midi.prime();
+                    })
                     .then((primed) => {
+                        if (loadGen !== musicLoadGeneration) {
+                            stopTransientSynth(midi, "Stale Primed Music Synth");
+                            return;
+                        }
+
                         playbackDurationSec = primed && primed.duration ? primed.duration : 0;
                         updatePlaybackBar(0);
                         window.currentMidi = midi;
@@ -3397,9 +3566,22 @@ V:8 nm="Timpani" snm="Timp"
                             primeError: "",
                             durationSec: playbackDurationSec
                         });
-                        if (autoPlay) togglePlay();
+
+                        if (
+                            autoPlay &&
+                            loadGen === musicLoadGeneration &&
+                            autoPlayIntentGen === playbackIntentGeneration
+                        ) {
+                            togglePlay();
+                        }
                     })
                     .catch(err => {
+                        if (loadGen !== musicLoadGeneration) {
+                            stopTransientSynth(midi, "Stale Failed Music Synth");
+                            return;
+                        }
+
+                        stopTransientSynth(midi, "Failed Music Synth");
                         playbackDurationSec = 0;
                         updatePlaybackBar(0);
                         console.error("Audio Init Error:", err);
@@ -3413,6 +3595,8 @@ V:8 nm="Timpani" snm="Timp"
                         });
                     });
             } else {
+                if (loadGen !== musicLoadGeneration) return;
+
                 setPlaybackState('stopped');
                 completeGameReadyAnalysis(gameReadyContext, {
                     renderOk: !!visualObj,
@@ -3445,6 +3629,8 @@ V:8 nm="Timpani" snm="Timp"
         function pausePlayerMusic() {
             if (!window.currentMidi || !window.isPlaying) return;
 
+            advancePlaybackIntent();
+
             try {
                 window.currentMidi.stop();
             } catch (e) {
@@ -3455,6 +3641,8 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function stopPlayerMusic(resetPosition = true) {
+            advancePlaybackIntent();
+
             try {
                 if (window.currentMidi && typeof window.currentMidi.stop === 'function') {
                     window.currentMidi.stop();
@@ -3481,6 +3669,9 @@ V:8 nm="Timpani" snm="Timp"
                 return;
             }
 
+            const intentGen = advancePlaybackIntent();
+            const midi = window.currentMidi;
+
             stopOtherAudioSources();
             setPlaybackState('loading');
 
@@ -3489,14 +3680,25 @@ V:8 nm="Timpani" snm="Timp"
                     ? 0
                     : clampPlaybackTime(playbackPositionSec);
 
-                if (typeof window.currentMidi.seek === 'function') {
-                    window.currentMidi.seek(startAt, "seconds");
+                if (typeof midi.seek === 'function') {
+                    midi.seek(startAt, "seconds");
                 }
 
-                await window.currentMidi.start();
+                await midi.start();
+
+                if (intentGen !== playbackIntentGeneration || midi !== window.currentMidi) {
+                    stopTransientSynth(midi, "Stale Playback Intent Synth");
+                    return;
+                }
+
                 setPlaybackState('playing');
                 startPlaybackTracking(startAt);
             } catch (e) {
+                if (intentGen !== playbackIntentGeneration || midi !== window.currentMidi) {
+                    stopTransientSynth(midi, "Stale Failed Playback Synth");
+                    return;
+                }
+
                 console.error("Playback Error:", e);
                 stopPlayerMusic(false);
             }
@@ -3932,19 +4134,8 @@ V:8 nm="Timpani" snm="Timp"
         }
 
         function countAbcVoicesForExport(abc = "") {
-            const ids = new Set();
-
-            abc.replace(/\r/g, "").split("\n").forEach((line) => {
-                const defMatch = line.match(/^V:\s*([^\s]+)/i);
-                if (defMatch) ids.add(defMatch[1]);
-
-                const inlineMatches = line.matchAll(/\[V:([^\]\s]+)[^\]]*\]/gi);
-                for (const match of inlineMatches) {
-                    ids.add(match[1]);
-                }
-            });
-
-            return Math.max(1, ids.size || collectAbcVoiceBodies(abc).length || 1);
+            const definitionCount = collectAbcVoiceDefinitions(abc).length;
+            return Math.max(1, definitionCount || collectAbcVoiceBodies(abc).length || 1);
         }
 
         function audioBufferToWavBlob(audioBuffer) {
