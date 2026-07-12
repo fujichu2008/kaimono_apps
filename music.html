@@ -496,11 +496,26 @@
 
                 <div class="mt-5 text-center space-y-2">
                     <h3 id="current-title" class="text-xl font-bold tracking-wide bg-gradient-to-r from-sky-200 via-white to-emerald-200 bg-clip-text text-transparent">曲名未定</h3>
-                    <div onclick="toggleMetaDisplay()" class="cursor-pointer bg-slate-800/50 rounded-lg p-2 border border-slate-700/50 hover:bg-slate-800 transition-colors" title="タップで表示切り替え">
-                        <div id="meta-marquee-wrap" class="marquee-container text-xs text-slate-400">
-                            <span id="meta-marquee" class="marquee-content">Generating vibe...</span>
+                    <div id="meta-display-wrap" class="relative">
+                        <div onclick="toggleMetaDisplay()" class="cursor-pointer bg-slate-800/50 rounded-lg p-2 pr-11 border border-slate-700/50 hover:bg-slate-800 transition-colors" title="タップで表示切り替え">
+                            <div id="meta-marquee-wrap" class="marquee-container text-xs text-slate-400">
+                                <span id="meta-marquee" class="marquee-content">Generating vibe...</span>
+                            </div>
+                            <p id="meta-full-wrap" class="text-xs text-slate-400 hidden leading-relaxed text-left max-h-32 overflow-y-auto">Generating vibe...</p>
                         </div>
-                        <p id="meta-full-wrap" class="text-xs text-slate-400 hidden leading-relaxed text-left max-h-32 overflow-y-auto">Generating vibe...</p>
+                        <button type="button" onclick="event.stopPropagation(); startMetaEdit();" class="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-lg bg-slate-900/80 hover:bg-sky-900/70 text-slate-400 hover:text-sky-300 border border-slate-700 flex items-center justify-center transition-colors" title="コメントを編集" aria-label="コメントを編集">
+                            <i data-lucide="pencil" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                    <div id="meta-edit-panel" class="hidden bg-slate-900/80 rounded-xl p-3 border border-sky-500/30 space-y-2">
+                        <label for="meta-editor" class="block text-[11px] font-bold text-sky-300">音楽コメントを編集</label>
+                        <textarea id="meta-editor" class="w-full min-h-28 bg-slate-800 border border-slate-700 rounded-lg p-3 text-xs leading-relaxed resize-y outline-none focus:border-sky-500" placeholder="楽曲の説明やメモを入力してください"></textarea>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button type="button" onclick="cancelMetaEdit()" class="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold transition-colors">キャンセル</button>
+                            <button type="button" onclick="saveMetaEdit()" class="min-h-[44px] rounded-xl bg-sky-600 hover:bg-sky-500 text-xs font-bold transition-colors flex items-center justify-center gap-1.5">
+                                <i data-lucide="save" class="w-4 h-4"></i> 保存
+                            </button>
+                        </div>
                     </div>
                     <div class="flex justify-center items-center gap-4">
                         <div id="player-rating" class="flex gap-1 text-slate-500">
@@ -1015,10 +1030,19 @@
         }
 
         function updateCurrentSongMetaUI(meta) {
+            const safeMeta = String(meta || "");
             const marqueeEl = document.getElementById('meta-marquee');
-            if (marqueeEl) marqueeEl.innerText = meta;
+            if (marqueeEl) marqueeEl.innerText = safeMeta;
             const fullWrapEl = document.getElementById('meta-full-wrap');
-            if (fullWrapEl) fullWrapEl.innerText = meta;
+            if (fullWrapEl) fullWrapEl.innerText = safeMeta;
+
+            const displayWrap = document.getElementById('meta-display-wrap');
+            const editPanel = document.getElementById('meta-edit-panel');
+            const editor = document.getElementById('meta-editor');
+            if (displayWrap) displayWrap.classList.remove('hidden');
+            if (editPanel) editPanel.classList.add('hidden');
+            if (editor) editor.value = safeMeta;
+
             updatePlayerRatingUI();
             updateSaveButtonState();
         }
@@ -4625,6 +4649,107 @@ V:8 nm="Timpani" snm="Timp"
             if (marqueeWrap && fullWrap) {
                 marqueeWrap.classList.toggle('hidden');
                 fullWrap.classList.toggle('hidden');
+            }
+        }
+
+        function startMetaEdit() {
+            if (!currentABC) {
+                showAbcCopyNotice("編集する楽曲データがありません。", true);
+                return;
+            }
+
+            const displayWrap = document.getElementById('meta-display-wrap');
+            const editPanel = document.getElementById('meta-edit-panel');
+            const editor = document.getElementById('meta-editor');
+            if (!editPanel || !editor) return;
+
+            editor.value = String(currentMetaRaw || "");
+            if (displayWrap) displayWrap.classList.add('hidden');
+            editPanel.classList.remove('hidden');
+            safeCreateIcons();
+
+            setTimeout(() => {
+                editor.focus();
+                editor.setSelectionRange(editor.value.length, editor.value.length);
+            }, 50);
+        }
+
+        function cancelMetaEdit() {
+            const displayWrap = document.getElementById('meta-display-wrap');
+            const editPanel = document.getElementById('meta-edit-panel');
+            const editor = document.getElementById('meta-editor');
+
+            if (editor) editor.value = String(currentMetaRaw || "");
+            if (displayWrap) displayWrap.classList.remove('hidden');
+            if (editPanel) editPanel.classList.add('hidden');
+        }
+
+        async function updateCurrentLibraryDescription(description) {
+            if (currentLibraryId === null) return;
+
+            const db = await dbPromise;
+            if (!db) throw new Error("IndexedDBを利用できません。");
+
+            await new Promise((resolve, reject) => {
+                let settled = false;
+                const finish = (error = null) => {
+                    if (settled) return;
+                    settled = true;
+                    if (error) reject(error);
+                    else resolve();
+                };
+
+                const tx = db.transaction('library', 'readwrite');
+                const store = tx.objectStore('library');
+                const request = store.get(currentLibraryId);
+
+                request.onsuccess = () => {
+                    const data = request.result;
+                    if (!data) {
+                        try {
+                            tx.abort();
+                        } catch (e) {
+                            console.warn("Comment Update Abort Error:", e);
+                        }
+                        finish(new Error("保存対象の楽曲が見つかりません。"));
+                        return;
+                    }
+
+                    data.description = description;
+                    store.put(data);
+                };
+                request.onerror = () => finish(request.error || new Error("コメントの読み込みに失敗しました。"));
+                tx.oncomplete = () => finish();
+                tx.onerror = () => finish(tx.error || new Error("コメントの保存に失敗しました。"));
+                tx.onabort = () => finish(tx.error || new Error("コメントの保存が中断されました。"));
+            });
+
+            await loadLibraryFromDB();
+            updateLibraryList();
+        }
+
+        async function saveMetaEdit() {
+            const editor = document.getElementById('meta-editor');
+            if (!editor) return;
+
+            const previousMeta = String(currentMetaRaw || "");
+            const nextMeta = String(editor.value || "").trim();
+            currentMetaRaw = nextMeta;
+            updateCurrentSongMetaUI(nextMeta);
+
+            if (currentLibraryId === null) {
+                showAbcCopyNotice("コメントを更新しました。ライブラリ保存時に反映されます。");
+                return;
+            }
+
+            try {
+                await updateCurrentLibraryDescription(nextMeta);
+                showAbcCopyNotice("コメントを更新しました。");
+            } catch (e) {
+                console.error("Comment Save Error:", e);
+                currentMetaRaw = previousMeta;
+                updateCurrentSongMetaUI(previousMeta);
+                showAbcCopyNotice("コメントの保存に失敗しました。", true);
             }
         }
 
