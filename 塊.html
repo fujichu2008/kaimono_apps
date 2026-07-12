@@ -742,6 +742,9 @@ const GAME_BGM_ABC_ENCODED =
 // 32小節・4/4・120BPMのため、1周は約64秒。
 const GAME_BGM_LOOP_MS = 64000;
 
+// ABC各パートの音量へ掛けるBGM専用倍率。効果音には影響しない。
+const GAME_BGM_VOLUME = 0.82;
+
 const gameBgm = {
   synth:null,
   visualObj:null,
@@ -761,9 +764,21 @@ const gameBgm = {
     }
 
     // 曲全体のABCリピートを解除し、アプリ側で継ぎ目なく繰り返す。
+    // 各パートのMIDI音量だけを一括補正し、効果音との音量差を確保する。
     const abc = decodeURIComponent(
       GAME_BGM_ABC_ENCODED
     )
+      .replace(
+        /^%%MIDI control 7 (\d+)$/gm,
+        (match,volume) =>
+          `%%MIDI control 7 ${Math.max(
+            1,
+            Math.round(
+              Number(volume) *
+              GAME_BGM_VOLUME
+            )
+          )}`
+      )
       .replace(/^x:/m,'X:')
       .replace(/\|:/g,'|')
       .replace(/:\|/g,'|');
@@ -1453,7 +1468,9 @@ const audio = {
     this.context = new AudioContextClass();
 
     this.master = this.context.createGain();
-    this.master.gain.value = 0.18;
+
+    // BGMに埋もれないよう、効果音専用出力を十分な音量へ戻す。
+    this.master.gain.value = 0.48;
     this.master.connect(this.context.destination);
   },
 
@@ -1461,8 +1478,10 @@ const audio = {
     this.init();
 
     if(this.context.state === 'suspended'){
-      this.context.resume();
+      return this.context.resume();
     }
+
+    return Promise.resolve();
   },
 
   tone(
@@ -1474,37 +1493,69 @@ const audio = {
   ){
     this.init();
 
-    const now = this.context.currentTime;
-    const oscillator = this.context.createOscillator();
-    const gain = this.context.createGain();
+    const playTone = () => {
+      if(
+        !this.context ||
+        !this.master ||
+        this.context.state !== 'running'
+      ){
+        return;
+      }
 
-    oscillator.type = type;
+      // AudioContext復帰と同時でも先頭が欠けないよう、わずかに後ろへ予約する。
+      const now =
+        this.context.currentTime + 0.01;
 
-    oscillator.frequency.setValueAtTime(
-      frequency,
-      now
-    );
+      const oscillator =
+        this.context.createOscillator();
 
-    oscillator.frequency.exponentialRampToValueAtTime(
-      Math.max(40,frequency * slide),
-      now + duration
-    );
+      const gain =
+        this.context.createGain();
 
-    gain.gain.setValueAtTime(
-      gainValue,
-      now
-    );
+      oscillator.type = type;
 
-    gain.gain.exponentialRampToValueAtTime(
-      0.001,
-      now + duration
-    );
+      oscillator.frequency.setValueAtTime(
+        frequency,
+        now
+      );
 
-    oscillator.connect(gain);
-    gain.connect(this.master);
+      oscillator.frequency.exponentialRampToValueAtTime(
+        Math.max(40,frequency * slide),
+        now + duration
+      );
 
-    oscillator.start(now);
-    oscillator.stop(now + duration + 0.02);
+      gain.gain.setValueAtTime(
+        gainValue,
+        now
+      );
+
+      gain.gain.exponentialRampToValueAtTime(
+        0.001,
+        now + duration
+      );
+
+      oscillator.connect(gain);
+      gain.connect(this.master);
+
+      oscillator.start(now);
+      oscillator.stop(
+        now + duration + 0.02
+      );
+    };
+
+    if(this.context.state === 'running'){
+      playTone();
+      return;
+    }
+
+    void this.resume()
+      .then(playTone)
+      .catch(error => {
+        console.warn(
+          'Gravity Core SFX resume failed.',
+          error
+        );
+      });
   },
 
   pickup(size){
@@ -7576,16 +7627,14 @@ function setupTitleScene(){
     0.018
   );
 
-  renderer.toneMappingExposure = 1.0;
-
-  // 白背景で色が飛ばないよう、タイトル専用の露出へ上書きする。
-  renderer.toneMappingExposure = 0.82;
+  // 白背景上でもコア本来の青が残るよう、タイトル専用露出を抑える。
+  renderer.toneMappingExposure = 0.68;
 
   const hemisphere =
     new THREE.HemisphereLight(
-      0xffffff,
-      0xa8b4c0,
-      1.75
+      0xd9edf5,
+      0x52616d,
+      1.12
     );
 
   scene.add(hemisphere);
@@ -7593,34 +7642,26 @@ function setupTitleScene(){
 
   const cyanLight =
     new THREE.PointLight(
-      0x70d8ff,
-      18,
-      26,
+      0x2c91b8,
+      4.2,
+      22,
       2
     );
 
   cyanLight.position.set(5,6,4);
-
-  // 白背景では強いネオン光が物体色を消すため、寒色光を穏やかにする。
-  cyanLight.color.setHex(0x67b8d1);
-  cyanLight.intensity = 7;
 
   scene.add(cyanLight);
   sceneLights.push(cyanLight);
 
   const pinkLight =
     new THREE.PointLight(
-      0x6b7fa6,
-      10,
-      22,
+      0xd99d7a,
+      2.2,
+      20,
       2
     );
 
   pinkLight.position.set(-6,3,-5);
-
-  // マゼンタ光を淡い暖色の補助光へ変え、色かぶりを防ぐ。
-  pinkLight.color.setHex(0xffd0ad);
-  pinkLight.intensity = 4.5;
 
   scene.add(pinkLight);
   sceneLights.push(pinkLight);
@@ -7632,33 +7673,36 @@ function setupTitleScene(){
   clusterRadius = 1.15;
   updateCoreScale();
 
-  // タイトル画面だけコアを濃いシアンへ調整し、白背景上でも輪郭を明確にする。
+  // 強い反射とクリアコートを抑え、白飛びせず濃いシアンに見える材質へ変更する。
   coreMesh.material.color.setHex(
-    0x2187a8
+    0x0b5f7c
   );
 
   coreMesh.material.emissive.setHex(
-    0x062e3d
+    0x021923
   );
 
   coreMesh.material.emissiveIntensity =
-    0.16;
+    0.08;
 
-  coreMesh.material.metalness = 0.50;
-  coreMesh.material.roughness = 0.27;
+  coreMesh.material.metalness = 0.38;
+  coreMesh.material.roughness = 0.42;
+  coreMesh.material.clearcoat = 0.55;
+  coreMesh.material.clearcoatRoughness =
+    0.24;
 
   coreWire.material.color.setHex(
-    0x07566e
+    0x042f40
   );
 
-  coreWire.material.opacity = 0.40;
+  coreWire.material.opacity = 0.62;
 
   coreGlow.color.setHex(
-    0x54c8e6
+    0x36a8c7
   );
 
-  coreGlow.intensity = 5.5;
-  coreGlow.distance = 8;
+  coreGlow.intensity = 3.2;
+  coreGlow.distance = 7;
 
   coreGroup.position.set(0,0,0);
   coreShadow.visible = false;
