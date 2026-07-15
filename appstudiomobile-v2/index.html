@@ -1001,6 +1001,21 @@
                 <label class="github-field-label" for="github-pwa-background-input">背景カラー</label>
                 <input type="text" id="github-pwa-background-input" placeholder="#f4f7fb" inputmode="text" autocapitalize="none" spellcheck="false" oninput="updateGitHubPublishField('pwa.backgroundColor', this.value)">
 
+                <label class="github-field-label" for="github-pwa-icon-file-input">アイコン画像</label>
+                <input type="file" id="github-pwa-icon-file-input" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="handlePwaIconFileSelection(event)">
+                <div style="padding:10px; border:1px solid var(--border-color); border-radius:10px; background:rgba(0,0,0,0.18);">
+                    <div style="display:flex; justify-content:center; margin-bottom:9px;">
+                        <img id="github-pwa-icon-preview" alt="PWAアイコン画像のプレビュー" style="display:none; width:88px; height:88px; border-radius:18px; object-fit:cover; border:1px solid var(--border-color); background:#111;">
+                        <div id="github-pwa-icon-placeholder" style="width:88px; height:88px; border-radius:18px; display:flex; align-items:center; justify-content:center; padding:8px; text-align:center; font-size:10px; line-height:1.4; color:#888; border:1px dashed #666; background:#202020;">画像は指定されていません</div>
+                    </div>
+                    <div id="github-pwa-icon-status" class="github-publish-note" style="margin:0 0 9px; text-align:center;">画像未指定時は、下の文字から簡易アイコンを生成します。</div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" id="github-pwa-icon-select-btn" class="github-mode-btn" style="min-height:40px; flex:1;" onclick="openPwaIconFilePicker()">画像を選択</button>
+                        <button type="button" id="github-pwa-icon-remove-btn" class="github-mode-btn" style="display:none; min-height:40px; flex:1; border-color:var(--danger-color); color:#ffb3b3;" onclick="removePwaIconImage()">画像を解除</button>
+                    </div>
+                </div>
+                <p class="github-publish-note">一度指定した画像は、このアプリのPWA設定として端末内に保存され、次回以降のGitHub公開でも自動使用されます。ブラウザのデータを削除した場合や別端末では再指定が必要です。</p>
+
                 <label class="github-field-label" for="github-pwa-icon-text-input">生成アイコンの文字</label>
                 <input type="text" id="github-pwa-icon-text-input" maxlength="8" placeholder="未入力時は表示名の先頭1〜2文字" oninput="updateGitHubPublishField('pwa.iconText', this.value)">
             </div>
@@ -1391,7 +1406,12 @@
                 shortName: "",
                 themeColor: "#007acc",
                 backgroundColor: "#1e1e1e",
-                iconText: ""
+                iconText: "",
+                hasCustomIcon: false,
+                iconImageName: "",
+                iconImagePreviewUrl: "",
+                iconImageLoading: false,
+                iconImageError: ""
             }
         };
         const PWA_PUBLISH_PREFS_KEY = "appstudio_pwa_publish_preferences";
@@ -3024,7 +3044,20 @@ nextBtn.onclick=nextStep;
             closeModal('save-modal');
         }
 
-                        function resetGitHubPublishState() {
+                        function revokePwaIconPreviewUrl() {
+            const previewUrl = githubPublishState.pwa.iconImagePreviewUrl;
+            if (previewUrl) {
+                try {
+                    URL.revokeObjectURL(previewUrl);
+                } catch (error) {
+                    console.warn("PWAアイコンのプレビューURL解放に失敗しました:", error);
+                }
+            }
+            githubPublishState.pwa.iconImagePreviewUrl = "";
+        }
+
+        function resetGitHubPublishState() {
+            revokePwaIconPreviewUrl();
             githubPublishState.mode = "html";
             githubPublishState.repo = "";
             githubPublishState.htmlFileName = "";
@@ -3034,6 +3067,10 @@ nextBtn.onclick=nextStep;
             githubPublishState.pwa.themeColor = "#007acc";
             githubPublishState.pwa.backgroundColor = "#1e1e1e";
             githubPublishState.pwa.iconText = "";
+            githubPublishState.pwa.hasCustomIcon = false;
+            githubPublishState.pwa.iconImageName = "";
+            githubPublishState.pwa.iconImageLoading = false;
+            githubPublishState.pwa.iconImageError = "";
             currentPwaPreferenceKey = "";
         }
 
@@ -3084,7 +3121,7 @@ nextBtn.onclick=nextStep;
             }
         }
 
-        function openGitHubPublishModal() {
+        async function openGitHubPublishModal() {
             const sourceCode = editor.getValue();
             if (!sourceCode.trim()) {
                 showToast("公開するコードがありません");
@@ -3097,9 +3134,10 @@ nextBtn.onclick=nextStep;
             const pwaAppName = extractedTitle || currentAppName || filenameInput.value || "AppStudio App";
             const safeFolder = sanitizeGitHubFolderName(pwaAppName);
             const detectedTheme = extractThemeColor(sourceCode);
+            const preferenceKey = createPwaPreferenceKey(sourceCode);
 
-            currentPwaPreferenceKey = createPwaPreferenceKey(sourceCode);
-            const savedPwaPreferences = loadPwaPublishPreferences(currentPwaPreferenceKey);
+            currentPwaPreferenceKey = preferenceKey;
+            const savedPwaPreferences = loadPwaPublishPreferences(preferenceKey);
 
             githubPublishState.repo = localStorage.getItem('gh_repo') || "";
             githubPublishState.htmlFileName = sanitizeGitHubFileName(filenameInput.value || baseName || "index");
@@ -3111,13 +3149,38 @@ nextBtn.onclick=nextStep;
             githubPublishState.pwa.themeColor = detectedTheme || "#007acc";
             githubPublishState.pwa.backgroundColor = "#1e1e1e";
             githubPublishState.pwa.iconText = String(savedPwaPreferences?.iconText || "");
+            githubPublishState.pwa.hasCustomIcon = false;
+            githubPublishState.pwa.iconImageName = "";
+            githubPublishState.pwa.iconImageLoading = true;
+            githubPublishState.pwa.iconImageError = "";
 
             savePwaPublishPreferences();
             githubPublishBusy = false;
             closeModal('save-modal');
-            syncGitHubPublishModal();
             setGitHubPublishProgress("");
             document.getElementById('github-publish-modal').style.display = 'flex';
+            syncGitHubPublishModal();
+
+            try {
+                const savedIcon = await loadPwaIconImage(preferenceKey);
+                if (currentPwaPreferenceKey !== preferenceKey) return;
+
+                if (savedIcon && savedIcon.blob instanceof Blob) {
+                    githubPublishState.pwa.hasCustomIcon = true;
+                    githubPublishState.pwa.iconImageName = String(savedIcon.originalName || "保存済みアイコン");
+                    setPwaIconPreviewBlob(savedIcon.blob);
+                }
+            } catch (error) {
+                if (currentPwaPreferenceKey !== preferenceKey) return;
+                console.error("PWAアイコン画像の復元に失敗しました:", error);
+                githubPublishState.pwa.iconImageError = "保存済みアイコン画像を読み込めませんでした。画像を選び直すか解除してください。";
+                showToast("保存済みPWAアイコンの読み込みに失敗しました");
+            } finally {
+                if (currentPwaPreferenceKey === preferenceKey) {
+                    githubPublishState.pwa.iconImageLoading = false;
+                    syncGitHubPublishModal();
+                }
+            }
         }
 
         function closeGitHubPublishModal() {
@@ -3204,10 +3267,13 @@ nextBtn.onclick=nextStep;
             const submitButton = document.getElementById('github-publish-submit');
             const cancelButton = document.getElementById('github-publish-cancel');
             if (submitButton) {
-                submitButton.disabled = githubPublishBusy;
-                submitButton.textContent = githubPublishBusy ? "公開中..." : "公開する";
+                submitButton.disabled = githubPublishBusy || githubPublishState.pwa.iconImageLoading;
+                submitButton.textContent = githubPublishBusy
+                    ? "公開中..."
+                    : (githubPublishState.pwa.iconImageLoading ? "アイコン読込中..." : "公開する");
             }
             if (cancelButton) cancelButton.disabled = githubPublishBusy;
+            renderPwaIconPreview();
         }
 
         function collectGitHubPublishOptions() {
@@ -3222,7 +3288,10 @@ nextBtn.onclick=nextStep;
                     shortName: String(githubPublishState.pwa.shortName || "").trim(),
                     themeColor: String(githubPublishState.pwa.themeColor || "").trim(),
                     backgroundColor: String(githubPublishState.pwa.backgroundColor || "").trim(),
-                    iconText: String(githubPublishState.pwa.iconText || "").trim()
+                    iconText: String(githubPublishState.pwa.iconText || "").trim(),
+                    hasCustomIcon: Boolean(githubPublishState.pwa.hasCustomIcon),
+                    iconStorageKey: String(currentPwaPreferenceKey || ""),
+                    iconImageError: String(githubPublishState.pwa.iconImageError || "")
                 }
             };
 
@@ -3347,7 +3416,7 @@ nextBtn.onclick=nextStep;
 
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
-                closeModal('github-publish-modal');
+                closeGitHubPublishModal();
                 showGitHubPublishResult(result);
                 showToast("GitHubへの公開が完了しました");
             } catch (error) {
@@ -3483,13 +3552,18 @@ nextBtn.onclick=nextStep;
                 shortName: String(config.shortName || "").trim(),
                 themeColor: String(config.themeColor || "").trim(),
                 backgroundColor: String(config.backgroundColor || "").trim(),
-                iconText: String(config.iconText || "").trim()
+                iconText: String(config.iconText || "").trim(),
+                hasCustomIcon: Boolean(config.hasCustomIcon),
+                iconStorageKey: String(config.iconStorageKey || ""),
+                iconImageError: String(config.iconImageError || "")
             };
-            const buildId = await createPwaBuildId(sourceCode, normalizedConfig);
-            const [icon192, icon512] = await Promise.all([
-                generatePwaIcon(192, normalizedConfig),
-                generatePwaIcon(512, normalizedConfig)
-            ]);
+            const iconPair = await createPwaIconPair(normalizedConfig);
+            const buildId = await createPwaBuildId(sourceCode, {
+                ...normalizedConfig,
+                iconRevision: iconPair.revision
+            });
+            const icon192 = iconPair.icon192;
+            const icon512 = iconPair.icon512;
 
             return {
                 rootPath: normalizedConfig.folderName,
@@ -3900,6 +3974,304 @@ self.addEventListener("fetch", function (event) {
 `;
         }
 
+        const pwaIconDb = {
+            name: "AppStudioPwaIcons",
+            version: 1,
+            store: "icons",
+            open() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.name, this.version);
+                    request.onupgradeneeded = event => {
+                        const db = event.target.result;
+                        if (!db.objectStoreNames.contains(this.store)) {
+                            db.createObjectStore(this.store, { keyPath: "id" });
+                        }
+                    };
+                    request.onsuccess = event => resolve(event.target.result);
+                    request.onerror = () => reject(request.error || new Error("PWAアイコン用IndexedDBを開けませんでした。"));
+                });
+            },
+            async get(id) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.store, "readonly");
+                    const request = tx.objectStore(this.store).get(id);
+                    request.onsuccess = () => resolve(request.result || null);
+                    request.onerror = () => reject(request.error || new Error("PWAアイコン画像を読み込めませんでした。"));
+                    tx.oncomplete = () => db.close();
+                    tx.onabort = () => db.close();
+                });
+            },
+            async put(record) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.store, "readwrite");
+                    tx.objectStore(this.store).put(record);
+                    tx.oncomplete = () => {
+                        db.close();
+                        resolve();
+                    };
+                    tx.onerror = () => {
+                        db.close();
+                        reject(tx.error || new Error("PWAアイコン画像を保存できませんでした。"));
+                    };
+                    tx.onabort = tx.onerror;
+                });
+            },
+            async delete(id) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.store, "readwrite");
+                    tx.objectStore(this.store).delete(id);
+                    tx.oncomplete = () => {
+                        db.close();
+                        resolve();
+                    };
+                    tx.onerror = () => {
+                        db.close();
+                        reject(tx.error || new Error("PWAアイコン画像を削除できませんでした。"));
+                    };
+                    tx.onabort = tx.onerror;
+                });
+            }
+        };
+
+        function createPwaIconRecordId(appKey) {
+            return `pwa_icon:${String(appKey || "")}`;
+        }
+
+        function openPwaIconFilePicker() {
+            const input = document.getElementById("github-pwa-icon-file-input");
+            if (!input) return;
+            input.value = "";
+            input.click();
+        }
+
+        function setPwaIconPreviewBlob(blob) {
+            revokePwaIconPreviewUrl();
+            if (blob instanceof Blob) {
+                githubPublishState.pwa.iconImagePreviewUrl = URL.createObjectURL(blob);
+            }
+        }
+
+        function renderPwaIconPreview() {
+            const preview = document.getElementById("github-pwa-icon-preview");
+            const placeholder = document.getElementById("github-pwa-icon-placeholder");
+            const status = document.getElementById("github-pwa-icon-status");
+            const selectButton = document.getElementById("github-pwa-icon-select-btn");
+            const removeButton = document.getElementById("github-pwa-icon-remove-btn");
+            if (!preview || !placeholder || !status || !selectButton || !removeButton) return;
+
+            const loading = githubPublishState.pwa.iconImageLoading;
+            const error = githubPublishState.pwa.iconImageError;
+            const hasPreview = Boolean(githubPublishState.pwa.hasCustomIcon && githubPublishState.pwa.iconImagePreviewUrl);
+
+            preview.style.display = hasPreview ? "block" : "none";
+            preview.src = hasPreview ? githubPublishState.pwa.iconImagePreviewUrl : "";
+            placeholder.style.display = hasPreview ? "none" : "flex";
+            placeholder.textContent = loading ? "画像を読み込み中..." : (error ? "画像を読み込めません" : "画像は指定されていません");
+            status.textContent = loading
+                ? "保存済み画像を読み込んでいます。"
+                : error
+                    ? error
+                    : githubPublishState.pwa.hasCustomIcon
+                        ? `保存済み画像を使用します${githubPublishState.pwa.iconImageName ? `（${githubPublishState.pwa.iconImageName}）` : ""}`
+                        : "画像未指定時は、下の文字から簡易アイコンを生成します。";
+            selectButton.textContent = githubPublishState.pwa.hasCustomIcon ? "画像を変更" : "画像を選択";
+            selectButton.disabled = loading;
+            removeButton.style.display = githubPublishState.pwa.hasCustomIcon ? "block" : "none";
+            removeButton.disabled = loading;
+        }
+
+        function loadPwaImage(blob) {
+            return new Promise((resolve, reject) => {
+                const url = URL.createObjectURL(blob);
+                const image = new Image();
+                image.onload = () => resolve({ image, url });
+                image.onerror = () => {
+                    URL.revokeObjectURL(url);
+                    reject(createPublishValidationError("画像を読み込めませんでした。PNG、JPEG、WebPを確認してください。"));
+                };
+                image.src = url;
+            });
+        }
+
+        function canvasToPngBlob(canvas) {
+            return new Promise((resolve, reject) => {
+                canvas.toBlob(blob => {
+                    if (blob) resolve(blob);
+                    else reject(createPublishValidationError("PWAアイコン画像のPNG変換に失敗しました。"));
+                }, "image/png");
+            });
+        }
+
+        async function convertPwaIconImageToPngBlob(file) {
+            const supported = ["image/png", "image/jpeg", "image/webp"];
+            if (!(file instanceof Blob) || !supported.includes(String(file.type || "").toLowerCase())) {
+                throw createPublishValidationError("対応画像はPNG、JPEG、WebPです。");
+            }
+
+            const loaded = await loadPwaImage(file);
+            try {
+                const width = loaded.image.naturalWidth || loaded.image.width;
+                const height = loaded.image.naturalHeight || loaded.image.height;
+                if (!width || !height) throw createPublishValidationError("画像サイズを取得できませんでした。");
+
+                const canvas = document.createElement("canvas");
+                canvas.width = 512;
+                canvas.height = 512;
+                const context = canvas.getContext("2d");
+                if (!context) throw createPublishValidationError("PWAアイコン変換用Canvasを初期化できませんでした。");
+
+                const cropSize = Math.min(width, height);
+                const sourceX = (width - cropSize) / 2;
+                const sourceY = (height - cropSize) / 2;
+                context.drawImage(loaded.image, sourceX, sourceY, cropSize, cropSize, 0, 0, 512, 512);
+                return await canvasToPngBlob(canvas);
+            } finally {
+                URL.revokeObjectURL(loaded.url);
+            }
+        }
+
+        async function savePwaIconImage(appKey, blob, originalName) {
+            if (!appKey || !(blob instanceof Blob)) {
+                throw createPublishValidationError("保存するPWAアイコン画像が不正です。");
+            }
+            await pwaIconDb.put({
+                id: createPwaIconRecordId(appKey),
+                appKey: String(appKey),
+                blob,
+                mimeType: "image/png",
+                originalName: String(originalName || "custom-icon.png"),
+                updatedAt: new Date().toISOString()
+            });
+        }
+
+        async function loadPwaIconImage(appKey) {
+            return appKey ? pwaIconDb.get(createPwaIconRecordId(appKey)) : null;
+        }
+
+        async function deletePwaIconImage(appKey) {
+            if (appKey) await pwaIconDb.delete(createPwaIconRecordId(appKey));
+        }
+
+        async function handlePwaIconFileSelection(event) {
+            const input = event.currentTarget;
+            const file = input?.files?.[0];
+            if (!file) return;
+            if (!currentPwaPreferenceKey) {
+                input.value = "";
+                showToast("PWAアイコンを関連付けるアプリ情報がありません");
+                return;
+            }
+
+            const preferenceKey = currentPwaPreferenceKey;
+            githubPublishState.pwa.iconImageLoading = true;
+            githubPublishState.pwa.iconImageError = "";
+            syncGitHubPublishModal();
+
+            try {
+                const pngBlob = await convertPwaIconImageToPngBlob(file);
+                await savePwaIconImage(preferenceKey, pngBlob, file.name);
+                if (currentPwaPreferenceKey !== preferenceKey) return;
+                githubPublishState.pwa.hasCustomIcon = true;
+                githubPublishState.pwa.iconImageName = String(file.name || "custom-icon.png");
+                setPwaIconPreviewBlob(pngBlob);
+                showToast("PWAアイコン画像を保存しました");
+            } catch (error) {
+                console.error("PWAアイコン画像の設定に失敗しました:", error);
+                showToast(error?.message || "PWAアイコン画像の設定に失敗しました");
+            } finally {
+                input.value = "";
+                if (currentPwaPreferenceKey === preferenceKey) {
+                    githubPublishState.pwa.iconImageLoading = false;
+                    syncGitHubPublishModal();
+                }
+            }
+        }
+
+        async function removePwaIconImage() {
+            if (!githubPublishState.pwa.hasCustomIcon) return;
+            if (!confirm("保存済みのPWAアイコン画像を解除しますか？\n解除後はアイコン文字から簡易アイコンを生成します。")) return;
+
+            const preferenceKey = currentPwaPreferenceKey;
+            githubPublishState.pwa.iconImageLoading = true;
+            githubPublishState.pwa.iconImageError = "";
+            syncGitHubPublishModal();
+
+            try {
+                await deletePwaIconImage(preferenceKey);
+                if (currentPwaPreferenceKey !== preferenceKey) return;
+                revokePwaIconPreviewUrl();
+                githubPublishState.pwa.hasCustomIcon = false;
+                githubPublishState.pwa.iconImageName = "";
+                showToast("保存済み画像を解除しました");
+            } catch (error) {
+                console.error("PWAアイコン画像の解除に失敗しました:", error);
+                showToast("PWAアイコン画像の解除に失敗しました");
+            } finally {
+                if (currentPwaPreferenceKey === preferenceKey) {
+                    githubPublishState.pwa.iconImageLoading = false;
+                    syncGitHubPublishModal();
+                }
+            }
+        }
+
+        async function generatePwaIconFromImage(size, blob) {
+            const loaded = await loadPwaImage(blob);
+            try {
+                const canvas = document.createElement("canvas");
+                canvas.width = size;
+                canvas.height = size;
+                const context = canvas.getContext("2d");
+                if (!context) throw createPublishValidationError(`${size}pxアイコン用Canvasを初期化できませんでした。`);
+                const width = loaded.image.naturalWidth || loaded.image.width;
+                const height = loaded.image.naturalHeight || loaded.image.height;
+                const cropSize = Math.min(width, height);
+                context.drawImage(loaded.image, (width - cropSize) / 2, (height - cropSize) / 2, cropSize, cropSize, 0, 0, size, size);
+                return canvasToPngBase64(canvas);
+            } finally {
+                URL.revokeObjectURL(loaded.url);
+            }
+        }
+
+        async function createPwaIconPair(config) {
+            if (config.iconImageError) throw createPublishValidationError(config.iconImageError);
+
+            let savedIcon = null;
+            try {
+                savedIcon = await loadPwaIconImage(config.iconStorageKey);
+            } catch (error) {
+                throw createPublishValidationError("保存済みPWAアイコン画像を読み込めませんでした。画像を選び直すか解除してください。");
+            }
+
+            if (savedIcon?.blob instanceof Blob) {
+                const [icon192, icon512] = await Promise.all([
+                    generatePwaIconFromImage(192, savedIcon.blob),
+                    generatePwaIconFromImage(512, savedIcon.blob)
+                ]);
+                return {
+                    icon192,
+                    icon512,
+                    revision: `image:${savedIcon.updatedAt || savedIcon.blob.size}`
+                };
+            }
+
+            if (config.hasCustomIcon) {
+                throw createPublishValidationError("保存済みPWAアイコン画像が見つかりません。画像を選び直すか解除してください。");
+            }
+
+            const [icon192, icon512] = await Promise.all([
+                generatePwaIcon(192, config),
+                generatePwaIcon(512, config)
+            ]);
+            return {
+                icon192,
+                icon512,
+                revision: `text:${config.iconText || ""}:${config.name || ""}:${config.themeColor || ""}`
+            };
+        }
+
         async function generatePwaIcon(size, config) {
             const canvas = document.createElement("canvas");
             canvas.width = size;
@@ -4213,6 +4585,8 @@ self.addEventListener("fetch", function (event) {
                 String(config.shortName || ""),
                 String(config.themeColor || ""),
                 String(config.backgroundColor || ""),
+                String(config.iconText || ""),
+                String(config.iconRevision || ""),
                 sanitizeGitHubFolderName(config.folderName)
             ].join("\n---APPSTUDIO-PWA---\n");
 
