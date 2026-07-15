@@ -1,0 +1,1836 @@
+<!DOCTYPE html>
+<!--
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEON GRAND PRIX — 3D対戦アクションレース (単一HTML / Three.js r128)
+
+【修正箇所】新規作成(対象コード空欄のためフルスクラッチ)
+
+【制約条件】
+・Three.js r128 / 単一HTML / 外部アセットなし(全テクスチャCanvas生成、全音WebAudio合成)
+・ランキング保存は window.storage(Claude Artifacts永続API)を優先し、
+  失敗時はメモリ内フォールバック。localStorageは環境制約により不使用
+・物理は「トラック空間モデル」(進行距離p + 横位置lat)。自由剛体物理より
+  スマホで安定・軽量で、氷の横滑りも減衰係数1つで表現できるため採用
+・影はブロブシャドウ、建物/椰子/樹木はInstancedMesh、pixelRatio上限1.5で
+  モバイル60fpsを狙う設計
+
+【実装した裁量機能】
+・車3種(RAIDEN GT=速度型 / SHIRANUI=バランス型 / GANRYU=重量型。重量型は体当たりに強い)
+・ステージ3種で挙動・景観・BGM・路面ギミックが変化
+  - 東京都心: 夜景ネオン、高グリップ、油膜パッチ
+  - 沖縄: 琉球音階BGM、砂だまり(減速)、海と椰子
+  - 冬の稚内: 低グリップで横滑り、アイスバーン(グリップ喪失)、降雪
+・アイテム6種: ミサイル(前方誘導)/バナナ/ブースト/シールド/ラムアタック(体当たり無敵)/サンダー(下位専用レア)
+・順位が低いほど強アイテムが出る重み付きルーレット
+・敵AI5台: レーシングライン走行、障害物回避、ラバーバンド、状況判断でアイテム使用
+・3周レース、スコア=順位+タイム+撃破数、ステージ別ランキングTop8保存
+・ミニマップ、ドリフトスモーク、カウントダウン、エンジン音(速度連動ピッチ)
+
+【改善提案(次イテレーション候補)】
+・ゴーストリプレイ(自己ベストのライン記録は progress+lat の2値/frameで軽量に保存可能)
+・ジャイロ操舵オプション、2周目以降の天候変化、対人ローカル通信対戦
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-->
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>NEON GRAND PRIX</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#000; touch-action:none;
+    font-family:'Hiragino Kaku Gothic ProN','Yu Gothic',system-ui,sans-serif; user-select:none; -webkit-user-select:none; }
+  canvas#gl { position:fixed; inset:0; display:block; }
+
+  .screen { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; z-index:20; }
+  .hidden { display:none !important; }
+
+  /* ---------- TITLE ---------- */
+  #title { background:radial-gradient(ellipse at 50% 30%, #1a1040 0%, #05030f 70%); }
+  #title .grid-floor { position:absolute; bottom:0; left:0; right:0; height:45%;
+    background:
+      linear-gradient(transparent 0%, rgba(255,45,120,.06) 100%),
+      repeating-linear-gradient(90deg, rgba(0,229,255,.25) 0 1px, transparent 1px 60px),
+      repeating-linear-gradient(0deg, rgba(0,229,255,.25) 0 1px, transparent 1px 34px);
+    transform:perspective(300px) rotateX(55deg); transform-origin:bottom; opacity:.6; }
+  .title-logo { text-align:center; z-index:2; }
+  .title-logo .neon-jp { font-size:clamp(13px,3.4vw,18px); letter-spacing:1.2em; color:#8fe8ff;
+    text-indent:1.2em; margin-bottom:10px; opacity:.85; }
+  .title-logo h1 { font-family:'Arial Black',Impact,sans-serif; font-style:italic;
+    font-size:clamp(42px,11vw,96px); line-height:.95; letter-spacing:.01em;
+    background:linear-gradient(180deg,#fff 15%, #7fdcff 40%, #ff2d78 85%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 0 18px rgba(0,229,255,.55)) drop-shadow(0 0 42px rgba(255,45,120,.35)); }
+  .title-logo h1 span { display:block; }
+  #startBtn { margin-top:52px; z-index:2; font-size:clamp(18px,5vw,26px); font-weight:800;
+    letter-spacing:.35em; text-indent:.35em; padding:18px 58px; color:#031018;
+    background:linear-gradient(180deg,#aef4ff,#19c8ff); border:none; border-radius:999px;
+    box-shadow:0 0 24px rgba(0,229,255,.7), inset 0 -3px 0 rgba(0,0,0,.2); cursor:pointer;
+    animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.05)} }
+  #titleRankBtn { margin-top:20px; z-index:2; background:none; border:1px solid rgba(255,255,255,.3);
+    color:#cfe; padding:9px 26px; border-radius:999px; font-size:13px; letter-spacing:.2em; cursor:pointer; }
+  .credit { position:absolute; bottom:12px; font-size:10px; color:rgba(255,255,255,.35); letter-spacing:.15em; }
+
+  /* ---------- SELECT ---------- */
+  #select { background:linear-gradient(180deg,#070714 0%, #0d0d22 100%); padding:16px;
+    justify-content:flex-start; overflow-y:auto; }
+  .sel-h { color:#7fdcff; font-size:13px; letter-spacing:.4em; margin:14px 0 8px; font-weight:700; }
+  .cards { display:flex; gap:10px; width:100%; max-width:640px; }
+  .card { flex:1; background:rgba(255,255,255,.05); border:2px solid rgba(255,255,255,.12);
+    border-radius:14px; padding:12px 8px 10px; text-align:center; cursor:pointer; transition:.15s;
+    position:relative; overflow:hidden; }
+  .card.on { border-color:#19c8ff; background:rgba(25,200,255,.12);
+    box-shadow:0 0 18px rgba(25,200,255,.35); }
+  .card .em { font-size:30px; line-height:1.1; }
+  .card .nm { color:#fff; font-weight:800; font-size:clamp(11px,3.2vw,15px); margin-top:6px;
+    font-style:italic; letter-spacing:.03em; }
+  .card .ds { color:#9ab; font-size:clamp(9px,2.6vw,11px); margin-top:4px; line-height:1.5; }
+  .bars { margin-top:8px; display:flex; flex-direction:column; gap:3px; }
+  .bar { height:4px; border-radius:2px; background:rgba(255,255,255,.1); position:relative; }
+  .bar i { position:absolute; inset:0; border-radius:2px; background:linear-gradient(90deg,#19c8ff,#ff2d78); }
+  .bar-l { font-size:8px; color:#789; text-align:left; }
+  #goBtn { margin:26px 0 30px; font-size:20px; font-weight:800; letter-spacing:.3em; text-indent:.3em;
+    padding:16px 64px; color:#180303; background:linear-gradient(180deg,#ffd76e,#ff9d2d);
+    border:none; border-radius:999px; box-shadow:0 0 22px rgba(255,157,45,.6); cursor:pointer; }
+
+  /* ---------- HUD ---------- */
+  #hud { position:fixed; inset:0; z-index:15; pointer-events:none; }
+  #hud > * { position:fixed; }
+  #posBox { top:calc(10px + env(safe-area-inset-top)); left:14px; color:#fff;
+    font-family:'Arial Black',Impact,sans-serif; font-style:italic; line-height:1;
+    text-shadow:0 0 12px rgba(0,229,255,.8), 2px 2px 0 rgba(0,0,0,.6); }
+  #posNum { font-size:52px; } #posSuf { font-size:20px; } 
+  #lapBox { top:calc(14px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%);
+    color:#fff; font-weight:800; font-size:16px; letter-spacing:.15em;
+    text-shadow:0 1px 4px #000; text-align:center; }
+  #timeBox { font-size:12px; color:#9fd; font-weight:400; margin-top:2px; }
+  #minimap { top:calc(10px + env(safe-area-inset-top)); right:12px; width:104px; height:104px;
+    opacity:.85; }
+  #speedBox { bottom:calc(120px + env(safe-area-inset-bottom)); right:16px; color:#fff; text-align:right;
+    font-family:Impact,'Arial Black',sans-serif; font-style:italic;
+    text-shadow:0 0 10px rgba(255,45,120,.7), 1px 1px 0 #000; }
+  #speedNum { font-size:40px; } #speedBox small { font-size:12px; font-style:normal; color:#fbc; }
+  #itemBox { bottom:calc(112px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
+    width:74px; height:74px; border-radius:50%; border:3px solid rgba(255,255,255,.5);
+    background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center;
+    font-size:38px; pointer-events:auto; box-shadow:0 0 16px rgba(0,0,0,.5); }
+  #itemBox2 { bottom:calc(122px + env(safe-area-inset-bottom)); left:calc(50% - 70px); transform:translateX(-50%);
+    width:54px; height:54px; border-radius:50%; border:2px solid rgba(255,255,255,.5);
+    background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center;
+    font-size:27px; pointer-events:none; opacity:.65; box-shadow:0 0 12px rgba(0,0,0,.5); }
+  #itemBox.have, #itemBox2.have { border-color:#ffd76e; box-shadow:0 0 22px rgba(255,215,110,.8); }
+  #announce { top:26%; left:50%; transform:translate(-50%,-50%); color:#fff; font-weight:900;
+    font-size:clamp(30px,9vw,64px); font-style:italic; letter-spacing:.1em; text-align:center;
+    text-shadow:0 0 24px rgba(0,229,255,.9), 3px 3px 0 rgba(0,0,0,.6); white-space:nowrap; }
+  #toast { top:37%; left:50%; transform:translateX(-50%); color:#ffd76e; font-weight:700;
+    font-size:15px; text-shadow:0 1px 6px #000; white-space:nowrap; }
+  #muteBtn, #pauseBtn { right:12px; width:38px; height:38px;
+    border-radius:50%; border:1px solid rgba(255,255,255,.4); background:rgba(0,0,0,.4);
+    color:#fff; font-size:17px; pointer-events:auto; cursor:pointer; }
+  #muteBtn { top:calc(122px + env(safe-area-inset-top)); }
+  #pauseBtn { top:calc(168px + env(safe-area-inset-top)); }
+
+  /* ---------- TOUCH CONTROLS: フローティングジョイスティック ---------- */
+  #joyZone { position:fixed; inset:0; z-index:14; touch-action:none; }
+  #joy { position:fixed; width:124px; height:124px; margin:-62px 0 0 -62px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.45); background:rgba(255,255,255,.07);
+    z-index:14; pointer-events:none; backdrop-filter:blur(2px); }
+  #joy::before, #joy::after { content:''; position:absolute; left:50%; top:50%;
+    background:rgba(255,255,255,.22); }
+  #joy::before { width:2px; height:88px; margin:-44px 0 0 -1px; }
+  #joy::after { width:88px; height:2px; margin:-1px 0 0 -44px; }
+  #joyKnob { position:absolute; left:50%; top:50%; width:54px; height:54px;
+    margin:-27px 0 0 -27px; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #aef4ff, #19c8ff 70%);
+    box-shadow:0 0 16px rgba(25,200,255,.75); will-change:transform; }
+
+  /* ---------- RESULT ---------- */
+  #result { background:rgba(4,4,16,.88); backdrop-filter:blur(6px); }
+  #result h2 { color:#fff; font-style:italic; font-family:'Arial Black',Impact,sans-serif;
+    font-size:clamp(28px,8vw,52px); text-shadow:0 0 20px rgba(255,215,110,.8); margin-bottom:6px; }
+  #resPlace { color:#ffd76e; font-size:clamp(38px,11vw,70px); font-weight:900; font-style:italic;
+    text-shadow:0 0 26px rgba(255,157,45,.9); line-height:1; margin:8px 0 2px; }
+  #resScore { color:#9fe8ff; font-size:18px; letter-spacing:.1em; margin-bottom:12px; }
+  table.res { border-collapse:collapse; margin:8px 0 14px; }
+  table.res td { color:#dfe; font-size:13px; padding:3px 12px; border-bottom:1px solid rgba(255,255,255,.1); }
+  table.res tr.me td { color:#ffd76e; font-weight:800; }
+  #nameRow { display:flex; gap:8px; align-items:center; margin:6px 0 14px; }
+  #nameIn { width:110px; padding:9px; font-size:16px; text-align:center; letter-spacing:.2em;
+    background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.35); color:#fff;
+    border-radius:8px; text-transform:uppercase; }
+  .rbtn { padding:12px 28px; font-size:15px; font-weight:800; letter-spacing:.15em; border:none;
+    border-radius:999px; cursor:pointer; margin:5px; }
+  .rbtn.p { background:linear-gradient(180deg,#aef4ff,#19c8ff); color:#031018; }
+  .rbtn.s { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.3); }
+
+  /* ---------- RANKING ---------- */
+  #ranking { background:rgba(4,4,16,.94); }
+  #ranking h2 { color:#7fdcff; letter-spacing:.3em; font-size:20px; margin-bottom:14px; }
+  .rk-tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .rk-tab { padding:7px 14px; border-radius:999px; border:1px solid rgba(255,255,255,.25);
+    background:none; color:#adc; font-size:12px; cursor:pointer; }
+  .rk-tab.on { background:rgba(25,200,255,.2); border-color:#19c8ff; color:#fff; }
+  #rkList { min-width:270px; min-height:200px; }
+  .rk-row { display:flex; justify-content:space-between; color:#dfe; font-size:14px;
+    padding:6px 4px; border-bottom:1px solid rgba(255,255,255,.08); gap:16px; }
+  .rk-row b { color:#ffd76e; }
+</style>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#007acc">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<!-- TITLE -->
+<div id="title" class="screen">
+  <div class="grid-floor"></div>
+  <div class="title-logo">
+    <div class="neon-jp">超電脳対戦レーシング</div>
+    <h1><span>NEON</span><span>GRAND PRIX</span></h1>
+  </div>
+  <button id="startBtn">START</button>
+  <button id="titleRankBtn">RANKING</button>
+  <div class="credit">SINGLE-FILE HTML / THREE.JS r128</div>
+</div>
+
+<!-- SELECT -->
+<div id="select" class="screen hidden">
+  <div class="sel-h">— MACHINE SELECT —</div>
+  <div class="cards" id="carCards"></div>
+  <div class="sel-h">— STAGE SELECT —</div>
+  <div class="cards" id="stageCards"></div>
+  <button id="goBtn">RACE START</button>
+</div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div id="posBox"><span id="posNum">6</span><span id="posSuf">th</span></div>
+  <div id="lapBox"><span id="lapTxt">LAP 1/3</span><div id="timeBox">0'00"00</div></div>
+  <canvas id="minimap" width="208" height="208"></canvas>
+  <div id="speedBox"><span id="speedNum">0</span><br><small>km/h</small></div>
+  <div id="itemBox2">—</div>
+  <div id="itemBox">—</div>
+  <div id="announce"></div>
+  <div id="toast"></div>
+  <button id="muteBtn">♪</button>
+  <button id="pauseBtn" aria-label="一時停止">⏸</button>
+</div>
+<div id="joyZone" class="hidden"></div>
+<div id="joy" class="hidden"><div id="joyKnob"></div></div>
+
+<!-- RESULT -->
+<div id="result" class="screen hidden">
+  <h2>FINISH!</h2>
+  <div id="resPlace">1st</div>
+  <div id="resScore">SCORE 0</div>
+  <table class="res"><tbody id="resBody"></tbody></table>
+  <div id="nameRow">
+    <input id="nameIn" maxlength="6" value="YOU" placeholder="NAME">
+    <button id="saveBtn" class="rbtn p">記録を保存</button>
+  </div>
+  <div>
+    <button id="retryBtn" class="rbtn s">もう一度</button>
+    <button id="homeBtn" class="rbtn s">タイトルへ</button>
+  </div>
+</div>
+
+<!-- RANKING -->
+<div id="ranking" class="screen hidden">
+  <h2>RANKING</h2>
+  <div class="rk-tabs" id="rkTabs"></div>
+  <div id="rkList"></div>
+  <button id="rkClose" class="rbtn s" style="margin-top:18px">閉じる</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+/* ================================================================
+   CONFIG
+================================================================ */
+const IS_MOBILE = /iPhone|iPad|Android|Mobile/i.test(navigator.userAgent);
+const SAMPLES = 720;            // トラックサンプル数
+const HALF_W  = 8.5;            // 路面半幅
+const LAPS    = 3;
+const AI_N    = 5;
+
+const CARS = [
+  { id:'speed',   em:'🏎', name:'RAIDEN GT', color:0xff3050, glow:0xff5577,
+    ds:'最高速特化。滑りやすい', maxSpd:66, accel:24, steer:2.55, grip:0.82, mass:0.85,
+    st:[1.0,.55,.5] },
+  { id:'balance', em:'🚗', name:'SHIRANUI',  color:0x18a6ff, glow:0x66ccff,
+    ds:'万能型。扱いやすい',     maxSpd:60, accel:30, steer:3.05, grip:1.0,  mass:1.0,
+    st:[.78,.8,.75] },
+  { id:'heavy',   em:'🚙', name:'GANRYU',    color:0x77b81f, glow:0xaaff44,
+    ds:'重量級。体当たり最強',   maxSpd:55, accel:34, steer:2.6,  grip:1.18, mass:1.5,
+    st:[.6,.95,1.0] },
+];
+
+const STAGES = [
+  { id:'tokyo', em:'🌃', name:'東京都心', ds:'ネオンの夜。高グリップ',
+    grip:1.0, fog:0x0a0c24, fogN:55, fogF:390, skyTop:'#05061c', skyBot:'#2a1050',
+    ground:0x101018, groundTex:'asphalt', skirt:0x2a2d38, road:'asphalt', rail:0x00e5ff, line:0xffe040,
+    amb:0x30364d, ambI:1.15, sun:0x9fb0ff, sunI:0.55, night:true,
+    trackR:215, wob:[36,3, 26,5], elev:[7,2, 4,5], patch:'oil',
+    bpm:132 },
+  { id:'okinawa', em:'🏝', name:'沖縄', ds:'常夏の海岸線。砂に注意',
+    grip:0.9, fog:0xbfe8f2, fogN:120, fogF:620, skyTop:'#2f9de0', skyBot:'#bff0f8',
+    ground:0xe8d9a8, groundTex:'sand', skirt:0xd8c896, road:'tropic', rail:0xffffff, line:0xffffff,
+    amb:0x8899aa, ambI:1.5, sun:0xfff2d8, sunI:1.35, night:false,
+    trackR:225, wob:[42,2, 22,5], elev:[5,3, 3,7], patch:'sand',
+    bpm:106 },
+  { id:'wakkanai', em:'❄️', name:'冬の稚内', ds:'氷雪路面。横滑り上等',
+    grip:0.52, fog:0xcdd6e0, fogN:45, fogF:330, skyTop:'#8593a8', skyBot:'#d8dee8',
+    ground:0xe9edf4, groundTex:'snow', skirt:0xdfe5ee, road:'snow', rail:0xff5544, line:0x8899aa,
+    amb:0xaab4c4, ambI:1.35, sun:0xdde6f5, sunI:0.75, night:false,
+    trackR:210, wob:[32,3, 30,4], elev:[9,2, 5,6], patch:'ice',
+    bpm:94 },
+];
+
+const ITEMS = {
+  missile:{ em:'🚀', name:'ホーミングミサイル' },
+  banana :{ em:'🍌', name:'バナナ' },
+  boost  :{ em:'⚡', name:'ニトロブースト' },
+  shield :{ em:'🛡', name:'シールド' },
+  ram    :{ em:'💥', name:'ラムアタック' },
+  thunder:{ em:'🌩', name:'サンダーストーム' },
+};
+
+/* ================================================================
+   AUDIO — 全合成 (BGM / SFX / エンジン)
+================================================================ */
+const AUDIO = {
+  ctx:null, master:null, bgmGain:null, engOsc:null, engGain:null, engFilter:null,
+  muted:false, seqTimer:null, step:0, song:null, nextT:0,
+  init(){
+    if(this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain(); this.master.gain.value = .8;
+    this.master.connect(this.ctx.destination);
+    this.bgmGain = this.ctx.createGain(); this.bgmGain.gain.value = .3;
+    this.bgmGain.connect(this.master);
+  },
+  resume(){ if(this.ctx && this.ctx.state==='suspended') this.ctx.resume(); },
+  f(m){ return 440*Math.pow(2,(m-69)/12); },
+  tone(m, t, dur, type, vol, dest){
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+    o.type=type; o.frequency.value=this.f(m);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+.01);
+    g.gain.exponentialRampToValueAtTime(.001,t+dur);
+    o.connect(g); g.connect(dest||this.master); o.start(t); o.stop(t+dur+.05);
+  },
+  noise(t,dur,vol,hp){
+    const n=this.ctx.sampleRate*dur, buf=this.ctx.createBuffer(1,n,this.ctx.sampleRate);
+    const d=buf.getChannelData(0); for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
+    const s=this.ctx.createBufferSource(); s.buffer=buf;
+    const f=this.ctx.createBiquadFilter(); f.type='highpass'; f.frequency.value=hp||4000;
+    const g=this.ctx.createGain(); g.gain.value=vol;
+    s.connect(f); f.connect(g); g.connect(this.bgmGain); s.start(t);
+  },
+  /* --- BGM sequencer --- */
+  SONGS:{
+    tokyo:{ bpm:132, wave:'sawtooth',
+      bass:[33,0,33,0, 36,0,33,0, 31,0,31,0, 38,0,36,0],
+      lead:[57,0,60,64, 0,64,63,60, 0,57,55,57, 60,0,55,0],
+      pad :[45,48,52] },
+    okinawa:{ bpm:106, wave:'square', // 琉球音階 C E F G B
+      bass:[36,0,0,36, 0,0,40,0, 41,0,0,41, 0,0,43,0],
+      lead:[60,0,64,65, 67,0,71,72, 71,0,67,65, 64,0,60,0],
+      pad :[48,52,55] },
+    wakkanai:{ bpm:94, wave:'triangle',
+      bass:[38,0,0,0, 41,0,0,0, 36,0,0,0, 43,0,0,0],
+      lead:[62,0,0,65, 0,69,0,0, 65,0,62,0, 0,60,0,0],
+      pad :[50,53,57] },
+  },
+  startBGM(stageId){
+    this.stopBGM();
+    this.song = this.SONGS[stageId]; this.step=0;
+    this.nextT = this.ctx.currentTime + .1;
+    this.seqTimer = setInterval(()=>this.schedule(), 60);
+  },
+  schedule(){
+    if(!this.song) return;
+    const spb = 60/this.song.bpm/4; // 16分
+    while(this.nextT < this.ctx.currentTime + .18){
+      const s=this.step%16, t=this.nextT, S=this.song;
+      if(S.bass[s]) this.tone(S.bass[s], t, spb*1.8, 'sine', .34, this.bgmGain);
+      if(S.lead[s]) this.tone(S.lead[s], t, spb*1.4, S.wave, .12, this.bgmGain);
+      if(s%4===2) this.noise(t, .04, .1);
+      if(s===0 || s===8) S.pad.forEach(m=>this.tone(m, t, spb*7, 'triangle', .05, this.bgmGain));
+      this.nextT += spb; this.step++;
+    }
+  },
+  stopBGM(){ if(this.seqTimer){ clearInterval(this.seqTimer); this.seqTimer=null; } this.song=null; },
+  /* --- Engine --- */
+  startEngine(){
+    if(this.engOsc || !this.ctx) return;
+    this.engOsc=this.ctx.createOscillator(); this.engOsc.type='sawtooth';
+    this.engFilter=this.ctx.createBiquadFilter(); this.engFilter.type='lowpass';
+    this.engFilter.frequency.value=300;
+    this.engGain=this.ctx.createGain(); this.engGain.gain.value=0;
+    this.engOsc.connect(this.engFilter); this.engFilter.connect(this.engGain);
+    this.engGain.connect(this.master); this.engOsc.start();
+  },
+  engine(spdRatio){
+    if(!this.engOsc) return;
+    this.engOsc.frequency.value = 42 + spdRatio*150;
+    this.engFilter.frequency.value = 220 + spdRatio*700;
+    this.engGain.gain.value = this.muted?0:(.03+spdRatio*.05);
+  },
+  stopEngine(){ if(this.engOsc){ try{this.engOsc.stop();}catch(e){} this.engOsc=null; } },
+  sfx(name){
+    if(!this.ctx || this.muted) return;
+    const t=this.ctx.currentTime;
+    switch(name){
+      case 'pick':  this.tone(76,t,.09,'square',.2); this.tone(83,t+.08,.12,'square',.2); break;
+      case 'use':   this.tone(64,t,.12,'sawtooth',.22); break;
+      case 'hit':   this.noise(t,.25,.5,800); this.tone(40,t,.25,'sawtooth',.3); break;
+      case 'boost': { const o=this.ctx.createOscillator(),g=this.ctx.createGain();
+        o.type='sawtooth'; o.frequency.setValueAtTime(120,t);
+        o.frequency.exponentialRampToValueAtTime(900,t+.5);
+        g.gain.setValueAtTime(.2,t); g.gain.exponentialRampToValueAtTime(.001,t+.55);
+        o.connect(g); g.connect(this.master); o.start(t); o.stop(t+.6); } break;
+      case 'beep':  this.tone(72,t,.14,'square',.25); break;
+      case 'go':    this.tone(84,t,.5,'square',.3); break;
+      case 'shield':this.tone(70,t,.2,'sine',.25); this.tone(74,t+.05,.25,'sine',.2); break;
+      case 'thunder': this.noise(t,.6,.6,300); this.tone(30,t,.6,'sawtooth',.35); break;
+      case 'finish': [72,76,79,84].forEach((m,i)=>this.tone(m,t+i*.13,.3,'square',.25)); break;
+      case 'wall':  this.noise(t,.1,.3,1500); break;
+    }
+  },
+  setMute(m){ this.muted=m;
+    if(this.bgmGain) this.bgmGain.gain.value = m?0:.3;
+    if(this.master) this.master.gain.value = m?0:.8; },
+};
+
+/* ================================================================
+   STORAGE — window.storage優先 / メモリフォールバック
+================================================================ */
+const STORE = {
+  mem:{},
+  async load(stageId){
+    const key = 'ngp-rank-'+stageId;
+    try{
+      if(window.storage){
+        const r = await window.storage.get(key);
+        if(r && r.value) return JSON.parse(r.value);
+      }
+    }catch(e){ /* キー未作成など */ }
+    return this.mem[key] || [];
+  },
+  async save(stageId, list){
+    const key = 'ngp-rank-'+stageId;
+    this.mem[key] = list;
+    try{
+      if(window.storage) await window.storage.set(key, JSON.stringify(list));
+    }catch(e){ console.warn('storage save failed', e); }
+  },
+  async loadBest(stageId){
+    const key = 'ngp-best-'+stageId;
+    try{
+      if(window.storage){
+        const r = await window.storage.get(key);
+        if(r && r.value){
+          const value=Number(r.value);
+          if(Number.isFinite(value) && value>0) return value;
+        }
+      }
+    }catch(e){ /* キー未作成など */ }
+    const value=Number(this.mem[key]);
+    return Number.isFinite(value) && value>0 ? value : null;
+  },
+  async saveBest(stageId, lapTime){
+    const key = 'ngp-best-'+stageId;
+    this.mem[key] = lapTime;
+    try{
+      if(window.storage) await window.storage.set(key, String(lapTime));
+    }catch(e){ console.warn('best lap save failed', e); }
+  },
+};
+
+/* ================================================================
+   TEXTURES — 全てCanvas生成
+================================================================ */
+function canvasTex(w,h,draw){
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  draw(c.getContext('2d'), w, h);
+  const t=new THREE.CanvasTexture(c); return t;
+}
+function roadTexture(stage){
+  return canvasTex(256,256,(g,w,h)=>{
+    let base, noiseA;
+    if(stage.road==='snow'){ base='#dfe6ee'; noiseA=.15; }
+    else if(stage.road==='tropic'){ base='#5a5d66'; noiseA=.28; }
+    else { base='#33353d'; noiseA=.3; }
+    g.fillStyle=base; g.fillRect(0,0,w,h);
+    for(let i=0;i<1600;i++){
+      g.fillStyle=`rgba(${Math.random()>.5?255:0},${Math.random()>.5?255:0},${Math.random()>.5?255:0},${Math.random()*noiseA*.3})`;
+      g.fillRect(Math.random()*w, Math.random()*h, 2, 2);
+    }
+    if(stage.road==='snow'){ // 轍
+      g.strokeStyle='rgba(120,130,150,.5)'; g.lineWidth=14;
+      [w*.3,w*.7].forEach(x=>{ g.beginPath(); g.moveTo(x,0); g.lineTo(x,h); g.stroke(); });
+    }
+    // センターライン(破線)
+    g.strokeStyle = stage.road==='snow' ? 'rgba(140,150,170,.7)' : '#'+stage.line.toString(16).padStart(6,'0');
+    g.lineWidth=6; g.setLineDash([28,26]);
+    g.beginPath(); g.moveTo(w/2,0); g.lineTo(w/2,h); g.stroke();
+    // 両端白線
+    g.setLineDash([]); g.strokeStyle='rgba(255,255,255,.75)'; g.lineWidth=8;
+    g.beginPath(); g.moveTo(8,0); g.lineTo(8,h); g.stroke();
+    g.beginPath(); g.moveTo(w-8,0); g.lineTo(w-8,h); g.stroke();
+  });
+}
+function groundTexture(stage){
+  const t = canvasTex(256,256,(g,w,h)=>{
+    if(stage.groundTex==='sand'){
+      g.fillStyle='#e6d7a6'; g.fillRect(0,0,w,h);
+      for(let i=0;i<2400;i++){ // 砂粒
+        g.fillStyle=`rgba(${170+Math.random()*60|0},${150+Math.random()*50|0},${90+Math.random()*40|0},.5)`;
+        g.fillRect(Math.random()*w,Math.random()*h,2,2);
+      }
+      for(let i=0;i<26;i++){ // 緑ムラ(草地)
+        g.fillStyle=`rgba(${60+Math.random()*40|0},${120+Math.random()*50|0},60,.22)`;
+        g.beginPath(); g.arc(Math.random()*w,Math.random()*h,8+Math.random()*22,0,7); g.fill();
+      }
+    } else if(stage.groundTex==='snow'){
+      g.fillStyle='#eef2f8'; g.fillRect(0,0,w,h);
+      for(let i=0;i<1800;i++){
+        const v=225+(Math.random()*30|0);
+        g.fillStyle=`rgba(${v-14},${v-8},${v},.55)`;
+        g.fillRect(Math.random()*w,Math.random()*h,2,2);
+      }
+      for(let i=0;i<14;i++){ // 吹き溜まりの陰影
+        g.fillStyle='rgba(150,165,190,.12)';
+        g.beginPath(); g.arc(Math.random()*w,Math.random()*h,10+Math.random()*26,0,7); g.fill();
+      }
+    } else { // asphalt(東京)
+      g.fillStyle='#191a22'; g.fillRect(0,0,w,h);
+      for(let i=0;i<2200;i++){
+        const v=Math.random()*46|0;
+        g.fillStyle=`rgba(${20+v},${21+v},${30+v},.5)`;
+        g.fillRect(Math.random()*w,Math.random()*h,2,2);
+      }
+      g.strokeStyle='rgba(70,74,92,.35)'; g.lineWidth=2; // 舗装区画の継ぎ目
+      for(let x=0;x<=w;x+=64){ g.beginPath(); g.moveTo(x,0); g.lineTo(x,h); g.stroke(); }
+      for(let y=0;y<=h;y+=64){ g.beginPath(); g.moveTo(0,y); g.lineTo(w,y); g.stroke(); }
+    }
+  });
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(40,40);
+  return t;
+}
+function windowTexture(){
+  return canvasTex(64,128,(g,w,h)=>{
+    g.fillStyle='#0c0f1a'; g.fillRect(0,0,w,h);
+    for(let y=6;y<h-4;y+=10) for(let x=5;x<w-4;x+=9){
+      if(Math.random()<.55){
+        g.fillStyle = Math.random()<.8 ? 'rgba(255,225,150,.95)' : 'rgba(120,220,255,.95)';
+        g.fillRect(x,y,5,6);
+      }
+    }
+  });
+}
+function skyTexture(stage){
+  return canvasTex(16,256,(g,w,h)=>{
+    const gr=g.createLinearGradient(0,0,0,h);
+    gr.addColorStop(0,stage.skyTop); gr.addColorStop(.62,stage.skyBot);
+    gr.addColorStop(1,stage.skyBot);
+    g.fillStyle=gr; g.fillRect(0,0,w,h);
+  });
+}
+
+/* ================================================================
+   TRACK — 極座標スプライン(自己交差なし保証)+ 起伏
+================================================================ */
+class Track {
+  constructor(stage){
+    this.stage = stage;
+    const [a1,k1,a2,k2] = stage.wob, [e1,m1,e2,m2] = stage.elev;
+    const ctrl=[];
+    for(let i=0;i<28;i++){
+      const th = i/28*Math.PI*2;
+      const r = stage.trackR + a1*Math.sin(k1*th+1.3) + a2*Math.sin(k2*th+4.1);
+      const y = 3 + e1*(Math.sin(m1*th+.7)+1) + e2*(Math.sin(m2*th+2.2)+1)*.5;
+      ctrl.push(new THREE.Vector3(Math.cos(th)*r, y, Math.sin(th)*r));
+    }
+    this.curve = new THREE.CatmullRomCurve3(ctrl, true, 'catmullrom', .5);
+    // 等間隔サンプル
+    this.pts = this.curve.getSpacedPoints(SAMPLES); this.pts.pop(); // 終点=始点を除去
+    const N = this.pts.length;
+    this.N = N;
+    this.tan=[]; this.right=[]; this.up=[]; this.kap=new Float32Array(N);
+    const UP = new THREE.Vector3(0,1,0);
+    let total = 0; this.cum=new Float32Array(N);
+    for(let i=0;i<N;i++){
+      const p0=this.pts[(i-1+N)%N], p1=this.pts[i], p2=this.pts[(i+1)%N];
+      const t = p2.clone().sub(p0).normalize();
+      const rr = new THREE.Vector3().crossVectors(t, UP).normalize();
+      const u = new THREE.Vector3().crossVectors(rr, t).normalize();
+      this.tan.push(t); this.right.push(rr); this.up.push(u);
+      this.cum[i]=total; total += p1.distanceTo(p2);
+    }
+    this.len = total;
+    this.ds  = total/N;
+    // 符号付き曲率
+    for(let i=0;i<N;i++){
+      const t1=this.tan[i], t2=this.tan[(i+1)%N];
+      const cy = t1.x*t2.z - t1.z*t2.x; // (t1×t2).y (逆符号系吸収のため実測調整済)
+      this.kap[i] = Math.asin(THREE.MathUtils.clamp(-cy,-1,1))/this.ds;
+    }
+    this._v1=new THREE.Vector3(); this._v2=new THREE.Vector3();
+  }
+  wrap(s){ s%=this.len; return s<0 ? s+this.len : s; }
+  idxOf(s){ return Math.floor(this.wrap(s)/this.ds) % this.N; }
+  // s(進行距離), lat(横位置), h(高さ) → outへワールド座標
+  posAt(s, lat, h, out){
+    const w=this.wrap(s), fi=w/this.ds, i=Math.floor(fi)%this.N, j=(i+1)%this.N, f=fi-Math.floor(fi);
+    out.copy(this.pts[i]).lerp(this.pts[j], f);
+    this._v1.copy(this.right[i]).lerp(this.right[j], f);
+    this._v2.copy(this.up[i]).lerp(this.up[j], f);
+    out.addScaledVector(this._v1, lat).addScaledVector(this._v2, h||0);
+    return out;
+  }
+  tanAt(s, out){
+    const w=this.wrap(s), fi=w/this.ds, i=Math.floor(fi)%this.N, j=(i+1)%this.N, f=fi-Math.floor(fi);
+    return out.copy(this.tan[i]).lerp(this.tan[j], f).normalize();
+  }
+  upAt(s, out){
+    const i=this.idxOf(s); return out.copy(this.up[i]);
+  }
+  kapAt(s){ return this.kap[this.idxOf(s)]; }
+  // ちょっと先の最大曲率(AIブレーキ用)
+  kapAhead(s, dist){
+    let m=0; const steps=Math.ceil(dist/this.ds);
+    let i=this.idxOf(s);
+    for(let k=0;k<steps;k++){ m=Math.max(m, Math.abs(this.kap[(i+k)%this.N])); }
+    return m;
+  }
+  buildMesh(){
+    const stage=this.stage, N=this.N, g=new THREE.BufferGeometry();
+    const pos=[], uv=[], idx=[];
+    for(let i=0;i<=N;i++){
+      const ii=i%N, p=this.pts[ii], r=this.right[ii];
+      pos.push(p.x-r.x*HALF_W, p.y+.05, p.z-r.z*HALF_W,
+               p.x+r.x*HALF_W, p.y+.05, p.z+r.z*HALF_W);
+      const v=this.cum[ii===0&&i>0?0:ii]/9 + (i===N?this.len/9:0);
+      uv.push(0, v, 1, v);
+    }
+    for(let i=0;i<N;i++){
+      const a=i*2,b=a+1,c=a+2,d=a+3;
+      idx.push(a,c,b, b,c,d);
+    }
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv,2));
+    g.setIndex(idx); g.computeVertexNormals();
+    const tex=roadTexture(stage); tex.wrapT=THREE.RepeatWrapping; tex.wrapS=THREE.ClampToEdgeWrapping;
+    tex.anisotropy=2;
+    const mesh=new THREE.Mesh(g, new THREE.MeshLambertMaterial({map:tex}));
+    const group=new THREE.Group(); group.add(mesh);
+    // ガードレール(左右の立ち上がり壁)
+    [-1,1].forEach(side=>{
+      const rp=[], ru=[], ri=[];
+      for(let i=0;i<=N;i++){
+        const ii=i%N, p=this.pts[ii], r=this.right[ii];
+        const bx=p.x+r.x*HALF_W*side, bz=p.z+r.z*HALF_W*side;
+        rp.push(bx, p.y+.05, bz, bx, p.y+.85, bz);
+      }
+      for(let i=0;i<N;i++){ const a=i*2,b=a+1,c=a+2,d=a+3; ri.push(a,c,b,b,c,d,a,b,c,c,b,d); }
+      const rg=new THREE.BufferGeometry();
+      rg.setAttribute('position', new THREE.Float32BufferAttribute(rp,3));
+      rg.setIndex(ri); rg.computeVertexNormals();
+      const railMat = stage.night
+        ? new THREE.MeshBasicMaterial({color:stage.rail, transparent:true, opacity:.85})
+        : new THREE.MeshLambertMaterial({color:stage.rail});
+      group.add(new THREE.Mesh(rg, railMat));
+    });
+    // 法面スカート: 路面端から地面(y=-1.15)へ落とすリボン(左右2枚)。浮遊感を解消
+    const skirtMat=new THREE.MeshLambertMaterial({color:stage.skirt, side:THREE.DoubleSide});
+    [-1,1].forEach(side=>{
+      const sp=[], si=[];
+      for(let i=0;i<=N;i++){
+        const ii=i%N, p=this.pts[ii], r=this.right[ii];
+        const bx=p.x+r.x*HALF_W*side, bz=p.z+r.z*HALF_W*side;
+        sp.push(bx, p.y+.05, bz, bx, -1.15, bz);
+      }
+      for(let i=0;i<N;i++){ const a=i*2,b=a+1,c=a+2,d=a+3; si.push(a,c,b, b,c,d); }
+      const sg=new THREE.BufferGeometry();
+      sg.setAttribute('position', new THREE.Float32BufferAttribute(sp,3));
+      sg.setIndex(si); sg.computeVertexNormals();
+      group.add(new THREE.Mesh(sg, skirtMat));
+    });
+    // スタートゲート
+    const gateM=new THREE.MeshLambertMaterial({color:0xdddddd});
+    const p0=this.pts[0], r0=this.right[0];
+    [-1,1].forEach(side=>{
+      const pole=new THREE.Mesh(new THREE.CylinderGeometry(.3,.3,7,6), gateM);
+      pole.position.set(p0.x+r0.x*(HALF_W+1)*side, p0.y+3.5, p0.z+r0.z*(HALF_W+1)*side);
+      group.add(pole);
+    });
+    const beam=new THREE.Mesh(new THREE.BoxGeometry(HALF_W*2+3,1.1,.8),
+      new THREE.MeshBasicMaterial({map:canvasTex(128,16,(g2,w,h)=>{
+        for(let x=0;x<w;x+=8) for(let y=0;y<h;y+=8){
+          g2.fillStyle=((x+y)/8)%2?'#fff':'#111'; g2.fillRect(x,y,8,8); }
+      })}));
+    beam.position.set(p0.x, p0.y+7, p0.z);
+    beam.lookAt(p0.x+this.tan[0].x, p0.y+7, p0.z+this.tan[0].z);
+    beam.rotateY(Math.PI/2);
+    group.add(beam);
+    return group;
+  }
+  // トラックから十分離れた散布位置を返す
+  scatter(count, minR, maxR, clearance){
+    const out=[];
+    let guard=0;
+    while(out.length<count && guard++<count*40){
+      const th=Math.random()*Math.PI*2;
+      const r=minR+Math.random()*(maxR-minR);
+      const x=Math.cos(th)*r, z=Math.sin(th)*r;
+      let ok=true;
+      for(let i=0;i<this.N;i+=6){
+        const p=this.pts[i], dx=p.x-x, dz=p.z-z;
+        if(dx*dx+dz*dz < clearance*clearance){ ok=false; break; }
+      }
+      if(ok) out.push({x,z});
+    }
+    return out;
+  }
+}
+
+/* ================================================================
+   KART
+================================================================ */
+let _kid=0;
+class Kart {
+  constructor(cfg, stage, track, isPlayer, name){
+    this.id=_kid++;
+    this.cfg=cfg; this.stage=stage; this.track=track; this.isPlayer=isPlayer;
+    this.name=name;
+    this.p=0; this.lat=0; this.spd=0; this.latV=0;
+    this.steer=0; this.accelHeld=true; this.brakeHeld=false;
+    this.spinT=0; this.boostT=0; this.shieldT=0; this.ramT=0; this.slowT=0;
+    this.patchGrip=1; this.patchSlow=1;
+    this.items=[]; this.pendingItem=null; this.rouletteT=0;
+    this.hits=0; this.finished=false; this.finishTime=0; this.rank=1;
+    this.aiItemT = .9+Math.random()*1.4;
+    this.aiTargetLat = 0;
+    this.aiSkill=1;
+    this.aiSpeedMul=1;
+    this.aiAccelMul=1;
+    this.aiLineBias=0;
+    this.wallCd=0;
+    this.mesh = this.buildMesh();
+    this._v=new THREE.Vector3(); this._t=new THREE.Vector3(); this._u=new THREE.Vector3();
+  }
+  buildMesh(){
+    const g=new THREE.Group();
+    const col=this.cfg.color;
+    const bodyM=new THREE.MeshPhongMaterial({color:col, shininess:90, specular:0xaaaaaa});
+    const darkM=new THREE.MeshPhongMaterial({color:0x15161c, shininess:40});
+    const glassM=new THREE.MeshPhongMaterial({color:0x1a2634, shininess:180, specular:0xffffff, transparent:true, opacity:.88});
+    const rimM=new THREE.MeshPhongMaterial({color:0xd8dde6, shininess:130, specular:0xffffff});
+    // シャシー（低く幅広）
+    const chassis=new THREE.Mesh(new THREE.BoxGeometry(2.05,.3,4.0), darkM);
+    chassis.position.y=.4; g.add(chassis);
+    // ボディシェル：潰したスフィアで流線形
+    const shell=new THREE.Mesh(new THREE.SphereGeometry(1,16,12), bodyM);
+    shell.scale.set(1.02,.4,2.0); shell.position.y=.62; g.add(shell);
+    // テーパーノーズ（先細り）
+    const nose=new THREE.Mesh(new THREE.CylinderGeometry(.14,.6,1.4,10), bodyM);
+    nose.rotation.x=Math.PI/2; nose.position.set(0,.55,2.3); g.add(nose);
+    // フロントスプリッター
+    const splitter=new THREE.Mesh(new THREE.BoxGeometry(1.9,.08,.7), darkM);
+    splitter.position.set(0,.28,2.45); g.add(splitter);
+    // サイドポッド
+    [-1,1].forEach(s=>{
+      const pod=new THREE.Mesh(new THREE.BoxGeometry(.34,.34,2.0), bodyM);
+      pod.position.set(s*1.0,.5,-.2); g.add(pod);
+    });
+    // キャノピー（半球ガラス）
+    const canopy=new THREE.Mesh(new THREE.SphereGeometry(.62,12,8,0,Math.PI*2,0,Math.PI/2), glassM);
+    canopy.scale.set(1.0,.85,1.5); canopy.position.set(0,.78,-.15); g.add(canopy);
+    // リアウィング＋翼端板＋ステー＋マフラー
+    const spoiler=new THREE.Mesh(new THREE.BoxGeometry(2.2,.09,.55), bodyM);
+    spoiler.position.set(0,1.18,-1.8); g.add(spoiler);
+    [-1,1].forEach(s=>{
+      const plate=new THREE.Mesh(new THREE.BoxGeometry(.07,.36,.6), darkM);
+      plate.position.set(s*1.1,1.18,-1.8); g.add(plate);
+      const st=new THREE.Mesh(new THREE.BoxGeometry(.1,.45,.1), darkM);
+      st.position.set(s*.7,.92,-1.8); g.add(st);
+      const ex=new THREE.Mesh(new THREE.CylinderGeometry(.09,.11,.5,8), rimM);
+      ex.rotation.x=Math.PI/2; ex.position.set(s*.45,.4,-2.05); g.add(ex);
+    });
+    // ホイール：タイヤ＋リム、前輪は操舵ピボット
+    this.wheels=[]; this.frontPivots=[];
+    const tireG=new THREE.CylinderGeometry(.42,.42,.34,14); tireG.rotateZ(Math.PI/2);
+    const rimG=new THREE.CylinderGeometry(.26,.26,.36,8); rimG.rotateZ(Math.PI/2);
+    [[-1.02,-1.35,false],[1.02,-1.35,false],[-1.02,1.35,true],[1.02,1.35,true]].forEach(([x,z,front])=>{
+      const w=new THREE.Group();
+      w.add(new THREE.Mesh(tireG, darkM));
+      w.add(new THREE.Mesh(rimG, rimM));
+      this.wheels.push(w);
+      if(front){
+        const pv=new THREE.Group(); pv.position.set(x,.42,z);
+        pv.add(w); g.add(pv); this.frontPivots.push(pv);
+      } else {
+        w.position.set(x,.42,z); g.add(w);
+      }
+    });
+    // ヘッドライト／テールランプ（発光）
+    const hl=new THREE.MeshBasicMaterial({color:0xfff6c8});
+    const tl=new THREE.MeshBasicMaterial({color:0xff2222});
+    [-.5,.5].forEach(x=>{
+      const l=new THREE.Mesh(new THREE.BoxGeometry(.3,.13,.08), hl);
+      l.position.set(x,.6,2.55); g.add(l);
+      const r=new THREE.Mesh(new THREE.BoxGeometry(.34,.12,.06), tl);
+      r.position.set(x*1.6,.62,-2.0); g.add(r);
+    });
+    // blob shadow
+    const sh=new THREE.Mesh(new THREE.CircleGeometry(1.9,14),
+      new THREE.MeshBasicMaterial({color:0x000000, transparent:true, opacity:.32, depthWrite:false}));
+    sh.rotation.x=-Math.PI/2; sh.position.y=.06; g.add(sh);
+    // shield visual
+    this.shieldMesh=new THREE.Mesh(new THREE.SphereGeometry(2.6,12,10),
+      new THREE.MeshBasicMaterial({color:0x66ccff, transparent:true, opacity:.28, depthWrite:false}));
+    this.shieldMesh.position.y=.9; this.shieldMesh.visible=false; g.add(this.shieldMesh);
+    // ram glow
+    this.ramMesh=new THREE.Mesh(new THREE.SphereGeometry(2.9,12,10),
+      new THREE.MeshBasicMaterial({color:0xff4422, transparent:true, opacity:.22, depthWrite:false}));
+    this.ramMesh.position.y=.9; this.ramMesh.visible=false; g.add(this.ramMesh);
+    this.spinGroup=g;
+    const root=new THREE.Group(); root.add(g);
+    return root;
+  }
+  progress(){ return this.p; }
+  spin(force){
+    if(this.shieldT>0 && !force){ this.shieldT=0; AUDIO.sfx('shield'); return false; }
+    if(this.ramT>0 && !force) return false;
+    if(this.spinT>0) return false;
+    this.spinT=1.35; this.latV*= .3;
+    if(this.isPlayer) AUDIO.sfx('hit');
+    return true;
+  }
+  useItem(race){
+    if(this.items.length===0 || this.rouletteT>0 || this.spinT>0) return;
+    const it=this.items.shift();
+    if(this.isPlayer) AUDIO.sfx('use');
+    switch(it){
+      case 'boost': this.boostT=2.3; if(this.isPlayer) AUDIO.sfx('boost'); break;
+      case 'shield': this.shieldT=7; break;
+      case 'ram': this.ramT=3.6; if(this.isPlayer) AUDIO.sfx('boost'); break;
+      case 'banana': race.dropBanana(this); break;
+      case 'missile': race.fireMissile(this); break;
+      case 'thunder': race.thunder(this); break;
+    }
+    if(this.isPlayer) race.toast(ITEMS[it].em+' '+ITEMS[it].name+'!');
+  }
+  update(dt, race){
+    const cfg=this.cfg, stage=this.stage, tr=this.track;
+    this.wallCd=Math.max(0,this.wallCd-dt);
+    // timers
+    ['spinT','boostT','shieldT','ramT','slowT','rouletteT'].forEach(k=>{ if(this[k]>0) this[k]-=dt; });
+    if(this.rouletteT<=0 && this.pendingItem){
+      const receivedItem=this.pendingItem;
+      this.pendingItem=null;
+      if(this.items.length<2){
+        this.items.push(receivedItem);
+        if(this.isPlayer) AUDIO.sfx('pick');
+      }
+    }
+    // grip
+    let g = cfg.grip * stage.grip * this.patchGrip;
+    // speed（AIのみ個体差・追い上げ補正を実速度へ反映）
+    const speedMul=this.isPlayer?1:this.aiSpeedMul;
+    const accelMul=this.isPlayer?1:this.aiAccelMul;
+    let maxS = cfg.maxSpd * speedMul * (this.boostT>0?1.45:1) * (this.ramT>0?1.22:1)
+               * (this.slowT>0?.55:1) * this.patchSlow;
+    if(this.spinT>0) maxS = 7;
+    const driveAccel=cfg.accel*accelMul;
+    const accel = (this.brakeHeld? -46 : (this.accelHeld? driveAccel : -14));
+    this.spd += accel*dt;
+    if(this.spd>maxS) this.spd += (maxS-this.spd)*Math.min(1,dt*4);
+    if(this.spd<0) this.spd=0;
+    // lateral: 操舵 + 遠心 + グリップ減衰
+    const kap = tr.kapAt(this.p);
+    if(this.spinT<=0){
+      this.latV += this.steer * cfg.steer * Math.min(1, this.spd/16) * 11 * dt;
+    }
+    this.latV += kap * this.spd*this.spd * 0.02 * Math.max(.15, 1.35-g) * dt * 30;
+    this.latV *= Math.max(0, 1 - g*5.2*dt);
+    this.lat += this.latV*dt;
+    const lim = HALF_W-1.1;
+    if(this.lat> lim){ this.lat= lim; if(Math.abs(this.latV)>2 && this.wallCd<=0){ this.spd*=.85; this.wallCd=.4; if(this.isPlayer)AUDIO.sfx('wall'); } this.latV*=-.35; }
+    if(this.lat<-lim){ this.lat=-lim; if(Math.abs(this.latV)>2 && this.wallCd<=0){ this.spd*=.85; this.wallCd=.4; if(this.isPlayer)AUDIO.sfx('wall'); } this.latV*=-.35; }
+    // advance
+    this.p += this.spd*dt;
+    // patches reset (毎フレーム再判定)
+    this.patchGrip=1; this.patchSlow=1;
+    // ---- place mesh
+    tr.posAt(this.p, this.lat, 0, this._v);
+    tr.tanAt(this.p, this._t);
+    tr.upAt(this.p, this._u);
+    this.mesh.position.copy(this._v);
+    this.mesh.up.copy(this._u);
+    this._v.addScaledVector(this._t, 5);
+    this.mesh.lookAt(this._v);
+    // slide angle + spin animation
+    const slide = Math.atan2(this.latV, Math.max(6,this.spd)) * .9;
+    if(this.spinT>0){
+      this.spinGroup.rotation.y = this.spinT*9;
+    } else {
+      this.spinGroup.rotation.y = -slide + this.steer*.12;
+    }
+    this.spinGroup.rotation.z = -this.latV*.012;
+    // wheels（回転＋前輪ステア追従）
+    const wr = this.spd*dt/ .42;
+    this.wheels.forEach(w=>{ w.rotation.x -= wr; });
+    const fs = this.spinT>0 ? 0 : -this.steer*.4;
+    this.frontPivots.forEach(pv=>{
+      pv.rotation.y += (fs-pv.rotation.y)*Math.min(1,dt*12);
+    });
+    // fx meshes
+    this.shieldMesh.visible = this.shieldT>0;
+    if(this.shieldT>0) this.shieldMesh.material.opacity = .18+.12*Math.sin(performance.now()*.01);
+    this.ramMesh.visible = this.ramT>0;
+    // drift smoke
+    if(Math.abs(this.latV)>5.5 && this.spd>18 && Math.random()<.5)
+      race.smoke(this.mesh.position, this.stage.road==='snow'?0xffffff:0x999999);
+    if(this.boostT>0 && Math.random()<.7)
+      race.smoke(this.mesh.position, 0x33bbff, .8);
+  }
+  aiUpdate(dt, race){
+    const tr=this.track;
+    const lookS=this.p+14+this.spd*.5;
+    // 先読み距離を伸ばし、個体ごとのライン差を残しながらカーブ内側へ寄せる
+    let target=THREE.MathUtils.clamp(
+      -tr.kapAt(lookS)*315+this.aiLineBias,
+      -(HALF_W-2.3), HALF_W-2.3
+    );
+    // 最も近い障害物だけを評価し、自車位置から空いている側へ回避
+    let nearestHazard=null, nearestHazardD=1e9;
+    for(const o of race.hazards()){
+      const dp=tr.wrap(o.p-this.p);
+      if(dp<34 && dp<nearestHazardD && Math.abs(o.lat-this.lat)<3.4){
+        nearestHazard=o; nearestHazardD=dp;
+      }
+    }
+    if(nearestHazard){
+      const passRight=nearestHazard.lat<=this.lat;
+      target=THREE.MathUtils.clamp(
+        nearestHazard.lat+(passRight?4.5:-4.5),
+        -(HALF_W-1.5), HALF_W-1.5
+      );
+    }
+    // 中身が見える箱から、順位と状況に合うアイテムを選ぶ
+    if(!nearestHazard && (this.items.length+(this.pendingItem?1:0))<2){
+      const value={banana:1.2,boost:2.5,missile:2.4,shield:1.9,ram:2.0,thunder:this.rank>=5?3.5:-99};
+      let bestBox=null, bestScore=-1e9;
+      for(const b of race.boxes){
+        if(!b.alive) continue;
+        const dp=tr.wrap(b.p-this.p);
+        if(dp>=65) continue;
+        const situational=((b.item==='boost' && this.rank>=3)?.7:0)
+          +((b.item==='missile' && this.rank>1)?.5:0)
+          +((b.item==='shield' && race.projectiles.some(ms=>ms.target===this))?.9:0);
+        const score=(value[b.item]||1)+situational-dp*.018-Math.abs(b.lat-this.lat)*.12;
+        if(score>bestScore){ bestScore=score; bestBox=b; }
+      }
+      if(bestBox) target=bestBox.lat;
+    }
+    this.steer=THREE.MathUtils.clamp(
+      (target-this.lat)*(.46+this.aiSkill*.04)-this.latV*.14,
+      -1,1
+    );
+    // 不要な減速を減らし、カーブがある時だけ適正速度までブレーキ
+    const km=tr.kapAhead(this.p,24+this.spd*.75);
+    const safe=Math.sqrt(
+      (this.cfg.grip*this.stage.grip*9.5)/Math.max(km,1e-4)
+    )*(1.22+(this.aiSkill-1)*.55);
+    this.brakeHeld=km>.0028 && this.spd>safe+8;
+    this.accelHeld=!this.brakeHeld || this.spd<safe-2;
+    // 後方時は実際の最高速・加速へ補正し、先行時は過剰に逃げ切らない
+    const gap=race.player.p-this.p;
+    const catchUp=THREE.MathUtils.clamp(gap/420,-.035,.11);
+    this.aiSpeedMul=THREE.MathUtils.clamp(this.aiSkill+catchUp,.94,1.11);
+    this.aiAccelMul=THREE.MathUtils.clamp(
+      this.aiSkill+Math.max(0,gap)/700*.12,
+      .98,1.18
+    );
+    // アイテムを短い間隔で状況判断。被ロック中のシールドは即時使用
+    this.aiItemT-=dt;
+    const threatened=race.projectiles.some(ms=>ms.target===this && ms.life>0);
+    if(this.items.length>0 && (this.aiItemT<=0 || (this.items[0]==='shield'&&threatened))){
+      this.aiItemT=.65+Math.random()*1.4;
+      let aheadD=1e9, behindD=1e9;
+      for(const k of race.karts){
+        if(k===this) continue;
+        const da=tr.wrap(k.p-this.p);
+        const db=tr.wrap(this.p-k.p);
+        if(da>2 && da<aheadD) aheadD=da;
+        if(db>1 && db<behindD) behindD=db;
+      }
+      const it=this.items[0];
+      if(it==='missile' && aheadD<95) this.useItem(race);
+      else if(it==='banana' && behindD<34) this.useItem(race);
+      else if(it==='boost' && (gap>18 || Math.abs(tr.kapAhead(this.p,45))<.01)) this.useItem(race);
+      else if(it==='ram' && (aheadD<20 || behindD<11)) this.useItem(race);
+      else if(it==='shield' && (threatened || Math.random()<.55)) this.useItem(race);
+      else if(it==='thunder' && this.rank>=4) this.useItem(race);
+      else if(Math.random()<.38) this.useItem(race);
+    }
+  }
+}
+
+/* ================================================================
+   RACE — シーン構築・進行管理
+================================================================ */
+class Race {
+  constructor(renderer, carIdx, stageIdx){
+    this.renderer=renderer;
+    this.stage=STAGES[stageIdx]; this.stageIdx=stageIdx;
+    this.carIdx=carIdx;
+    this.scene=new THREE.Scene();
+    this.scene.fog=new THREE.Fog(this.stage.fog, this.stage.fogN, this.stage.fogF);
+    this.camera=new THREE.PerspectiveCamera(68, innerWidth/innerHeight, .1, 1200);
+    this.clock=new THREE.Clock();
+    this.time=0; this.state='count'; this.countT=3.6;
+    this.pauseFrom=null;
+    this.playerCompletedLaps=0; this.playerLapStartTime=0;
+    this.bestLap=null; this.bestLapLoaded=false;
+    this.projectiles=[]; this.bananas=[]; this.smokes=[];
+    this.finishOrder=[];
+    _kid=0;
+    this.build();
+    this._bestLapTask=STORE.loadBest(this.stage.id).then(best=>{
+      this.bestLap=best;
+      this.bestLapLoaded=true;
+    }).catch(e=>{
+      this.bestLapLoaded=true;
+      console.warn('best lap load failed', e);
+    });
+  }
+  build(){
+    const S=this.stage, sc=this.scene;
+    // lights
+    sc.add(new THREE.AmbientLight(S.amb, S.ambI));
+    const sun=new THREE.DirectionalLight(S.sun, S.sunI);
+    sun.position.set(120, 220, 80); sc.add(sun);
+    const hemi=new THREE.HemisphereLight(parseInt(S.skyBot.slice(1),16), S.ground, .35);
+    sc.add(hemi);
+    // sky dome
+    const sky=new THREE.Mesh(new THREE.SphereGeometry(950,20,12),
+      new THREE.MeshBasicMaterial({map:skyTexture(S), side:THREE.BackSide, fog:false}));
+    sc.add(sky);
+    if(S.night){ // stars
+      const sp=[], n=350;
+      for(let i=0;i<n;i++){
+        const th=Math.random()*Math.PI*2, ph=Math.random()*Math.PI*.45;
+        sp.push(Math.cos(th)*Math.cos(ph)*900, Math.sin(ph)*900+60, Math.sin(th)*Math.cos(ph)*900);
+      }
+      const sg=new THREE.BufferGeometry();
+      sg.setAttribute('position', new THREE.Float32BufferAttribute(sp,3));
+      sc.add(new THREE.Points(sg, new THREE.PointsMaterial({color:0xffffff,size:2.4,sizeAttenuation:false,fog:false})));
+    }
+    // ground
+    const gnd=new THREE.Mesh(new THREE.CircleGeometry(1000,40),
+      new THREE.MeshLambertMaterial({map:groundTexture(S)}));
+    gnd.rotation.x=-Math.PI/2; gnd.position.y=-1.2; sc.add(gnd);
+    if(S.id==='okinawa'){
+      const sea=new THREE.Mesh(new THREE.RingGeometry(430,1100,48),
+        new THREE.MeshLambertMaterial({color:0x1888c8}));
+      sea.rotation.x=-Math.PI/2; sea.position.y=-1; sc.add(sea);
+      this.sea=sea;
+    }
+    // track
+    this.track=new Track(S);
+    sc.add(this.track.buildMesh());
+    this.buildScenery();
+    this.buildRoadObjects();
+    // karts
+    this.karts=[];
+    const names=['AKAGI','TSUKUBA','HAKONE','IROHA','USUI'];
+    for(let i=0;i<AI_N+1;i++){
+      const isP = i===0;
+      const cfg = isP ? CARS[this.carIdx] : CARS[(this.carIdx+1+Math.floor(Math.random()*2))%3];
+      const k=new Kart(cfg, S, this.track, isP, isP?'YOU':names[i-1]);
+      // グリッド配置
+      k.p = -8 - Math.floor(i/2)*7; // ライン手前(負値)から。wrap()が負を吸収
+      k.lat = (i%2===0? -3.2 : 3.2);
+      if(!isP){
+        // 後方グリッドほど少し高スキルにし、全車が同じ走りにならない個体差も付与
+        const rivalIndex=i-1;
+        k.aiSkill=.96+rivalIndex*.018+Math.random()*.015;
+        k.aiLineBias=(Math.random()-.5)*.8;
+        // AI色をばらす
+        const hue=Math.random();
+        k.mesh.traverse(o=>{ if(o.isMesh && o.material.color && o.material.shininess===90)
+          o.material=o.material.clone(), o.material.color.setHSL(hue,.75,.5); });
+      }
+      sc.add(k.mesh); this.karts.push(k);
+    }
+    this.player=this.karts[0];
+    // snow particles
+    if(S.id==='wakkanai'){
+      const n=900, arr=new Float32Array(n*3);
+      for(let i=0;i<n;i++){ arr[i*3]=(Math.random()-.5)*140; arr[i*3+1]=Math.random()*60; arr[i*3+2]=(Math.random()-.5)*140; }
+      this.snowGeo=new THREE.BufferGeometry();
+      this.snowGeo.setAttribute('position', new THREE.BufferAttribute(arr,3));
+      this.snow=new THREE.Points(this.snowGeo, new THREE.PointsMaterial({color:0xffffff,size:.4,transparent:true,opacity:.9}));
+      sc.add(this.snow);
+    }
+    // smoke pool
+    this.smokePool=[];
+    const smGeo=new THREE.PlaneGeometry(1.6,1.6);
+    for(let i=0;i<50;i++){
+      const m=new THREE.Mesh(smGeo, new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0,depthWrite:false}));
+      m.visible=false; sc.add(m); this.smokePool.push({m,t:0});
+    }
+    this.buildMinimapBase();
+  }
+  buildScenery(){
+    const S=this.stage, sc=this.scene, tr=this.track;
+    if(S.id==='tokyo'){
+      const spots=tr.scatter(200, 40, 560, 26);
+      const winTex=windowTexture(); winTex.wrapS=winTex.wrapT=THREE.RepeatWrapping;
+      const geo=new THREE.BoxGeometry(1,1,1); geo.translate(0,.5,0);
+      const mat=new THREE.MeshLambertMaterial({color:0x222633, emissive:0xffffff, emissiveMap:winTex, emissiveIntensity:.9, map:winTex});
+      const im=new THREE.InstancedMesh(geo, mat, spots.length);
+      const M=new THREE.Matrix4(), Q=new THREE.Quaternion(), P=new THREE.Vector3(), Sc=new THREE.Vector3();
+      spots.forEach((s,i)=>{
+        const h=16+Math.random()*80, w=9+Math.random()*14;
+        P.set(s.x,-1,s.z); Sc.set(w,h,w);
+        Q.setFromAxisAngle(new THREE.Vector3(0,1,0), Math.random()*Math.PI);
+        M.compose(P,Q,Sc); im.setMatrixAt(i,M);
+      });
+      sc.add(im);
+      // ネオン看板ぽい発光柱
+      const nspots=tr.scatter(28, 22, 120, 15);
+      const nm=new THREE.InstancedMesh(new THREE.BoxGeometry(1.2,10,1.2),
+        new THREE.MeshBasicMaterial({color:0xff2d78}), nspots.length);
+      nspots.forEach((s,i)=>{ M.compose(P.set(s.x,4,s.z), Q.identity(), Sc.set(1,1,1)); nm.setMatrixAt(i,M); });
+      sc.add(nm);
+    }
+    if(S.id==='okinawa'){
+      const spots=tr.scatter(120, 25, 400, 18);
+      const M=new THREE.Matrix4(), Q=new THREE.Quaternion(), P=new THREE.Vector3(), Sc=new THREE.Vector3(1,1,1);
+      const trunk=new THREE.CylinderGeometry(.35,.55,7,6); trunk.translate(0,3.5,0);
+      const tim=new THREE.InstancedMesh(trunk, new THREE.MeshLambertMaterial({color:0x8a6a3c}), spots.length);
+      const leaf=new THREE.ConeGeometry(3.4,2.2,7); leaf.translate(0,7.6,0);
+      const lim=new THREE.InstancedMesh(leaf, new THREE.MeshLambertMaterial({color:0x2f9c45}), spots.length);
+      spots.forEach((s,i)=>{
+        const k=.8+Math.random()*.6;
+        Q.setFromAxisAngle(new THREE.Vector3(0,0,1),(Math.random()-.5)*.15);
+        M.compose(P.set(s.x,-1,s.z), Q, Sc.set(k,k,k));
+        tim.setMatrixAt(i,M); lim.setMatrixAt(i,M);
+      });
+      sc.add(tim); sc.add(lim);
+    }
+    if(S.id==='wakkanai'){
+      const spots=tr.scatter(160, 22, 420, 17);
+      const M=new THREE.Matrix4(), Q=new THREE.Quaternion(), P=new THREE.Vector3(), Sc=new THREE.Vector3(1,1,1);
+      const tree=new THREE.ConeGeometry(2.4,8,7); tree.translate(0,4,0);
+      const tim=new THREE.InstancedMesh(tree, new THREE.MeshLambertMaterial({color:0x27523a}), spots.length);
+      const cap=new THREE.ConeGeometry(1.7,3,7); cap.translate(0,7,0);
+      const cim=new THREE.InstancedMesh(cap, new THREE.MeshLambertMaterial({color:0xf2f6fc}), spots.length);
+      spots.forEach((s,i)=>{
+        const k=.7+Math.random()*.8;
+        M.compose(P.set(s.x,-1,s.z), Q.identity(), Sc.set(k,k,k));
+        tim.setMatrixAt(i,M); cim.setMatrixAt(i,M);
+      });
+      sc.add(tim); sc.add(cim);
+    }
+  }
+  buildRoadObjects(){
+    const tr=this.track, sc=this.scene, S=this.stage;
+    this.obstacles=[]; this.patches=[]; this.boxes=[];
+    const L=tr.len;
+    const V=new THREE.Vector3();
+    // 障害物: コーンと岩
+    const coneG=new THREE.ConeGeometry(.7,1.5,8), coneM=new THREE.MeshLambertMaterial({color:0xff7722});
+    const rockG=new THREE.DodecahedronGeometry(1.1), rockM=new THREE.MeshLambertMaterial({color:S.id==='wakkanai'?0xbcc6d4:0x777a82});
+    for(let i=0;i<14;i++){
+      const p = L*(.06 + .92*i/14) + Math.random()*20;
+      const lat = (Math.random()*2-1)*(HALF_W-2.4);
+      const rock = Math.random()<.4;
+      const m=new THREE.Mesh(rock?rockG:coneG, rock?rockM:coneM);
+      tr.posAt(p, lat, rock?.7:.75, V); m.position.copy(V);
+      sc.add(m);
+      this.obstacles.push({p:tr.wrap(p), lat, mesh:m, rock, alive:true});
+    }
+    // ステージパッチ(油/砂/氷)
+    const pc = S.patch==='ice'?10 : 8;
+    const pcol = S.patch==='ice'?0x9fd8ff : S.patch==='sand'?0xd8bd7a : 0x101418;
+    const pop  = S.patch==='ice'?.55 : .8;
+    for(let i=0;i<pc;i++){
+      const p=L*Math.random(), lat=(Math.random()*2-1)*(HALF_W-3.4);
+      const m=new THREE.Mesh(new THREE.CircleGeometry(2.6,12),
+        new THREE.MeshBasicMaterial({color:pcol, transparent:true, opacity:pop, depthWrite:false}));
+      tr.posAt(p,lat,.12,V); m.position.copy(V);
+      const up=tr.upAt(p, new THREE.Vector3());
+      m.lookAt(V.clone().add(up));
+      sc.add(m);
+      this.patches.push({p:tr.wrap(p), lat, type:S.patch});
+    }
+    // アイテムボックス：中身可視（絵文字Sprite＋台座）・ランダム配置
+    const boxG=new THREE.BoxGeometry(1.2,1.2,1.2);
+    const padM=new THREE.MeshBasicMaterial({color:0x7fdcff, transparent:true, opacity:.3, depthWrite:false});
+    const spriteTex={};
+    Object.keys(ITEMS).forEach(id=>{
+      spriteTex[id]=canvasTex(64,64,(g,w,h)=>{
+        g.font='44px sans-serif'; g.textAlign='center'; g.textBaseline='middle';
+        g.fillText(ITEMS[id].em,w/2,h/2+4);
+      });
+    });
+    // 出現重み：強アイテムは絞り、thunderは超レア
+    const itemPool=['banana','banana','banana','boost','boost','boost','boost',
+      'missile','missile','missile','shield','shield','shield','ram','ram','thunder'];
+    for(let i=0;i<26;i++){
+      const p=L*(.03+Math.random()*.94);
+      const lat=(Math.random()*2-1)*(HALF_W-2.2);
+      const item=itemPool[Math.floor(Math.random()*itemPool.length)];
+      const grp=new THREE.Group();
+      grp.add(new THREE.Mesh(boxG,padM));
+      const sp=new THREE.Sprite(new THREE.SpriteMaterial({
+        map:spriteTex[item], transparent:true, depthWrite:false
+      }));
+      sp.scale.set(1.9,1.9,1); grp.add(sp);
+      tr.posAt(p,lat,1.2,V); grp.position.copy(V); sc.add(grp);
+      this.boxes.push({p:tr.wrap(p),lat,mesh:grp,item,alive:true,respawn:0});
+    }
+  }
+  hazards(){ // AI回避対象
+    return this.obstacles.filter(o=>o.alive).concat(this.bananas);
+  }
+  /* ---------- items ---------- */
+  rollItem(kart){
+    if((kart.items.length + (kart.pendingItem?1:0)) >= 2) return;
+    // 下位ほど強い
+    const r=kart.rank;
+    let pool;
+    if(r<=2)      pool=['banana','banana','shield','missile','boost'];
+    else if(r<=4) pool=['missile','boost','banana','shield','ram','boost'];
+    else          pool=['boost','boost','ram','missile','thunder','shield'];
+    const it=pool[Math.floor(Math.random()*pool.length)];
+    kart.pendingItem=it; kart.rouletteT=.9;
+  }
+  dropBanana(kart){
+    const V=new THREE.Vector3();
+    const p=this.track.wrap(kart.p-4), lat=kart.lat;
+    const m=new THREE.Mesh(new THREE.SphereGeometry(.65,8,6),
+      new THREE.MeshLambertMaterial({color:0xffdd33}));
+    m.scale.set(1,.7,1.4);
+    this.track.posAt(p,lat,.6,V); m.position.copy(V);
+    this.scene.add(m);
+    this.bananas.push({p,lat,mesh:m,owner:kart.id,age:0});
+  }
+  fireMissile(kart){
+    const tr=this.track;
+    // 最も近い前方カート
+    let best=null, bd=1e9;
+    for(const k of this.karts){ if(k===kart) continue;
+      const d=tr.wrap(k.p-kart.p); if(d>1 && d<bd){ bd=d; best=k; } }
+    const m=new THREE.Group();
+    const cone=new THREE.Mesh(new THREE.ConeGeometry(.45,1.6,8),
+      new THREE.MeshBasicMaterial({color:0xff3333}));
+    cone.rotation.x=Math.PI/2; m.add(cone);
+    const glow=new THREE.Mesh(new THREE.SphereGeometry(.7,8,6),
+      new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.5}));
+    m.add(glow);
+    this.scene.add(m);
+    this.projectiles.push({p:tr.wrap(kart.p+3), lat:kart.lat, spd:105, target:best,
+      owner:kart.id, mesh:m, life:6});
+  }
+  thunder(kart){
+    AUDIO.sfx('thunder');
+    for(const k of this.karts){
+      if(k===kart) continue;
+      if(this.track.wrap(k.p - kart.p) < this.track.len*.7){ // 前方勢に
+        if(k.rank < kart.rank){ k.spin(); k.slowT=2.2; }
+      }
+    }
+    if(kart.isPlayer) this.flash();
+    else if(this.player.rank < kart.rank) this.flash();
+  }
+  flash(){
+    const el=document.getElementById('announce');
+    el.textContent='🌩'; el.style.opacity=1;
+    setTimeout(()=>{ if(this.state==='race') el.textContent=''; }, 500);
+  }
+  smoke(pos, color, scale){
+    const s=this.smokePool.find(s=>!s.m.visible);
+    if(!s) return;
+    s.m.visible=true; s.t=.7;
+    s.m.position.copy(pos); s.m.position.y+=.6+Math.random()*.5;
+    s.m.position.x+=(Math.random()-.5); s.m.position.z+=(Math.random()-.5);
+    s.m.material.color.setHex(color);
+    s.m.material.opacity=.5;
+    s.m.scale.setScalar(scale||1);
+  }
+  toast(txt){
+    const el=document.getElementById('toast');
+    el.textContent=txt;
+    clearTimeout(this._toastT);
+    this._toastT=setTimeout(()=>el.textContent='',1400);
+  }
+  /* ---------- per-frame ---------- */
+  update(){
+    const rawDt=this.clock.getDelta();
+    if(this.state==='pause'){
+      this.updateHUD();
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    let dt=Math.min(rawDt, .05);
+    const tr=this.track, L=tr.len;
+    // countdown
+    if(this.state==='count'){
+      const prev=Math.ceil(this.countT);
+      this.countT-=dt;
+      const cur=Math.ceil(this.countT);
+      const an=document.getElementById('announce');
+      if(this.countT<=0){
+        this.state='race'; an.textContent='GO!'; AUDIO.sfx('go');
+        setTimeout(()=>{ if(an.textContent==='GO!') an.textContent=''; }, 800);
+      } else if(cur<=3){
+        if(cur!==prev) AUDIO.sfx('beep');
+        an.textContent=cur;
+      }
+      dt*= (this.state==='race'?1:0); // カウント中は停止
+    }
+    if(this.state==='race' || this.state==='finish') this.time+=dt;
+    // AI
+    for(const k of this.karts) if(!k.isPlayer) k.aiUpdate(dt, this);
+    // patches判定 → kart.update内で使うため先に
+    for(const k of this.karts){
+      for(const pa of this.patches){
+        let dp=tr.wrap(pa.p-k.p); if(dp>L/2) dp-=L;
+        if(Math.abs(dp)<2.8 && Math.abs(pa.lat-k.lat)<2.8){
+          if(pa.type==='ice') k.patchGrip=.22;
+          else if(pa.type==='oil') k.patchGrip=.35;
+          else if(pa.type==='sand') k.patchSlow=.6;
+        }
+      }
+    }
+    // karts
+    for(const k of this.karts) k.update(dt, this);
+    // 順位
+    const sorted=[...this.karts].sort((a,b)=>b.p-a.p);
+    sorted.forEach((k,i)=>k.rank=i+1);
+    // プレイヤーのラップ通過判定
+    const completedLaps=Math.min(LAPS, Math.max(0, Math.floor(this.player.p/L)));
+    if(completedLaps>this.playerCompletedLaps){
+      const lapTime=this.time-this.playerLapStartTime;
+      this.playerLapStartTime=this.time;
+      this.playerCompletedLaps=completedLaps;
+      this.recordBestLap(lapTime);
+    }
+    // アイテムボックス
+    const V=new THREE.Vector3();
+    for(const b of this.boxes){
+      if(!b.alive){ b.respawn-=dt; if(b.respawn<=0){ b.alive=true; b.mesh.visible=true; } continue; }
+      b.mesh.rotation.y+=dt*2.2; b.mesh.rotation.x+=dt*1.1;
+      for(const k of this.karts){
+        if((k.items.length+(k.pendingItem?1:0))>=2) continue;
+        let dp=tr.wrap(b.p-k.p); if(dp>L/2)dp-=L;
+        if(Math.abs(dp)<2.2 && Math.abs(b.lat-k.lat)<2.2){
+          // thunderは下位（5位以下）だけ取得可能。対象外なら箱を残す
+          if(b.item==='thunder' && k.rank<=4) continue;
+          b.alive=false; b.mesh.visible=false; b.respawn=4.5;
+          k.pendingItem=b.item;
+          k.rouletteT=.25;
+          if(k.isPlayer) this.toast(ITEMS[b.item].em+' '+ITEMS[b.item].name+' 入手');
+          break;
+        }
+      }
+    }
+    // 障害物衝突
+    for(const o of this.obstacles){
+      if(!o.alive) continue;
+      for(const k of this.karts){
+        let dp=tr.wrap(o.p-k.p); if(dp>L/2)dp-=L;
+        if(Math.abs(dp)<2.0 && Math.abs(o.lat-k.lat)<1.9){
+          if(k.ramT>0){ o.alive=false; o.mesh.visible=false; if(k.isPlayer){k.hits++; this.toast('💥 障害物粉砕!');} }
+          else { if(k.spin()) k.spd*= o.rock?.35:.6;
+                 if(!o.rock){ o.alive=false; o.mesh.visible=false; } }
+        }
+      }
+    }
+    // バナナ
+    for(let i=this.bananas.length-1;i>=0;i--){
+      const bn=this.bananas[i]; bn.age+=dt;
+      for(const k of this.karts){
+        if(bn.owner===k.id && bn.age<1) continue;
+        let dp=tr.wrap(bn.p-k.p); if(dp>L/2)dp-=L;
+        if(Math.abs(dp)<1.8 && Math.abs(bn.lat-k.lat)<1.7){
+          k.spin();
+          const owner=this.karts.find(q=>q.id===bn.owner);
+          if(owner&&owner.isPlayer&&!k.isPlayer){ owner.hits++; this.toast('🍌 命中! +200'); }
+          this.scene.remove(bn.mesh); this.bananas.splice(i,1); break;
+        }
+      }
+      if(bn.age>25){ this.scene.remove(bn.mesh); this.bananas.splice(i,1); }
+    }
+    // ミサイル
+    for(let i=this.projectiles.length-1;i>=0;i--){
+      const ms=this.projectiles[i]; ms.life-=dt;
+      ms.p=tr.wrap(ms.p+ms.spd*dt);
+      if(ms.target){
+        const dl=ms.target.lat-ms.lat;
+        ms.lat += THREE.MathUtils.clamp(dl, -8*dt, 8*dt);
+      }
+      tr.posAt(ms.p, ms.lat, 1.0, V); ms.mesh.position.copy(V);
+      tr.tanAt(ms.p, V); ms.mesh.lookAt(ms.mesh.position.clone().add(V));
+      let hit=false;
+      for(const k of this.karts){
+        if(k.id===ms.owner) continue;
+        let dp=tr.wrap(k.p-ms.p); if(dp>L/2)dp-=L;
+        if(Math.abs(dp)<2.2 && Math.abs(k.lat-ms.lat)<2.2){
+          const did=k.spin();
+          const owner=this.karts.find(q=>q.id===ms.owner);
+          if(did && owner && owner.isPlayer){ owner.hits++; this.toast('🚀 撃破! +200'); }
+          hit=true; break;
+        }
+      }
+      if(hit||ms.life<=0){ this.scene.remove(ms.mesh); this.projectiles.splice(i,1); }
+    }
+    // カート同士
+    for(let i=0;i<this.karts.length;i++) for(let j=i+1;j<this.karts.length;j++){
+      const a=this.karts[i], b=this.karts[j];
+      let dp=tr.wrap(a.p-b.p); if(dp>L/2)dp-=L;
+      if(Math.abs(dp)<3.4 && Math.abs(a.lat-b.lat)<2.3){
+        const push=(a.lat>b.lat?1:-1)*.9;
+        const ma=a.cfg.mass, mb=b.cfg.mass;
+        a.latV+=push*(mb/(ma+mb))*7; b.latV-=push*(ma/(ma+mb))*7;
+        if(a.ramT>0&&b.ramT<=0){ if(b.spin()&&a.isPlayer){a.hits++;this.toast('💥 体当たり! +200');} }
+        else if(b.ramT>0&&a.ramT<=0){ if(a.spin()&&b.isPlayer){b.hits++;this.toast('💥 体当たり! +200');} }
+      }
+    }
+    // smoke
+    for(const s of this.smokePool){
+      if(!s.m.visible) continue;
+      s.t-=dt;
+      s.m.material.opacity=s.t*.6;
+      s.m.position.y+=dt*1.5;
+      s.m.quaternion.copy(this.camera.quaternion);
+      if(s.t<=0) s.m.visible=false;
+    }
+    // snow
+    if(this.snow){
+      const arr=this.snowGeo.attributes.position.array;
+      const cx=this.player.mesh.position.x, cz=this.player.mesh.position.z;
+      for(let i=0;i<arr.length;i+=3){
+        arr[i+1]-=dt*7;
+        if(arr[i+1]<0){ arr[i+1]=50+Math.random()*10;
+          arr[i]=cx+(Math.random()-.5)*140; arr[i+2]=cz+(Math.random()-.5)*140; }
+      }
+      this.snowGeo.attributes.position.needsUpdate=true;
+      this.snow.position.set(0,0,0);
+    }
+    // ラップ / フィニッシュ
+    for(const k of this.karts){
+      if(!k.finished && k.p>=L*LAPS){
+        k.finished=true; k.finishTime=this.time;
+        this.finishOrder.push(k);
+        if(k.isPlayer){ AUDIO.sfx('finish'); this.state='finish'; this.finishT=2.4;
+          document.getElementById('announce').textContent='FINISH!'; }
+      }
+      if(k.finished){ k.accelHeld=true; k.brakeHeld=false; }
+    }
+    if(this.state==='finish'){
+      this.player.steer=0; this.player.accelHeld=true; // 流し走行
+      this.finishT-=dt;
+      if(this.finishT<=0){ this.state='done'; }
+    }
+    // camera
+    this.updateCamera(dt);
+    // HUD
+    this.updateHUD();
+    AUDIO.engine(this.player.spd/this.player.cfg.maxSpd);
+    this.renderer.render(this.scene, this.camera);
+  }
+  updateCamera(dt){
+    const k=this.player, tr=this.track;
+    const t=new THREE.Vector3(); tr.tanAt(k.p, t);
+    const u=new THREE.Vector3(); tr.upAt(k.p, u);
+    const pos=k.mesh.position.clone()
+      .addScaledVector(t, -8.5 - k.spd*.03)
+      .addScaledVector(u, 4.2);
+    if(!this._camInit){ this.camera.position.copy(pos); this._camInit=true; }
+    this.camera.position.lerp(pos, Math.min(1, dt*5.5));
+    const look=k.mesh.position.clone().addScaledVector(t, 9).addScaledVector(u,1.2);
+    this.camera.up.lerp(u, Math.min(1,dt*4)).normalize();
+    this.camera.lookAt(look);
+    // FOV: ブースト演出
+    const targetFov = 68 + (k.boostT>0?9:0) + k.spd*.08;
+    this.camera.fov += (targetFov-this.camera.fov)*Math.min(1,dt*5);
+    this.camera.updateProjectionMatrix();
+  }
+  buildMinimapBase(){
+    const c=document.createElement('canvas'); c.width=208; c.height=208;
+    const g=c.getContext('2d');
+    const pts=this.track.pts;
+    let minX=1e9,maxX=-1e9,minZ=1e9,maxZ=-1e9;
+    pts.forEach(p=>{ minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);
+      minZ=Math.min(minZ,p.z);maxZ=Math.max(maxZ,p.z); });
+    const sc=180/Math.max(maxX-minX,maxZ-minZ);
+    this.mmMap=p=>[ (p.x-(minX+maxX)/2)*sc+104, (p.z-(minZ+maxZ)/2)*sc+104 ];
+    g.strokeStyle='rgba(255,255,255,.9)'; g.lineWidth=7; g.lineCap='round'; g.beginPath();
+    pts.forEach((p,i)=>{ const [x,y]=this.mmMap(p); i?g.lineTo(x,y):g.moveTo(x,y); });
+    g.closePath(); g.stroke();
+    g.strokeStyle='rgba(0,0,0,.5)'; g.lineWidth=3; g.stroke();
+    this.mmBase=c;
+  }
+  updateHUD(){
+    const k=this.player;
+    document.getElementById('posNum').textContent=k.rank;
+    document.getElementById('posSuf').textContent=['st','nd','rd','th','th','th'][k.rank-1];
+    const lap=Math.min(LAPS, Math.max(1, Math.floor(k.p/this.track.len)+1));
+    document.getElementById('lapTxt').textContent=`LAP ${lap}/${LAPS}`;
+    const t=this.time, mm=Math.floor(t/60), ss=Math.floor(t%60), cs=Math.floor(t%1*100);
+    document.getElementById('timeBox').textContent=
+      `${mm}'${String(ss).padStart(2,'0')}"${String(cs).padStart(2,'0')}`;
+    document.getElementById('speedNum').textContent=Math.round(k.spd*3.4);
+    const ib=document.getElementById('itemBox');
+    const ib2=document.getElementById('itemBox2');
+    let rouletteEm='';
+    if(k.rouletteT>0){
+      const keys=Object.keys(ITEMS);
+      rouletteEm=ITEMS[keys[Math.floor(performance.now()/70)%keys.length]].em;
+    }
+    const firstItem=k.items[0]||null;
+    const secondItem=k.items[1]||null;
+    if(firstItem){
+      ib.textContent=ITEMS[firstItem].em; ib.classList.add('have');
+    } else if(rouletteEm){
+      ib.textContent=rouletteEm; ib.classList.remove('have');
+    } else {
+      ib.textContent='—'; ib.classList.remove('have');
+    }
+    if(secondItem){
+      ib2.textContent=ITEMS[secondItem].em; ib2.classList.add('have');
+    } else if(rouletteEm && firstItem){
+      ib2.textContent=rouletteEm; ib2.classList.remove('have');
+    } else {
+      ib2.textContent='—'; ib2.classList.remove('have');
+    }
+    // minimap
+    const g=document.getElementById('minimap').getContext('2d');
+    g.clearRect(0,0,208,208); g.drawImage(this.mmBase,0,0);
+    const V=new THREE.Vector3();
+    for(const q of this.karts){
+      this.track.posAt(q.p,0,0,V);
+      const [x,y]=this.mmMap(V);
+      g.fillStyle=q.isPlayer?'#ffd76e':'#ff2d78';
+      g.beginPath(); g.arc(x,y,q.isPlayer?7:5,0,7); g.fill();
+      if(q.isPlayer){ g.strokeStyle='#fff'; g.lineWidth=2; g.stroke(); }
+    }
+  }
+  recordBestLap(lapTime){
+    if(!Number.isFinite(lapTime) || lapTime<=0) return;
+    this._bestLapTask=this._bestLapTask.then(async()=>{
+      if(!this.bestLapLoaded){
+        this.bestLap=await STORE.loadBest(this.stage.id);
+        this.bestLapLoaded=true;
+      }
+      if(this.bestLap===null || lapTime<this.bestLap){
+        this.bestLap=lapTime;
+        this.toast('🏁 BEST LAP!');
+        await STORE.saveBest(this.stage.id, lapTime);
+      }
+    }).catch(e=>console.warn('best lap update failed', e));
+  }
+  score(){
+    const k=this.player;
+    const placePts=[5000,3600,2600,1800,1100,600][k.rank-1]||500;
+    const timeBonus=Math.max(0, Math.round(6500 - k.finishTime*22));
+    return placePts + timeBonus + k.hits*200;
+  }
+  dispose(){
+    this.scene.traverse(o=>{
+      if(o.geometry) o.geometry.dispose();
+      if(o.material){ (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{
+        if(m.map) m.map.dispose(); m.dispose(); }); }
+    });
+  }
+}
+
+/* ================================================================
+   APP — 画面遷移・入力・メインループ
+================================================================ */
+const APP = {
+  renderer:null, race:null, carIdx:1, stageIdx:0, raf:0,
+  init(){
+    this.renderer=new THREE.WebGLRenderer({canvas:document.getElementById('gl'),
+      antialias:!IS_MOBILE, powerPreference:'high-performance'});
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE?1.5:2));
+    this.renderer.setSize(innerWidth, innerHeight);
+    addEventListener('resize', ()=>{
+      this.renderer.setSize(innerWidth, innerHeight);
+      if(this.race){ this.race.camera.aspect=innerWidth/innerHeight;
+        this.race.camera.updateProjectionMatrix(); }
+    });
+    this.buildSelect();
+    this.bindUI();
+    this.bindInput();
+  },
+  buildSelect(){
+    const cc=document.getElementById('carCards');
+    CARS.forEach((c,i)=>{
+      const d=document.createElement('div');
+      d.className='card'+(i===this.carIdx?' on':'');
+      d.innerHTML=`<div class="em">${c.em}</div><div class="nm">${c.name}</div>
+        <div class="ds">${c.ds}</div>
+        <div class="bars">
+          <div class="bar-l">SPEED</div><div class="bar"><i style="width:${c.st[0]*100}%"></i></div>
+          <div class="bar-l">GRIP</div><div class="bar"><i style="width:${c.st[1]*100}%"></i></div>
+          <div class="bar-l">POWER</div><div class="bar"><i style="width:${c.st[2]*100}%"></i></div>
+        </div>`;
+      d.onclick=()=>{ this.carIdx=i;
+        [...cc.children].forEach((e,j)=>e.classList.toggle('on',j===i)); };
+      cc.appendChild(d);
+    });
+    const scEl=document.getElementById('stageCards');
+    STAGES.forEach((s,i)=>{
+      const d=document.createElement('div');
+      d.className='card'+(i===this.stageIdx?' on':'');
+      d.innerHTML=`<div class="em">${s.em}</div><div class="nm">${s.name}</div><div class="ds">${s.ds}</div>`;
+      d.onclick=()=>{ this.stageIdx=i;
+        [...scEl.children].forEach((e,j)=>e.classList.toggle('on',j===i)); };
+      scEl.appendChild(d);
+    });
+  },
+  show(id){
+    ['title','select','hud','result','ranking'].forEach(s=>
+      document.getElementById(s).classList.toggle('hidden', s!==id));
+    const inRace = id==='hud';
+    document.getElementById('joyZone').classList.toggle('hidden', !inRace);
+    if(!inRace){
+      document.getElementById('joy').classList.add('hidden');
+      this.joy.active=false; this.joy.x=0; this.joy.y=0; this.joy.id=null;
+    }
+  },
+  bindUI(){
+    document.getElementById('startBtn').onclick=()=>{
+      AUDIO.init(); AUDIO.resume(); AUDIO.sfx('pick');
+      this.show('select');
+    };
+    document.getElementById('goBtn').onclick=()=>{ AUDIO.sfx('use'); this.startRace(); };
+    document.getElementById('retryBtn').onclick=()=>{ this.endRace(); this.startRace(); };
+    document.getElementById('homeBtn').onclick=()=>{ this.endRace(); this.show('title'); };
+    document.getElementById('titleRankBtn').onclick=()=>{ this.showRanking(this.stageIdx,'title'); };
+    document.getElementById('rkClose').onclick=()=>{ this.show(this._rkBack||'title'); };
+    document.getElementById('muteBtn').onclick=()=>{
+      AUDIO.setMute(!AUDIO.muted);
+      document.getElementById('muteBtn').textContent=AUDIO.muted?'✕':'♪';
+    };
+    document.getElementById('pauseBtn').onclick=()=>{
+      const r=this.race;
+      if(!r) return;
+      const btn=document.getElementById('pauseBtn');
+      if(r.state==='pause'){
+        r.state=r.pauseFrom||'race';
+        r.pauseFrom=null;
+        r.clock.getDelta();
+        AUDIO.resume();
+        btn.textContent='⏸';
+        btn.setAttribute('aria-label','一時停止');
+      } else if(r.state==='count' || r.state==='race' || r.state==='finish'){
+        r.pauseFrom=r.state;
+        r.state='pause';
+        if(AUDIO.ctx) AUDIO.ctx.suspend();
+        btn.textContent='▶';
+        btn.setAttribute('aria-label','再開');
+      }
+    };
+    document.getElementById('saveBtn').onclick=async ()=>{
+      const name=(document.getElementById('nameIn').value||'YOU').toUpperCase().slice(0,6);
+      const stage=STAGES[this.stageIdx];
+      const list=await STORE.load(stage.id);
+      list.push({name, score:this._lastScore, car:CARS[this.carIdx].name,
+        time:this.race?this.race.player.finishTime:0});
+      list.sort((a,b)=>b.score-a.score);
+      await STORE.save(stage.id, list.slice(0,8));
+      document.getElementById('saveBtn').textContent='保存済み ✓';
+      document.getElementById('saveBtn').disabled=true;
+      this.showRanking(this.stageIdx,'result');
+    };
+    // ranking tabs
+    const tabs=document.getElementById('rkTabs');
+    STAGES.forEach((s,i)=>{
+      const b=document.createElement('button');
+      b.className='rk-tab'; b.textContent=s.em+' '+s.name;
+      b.onclick=()=>this.showRanking(i,this._rkBack);
+      tabs.appendChild(b);
+    });
+  },
+  async showRanking(stageIdx, back){
+    this._rkBack=back||'title';
+    this.show('ranking');
+    [...document.getElementById('rkTabs').children].forEach((e,j)=>
+      e.classList.toggle('on', j===stageIdx));
+    const list=await STORE.load(STAGES[stageIdx].id);
+    const el=document.getElementById('rkList');
+    el.innerHTML = list.length===0
+      ? '<div style="color:#89a;padding:30px 0;text-align:center">まだ記録がありません。<br>走って歴史を作りましょう。</div>'
+      : list.map((r,i)=>`<div class="rk-row"><span><b>${i+1}.</b> ${r.name}</span>
+          <span style="color:#9ab;font-size:11px">${r.car||''}</span>
+          <b>${r.score}</b></div>`).join('');
+  },
+  startRace(){
+    if(this.race){ this.race.dispose(); this.race=null; }
+    cancelAnimationFrame(this.raf);
+    document.getElementById('announce').textContent='';
+    document.getElementById('toast').textContent='';
+    this.race=new Race(this.renderer, this.carIdx, this.stageIdx);
+    this.show('hud');
+    const pauseBtn=document.getElementById('pauseBtn');
+    pauseBtn.textContent='⏸';
+    pauseBtn.setAttribute('aria-label','一時停止');
+    AUDIO.init(); AUDIO.resume();
+    AUDIO.startBGM(STAGES[this.stageIdx].id);
+    AUDIO.startEngine();
+    this._resultShown=false;
+    setTimeout(()=>{ if(this.race) this.race.toast(IS_MOBILE
+      ? '画面のどこでもドラッグ: 上=加速 / 左右=ハンドル / 下=ブレーキ'
+      : 'ドラッグ or キー: ↑加速 ←→ハンドル ↓ブレーキ / SPACEアイテム'); }, 500);
+    const loop=()=>{
+      this.raf=requestAnimationFrame(loop);
+      this.race.update();
+      this.applyInput();
+      if(this.race.state==='done' && !this._resultShown){
+        this._resultShown=true; this.showResult();
+      }
+    };
+    loop();
+  },
+  endRace(){
+    cancelAnimationFrame(this.raf);
+    AUDIO.stopBGM(); AUDIO.stopEngine();
+    if(this.race){ this.race.dispose(); this.race=null; }
+    this.renderer.clear();
+  },
+  showResult(){
+    AUDIO.stopBGM();
+    AUDIO.stopEngine();
+    const r=this.race, k=r.player;
+    const score=r.score(); this._lastScore=score;
+    document.getElementById('resPlace').textContent=
+      k.rank+['st','nd','rd','th','th','th'][k.rank-1]+' PLACE';
+    document.getElementById('resScore').textContent='SCORE '+score;
+    // 順位表: 完走者は着順、未完走者は現在順
+    const done=r.finishOrder.slice();
+    const rest=[...r.karts].filter(q=>!done.includes(q)).sort((a,b)=>b.p-a.p);
+    const all=done.concat(rest);
+    document.getElementById('resBody').innerHTML=all.map((q,i)=>{
+      const t=q.finished
+        ? `${Math.floor(q.finishTime/60)}'${String(Math.floor(q.finishTime%60)).padStart(2,'0')}"`
+        : '—';
+      return `<tr class="${q.isPlayer?'me':''}"><td>${i+1}</td><td>${q.name}</td>
+        <td>${q.cfg.name}</td><td>${t}</td></tr>`;
+    }).join('');
+    document.getElementById('saveBtn').textContent='記録を保存';
+    document.getElementById('saveBtn').disabled=false;
+    this.show('result');
+    // ラストの流し絵を背景に残すため描画は継続
+    const idle=()=>{ if(!this.race) return;
+      this.raf=requestAnimationFrame(idle); this.race.update(); };
+    cancelAnimationFrame(this.raf); idle();
+  },
+  /* ---------- input ---------- */
+  keys:{}, joy:{active:false, id:null, cx:0, cy:0, x:0, y:0},
+  bindInput(){
+    addEventListener('keydown',e=>{
+      this.keys[e.code]=true;
+      if(e.code==='Space'){ e.preventDefault();
+        if(this.race&&this.race.state==='race') this.race.player.useItem(this.race); }
+    });
+    addEventListener('keyup',e=>this.keys[e.code]=false);
+    // フローティングジョイスティック: 触れた場所が原点。画面全域(joyZone)で操作可能
+    const joyEl=document.getElementById('joy'), knob=document.getElementById('joyKnob'),
+          zone=document.getElementById('joyZone'), J=this.joy, JR=56;
+    const jStart=(x,y,id)=>{
+      J.active=true; J.id=id; J.cx=x; J.cy=y; J.x=0; J.y=0;
+      joyEl.style.left=x+'px'; joyEl.style.top=y+'px';
+      knob.style.transform='translate(0px,0px)';
+      joyEl.classList.remove('hidden');
+    };
+    const jMove=(x,y)=>{
+      if(!J.active) return;
+      let dx=x-J.cx, dy=y-J.cy;
+      const d=Math.hypot(dx,dy);
+      if(d>JR){ dx*=JR/d; dy*=JR/d; }
+      J.x=dx/JR; J.y=dy/JR;
+      knob.style.transform=`translate(${dx}px,${dy}px)`;
+    };
+    const jEnd=()=>{
+      J.active=false; J.id=null; J.x=0; J.y=0;
+      joyEl.classList.add('hidden');
+    };
+    zone.addEventListener('touchstart',e=>{ e.preventDefault();
+      if(J.active) return; // 2本目はアイテムボタン等に譲る
+      const t=e.changedTouches[0]; jStart(t.clientX,t.clientY,t.identifier);
+    },{passive:false});
+    zone.addEventListener('touchmove',e=>{ e.preventDefault();
+      for(const t of e.changedTouches) if(t.identifier===J.id) jMove(t.clientX,t.clientY);
+    },{passive:false});
+    ['touchend','touchcancel'].forEach(ev=>zone.addEventListener(ev,e=>{
+      for(const t of e.changedTouches) if(t.identifier===J.id) jEnd();
+    }));
+    zone.addEventListener('mousedown',e=>{ e.preventDefault(); jStart(e.clientX,e.clientY,'mouse'); });
+    addEventListener('mousemove',e=>{ if(J.id==='mouse') jMove(e.clientX,e.clientY); });
+    addEventListener('mouseup',()=>{ if(J.id==='mouse') jEnd(); });
+    const ib=document.getElementById('itemBox');
+    const useIt=e=>{ e.preventDefault();
+      if(this.race&&this.race.state==='race') this.race.player.useItem(this.race); };
+    ib.addEventListener('touchstart',useIt,{passive:false});
+    ib.addEventListener('mousedown',useIt);
+    document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden && AUDIO.ctx) AUDIO.ctx.suspend();
+      else if(AUDIO.ctx && !(this.race && this.race.state==='pause')) AUDIO.ctx.resume();
+    });
+  },
+  applyInput(){
+    if(!this.race) return;
+    const k=this.race.player;
+    if(this.race.state!=='race'){ if(this.race.state!=='finish') return; }
+    let s=0, acc=false, brk=false;
+    if(this.keys['ArrowLeft']||this.keys['KeyA']) s-=1;
+    if(this.keys['ArrowRight']||this.keys['KeyD']) s+=1;
+    if(this.keys['ArrowUp']||this.keys['KeyW']) acc=true;
+    if(this.keys['ArrowDown']||this.keys['KeyS']) brk=true;
+    const J=this.joy;
+    if(J.active){
+      if(Math.abs(J.x)>.08) s=THREE.MathUtils.clamp(J.x*1.3, -1, 1); // アナログ操舵
+      if(J.y<-.12) acc=true;   // 上に倒す=加速
+      if(J.y> .38) brk=true;   // 下に大きく倒す=ブレーキ
+    }
+    if(this.race.state==='race'){
+      k.steer=s;
+      k.brakeHeld=brk;
+      k.accelHeld=acc && !brk;
+    }
+  },
+};
+
+APP.init();
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_START -->
+<script>
+window.addEventListener("load", function () {
+    if (location.protocol !== "file:" && location.protocol !== "about:" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(function (error) {
+            console.warn("Service Worker registration failed:", error);
+        });
+    }
+});
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_END -->
+</body>
+</html>
