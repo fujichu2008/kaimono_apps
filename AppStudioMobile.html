@@ -3389,9 +3389,167 @@ nextBtn.onclick=nextStep;
             };
         }
 
+        function findPwaHtmlMarker(source, marker, fromIndex = 0) {
+            const text = String(source || "");
+            let searchIndex = Math.max(0, Number(fromIndex) || 0);
+
+            while (searchIndex < text.length) {
+                const markerIndex = text.indexOf(marker, searchIndex);
+                if (markerIndex === -1) return -1;
+
+                const lowerBeforeMarker = text.slice(0, markerIndex).toLowerCase();
+                const lastScriptOpen = lowerBeforeMarker.lastIndexOf("<script");
+                const lastScriptClose = lowerBeforeMarker.lastIndexOf("</script");
+                const lastStyleOpen = lowerBeforeMarker.lastIndexOf("<style");
+                const lastStyleClose = lowerBeforeMarker.lastIndexOf("</style");
+                const insideScript = lastScriptOpen > lastScriptClose;
+                const insideStyle = lastStyleOpen > lastStyleClose;
+
+                if (!insideScript && !insideStyle) {
+                    return markerIndex;
+                }
+
+                searchIndex = markerIndex + marker.length;
+            }
+
+            return -1;
+        }
+
+        function countHtmlManifestLinks(source) {
+            const text = String(source || "");
+            try {
+                const documentObject = new DOMParser().parseFromString(text, "text/html");
+                return Array.from(documentObject.querySelectorAll("link[rel]")).filter(link => {
+                    const relTokens = String(link.getAttribute("rel") || "")
+                        .toLowerCase()
+                        .split(/\s+/)
+                        .filter(Boolean);
+                    return relTokens.includes("manifest");
+                }).length;
+            } catch (error) {
+                const withoutRawText = text
+                    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+                    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "");
+                return (withoutRawText.match(/<link\b[^>]*\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["'][^>]*>/gi) || []).length;
+            }
+        }
+
+        function maskJavaScriptStringsAndComments(code) {
+            const text = String(code || "");
+            let result = "";
+            let state = "code";
+
+            for (let index = 0; index < text.length; index++) {
+                const character = text[index];
+                const nextCharacter = text[index + 1];
+
+                if (state === "code") {
+                    if (character === "'") {
+                        state = "singleQuote";
+                        result += " ";
+                    } else if (character === '"') {
+                        state = "doubleQuote";
+                        result += " ";
+                    } else if (character === "`") {
+                        state = "templateQuote";
+                        result += " ";
+                    } else if (character === "/" && nextCharacter === "/") {
+                        state = "lineComment";
+                        result += "  ";
+                        index++;
+                    } else if (character === "/" && nextCharacter === "*") {
+                        state = "blockComment";
+                        result += "  ";
+                        index++;
+                    } else {
+                        result += character;
+                    }
+                    continue;
+                }
+
+                if (state === "lineComment") {
+                    if (character === "\n") {
+                        state = "code";
+                        result += "\n";
+                    } else {
+                        result += " ";
+                    }
+                    continue;
+                }
+
+                if (state === "blockComment") {
+                    if (character === "*" && nextCharacter === "/") {
+                        state = "code";
+                        result += "  ";
+                        index++;
+                    } else {
+                        result += character === "\n" ? "\n" : " ";
+                    }
+                    continue;
+                }
+
+                if (character === "\\") {
+                    result += " ";
+                    if (index + 1 < text.length) {
+                        result += nextCharacter === "\n" ? "\n" : " ";
+                        index++;
+                    }
+                    continue;
+                }
+
+                const closesString = (state === "singleQuote" && character === "'")
+                    || (state === "doubleQuote" && character === '"')
+                    || (state === "templateQuote" && character === "`");
+
+                if (closesString) {
+                    state = "code";
+                    result += " ";
+                } else {
+                    result += character === "\n" ? "\n" : " ";
+                }
+            }
+
+            return result;
+        }
+
+        function countExecutableServiceWorkerRegistrations(source) {
+            const text = String(source || "");
+            let scriptContents = [];
+
+            try {
+                const documentObject = new DOMParser().parseFromString(text, "text/html");
+                scriptContents = Array.from(documentObject.querySelectorAll("script"))
+                    .map(script => String(script.textContent || ""));
+            } catch (error) {
+                const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi;
+                let match;
+                while ((match = scriptPattern.exec(text)) !== null) {
+                    scriptContents.push(String(match[1] || ""));
+                }
+            }
+
+            const registrationPattern = new RegExp([
+                "navigator",
+                "\\s*\\.\\s*",
+                "serviceWorker",
+                "\\s*\\.\\s*",
+                "register",
+                "\\s*\\("
+            ].join(""), "g");
+
+            return scriptContents.reduce((total, scriptContent) => {
+                const executableCode = maskJavaScriptStringsAndComments(scriptContent);
+                return total + (executableCode.match(registrationPattern) || []).length;
+            }, 0);
+        }
+
         function replacePwaMarkedRange(source, startMarker, endMarker, replacement) {
-            const startIndex = source.indexOf(startMarker);
-            const endIndex = source.indexOf(endMarker);
+            const startIndex = findPwaHtmlMarker(source, startMarker);
+            const endIndex = findPwaHtmlMarker(
+                source,
+                endMarker,
+                startIndex === -1 ? 0 : startIndex + startMarker.length
+            );
             const hasStart = startIndex !== -1;
             const hasEnd = endIndex !== -1;
 
@@ -3430,13 +3588,15 @@ window.addEventListener("load", function () {
 <\/script>
 ${scriptEnd}`;
 
-            const hasHeadMarkers = source.includes(headStart) || source.includes(headEnd);
-            const hasScriptMarkers = source.includes(scriptStart) || source.includes(scriptEnd);
+            const hasHeadMarkers = findPwaHtmlMarker(source, headStart) !== -1
+                || findPwaHtmlMarker(source, headEnd) !== -1;
+            const hasScriptMarkers = findPwaHtmlMarker(source, scriptStart) !== -1
+                || findPwaHtmlMarker(source, scriptEnd) !== -1;
 
-            if (!hasHeadMarkers && /<link\b[^>]*\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["'][^>]*>/i.test(source)) {
+            if (!hasHeadMarkers && countHtmlManifestLinks(source) > 0) {
                 throw createPublishValidationError("このHTMLには既存のPWA設定があります。AppStudioの自動PWA公開と競合するため、公開を中止しました。");
             }
-            if (!hasScriptMarkers && /navigator\s*\.\s*serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
+            if (!hasScriptMarkers && countExecutableServiceWorkerRegistrations(source) > 0) {
                 throw createPublishValidationError("このHTMLには既存のPWA設定があります。AppStudioの自動PWA公開と競合するため、公開を中止しました。");
             }
 
@@ -3670,9 +3830,9 @@ self.addEventListener("fetch", function (event) {
             if (!/<!doctype\s+html/i.test(indexHtml) && !/<html\b/i.test(indexHtml)) {
                 fail("index.htmlにDOCTYPEまたはhtmlタグがありません。");
             }
-            const manifestLinkCount = (indexHtml.match(/<link\b[^>]*\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["'][^>]*>/gi) || []).length;
+            const manifestLinkCount = countHtmlManifestLinks(indexHtml);
             if (manifestLinkCount !== 1) fail(`manifestリンクが${manifestLinkCount}件あります。`);
-            const serviceWorkerRegisterCount = (indexHtml.match(/navigator\s*\.\s*serviceWorker\s*\.\s*register\s*\(/g) || []).length;
+            const serviceWorkerRegisterCount = countExecutableServiceWorkerRegistrations(indexHtml);
             if (serviceWorkerRegisterCount !== 1) fail(`Service Worker登録が${serviceWorkerRegisterCount}件あります。`);
 
             let manifest;
