@@ -985,9 +985,9 @@
 
             <div id="github-pwa-settings" class="github-publish-section">
                 <div class="github-publish-section-title">PWA設定</div>
-                <label class="github-field-label" for="github-pwa-folder-input">公開フォルダ名（アプリ名から自動生成）</label>
-                <input type="text" id="github-pwa-folder-input" placeholder="gravity-core" autocapitalize="none" spellcheck="false" readonly>
-                <p class="github-publish-note">アプリ表示名を変更すると、公開フォルダ名も自動更新されます。</p>
+                <label class="github-field-label" for="github-pwa-folder-input">公開フォルダ名</label>
+                <input type="text" id="github-pwa-folder-input" placeholder="gravity-core" autocapitalize="none" spellcheck="false" oninput="updateGitHubPublishField('pwa.folderName', this.value)">
+                <p class="github-publish-note">初回はアプリ名から自動生成します。変更したフォルダ名はアプリごとに記憶し、次回の公開設定へ引き継ぎます。</p>
 
                 <label class="github-field-label" for="github-pwa-name-input">アプリ表示名</label>
                 <input type="text" id="github-pwa-name-input" placeholder="GRAVITY CORE" oninput="updateGitHubPublishField('pwa.name', this.value)">
@@ -1394,6 +1394,8 @@
                 iconText: ""
             }
         };
+        const PWA_PUBLISH_PREFS_KEY = "appstudio_pwa_publish_preferences";
+        let currentPwaPreferenceKey = "";
         let githubPublishBusy = false;
         let githubPublishResult = {
             publicUrl: "",
@@ -3032,6 +3034,54 @@ nextBtn.onclick=nextStep;
             githubPublishState.pwa.themeColor = "#007acc";
             githubPublishState.pwa.backgroundColor = "#1e1e1e";
             githubPublishState.pwa.iconText = "";
+            currentPwaPreferenceKey = "";
+        }
+
+        function createPwaPreferenceKey(sourceCode) {
+            const extractedTitle = extractHtmlTitle(sourceCode);
+            const identity = currentAppName || extractedTitle || filenameInput.value || "default";
+            return String(identity)
+                .normalize("NFKC")
+                .trim()
+                .toLowerCase() || "default";
+        }
+
+        function loadPwaPublishPreferences(preferenceKey) {
+            if (!preferenceKey) return null;
+
+            try {
+                const parsed = JSON.parse(localStorage.getItem(PWA_PUBLISH_PREFS_KEY) || "{}");
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+                const saved = parsed[preferenceKey];
+                return saved && typeof saved === "object" && !Array.isArray(saved)
+                    ? saved
+                    : null;
+            } catch (error) {
+                console.warn("PWA公開設定の読み込みに失敗しました:", error);
+                return null;
+            }
+        }
+
+        function savePwaPublishPreferences() {
+            if (!currentPwaPreferenceKey) return;
+
+            try {
+                const parsed = JSON.parse(localStorage.getItem(PWA_PUBLISH_PREFS_KEY) || "{}");
+                const preferences = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? parsed
+                    : {};
+
+                preferences[currentPwaPreferenceKey] = {
+                    folderName: sanitizeGitHubFolderName(githubPublishState.pwa.folderName),
+                    iconText: String(githubPublishState.pwa.iconText || ""),
+                    updatedAt: new Date().toISOString()
+                };
+
+                localStorage.setItem(PWA_PUBLISH_PREFS_KEY, JSON.stringify(preferences));
+            } catch (error) {
+                console.warn("PWA公開設定の保存に失敗しました:", error);
+            }
         }
 
         function openGitHubPublishModal() {
@@ -3048,15 +3098,21 @@ nextBtn.onclick=nextStep;
             const safeFolder = sanitizeGitHubFolderName(pwaAppName);
             const detectedTheme = extractThemeColor(sourceCode);
 
+            currentPwaPreferenceKey = createPwaPreferenceKey(sourceCode);
+            const savedPwaPreferences = loadPwaPublishPreferences(currentPwaPreferenceKey);
+
             githubPublishState.repo = localStorage.getItem('gh_repo') || "";
             githubPublishState.htmlFileName = sanitizeGitHubFileName(filenameInput.value || baseName || "index");
-            githubPublishState.pwa.folderName = safeFolder;
+            githubPublishState.pwa.folderName = savedPwaPreferences?.folderName
+                ? sanitizeGitHubFolderName(savedPwaPreferences.folderName)
+                : safeFolder;
             githubPublishState.pwa.name = pwaAppName;
             githubPublishState.pwa.shortName = Array.from(githubPublishState.pwa.name).slice(0, 12).join("");
             githubPublishState.pwa.themeColor = detectedTheme || "#007acc";
             githubPublishState.pwa.backgroundColor = "#1e1e1e";
-            githubPublishState.pwa.iconText = "";
+            githubPublishState.pwa.iconText = String(savedPwaPreferences?.iconText || "");
 
+            savePwaPublishPreferences();
             githubPublishBusy = false;
             closeModal('save-modal');
             syncGitHubPublishModal();
@@ -3090,11 +3146,14 @@ nextBtn.onclick=nextStep;
             const key = path.slice(4);
             if (!Object.prototype.hasOwnProperty.call(githubPublishState.pwa, key)) return;
 
-            githubPublishState.pwa[key] = text;
-            if (key === "name") {
+            if (key === "folderName") {
                 githubPublishState.pwa.folderName = sanitizeGitHubFolderName(text);
-                const folderInput = document.getElementById('github-pwa-folder-input');
-                if (folderInput) folderInput.value = githubPublishState.pwa.folderName;
+            } else {
+                githubPublishState.pwa[key] = text;
+            }
+
+            if (key === "folderName" || key === "iconText") {
+                savePwaPublishPreferences();
             }
         }
 
@@ -3158,7 +3217,7 @@ nextBtn.onclick=nextStep;
                 token: normalizeGitHubToken(sessionGhToken),
                 htmlFileName: sanitizeGitHubFileName(githubPublishState.htmlFileName),
                 pwa: {
-                    folderName: sanitizeGitHubFolderName(githubPublishState.pwa.name),
+                    folderName: sanitizeGitHubFolderName(githubPublishState.pwa.folderName),
                     name: String(githubPublishState.pwa.name || "").trim(),
                     shortName: String(githubPublishState.pwa.shortName || "").trim(),
                     themeColor: String(githubPublishState.pwa.themeColor || "").trim(),
@@ -3175,6 +3234,7 @@ nextBtn.onclick=nextStep;
             githubPublishState.pwa.themeColor = options.pwa.themeColor;
             githubPublishState.pwa.backgroundColor = options.pwa.backgroundColor;
             githubPublishState.pwa.iconText = options.pwa.iconText;
+            savePwaPublishPreferences();
             syncGitHubPublishModal();
 
             return options;
