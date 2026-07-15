@@ -1841,9 +1841,9 @@
             }
         }
 
-        function extractFencedClipboardBlock(text, preferredLangs = []) {
+        function collectFencedClipboardBlocks(text) {
             const trimmed = String(text || "").trim();
-            const fenceRegex = /\x60\x60\x60([a-z0-9_-]*)\s*\n?([\s\S]*?)\n?\x60\x60\x60/gi;
+            const fenceRegex = /\x60\x60\x60([a-z0-9_-]*)[^\S\r\n]*(?:\r?\n)?([\s\S]*?)\r?\n?\x60\x60\x60/gi;
             const matches = [];
             let match;
 
@@ -1854,18 +1854,102 @@
                 });
             }
 
+            return matches;
+        }
+
+        function extractFencedClipboardBlock(text, preferredLangs = []) {
+            const trimmed = String(text || "").trim();
+            const matches = collectFencedClipboardBlocks(trimmed);
             if (!matches.length) return trimmed;
 
             const preferred = matches.find(item => preferredLangs.includes(item.lang));
             return (preferred || matches[0]).body;
         }
 
+        function stripLeadingHtmlCommentsForDetection(text) {
+            let candidate = String(text || "").replace(/^\uFEFF/, "").trimStart();
+            let previous = null;
+
+            while (candidate !== previous) {
+                previous = candidate;
+                candidate = candidate.replace(/^<!--(?:[\s\S]*?)-->\s*/i, "").trimStart();
+            }
+
+            return candidate;
+        }
+
         function looksLikeFullHtmlCode(text) {
-            const candidate = String(text || "").trim();
+            const candidate = String(text || "").replace(/^\uFEFF/, "").trim();
             if (!candidate) return false;
 
-            return /^(<!doctype\s+html|<html[\s>])/i.test(candidate)
-                || (/<head[\s>]/i.test(candidate) && /<body[\s>]/i.test(candidate) && /<\/html>\s*$/i.test(candidate));
+            const structuralCandidate = stripLeadingHtmlCommentsForDetection(candidate);
+            const startsWithDoctype = /^<!doctype\s+html\b[^>]*>/i.test(structuralCandidate);
+            const startsWithHtml = /^<html\b[^>]*>/i.test(structuralCandidate);
+            if (!startsWithDoctype && !startsWithHtml) return false;
+
+            if (startsWithDoctype) {
+                const afterDoctype = structuralCandidate.replace(/^<!doctype\s+html\b[^>]*>/i, "");
+                if (!/^<html\b[^>]*>/i.test(stripLeadingHtmlCommentsForDetection(afterDoctype))) return false;
+            }
+
+            return /<html\b[^>]*>/i.test(structuralCandidate)
+                && /<head\b[^>]*>/i.test(structuralCandidate)
+                && /<body\b[^>]*>/i.test(structuralCandidate)
+                && /<\/html\s*>\s*(?:<!--[\s\S]*?-->\s*)*$/i.test(structuralCandidate);
+        }
+
+        function extractHtmlDocumentFromText(text) {
+            const candidate = String(text || "").replace(/^\uFEFF/, "").trim();
+            if (!candidate) return null;
+            if (looksLikeFullHtmlCode(candidate)) return candidate;
+
+            // JSON配列・JSONオブジェクト内のHTML文字列を、フルコードとして誤検知しない。
+            if (/^[\[{]/.test(candidate)) return null;
+
+            const startPattern = /<!doctype\s+html\b|<html\b/gi;
+            let startMatch;
+
+            while ((startMatch = startPattern.exec(candidate)) !== null) {
+                const fromStart = candidate.slice(startMatch.index);
+                const closingPattern = /<\/html\s*>/gi;
+                let closingMatch;
+                let lastClosingEnd = -1;
+
+                while ((closingMatch = closingPattern.exec(fromStart)) !== null) {
+                    lastClosingEnd = closingMatch.index + closingMatch[0].length;
+                }
+
+                if (lastClosingEnd === -1) continue;
+
+                const extracted = fromStart.slice(0, lastClosingEnd).trim();
+                if (looksLikeFullHtmlCode(extracted)) return extracted;
+            }
+
+            return null;
+        }
+
+        function extractFullHtmlCode(text) {
+            const source = String(text || "");
+            const blocks = collectFencedClipboardBlocks(source);
+            const orderedBlocks = [...blocks].sort((a, b) => {
+                const priority = item => {
+                    if (item.lang === "html" || item.lang === "htm") return 0;
+                    if (!item.lang) return 1;
+                    return 2;
+                };
+                return priority(a) - priority(b);
+            });
+
+            // 複数のコードフェンスがある場合も、最初のフェンスだけで判定を打ち切らない。
+            // 小さなHTML例より完全コードを優先するため、有効候補のうち最長のものを採用する。
+            const fencedCandidates = orderedBlocks
+                .map(block => extractHtmlDocumentFromText(block.body))
+                .filter(Boolean)
+                .sort((a, b) => b.length - a.length);
+            if (fencedCandidates.length) return fencedCandidates[0];
+
+            // コードフェンスが欠けていても、説明文中のDOCTYPE/html開始位置から完全HTMLを抽出する。
+            return extractHtmlDocumentFromText(source);
         }
 
         function extractJsonPatchText(text) {
@@ -1906,8 +1990,8 @@
                 return false;
             }
 
-            const htmlCode = extractFencedClipboardBlock(sourceText, ['html']);
-            if (looksLikeFullHtmlCode(htmlCode)) {
+            const htmlCode = extractFullHtmlCode(sourceText);
+            if (htmlCode) {
                 if (editor.getValue().trim().length > 0) {
                     if (!confirm("【警告】\n現在のアプリを破棄し、HTMLフルコードで差し替えますか？")) return false;
                 }
