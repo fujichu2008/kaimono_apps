@@ -948,7 +948,7 @@
             <h2>保存オプション</h2>
             <input type="text" id="filename-input" placeholder="アプリ名を入力 (例: MyGame)">
             <div class="modal-buttons">
-                <button class="btn-confirm" onclick="saveToLibrary()">アプリ保存</button>
+                <button id="save-library-btn" class="btn-confirm" onclick="saveToLibrary()">アプリ保存</button>
                 <button class="btn-confirm" style="background: #4caf50;" onclick="downloadHTML()">HTML DL</button>
                 <button class="btn-confirm" style="background: #333;" onclick="openGitHubPublishModal()">GitHub Repo</button>
             </div>
@@ -1393,14 +1393,20 @@
         let draftSaveTimer = null;
         let draftIndicatorTimer = null;
         let draftGeneration = 0;
+        let workspaceGeneration = 0;
         let draftOperationQueue = Promise.resolve();
         let draftFlushPromise = null;
         let draftFlushGeneration = -1;
         let draftFlushCode = "";
         let editorDraftDirty = false;
+        let draftSaveSuppressionDepth = 0;
+        let librarySaveBusy = false;
+        let lastGeneratedAppId = 0;
+        let appRecordIdInitializationPromise = null;
+        let latestLoadRequestId = 0;
+        let draftCleanupPending = false;
         let statsUpdateTimer = null;
         let toastTimer = null;
-        let suppressDraftSave = false;
         let iframeErrorLogs = [];
         let reflectSnapshots = [];
         let reflectRedoSnapshots = [];
@@ -1456,7 +1462,7 @@
             frameDirty = true;
             scheduleStatsUpdate();
             scheduleEditorDraftSave();
-            if (!suppressDraftSave) {
+            if (!isDraftSaveSuppressed()) {
                 editorDraftDirty = true;
                 resetSaveStatusButton();
                 syncRunBarState();
@@ -1613,6 +1619,75 @@
             }
         });
 
+        function beginDraftSaveSuppression() {
+            draftSaveSuppressionDepth++;
+        }
+
+        function endDraftSaveSuppression() {
+            draftSaveSuppressionDepth = Math.max(0, draftSaveSuppressionDepth - 1);
+        }
+
+        function isDraftSaveSuppressed() {
+            return draftSaveSuppressionDepth > 0;
+        }
+
+        function isCurrentWorkspaceGeneration(generation) {
+            return workspaceGeneration === generation;
+        }
+
+        function isEditorCodeUnchanged(code) {
+            return editor.getValue() === String(code || "");
+        }
+
+        function isPendingAiInstructionUnchanged(instruction) {
+            return pendingAiInstruction === String(instruction || "");
+        }
+
+        function invalidatePendingLoadRequests() {
+            latestLoadRequestId++;
+        }
+
+        function advanceWorkspaceGeneration() {
+            workspaceGeneration++;
+            return workspaceGeneration;
+        }
+
+        function createAppRecordId() {
+            const now = Date.now();
+            lastGeneratedAppId = Math.max(now, lastGeneratedAppId + 1);
+            return lastGeneratedAppId;
+        }
+
+        function ensureAppRecordIdInitialized() {
+            if (appRecordIdInitializationPromise) {
+                return appRecordIdInitializationPromise;
+            }
+
+            appRecordIdInitializationPromise = idb.getAll()
+                .then(items => {
+                    const maxExistingId = items.reduce((maxId, item) => {
+                        const id = item && item.id;
+                        return Number.isSafeInteger(id) ? Math.max(maxId, id) : maxId;
+                    }, 0);
+                    lastGeneratedAppId = Math.max(lastGeneratedAppId, maxExistingId);
+                    return lastGeneratedAppId;
+                })
+                .catch(error => {
+                    appRecordIdInitializationPromise = null;
+                    throw error;
+                });
+
+            return appRecordIdInitializationPromise;
+        }
+
+        function setLibrarySaveBusy(isBusy) {
+            librarySaveBusy = Boolean(isBusy);
+            const button = document.getElementById('save-library-btn');
+            if (!button) return;
+            button.disabled = librarySaveBusy;
+            button.textContent = librarySaveBusy ? "保存中..." : "アプリ保存";
+        }
+
         function invalidateEditorDraftGeneration() {
             // clearTimeoutでは開始済みのIndexedDB書込みを止められないため、
             // 世代を進めて古い保存処理を無効化する。
@@ -1628,16 +1703,16 @@
         }
 
         function scheduleEditorDraftSave() {
-            if (suppressDraftSave) return;
+            if (isDraftSaveSuppressed()) return;
             clearTimeout(draftSaveTimer);
             draftSaveTimer = setTimeout(() => {
                 draftSaveTimer = null;
                 saveEditorDraft();
-            }, 2000);
+            }, 1000);
         }
 
         async function saveEditorDraft() {
-            if (suppressDraftSave || !editorDraftDirty) return false;
+            if (isDraftSaveSuppressed() || !editorDraftDirty) return false;
 
             const generationAtStart = draftGeneration;
             const draftData = {
@@ -1646,16 +1721,20 @@
                 code: editor.getValue(),
                 currentAppName: currentAppName,
                 currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
+                pendingAiInstruction: String(pendingAiInstruction || ""),
                 savedAt: new Date().toISOString()
             };
 
             try {
                 return await enqueueDraftOperation(async () => {
-                    if (suppressDraftSave || generationAtStart !== draftGeneration) return false;
+                    if (isDraftSaveSuppressed() || generationAtStart !== draftGeneration) return false;
 
-                    if (!draftData.code.trim()) {
+                    if (!draftData.code.trim() && !draftData.pendingAiInstruction.trim()) {
                         await idb.delete(DRAFT_ID);
-                        if (generationAtStart === draftGeneration && !editor.getValue().trim()) {
+                        draftCleanupPending = false;
+                        if (generationAtStart === draftGeneration
+                            && !editor.getValue().trim()
+                            && !pendingAiInstruction.trim()) {
                             editorDraftDirty = false;
                         }
                         return true;
@@ -1666,6 +1745,13 @@
                     if (generationAtStart !== draftGeneration) {
                         await idb.delete(DRAFT_ID);
                         return false;
+                    }
+
+                    draftCleanupPending = false;
+                    if (editor.getValue() === draftData.code
+                        && currentAppName === draftData.currentAppName
+                        && pendingAiInstruction === draftData.pendingAiInstruction) {
+                        editorDraftDirty = false;
                     }
 
                     showDraftSaveIndicator();
@@ -1704,25 +1790,42 @@
 
         window.addEventListener('pagehide', () => {
             flushEditorDraftSave();
+            retryPendingDraftCleanup();
             flushIframeErrorStats();
         });
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 flushEditorDraftSave();
+                retryPendingDraftCleanup();
                 flushIframeErrorStats();
             }
+        });
+
+        document.addEventListener('freeze', () => {
+            flushEditorDraftSave();
+            retryPendingDraftCleanup();
+            flushIframeErrorStats();
         });
 
         async function deleteEditorDraft() {
             invalidateEditorDraftGeneration();
             try {
                 await enqueueDraftOperation(() => idb.delete(DRAFT_ID));
+                draftCleanupPending = false;
                 return true;
             } catch (e) {
+                draftCleanupPending = true;
                 console.warn("ドラフト削除に失敗しました:", e);
                 return false;
             }
+        }
+
+        async function retryPendingDraftCleanup() {
+            if (!draftCleanupPending || editorDraftDirty || isDraftSaveSuppressed()) {
+                return false;
+            }
+            return deleteEditorDraft();
         }
 
         function showDraftSaveIndicator() {
@@ -1739,28 +1842,34 @@
         async function restoreEditorDraftOnStartup() {
             try {
                 const draft = await idb.get(DRAFT_ID);
-                if (!draft || !draft.code || editor.getValue().trim()) return;
+                const hasRestorableCode = Boolean(draft && String(draft.code || "").length);
+                const hasRestorableInstruction = Boolean(draft && String(draft.pendingAiInstruction || "").trim());
+                if (!draft || (!hasRestorableCode && !hasRestorableInstruction) || editor.getValue().trim()) return;
 
                 if (!confirm("前回の未保存編集を復元しますか？")) {
-                    await deleteEditorDraft();
+                    const deleted = await deleteEditorDraft();
+                    if (!deleted) showToast("旧ドラフトの削除に失敗しました");
                     return;
                 }
 
-                suppressDraftSave = true;
-                editor.setValue(draft.code);
-                editorDraftDirty = true;
-                currentAppName = draft.currentAppName || "";
-                currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
-                appNameDisplay.textContent = currentAppName ? `${currentAppName}（未保存復元）` : "（未保存ドラフト復元）";
-                filenameInput.value = currentAppName || "";
-                syncRunBarState();
-                updateStats();
+                invalidatePendingLoadRequests();
+                advanceWorkspaceGeneration();
+                beginDraftSaveSuppression();
+                try {
+                    editor.setValue(String(draft.code || ""));
+                    currentAppName = draft.currentAppName || "";
+                    currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
+                    pendingAiInstruction = String(draft.pendingAiInstruction || "");
+                    editorDraftDirty = false;
+                    appNameDisplay.textContent = currentAppName ? `${currentAppName}（未保存復元）` : "（未保存ドラフト復元）";
+                    filenameInput.value = currentAppName || "";
+                    syncRunBarState();
+                    updateStats();
+                } finally {
+                    endDraftSaveSuppression();
+                }
                 showToast("前回の未保存編集を復元しました");
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
             } catch (e) {
-                suppressDraftSave = false;
                 console.warn("ドラフト復元に失敗しました:", e);
             }
         }
@@ -1787,45 +1896,59 @@
             }
         }
 
-                        function clearCode() {
+                        async function clearCode() {
             if(confirm("エディタの内容をクリアしますか？\n(編集中の状態もリセットされます)")) {
-                suppressDraftSave = true;
-                pushReflectSnapshot(editor.getValue());
-                editor.setValue("");
-                editorDraftDirty = false;
-                                currentAppName = "";
-                appNameDisplay.textContent = "(新規作成中)";
-                currentAppHistory = [];
-                resetSaveStatusButton();
-                syncRunBarState();
-                deleteEditorDraft();
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
+                invalidatePendingLoadRequests();
+                advanceWorkspaceGeneration();
+                beginDraftSaveSuppression();
+                try {
+                    pushReflectSnapshot(editor.getValue());
+                    editor.setValue("");
+                    editorDraftDirty = false;
+                                    currentAppName = "";
+                    appNameDisplay.textContent = "(新規作成中)";
+                    currentAppHistory = [];
+                    pendingAiInstruction = "";
+                    resetSaveStatusButton();
+                    syncRunBarState();
+                } finally {
+                    endDraftSaveSuppression();
+                }
+
+                const deleted = await deleteEditorDraft();
+                if (!deleted) {
+                    showToast("コードはクリアしましたが、旧ドラフトの整理に失敗しました");
+                }
             }
         }
 
         async function createNewApp() {
             if (!confirm("現在開いているアプリは閉じられます。\n新規作成を開始しますか？")) return;
 
-            suppressDraftSave = true;
-            pushReflectSnapshot(editor.getValue());
-            editor.setValue("");
-            editorDraftDirty = false;
-            currentAppName = "";
-            currentAppHistory = [];
-            pendingAiInstruction = "";
-            appNameDisplay.textContent = "(新規作成中)";
-            filenameInput.value = "";
-            resetSaveStatusButton();
-            syncRunBarState();
-            await deleteEditorDraft();
+            invalidatePendingLoadRequests();
+            advanceWorkspaceGeneration();
+            beginDraftSaveSuppression();
+            try {
+                pushReflectSnapshot(editor.getValue());
+                editor.setValue("");
+                editorDraftDirty = false;
+                currentAppName = "";
+                currentAppHistory = [];
+                pendingAiInstruction = "";
+                appNameDisplay.textContent = "(新規作成中)";
+                filenameInput.value = "";
+                resetSaveStatusButton();
+                syncRunBarState();
+            } finally {
+                endDraftSaveSuppression();
+            }
+
+            const deleted = await deleteEditorDraft();
             frameDirty = true;
             switchTab('run');
-            showToast("新しいアプリの作成を開始します");
-            setTimeout(() => {
-                suppressDraftSave = false;
-            }, 0);
+            showToast(deleted
+                ? "新しいアプリの作成を開始します"
+                : "新規作成を開始しましたが、旧ドラフトの整理に失敗しました");
         }
 
         // --- New: Copy Function ---
@@ -2415,7 +2538,11 @@ ${currentCode}
 
                         writeTextWithFallback(prompt, "プロンプトをコピーしました", () => {
                 recordDevLog('prompt_copy', 'success', '', `type:${type}, codeAttach:${codeAttachMode}, instructionLength:${instruction.length}`);
-                if (instruction) pendingAiInstruction = instruction; // 履歴保存用に保持
+                if (instruction) {
+                    pendingAiInstruction = instruction;
+                    editorDraftDirty = true;
+                    scheduleEditorDraftSave();
+                }
                 instructionInput.value = "";
                 closeModal('prompt-modal');
             });
@@ -2925,7 +3052,15 @@ nextBtn.onclick=nextStep;
         }
 
                 // --- Save / Load Logic ---
-        function openSaveModal() {
+        async function openSaveModal() {
+            try {
+                await ensureAppRecordIdInitialized();
+            } catch (error) {
+                console.error("保存IDの初期化に失敗しました:", error);
+                showToast("保存準備に失敗しました");
+                return;
+            }
+
             document.getElementById('save-modal').style.display = 'flex';
             // 既存の名前があればそれを、なければ日時ベースのデフォルト名をセット
             if (currentAppName) {
@@ -3017,21 +3152,26 @@ nextBtn.onclick=nextStep;
         };
 
                 async function saveToLibrary() {
-            const projectName = filenameInput.value || "Untitled";
-            const code = editor.getValue();
-            const draftGenerationAtSaveStart = draftGeneration;
+            if (librarySaveBusy) {
+                showToast("保存処理中です");
+                return;
+            }
+
+            const projectNameAtSaveStart = filenameInput.value || "Untitled";
+            const codeAtSaveStart = editor.getValue();
+            const workspaceGenerationAtSaveStart = workspaceGeneration;
+            const pendingInstructionAtSaveStart = pendingAiInstruction;
            
-            if(!code.trim()) {
+            if(!codeAtSaveStart.trim()) {
                 showToast("保存するコードがありません");
                 closeModal('save-modal');
                 return;
             }
 
-            // 履歴の追加
-            if (pendingAiInstruction) {
+            const historyForSave = Array.isArray(currentAppHistory) ? [...currentAppHistory] : [];
+            if (pendingInstructionAtSaveStart) {
                 const ts = new Date().toLocaleString();
-                currentAppHistory.unshift(`[${ts}] ${pendingAiInstruction}`);
-                pendingAiInstruction = ""; // 消費
+                historyForSave.unshift(`[${ts}] ${pendingInstructionAtSaveStart}`);
             }
 
             const now = new Date();
@@ -3040,45 +3180,102 @@ nextBtn.onclick=nextStep;
             const dd = String(now.getDate()).padStart(2, '0');
             const hh = String(now.getHours()).padStart(2, '0');
             const min = String(now.getMinutes()).padStart(2, '0');
-            const versionSuffix = `${yyyy}${mm}${dd}${hh}${min}`;
-            const appName = `${projectName}_${versionSuffix}`;
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            const versionSuffix = `${yyyy}${mm}${dd}${hh}${min}${ss}`;
+            const appName = `${projectNameAtSaveStart}_${versionSuffix}`;
 
             const appData = {
-                id: Date.now(),
+                id: createAppRecordId(),
                 name: appName,
-                projectName: projectName,
-                code: code,
+                projectName: projectNameAtSaveStart,
+                code: codeAtSaveStart,
                 date: now.toLocaleString(),
-                history: currentAppHistory
+                history: historyForSave
             };
 
-                        try {
+                        setLibrarySaveBusy(true);
+            closeModal('save-modal');
+
+            try {
                                 await idb.put(appData);
 
-                // アプリ本体の保存トランザクション完了後にだけドラフトを整理する。
-                // 保存中に編集内容が変わった場合は、新しい内容を未保存ドラフトとして維持する。
-                currentAppName = projectName;
-                appNameDisplay.textContent = appName;
-                const editorStillMatchesSavedCode = editor.getValue() === code
-                    && draftGeneration === draftGenerationAtSaveStart;
-                editorDraftDirty = !editorStillMatchesSavedCode;
+                if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                    recordDevLog('save_app', 'success', 'workspace_changed', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                    return;
+                }
 
-                if (editorStillMatchesSavedCode) {
-                    await deleteEditorDraft();
+                const pendingInstructionUnchangedAtCommit =
+                    isPendingAiInstructionUnchanged(pendingInstructionAtSaveStart);
+                const saveSnapshotStillCurrent =
+                    isEditorCodeUnchanged(codeAtSaveStart)
+                    && pendingInstructionUnchangedAtCommit;
+
+                currentAppHistory = historyForSave;
+                if (pendingInstructionUnchangedAtCommit) {
+                    pendingAiInstruction = "";
+                }
+                currentAppName = projectNameAtSaveStart;
+                appNameDisplay.textContent = appName;
+
+                if (saveSnapshotStillCurrent) {
+                    editorDraftDirty = false;
+                    const draftDeleted = await deleteEditorDraft();
+
+                    if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                        recordDevLog('save_app', 'success', 'workspace_changed_after_cleanup', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                        return;
+                    }
+
+                    const stateChangedDuringCleanup =
+                        !isEditorCodeUnchanged(codeAtSaveStart)
+                        || !isPendingAiInstructionUnchanged("");
+
+                    if (stateChangedDuringCleanup) {
+                        editorDraftDirty = true;
+                        resetSaveStatusButton();
+                        const draftSaved = await saveEditorDraft();
+
+                        if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                            recordDevLog('save_app', 'success', 'workspace_changed_after_draft_save', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                            return;
+                        }
+
+                        syncRunBarState();
+                        showToast(draftSaved
+                            ? `「${appName}」を保存しました（保存後の変更は未保存です）`
+                            : `「${appName}」を保存しましたが、保存後の変更をドラフト保存できませんでした`);
+                        recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:false`);
+                        return;
+                    }
+
                     setSaveStatusButtonSaved();
-                    showToast(`「${appName}」を保存しました`);
-                } else {
-                    await saveEditorDraft();
-                    resetSaveStatusButton();
-                    showToast(`「${appName}」を保存しました（保存後の変更は未保存です）`);
+                    syncRunBarState();
+                    showToast(draftDeleted
+                        ? `「${appName}」を保存しました`
+                        : `「${appName}」を保存しましたが、旧ドラフトの整理に失敗しました`);
+                    recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:true`);
+                    return;
+                }
+
+                editorDraftDirty = true;
+                resetSaveStatusButton();
+                const draftSaved = await saveEditorDraft();
+
+                if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                    recordDevLog('save_app', 'success', 'workspace_changed_after_draft_save', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                    return;
                 }
 
                 syncRunBarState();
-                recordDevLog('save_app', 'success', '', `project:${projectName}, version:${appName}, currentMatches:${editorStillMatchesSavedCode}`);
+                showToast(draftSaved
+                    ? `「${appName}」を保存しました（保存後の変更は未保存です）`
+                    : `「${appName}」を保存しましたが、保存後の変更をドラフト保存できませんでした`);
+                recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:false`);
             } catch (e) {
                 showToast("保存エラー: " + e.message);
+            } finally {
+                setLibrarySaveBusy(false);
             }
-            closeModal('save-modal');
         }
 
                                 async function downloadHTML() {
@@ -3828,7 +4025,7 @@ nextBtn.onclick=nextStep;
                 "navigator",
                 "\\s*\\.\\s*",
                 "serviceWorker",
-                "\\s*\\.\\s*",
+                "\\s*(?:\\?\\.\\s*|\\.\\s*)",
                 "register",
                 "\\s*\\("
             ].join(""), "g");
@@ -4799,10 +4996,31 @@ self.addEventListener("fetch", function (event) {
         }
 
                                                                 async function loadApp(id) {
-            const app = await idb.get(id);
-            if(app) {
-                if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
-                suppressDraftSave = true;
+            const requestId = ++latestLoadRequestId;
+            let app;
+
+            try {
+                app = await idb.get(id);
+            } catch (error) {
+                console.error("アプリの読み込みに失敗しました:", error);
+                if (requestId === latestLoadRequestId) {
+                    showToast("アプリの読み込みに失敗しました");
+                }
+                return;
+            }
+
+            if (requestId !== latestLoadRequestId) return;
+            if (!app) {
+                showToast("読み込むアプリが見つかりませんでした");
+                return;
+            }
+
+            if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
+            if (requestId !== latestLoadRequestId) return;
+
+            const appliedWorkspaceGeneration = advanceWorkspaceGeneration();
+            beginDraftSaveSuppression();
+            try {
                 editor.setValue(app.code);
                 editorDraftDirty = false;
                 // メタ情報復元
@@ -4813,14 +5031,20 @@ self.addEventListener("fetch", function (event) {
                 pendingAiInstruction = "";
                 resetSaveStatusButton();
                 syncRunBarState();
-                await deleteEditorDraft();
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
-
-                switchTab('run');
-                showToast(`「${app.name}」を読み込みました`);
+            } finally {
+                endDraftSaveSuppression();
             }
+
+            const deleted = await deleteEditorDraft();
+            if (requestId !== latestLoadRequestId
+                || !isCurrentWorkspaceGeneration(appliedWorkspaceGeneration)) {
+                return;
+            }
+
+            switchTab('run');
+            showToast(deleted
+                ? `「${app.name}」を読み込みました`
+                : `「${app.name}」を読み込みましたが、旧ドラフトの整理に失敗しました`);
         }
 
         async function showHistoryModal(id) {
@@ -5377,7 +5601,10 @@ self.addEventListener("fetch", function (event) {
 
                 // Initialize
         updateStats();
-        restoreEditorDraftOnStartup().then(() => {
+        Promise.allSettled([
+            ensureAppRecordIdInitialized(),
+            restoreEditorDraftOnStartup()
+        ]).then(() => {
             syncRunBarState();
             reloadFrame();
         });
