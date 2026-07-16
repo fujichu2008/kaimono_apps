@@ -3472,7 +3472,12 @@ nextBtn.onclick=nextStep;
 
         function normalizeGitHubToken(value) {
             return String(value ?? "")
-                .replace(/[\s\u200B-\u200D\uFEFF]+/g, "");
+                .normalize("NFKC")
+                .replace(/[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]+/g, "");
+        }
+
+        function isValidGitHubTokenHeaderValue(value) {
+            return /^[\x21-\x7E]+$/.test(String(value || ""));
         }
 
         function updateGitHubSessionToken(value) {
@@ -3570,6 +3575,9 @@ nextBtn.onclick=nextStep;
             }
             if (!options.token) {
                 throw createPublishValidationError("Personal Access Tokenを入力してください。");
+            }
+            if (!isValidGitHubTokenHeaderValue(options.token)) {
+                throw createPublishValidationError("Personal Access Tokenに全角文字または使用できない文字が含まれています。トークンをコピーし直してください。");
             }
             if (options.mode === "html") {
                 if (!options.htmlFileName) {
@@ -3674,11 +3682,17 @@ nextBtn.onclick=nextStep;
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
 
-                const isApiError = error && error.publishErrorType === "api";
-                if (isApiError) {
-                    recordDevLog('github_publish_api', 'failed', `status:${error.status || "unknown"}`, `mode:${options.mode}`);
+                const isGitHubTransportError = error
+                    && (error.publishErrorType === "api" || error.publishErrorType === "network");
+                if (isGitHubTransportError) {
+                    recordDevLog(
+                        'github_publish_api',
+                        'failed',
+                        `${error.publishErrorType}:${error.status ?? "unknown"}`,
+                        `mode:${options.mode}, msg:${String(error?.message || "").slice(0, 150)}`
+                    );
                 } else {
-                    recordDevLog('github_publish_validation', 'failed', error?.publishErrorType || 'build', `mode:${options.mode}`);
+                    recordDevLog('github_publish_validation', 'failed', error?.publishErrorType || 'build', `mode:${options.mode}, msg:${String(error?.message || "").slice(0, 150)}`);
                 }
 
                 setGitHubPublishProgress(error?.message || "公開に失敗しました。", true);
@@ -3739,7 +3753,19 @@ nextBtn.onclick=nextStep;
                 throw createPublishValidationError("GitHubリポジトリのdefault_branchを取得できませんでした。");
             }
 
-            const initialHeadSha = await getGitHubBranchHead(options.repo, branch, options.token);
+            setGitHubPublishProgress(`branch「${branch}」のHEADを取得しています...`);
+            let initialHeadSha;
+            try {
+                initialHeadSha = await getGitHubBranchHead(options.repo, branch, options.token);
+            } catch (error) {
+                const isEmptyRepo = error && error.publishErrorType === "api"
+                    && (error.status === 409 || error.status === 404);
+                if (!isEmptyRepo) throw error;
+                // 空リポジトリ(初回コミットなし)ではGit Data API(blob/tree/commit/ref)が
+                // すべて409を返すため、初回だけContents APIで5ファイルを順次コミットする。
+                return publishPwaWithContentsApi(options, bundle);
+            }
+            setGitHubPublishProgress("HEADのcommit情報を取得しています...");
             const commitInfo = await githubApiRequest(
                 `${getGitHubRepoApiPath(options.repo)}/git/commits/${encodeURIComponent(initialHeadSha)}`,
                 { method: "GET" },
@@ -3750,24 +3776,38 @@ nextBtn.onclick=nextStep;
                 throw createPublishValidationError("現在のGit tree SHAを取得できませんでした。");
             }
 
-            setGitHubPublishProgress(`PWAファイルをGit Blobへ変換しています... (0/${bundle.files.length})`);
-            const blobFiles = [];
+            setGitHubPublishProgress(`PWAファイルをGit tree用データへ変換しています... (0/${bundle.files.length})`);
+            const treeEntries = [];
+            let uploadedBlobCount = 0;
             for (let index = 0; index < bundle.files.length; index++) {
                 const file = bundle.files[index];
-                const encoding = file.type === "binary" ? "base64" : "utf-8";
-                const content = file.type === "binary" ? file.base64 : file.content;
-                const blobSha = await createGitHubBlob(options.repo, content, encoding, options.token);
-                blobFiles.push({
+                const entry = {
                     path: file.path,
                     mode: "100644",
-                    type: "blob",
-                    sha: blobSha
-                });
-                setGitHubPublishProgress(`PWAファイルをGit Blobへ変換しています... (${index + 1}/${bundle.files.length})`);
+                    type: "blob"
+                };
+                const textContent = file.type === "text" ? String(file.content || "") : "";
+                const canInlineText = file.type === "text"
+                    && new TextEncoder().encode(textContent).length <= 1000000;
+
+                if (canInlineText) {
+                    // Create a treeのcontentへ直接渡し、テキスト3ファイルの個別Blob API呼び出しを省く。
+                    entry.content = textContent;
+                } else {
+                    const encoding = file.type === "binary" ? "base64" : "utf-8";
+                    const content = file.type === "binary" ? file.base64 : textContent;
+                    entry.sha = await createGitHubBlob(options.repo, content, encoding, options.token);
+                    uploadedBlobCount++;
+                }
+
+                treeEntries.push(entry);
+                setGitHubPublishProgress(
+                    `PWAファイルをGit tree用データへ変換しています... (${index + 1}/${bundle.files.length})\nAPIへ個別送信したBlob: ${uploadedBlobCount}件`
+                );
             }
 
             setGitHubPublishProgress("新しいGit treeを作成しています...");
-            const treeSha = await createGitHubTree(options.repo, baseTreeSha, blobFiles, options.token);
+            const treeSha = await createGitHubTree(options.repo, baseTreeSha, treeEntries, options.token);
 
             setGitHubPublishProgress("PWA公開コミットを作成しています...");
             const commitSha = await createGitHubCommit(
@@ -3793,6 +3833,45 @@ nextBtn.onclick=nextStep;
                 githubUrl: `https://github.com/${options.repo}/commit/${commitSha}`,
                 message: "PWAの5ファイルを1コミットで公開しました。",
                 note: "GitHubへの公開は完了しました。GitHub Pagesが有効でない場合は、リポジトリ設定のPagesから公開元を設定してください。"
+            };
+        }
+
+        // 空リポジトリへの初回公開用フォールバック。
+        // Git Data APIが使えないため、Contents APIで5ファイルを順次コミットする(5コミット)。
+        // 2回目以降の公開は、従来どおりGit Data APIの1コミット経路へ自動的に戻る。
+        async function publishPwaWithContentsApi(options, bundle) {
+            for (let index = 0; index < bundle.files.length; index++) {
+                const file = bundle.files[index];
+                setGitHubPublishProgress(`空リポジトリのため初回はContents APIで公開しています... (${index + 1}/${bundle.files.length})`);
+
+                const existing = await githubApiRequest(
+                    `${getGitHubRepoApiPath(options.repo)}/contents/${encodeGitHubPath(file.path)}`,
+                    { method: "GET", allowStatuses: [404] },
+                    options.token
+                );
+
+                const body = {
+                    message: `Publish ${file.path} via AppStudioMobile`,
+                    content: file.type === "binary" ? file.base64 : utf8ToBase64(file.content)
+                };
+                if (existing && existing.sha) body.sha = existing.sha;
+
+                await githubApiRequest(
+                    `${getGitHubRepoApiPath(options.repo)}/contents/${encodeGitHubPath(file.path)}`,
+                    {
+                        method: "PUT",
+                        body: JSON.stringify(body)
+                    },
+                    options.token
+                );
+            }
+
+            const [username, repository] = options.repo.split("/");
+            return {
+                publicUrl: `https://${username}.github.io/${repository}/${bundle.rootPath}/`,
+                githubUrl: `https://github.com/${options.repo}/tree/HEAD/${encodeGitHubPath(bundle.rootPath)}`,
+                message: "空リポジトリだったため、PWAの5ファイルをContents APIで公開しました(5コミット)。",
+                note: "次回以降の公開は1コミットで反映されます。GitHub Pagesが有効でない場合は、リポジトリ設定のPagesから公開元を設定してください。"
             };
         }
 
@@ -4317,7 +4396,13 @@ self.addEventListener("fetch", function (event) {
             const hasPreview = Boolean(githubPublishState.pwa.hasCustomIcon && githubPublishState.pwa.iconImagePreviewUrl);
 
             preview.style.display = hasPreview ? "block" : "none";
-            preview.src = hasPreview ? githubPublishState.pwa.iconImagePreviewUrl : "";
+            // src="" はベースURL(=このページ自体)を画像として読み込もうとし、
+            // Resource load errorの原因になるため、未使用時は属性ごと外す。
+            if (hasPreview) {
+                preview.src = githubPublishState.pwa.iconImagePreviewUrl;
+            } else {
+                preview.removeAttribute("src");
+            }
             placeholder.style.display = hasPreview ? "none" : "flex";
             placeholder.textContent = loading ? "画像を読み込み中..." : (error ? "画像を読み込めません" : "画像は指定されていません");
             status.textContent = loading
@@ -4741,6 +4826,159 @@ self.addEventListener("fetch", function (event) {
             return updatedHeadSha;
         }
 
+        function waitForGitHubRetry(delayMs) {
+            return new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        function canRetryGitHubRequest(method) {
+            // GETは安全に再試行できる。Gitオブジェクト作成POSTは重複してもbranchへ未反映で、
+            // PATCHは同じcommit SHAへの更新なので再試行可能。
+            // Contents APIのPUTは、応答消失時に実際は成功済みの可能性があるため自動再試行しない。
+            return method === "GET" || method === "POST" || method === "PATCH";
+        }
+
+        function requestGitHubApiWithXhr(apiPath, requestOptions = {}) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                const method = String(requestOptions.method || "GET").toUpperCase();
+                const url = `https://api.github.com${apiPath}`;
+
+                try {
+                    xhr.open(method, url, true);
+                    xhr.timeout = 30000;
+
+                    const headers = requestOptions.headers;
+                    const headerEntries = typeof Headers !== "undefined" && headers instanceof Headers
+                        ? Array.from(headers.entries())
+                        : Object.entries(headers || {});
+
+                    headerEntries.forEach(([name, value]) => {
+                        if (value !== undefined && value !== null) {
+                            xhr.setRequestHeader(String(name), String(value));
+                        }
+                    });
+                } catch (error) {
+                    reject(error);
+                    return;
+                }
+
+                xhr.onload = () => {
+                    const status = Number(xhr.status || 0);
+                    resolve({
+                        status,
+                        statusText: String(xhr.statusText || ""),
+                        ok: status >= 200 && status < 300,
+                        text: async () => String(xhr.responseText || "")
+                    });
+                };
+
+                xhr.onerror = () => reject(new TypeError("XMLHttpRequest network error"));
+                xhr.ontimeout = () => reject(new TypeError("XMLHttpRequest timeout"));
+                xhr.onabort = () => reject(new TypeError("XMLHttpRequest aborted"));
+
+                try {
+                    xhr.send(requestOptions.body ?? null);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        }
+
+        async function probeGitHubApiReachability() {
+            try {
+                // 認証ヘッダーやレスポンス読取りを伴わない通信で、
+                // api.github.comへの接続自体が実行環境から許可されているかだけを調べる。
+                await fetch(`https://api.github.com/rate_limit?appstudio_probe=${Date.now()}`, {
+                    method: "GET",
+                    mode: "no-cors",
+                    cache: "no-store"
+                });
+                return true;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function describeGitHubExecutionEnvironment() {
+            let embedded = false;
+            try {
+                embedded = window.top !== window.self;
+            } catch (error) {
+                embedded = true;
+            }
+
+            const protocol = String(location.protocol || "不明");
+            const origin = String(location.origin || "null");
+            return `実行環境: protocol=${protocol}, origin=${origin}, embedded=${embedded ? "yes" : "no"}`;
+        }
+
+        async function fetchGitHubApiWithRetry(apiPath, fetchOptions) {
+            const method = String(fetchOptions.method || "GET").toUpperCase();
+            const maxAttempts = canRetryGitHubRequest(method) ? 3 : 1;
+            let lastNetworkError = null;
+            let xhrError = null;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    const response = await fetch(`https://api.github.com${apiPath}`, fetchOptions);
+
+                    const retryableStatus = response.status === 429 || response.status >= 500;
+                    if (retryableStatus && attempt < maxAttempts) {
+                        setGitHubPublishProgress(
+                            `GitHub APIが一時エラーを返しました。再試行しています... (${attempt + 1}/${maxAttempts})`
+                        );
+                        await waitForGitHubRetry(700 * attempt);
+                        continue;
+                    }
+
+                    return response;
+                } catch (error) {
+                    lastNetworkError = error;
+
+                    // WebKitのfetch経路だけが失敗している場合に備え、最初の失敗時は
+                    // 同じGitHub API要求をXMLHttpRequestでも1回だけ試す。
+                    if (attempt === 1) {
+                        setGitHubPublishProgress("fetch通信に失敗しました。別の通信方式で再接続しています...");
+                        try {
+                            return await requestGitHubApiWithXhr(apiPath, fetchOptions);
+                        } catch (fallbackError) {
+                            xhrError = fallbackError;
+                        }
+                    }
+
+                    if (attempt >= maxAttempts) break;
+
+                    setGitHubPublishProgress(
+                        `GitHub通信を再試行しています... (${attempt + 1}/${maxAttempts})`
+                    );
+                    await waitForGitHubRetry(700 * attempt);
+                }
+            }
+
+            setGitHubPublishProgress("GitHubへの通信経路を診断しています...");
+            const apiReachable = await probeGitHubApiReachability();
+            const environment = describeGitHubExecutionEnvironment();
+            const fetchMessage = String(lastNetworkError?.message || "Load failed");
+            const xhrMessage = String(xhrError?.message || "XHRも接続できませんでした");
+
+            const diagnosis = apiReachable
+                ? "GitHubへの通常通信は可能ですが、Authorization付きのAPI通信が現在のブラウザまたは表示環境で遮断されています。埋め込みプレビューやアプリ内ブラウザではなく、Safariの通常タブ上のHTTPSページとしてAppStudioを開いてください。"
+                : "api.github.comへの通信自体が現在の実行環境で遮断されています。ホスト側のContent Security Policy、アプリ内ブラウザ、VPN、DNSフィルタ、コンテンツブロッカーはJavaScriptから回避できません。Safariの通常タブ上のHTTPSページとしてAppStudioを開いてください。";
+
+            const error = new Error(
+                `GitHub APIへ接続できませんでした。\n[対象: ${apiPath}]\n`
+                + `${diagnosis}\n`
+                + `${environment}\n`
+                + `fetch: ${fetchMessage}\n`
+                + `XMLHttpRequest: ${xhrMessage}`
+            );
+            error.publishErrorType = "network";
+            error.status = 0;
+            error.apiPath = apiPath;
+            error.githubApiReachable = apiReachable;
+            throw error;
+        }
+
         async function githubApiRequest(apiPath, options = {}, token = sessionGhToken) {
             const {
                 allowStatuses = [],
@@ -4748,15 +4986,29 @@ self.addEventListener("fetch", function (event) {
                 ...fetchOptions
             } = options;
 
-            const response = await fetch(`https://api.github.com${apiPath}`, {
+            const normalizedToken = normalizeGitHubToken(token);
+            if (!normalizedToken) {
+                throw createPublishValidationError("Personal Access Tokenが空です。");
+            }
+            if (!isValidGitHubTokenHeaderValue(normalizedToken)) {
+                throw createPublishValidationError("Personal Access TokenをHTTPヘッダーへ設定できません。全角文字や不可視文字が含まれていないか確認してください。");
+            }
+
+            // GitHubのブラウザ向けCORS preflightとの互換性を優先する。
+            // X-GitHub-Api-Versionは送らなくても2022-11-28が既定値になるため、
+            // 不要な非単純ヘッダーを増やさない。Content-Typeもbodyがある要求だけに付ける。
+            const requestHeaders = {
+                "Authorization": `Bearer ${normalizedToken}`,
+                "Accept": "application/vnd.github+json",
+                ...extraHeaders
+            };
+            if (fetchOptions.body !== undefined && fetchOptions.body !== null) {
+                requestHeaders["Content-Type"] = "application/json";
+            }
+
+            const response = await fetchGitHubApiWithRetry(apiPath, {
                 ...fetchOptions,
-                headers: {
-                    "Authorization": `Bearer ${token}`,
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "Content-Type": "application/json",
-                    ...extraHeaders
-                }
+                headers: requestHeaders
             });
 
             const responseText = await response.text();
@@ -4774,11 +5026,12 @@ self.addEventListener("fetch", function (event) {
                 const statusGuide = {
                     403: "権限不足、API制限、またはトークンの許可範囲を確認してください。",
                     404: "リポジトリ、branch、または対象パスが見つかりません。",
-                    409: "GitHub側の状態競合が発生しました。",
-                    422: "GitHubが更新内容を受理できませんでした。branch競合や入力値を確認してください。"
+                    409: "GitHub側の状態競合、またはリポジトリが空(初回コミットなし)の可能性があります。",
+                    422: "GitHubが更新内容を受理できませんでした。branch競合や入力値を確認してください。",
+                    429: "GitHub APIの呼び出し上限または一時的なレート制限です。少し時間を空けて再実行してください。"
                 };
                 const githubMessage = String(data?.message || response.statusText || "GitHub API error");
-                const error = new Error(`GitHub API ${response.status}: ${githubMessage}${statusGuide[response.status] ? `\n${statusGuide[response.status]}` : ""}`);
+                const error = new Error(`GitHub API ${response.status}: ${githubMessage}\n[対象: ${apiPath}]${statusGuide[response.status] ? `\n${statusGuide[response.status]}` : ""}`);
                 error.publishErrorType = "api";
                 error.status = response.status;
                 error.githubMessage = githubMessage;
