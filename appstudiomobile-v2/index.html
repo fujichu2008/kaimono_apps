@@ -1392,6 +1392,12 @@
         const DRAFT_ID = '__draft__';
         let draftSaveTimer = null;
         let draftIndicatorTimer = null;
+        let draftGeneration = 0;
+        let draftOperationQueue = Promise.resolve();
+        let draftFlushPromise = null;
+        let draftFlushGeneration = -1;
+        let draftFlushCode = "";
+        let editorDraftDirty = false;
         let statsUpdateTimer = null;
         let toastTimer = null;
         let suppressDraftSave = false;
@@ -1451,6 +1457,7 @@
             scheduleStatsUpdate();
             scheduleEditorDraftSave();
             if (!suppressDraftSave) {
+                editorDraftDirty = true;
                 resetSaveStatusButton();
                 syncRunBarState();
             }
@@ -1606,40 +1613,93 @@
             }
         });
 
+        function invalidateEditorDraftGeneration() {
+            // clearTimeoutでは開始済みのIndexedDB書込みを止められないため、
+            // 世代を進めて古い保存処理を無効化する。
+            draftGeneration++;
+            clearTimeout(draftSaveTimer);
+            draftSaveTimer = null;
+        }
+
+        function enqueueDraftOperation(operation) {
+            const queued = draftOperationQueue.then(operation, operation);
+            draftOperationQueue = queued.catch(() => {});
+            return queued;
+        }
+
         function scheduleEditorDraftSave() {
             if (suppressDraftSave) return;
             clearTimeout(draftSaveTimer);
-            draftSaveTimer = setTimeout(saveEditorDraft, 2000);
+            draftSaveTimer = setTimeout(() => {
+                draftSaveTimer = null;
+                saveEditorDraft();
+            }, 2000);
         }
 
         async function saveEditorDraft() {
-            if (suppressDraftSave) return;
+            if (suppressDraftSave || !editorDraftDirty) return false;
 
-            const code = editor.getValue();
+            const generationAtStart = draftGeneration;
+            const draftData = {
+                id: DRAFT_ID,
+                type: 'draft',
+                code: editor.getValue(),
+                currentAppName: currentAppName,
+                currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
+                savedAt: new Date().toISOString()
+            };
+
             try {
-                if (!code.trim()) {
-                    await deleteEditorDraft();
-                    return;
-                }
+                return await enqueueDraftOperation(async () => {
+                    if (suppressDraftSave || generationAtStart !== draftGeneration) return false;
 
-                await idb.put({
-                    id: DRAFT_ID,
-                    type: 'draft',
-                    code: code,
-                    currentAppName: currentAppName,
-                    currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
-                    savedAt: new Date().toISOString()
+                    if (!draftData.code.trim()) {
+                        await idb.delete(DRAFT_ID);
+                        if (generationAtStart === draftGeneration && !editor.getValue().trim()) {
+                            editorDraftDirty = false;
+                        }
+                        return true;
+                    }
+
+                    await idb.put(draftData);
+
+                    if (generationAtStart !== draftGeneration) {
+                        await idb.delete(DRAFT_ID);
+                        return false;
+                    }
+
+                    showDraftSaveIndicator();
+                    return true;
                 });
-                showDraftSaveIndicator();
             } catch (e) {
                 console.warn("ドラフト保存に失敗しました:", e);
+                return false;
             }
         }
 
         function flushEditorDraftSave() {
             clearTimeout(draftSaveTimer);
             draftSaveTimer = null;
-            saveEditorDraft();
+
+            const generationAtFlush = draftGeneration;
+            const codeAtFlush = editor.getValue();
+            if (draftFlushPromise
+                && draftFlushGeneration === generationAtFlush
+                && draftFlushCode === codeAtFlush) {
+                return draftFlushPromise;
+            }
+
+            const trackedPromise = Promise.resolve(saveEditorDraft()).finally(() => {
+                if (draftFlushPromise === trackedPromise) {
+                    draftFlushPromise = null;
+                    draftFlushGeneration = -1;
+                    draftFlushCode = "";
+                }
+            });
+            draftFlushPromise = trackedPromise;
+            draftFlushGeneration = generationAtFlush;
+            draftFlushCode = codeAtFlush;
+            return trackedPromise;
         }
 
         window.addEventListener('pagehide', () => {
@@ -1655,11 +1715,13 @@
         });
 
         async function deleteEditorDraft() {
-            clearTimeout(draftSaveTimer);
+            invalidateEditorDraftGeneration();
             try {
-                await idb.delete(DRAFT_ID);
+                await enqueueDraftOperation(() => idb.delete(DRAFT_ID));
+                return true;
             } catch (e) {
                 console.warn("ドラフト削除に失敗しました:", e);
+                return false;
             }
         }
 
@@ -1686,6 +1748,7 @@
 
                 suppressDraftSave = true;
                 editor.setValue(draft.code);
+                editorDraftDirty = true;
                 currentAppName = draft.currentAppName || "";
                 currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
                 appNameDisplay.textContent = currentAppName ? `${currentAppName}（未保存復元）` : "（未保存ドラフト復元）";
@@ -1729,6 +1792,7 @@
                 suppressDraftSave = true;
                 pushReflectSnapshot(editor.getValue());
                 editor.setValue("");
+                editorDraftDirty = false;
                                 currentAppName = "";
                 appNameDisplay.textContent = "(新規作成中)";
                 currentAppHistory = [];
@@ -1747,6 +1811,7 @@
             suppressDraftSave = true;
             pushReflectSnapshot(editor.getValue());
             editor.setValue("");
+            editorDraftDirty = false;
             currentAppName = "";
             currentAppHistory = [];
             pendingAiInstruction = "";
@@ -2259,7 +2324,8 @@
                 document.body.appendChild(textArea);
                 textArea.select();
                 try {
-                    document.execCommand('copy');
+                    const copied = document.execCommand('copy');
+                    if (!copied) throw new Error("document.execCommand('copy') returned false");
                     onCopy();
                 } catch (e) {
                     alert("コピーに失敗しました。権限を確認してください。");
@@ -2409,10 +2475,6 @@ ${currentCode}
 
                 if (!Array.isArray(fixes)) throw new Error("配列ではありません");
 
-                // Helper: Entity conversion
-                const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
-                const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-
                 const countOccurrences = (base, needle) => {
                     if (!needle) return 0;
                     let index = 0;
@@ -2443,66 +2505,13 @@ ${currentCode}
                     let target = String(beforeText).replace(/\r\n/g, '\n');
                     let replacement = String(afterText).replace(/\r\n/g, '\n');
 
-                    // 候補生成 (同値表現の展開)
-                    const variants = new Set([
-                        target,
-                        decodeEnt(target),
-                        encodeEnt(target),
-                        decodeEnt(decodeEnt(target))
-                    ]);
-
-                    let bestMatch = null;
-                    let totalFound = 0;
-                    let bestMatchWasTrimmed = false;
-
-                    // 1. 完全一致スキャン
-                    for (const cand of variants) {
-                        const occurrences = countOccurrences(code, cand);
-                        if (occurrences > 0) {
-                            totalFound += occurrences;
-                            if (!bestMatch) bestMatch = cand;
-                        }
-                    }
-
-                    // 2. ヒットなしならTrim一致スキャン
-                    if (totalFound === 0) {
-                        const variantsTrim = new Set();
-                        for (const v of variants) {
-                            const trimmed = v.trim();
-                            if (trimmed) variantsTrim.add(trimmed);
-                        }
-
-                        for (const cand of variantsTrim) {
-                            const occurrences = countOccurrences(code, cand);
-                            if (occurrences > 0) {
-                                totalFound += occurrences;
-                                if (!bestMatch) {
-                                    bestMatch = cand;
-                                    bestMatchWasTrimmed = true;
-                                }
-                            }
-                        }
-                    }
+                    // LF正規化後の完全一致だけを許可する。
+                    // trimやHTMLエンティティ変換は別箇所への誤適用を招くため自動では行わない。
+                    const totalFound = countOccurrences(code, target);
 
                     if (totalFound === 0) {
-                        const replacementFound = countOccurrences(code, replacement);
-                        if (replacementFound === 1 && replacement.length >= 30) {
-                            alreadyAppliedFixes.push({ reason: "afterが既に1箇所だけ存在するため適用済みと判断", fix });
-                            continue;
-                        }
-
-                        if (replacementFound > 0) {
-                            failedFixes.push({
-                                reason: replacement.length < 30
-                                    ? `afterは既に${replacementFound}箇所存在しますが、30文字未満のため適用済み判定せず未適用`
-                                    : `afterが既に${replacementFound}箇所存在するため、誤判定防止のため未適用`,
-                                fix
-                            });
-                            continue;
-                        }
-
                         failedFixes.push({
-                            reason: "対象コードが見つかりません",
+                            reason: "対象コードが見つかりません。afterの存在だけでは適用済みと判断しません",
                             fix
                         });
                         continue;
@@ -2516,18 +2525,9 @@ ${currentCode}
                         continue;
                     }
 
-                    // replaceテキストの形式合わせ
-                    if (bestMatch) {
-                        if (bestMatch === decodeEnt(target)) replacement = decodeEnt(replacement);
-                        else if (bestMatch === encodeEnt(target)) replacement = encodeEnt(replacement);
-                        else if (bestMatch === decodeEnt(decodeEnt(target))) replacement = decodeEnt(decodeEnt(replacement));
-
-                        if (bestMatchWasTrimmed) replacement = replacement.trim();
-
-                                                // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
-                        code = code.replace(bestMatch, () => replacement);
-                        appliedFixes.push(fix);
-                    }
+                                            // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
+                    code = code.replace(target, () => replacement);
+                    appliedFixes.push(fix);
                 }
 
                 if (appliedFixes.length > 0) {
@@ -2956,43 +2956,62 @@ nextBtn.onclick=nextStep;
                         }
                     };
                     req.onsuccess = (e) => resolve(e.target.result);
-                    req.onerror = (e) => reject(e);
+                    req.onerror = () => reject(req.error || new Error("IndexedDBを開けませんでした。"));
+                });
+            },
+            runTransaction: async (mode, operation) => {
+                const db = await idb.open();
+                return new Promise((resolve, reject) => {
+                    let result;
+                    let settled = false;
+
+                    const closeAndResolve = () => {
+                        if (settled) return;
+                        settled = true;
+                        db.close();
+                        resolve(result);
+                    };
+                    const closeAndReject = (error) => {
+                        if (settled) return;
+                        settled = true;
+                        db.close();
+                        reject(error || new Error("IndexedDB transaction failed"));
+                    };
+
+                    try {
+                        const tx = db.transaction([STORE_NAME], mode);
+                        const store = tx.objectStore(STORE_NAME);
+                        tx.oncomplete = closeAndResolve;
+                        tx.onerror = () => closeAndReject(tx.error);
+                        tx.onabort = () => closeAndReject(tx.error || new Error("IndexedDB transaction aborted"));
+                        operation(store, value => {
+                            result = value;
+                        });
+                    } catch (error) {
+                        closeAndReject(error);
+                    }
                 });
             },
             getAll: async () => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readonly');
-                    const req = tx.objectStore(STORE_NAME).getAll();
-                    req.onsuccess = () => resolve(req.result.reverse());
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readonly', (store, setResult) => {
+                    const req = store.getAll();
+                    req.onsuccess = () => setResult(req.result.reverse());
                 });
             },
             get: async (id) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readonly');
-                    const req = tx.objectStore(STORE_NAME).get(id);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readonly', (store, setResult) => {
+                    const req = store.get(id);
+                    req.onsuccess = () => setResult(req.result);
                 });
             },
             put: async (item) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readwrite');
-                    const req = tx.objectStore(STORE_NAME).put(item);
-                    req.onsuccess = () => resolve();
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readwrite', store => {
+                    store.put(item);
                 });
             },
             delete: async (id) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readwrite');
-                    const req = tx.objectStore(STORE_NAME).delete(id);
-                    req.onsuccess = () => resolve();
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readwrite', store => {
+                    store.delete(id);
                 });
             }
         };
@@ -3000,6 +3019,7 @@ nextBtn.onclick=nextStep;
                 async function saveToLibrary() {
             const projectName = filenameInput.value || "Untitled";
             const code = editor.getValue();
+            const draftGenerationAtSaveStart = draftGeneration;
            
             if(!code.trim()) {
                 showToast("保存するコードがありません");
@@ -3034,14 +3054,27 @@ nextBtn.onclick=nextStep;
 
                         try {
                                 await idb.put(appData);
-                await deleteEditorDraft();
-                showToast(`「${appName}」を保存しました`);
-                // 保存成功したら状態を更新
+
+                // アプリ本体の保存トランザクション完了後にだけドラフトを整理する。
+                // 保存中に編集内容が変わった場合は、新しい内容を未保存ドラフトとして維持する。
                 currentAppName = projectName;
                 appNameDisplay.textContent = appName;
-                setSaveStatusButtonSaved();
+                const editorStillMatchesSavedCode = editor.getValue() === code
+                    && draftGeneration === draftGenerationAtSaveStart;
+                editorDraftDirty = !editorStillMatchesSavedCode;
+
+                if (editorStillMatchesSavedCode) {
+                    await deleteEditorDraft();
+                    setSaveStatusButtonSaved();
+                    showToast(`「${appName}」を保存しました`);
+                } else {
+                    await saveEditorDraft();
+                    resetSaveStatusButton();
+                    showToast(`「${appName}」を保存しました（保存後の変更は未保存です）`);
+                }
+
                 syncRunBarState();
-                recordDevLog('save_app', 'success', '', `project:${projectName}, version:${appName}`);
+                recordDevLog('save_app', 'success', '', `project:${projectName}, version:${appName}, currentMatches:${editorStillMatchesSavedCode}`);
             } catch (e) {
                 showToast("保存エラー: " + e.message);
             }
@@ -3059,8 +3092,8 @@ nextBtn.onclick=nextStep;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            await deleteEditorDraft();
+            // iOS Safariがダウンロード処理でBlob URLを参照し終える前に解放しない。
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
             closeModal('save-modal');
         }
 
@@ -3287,10 +3320,12 @@ nextBtn.onclick=nextStep;
             const submitButton = document.getElementById('github-publish-submit');
             const cancelButton = document.getElementById('github-publish-cancel');
             if (submitButton) {
-                submitButton.disabled = githubPublishBusy || githubPublishState.pwa.iconImageLoading;
+                const pwaIconBusy = githubPublishState.mode === "pwa"
+                    && githubPublishState.pwa.iconImageLoading;
+                submitButton.disabled = githubPublishBusy || pwaIconBusy;
                 submitButton.textContent = githubPublishBusy
                     ? "公開中..."
-                    : (githubPublishState.pwa.iconImageLoading ? "アイコン読込中..." : "公開する");
+                    : (pwaIconBusy ? "アイコン読込中..." : "公開する");
             }
             if (cancelButton) cancelButton.disabled = githubPublishBusy;
             renderPwaIconPreview();
@@ -3427,7 +3462,6 @@ nextBtn.onclick=nextStep;
                     ? await publishPwaToGitHub(options)
                     : await publishSingleHtmlToGitHub(options);
 
-                await deleteEditorDraft();
                 if (options.mode === "pwa") {
                     recordDevLog('github_publish_pwa', 'success', '', `folder:${options.pwa.folderName}, files:5`);
                 } else {
@@ -4770,6 +4804,7 @@ self.addEventListener("fetch", function (event) {
                 if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
                 suppressDraftSave = true;
                 editor.setValue(app.code);
+                editorDraftDirty = false;
                 // メタ情報復元
                                 currentAppName = app.projectName || app.name;
                 appNameDisplay.textContent = app.name;
@@ -4824,7 +4859,9 @@ self.addEventListener("fetch", function (event) {
                 const fileName = app.name.endsWith('.html') ? app.name : app.name + '.html';
                 const file = new File([blob], fileName, { type: 'text/html' });
 
-                if (navigator.share && navigator.canShare({ files: [file] })) {
+                if (navigator.share
+                    && typeof navigator.canShare === "function"
+                    && navigator.canShare({ files: [file] })) {
                     await navigator.share({
                         files: [file],
                         title: app.name,
@@ -5281,7 +5318,18 @@ self.addEventListener("fetch", function (event) {
 
         function clearDevStatsLogs() {
             if (!confirm("開発統計ログをすべて削除しますか？\nこの操作は元に戻せません。")) return;
-            saveDevLogs([]);
+
+            if (iframeErrorStatsFlushTimer) {
+                clearTimeout(iframeErrorStatsFlushTimer);
+                iframeErrorStatsFlushTimer = null;
+            }
+            iframeErrorStatsBuffer = {};
+
+            if (!saveDevLogs([])) {
+                showToast("開発統計ログをリセットできませんでした");
+                return;
+            }
+
             renderDevStatsModal();
             showToast("開発統計ログをリセットしました");
         }
