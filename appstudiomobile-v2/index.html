@@ -740,6 +740,9 @@
             transition: opacity 0.3s;
             pointer-events: none;
             z-index: 300;
+            max-width: 90vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
             white-space: nowrap;
         }
        
@@ -921,6 +924,7 @@
             <div id="run-menu" class="run-menu">
                 <button onclick="closeRunMenu(); createNewApp()">🆕 新規作成</button>
                 <button onclick="closeRunMenu(); restoreReflectSnapshot()">⏪ 反映前に戻す</button>
+                <button onclick="closeRunMenu(); redoReflectSnapshot()">⏩ 「戻す」をやり直す</button>
                 <button onclick="closeRunMenu(); reloadFrame()">↻ リロード</button>
                 <button id="runtime-mode-toggle-btn" onclick="closeRunMenu(); toggleRuntimeMode()">🛡 安全実行へ切替</button>
                 <button onclick="closeRunMenu(); openErrorLogModal()">🐞 エラーログ</button>
@@ -1506,6 +1510,7 @@
 
         function pushReflectSnapshot(code) {
             const snapshot = String(code || "");
+            reflectRedoSnapshots = [];
             if (reflectSnapshots.length && reflectSnapshots[reflectSnapshots.length - 1] === snapshot) return;
             reflectSnapshots.push(snapshot);
             if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
@@ -1524,6 +1529,20 @@
             editor.setValue(restoreCode);
             reloadFrame();
             showToast("反映前の状態に戻しました");
+        }
+
+        function redoReflectSnapshot() {
+            if (!reflectRedoSnapshots.length) {
+                showToast("やり直せる反映履歴がありません");
+                return;
+            }
+            const currentCode = editor.getValue();
+            const restoreCode = reflectRedoSnapshots.pop();
+            reflectSnapshots.push(currentCode);
+            if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
+            editor.setValue(restoreCode);
+            reloadFrame();
+            showToast("反映後の状態へやり直しました");
         }
 
         function toggleRunMenu(event) {
@@ -2275,14 +2294,15 @@ ${isLast ? "※これは最後の分割です。このあと別メッセージ�
 ${chunk}
 \`\`\``;
 
-                        writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`);
-            promptCopiedChunkIndexes.add(index);
-            const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
-            if (selectedBtn) {
-                selectedBtn.style.background = 'var(--success-color)';
-                selectedBtn.style.borderColor = 'var(--success-color)';
-                selectedBtn.style.color = '#fff';
-            }
+                        writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`, () => {
+                promptCopiedChunkIndexes.add(index);
+                const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
+                if (selectedBtn) {
+                    selectedBtn.style.background = 'var(--success-color)';
+                    selectedBtn.style.borderColor = 'var(--success-color)';
+                    selectedBtn.style.color = '#fff';
+                }
+            });
         }
 
                 function buildPromptCodeSection(currentCode, mode) {
@@ -2531,8 +2551,8 @@ ${currentCode}
 
                     displayFixError(`${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
                     displayFixRecovery(failedFixes, appliedFixes.length, alreadyAppliedFixes.length);
-                    failedFixes.forEach(item => {
-                        recordDevLog('reflect_failed', 'failed', item.reason || 'JSON反映失敗', resultSummary);
+                    failedFixes.forEach((item, itemIndex) => {
+                        recordDevLog(itemIndex === 0 ? 'reflect_failed' : 'reflect_failed_item', 'failed', item.reason || 'JSON反映失敗', resultSummary);
                     });
                     showToast(resultSummary);
                     return false;
@@ -3844,11 +3864,10 @@ ${scriptEnd}`;
 
             let published = replacePwaMarkedRange(source, headStart, headEnd, headBlock);
             if (published === null) {
-                const headClose = published === null ? source.match(/<\/head\s*>/i) : null;
-                if (!headClose) {
+                const headPosition = findHtmlClosingTagOutsideRawText(source, "head");
+                if (headPosition === -1) {
                     throw createPublishValidationError("PWA公開には終了headタグが必要です。元HTMLを修正してから再実行してください。");
                 }
-                const headPosition = headClose.index;
                 published = source.slice(0, headPosition) + headBlock + "\n" + source.slice(headPosition);
             }
 
