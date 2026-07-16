@@ -740,6 +740,9 @@
             transition: opacity 0.3s;
             pointer-events: none;
             z-index: 300;
+            max-width: 90vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
             white-space: nowrap;
         }
        
@@ -916,6 +919,7 @@
             <div id="run-menu" class="run-menu">
                 <button onclick="closeRunMenu(); createNewApp()">🆕 新規作成</button>
                 <button onclick="closeRunMenu(); restoreReflectSnapshot()">⏪ 反映前に戻す</button>
+                <button onclick="closeRunMenu(); redoReflectSnapshot()">⏩ 「戻す」をやり直す</button>
                 <button onclick="closeRunMenu(); reloadFrame()">↻ リロード</button>
                 <button id="runtime-mode-toggle-btn" onclick="closeRunMenu(); toggleRuntimeMode()">🛡 安全実行へ切替</button>
                 <button onclick="closeRunMenu(); openErrorLogModal()">🐞 エラーログ</button>
@@ -939,7 +943,7 @@
             <h2>保存オプション</h2>
             <input type="text" id="filename-input" placeholder="アプリ名を入力 (例: MyGame)">
             <div class="modal-buttons">
-                <button class="btn-confirm" onclick="saveToLibrary()">アプリ保存</button>
+                <button id="save-library-btn" class="btn-confirm" onclick="saveToLibrary()">アプリ保存</button>
                 <button class="btn-confirm" style="background: #4caf50;" onclick="downloadHTML()">HTML DL</button>
                 <button class="btn-confirm" style="background: #333;" onclick="openGitHubPublishModal()">GitHub Repo</button>
             </div>
@@ -1383,9 +1387,21 @@
         const DRAFT_ID = '__draft__';
         let draftSaveTimer = null;
         let draftIndicatorTimer = null;
+        let draftGeneration = 0;
+        let workspaceGeneration = 0;
+        let draftOperationQueue = Promise.resolve();
+        let draftFlushPromise = null;
+        let draftFlushGeneration = -1;
+        let draftFlushCode = "";
+        let editorDraftDirty = false;
+        let draftSaveSuppressionDepth = 0;
+        let librarySaveBusy = false;
+        let lastGeneratedAppId = 0;
+        let appRecordIdInitializationPromise = null;
+        let latestLoadRequestId = 0;
+        let draftCleanupPending = false;
         let statsUpdateTimer = null;
         let toastTimer = null;
-        let suppressDraftSave = false;
         let iframeErrorLogs = [];
         let reflectSnapshots = [];
         let reflectRedoSnapshots = [];
@@ -1441,7 +1457,8 @@
             frameDirty = true;
             scheduleStatsUpdate();
             scheduleEditorDraftSave();
-            if (!suppressDraftSave) {
+            if (!isDraftSaveSuppressed()) {
+                editorDraftDirty = true;
                 resetSaveStatusButton();
                 syncRunBarState();
             }
@@ -1501,6 +1518,7 @@
 
         function pushReflectSnapshot(code) {
             const snapshot = String(code || "");
+            reflectRedoSnapshots = [];
             if (reflectSnapshots.length && reflectSnapshots[reflectSnapshots.length - 1] === snapshot) return;
             reflectSnapshots.push(snapshot);
             if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
@@ -1519,6 +1537,20 @@
             editor.setValue(restoreCode);
             reloadFrame();
             showToast("反映前の状態に戻しました");
+        }
+
+        function redoReflectSnapshot() {
+            if (!reflectRedoSnapshots.length) {
+                showToast("やり直せる反映履歴がありません");
+                return;
+            }
+            const currentCode = editor.getValue();
+            const restoreCode = reflectRedoSnapshots.pop();
+            reflectSnapshots.push(currentCode);
+            if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
+            editor.setValue(restoreCode);
+            reloadFrame();
+            showToast("反映後の状態へやり直しました");
         }
 
         function toggleRunMenu(event) {
@@ -1582,61 +1614,213 @@
             }
         });
 
-        function scheduleEditorDraftSave() {
-            if (suppressDraftSave) return;
+        function beginDraftSaveSuppression() {
+            draftSaveSuppressionDepth++;
+        }
+
+        function endDraftSaveSuppression() {
+            draftSaveSuppressionDepth = Math.max(0, draftSaveSuppressionDepth - 1);
+        }
+
+        function isDraftSaveSuppressed() {
+            return draftSaveSuppressionDepth > 0;
+        }
+
+        function isCurrentWorkspaceGeneration(generation) {
+            return workspaceGeneration === generation;
+        }
+
+        function isEditorCodeUnchanged(code) {
+            return editor.getValue() === String(code || "");
+        }
+
+        function isPendingAiInstructionUnchanged(instruction) {
+            return pendingAiInstruction === String(instruction || "");
+        }
+
+        function invalidatePendingLoadRequests() {
+            latestLoadRequestId++;
+        }
+
+        function advanceWorkspaceGeneration() {
+            workspaceGeneration++;
+            return workspaceGeneration;
+        }
+
+        function createAppRecordId() {
+            const now = Date.now();
+            lastGeneratedAppId = Math.max(now, lastGeneratedAppId + 1);
+            return lastGeneratedAppId;
+        }
+
+        function ensureAppRecordIdInitialized() {
+            if (appRecordIdInitializationPromise) {
+                return appRecordIdInitializationPromise;
+            }
+
+            appRecordIdInitializationPromise = idb.getAll()
+                .then(items => {
+                    const maxExistingId = items.reduce((maxId, item) => {
+                        const id = item && item.id;
+                        return Number.isSafeInteger(id) ? Math.max(maxId, id) : maxId;
+                    }, 0);
+                    lastGeneratedAppId = Math.max(lastGeneratedAppId, maxExistingId);
+                    return lastGeneratedAppId;
+                })
+                .catch(error => {
+                    appRecordIdInitializationPromise = null;
+                    throw error;
+                });
+
+            return appRecordIdInitializationPromise;
+        }
+
+        function setLibrarySaveBusy(isBusy) {
+            librarySaveBusy = Boolean(isBusy);
+            const button = document.getElementById('save-library-btn');
+            if (!button) return;
+            button.disabled = librarySaveBusy;
+            button.textContent = librarySaveBusy ? "保存中..." : "アプリ保存";
+        }
+
+        function invalidateEditorDraftGeneration() {
+            // clearTimeoutでは開始済みのIndexedDB書込みを止められないため、
+            // 世代を進めて古い保存処理を無効化する。
+            draftGeneration++;
             clearTimeout(draftSaveTimer);
-            draftSaveTimer = setTimeout(saveEditorDraft, 2000);
+            draftSaveTimer = null;
+        }
+
+        function enqueueDraftOperation(operation) {
+            const queued = draftOperationQueue.then(operation, operation);
+            draftOperationQueue = queued.catch(() => {});
+            return queued;
+        }
+
+        function scheduleEditorDraftSave() {
+            if (isDraftSaveSuppressed()) return;
+            clearTimeout(draftSaveTimer);
+            draftSaveTimer = setTimeout(() => {
+                draftSaveTimer = null;
+                saveEditorDraft();
+            }, 1000);
         }
 
         async function saveEditorDraft() {
-            if (suppressDraftSave) return;
+            if (isDraftSaveSuppressed() || !editorDraftDirty) return false;
 
-            const code = editor.getValue();
+            const generationAtStart = draftGeneration;
+            const draftData = {
+                id: DRAFT_ID,
+                type: 'draft',
+                code: editor.getValue(),
+                currentAppName: currentAppName,
+                currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
+                pendingAiInstruction: String(pendingAiInstruction || ""),
+                savedAt: new Date().toISOString()
+            };
+
             try {
-                if (!code.trim()) {
-                    await deleteEditorDraft();
-                    return;
-                }
+                return await enqueueDraftOperation(async () => {
+                    if (isDraftSaveSuppressed() || generationAtStart !== draftGeneration) return false;
 
-                await idb.put({
-                    id: DRAFT_ID,
-                    type: 'draft',
-                    code: code,
-                    currentAppName: currentAppName,
-                    currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
-                    savedAt: new Date().toISOString()
+                    if (!draftData.code.trim() && !draftData.pendingAiInstruction.trim()) {
+                        await idb.delete(DRAFT_ID);
+                        draftCleanupPending = false;
+                        if (generationAtStart === draftGeneration
+                            && !editor.getValue().trim()
+                            && !pendingAiInstruction.trim()) {
+                            editorDraftDirty = false;
+                        }
+                        return true;
+                    }
+
+                    await idb.put(draftData);
+
+                    if (generationAtStart !== draftGeneration) {
+                        await idb.delete(DRAFT_ID);
+                        return false;
+                    }
+
+                    draftCleanupPending = false;
+                    if (editor.getValue() === draftData.code
+                        && currentAppName === draftData.currentAppName
+                        && pendingAiInstruction === draftData.pendingAiInstruction) {
+                        editorDraftDirty = false;
+                    }
+
+                    showDraftSaveIndicator();
+                    return true;
                 });
-                showDraftSaveIndicator();
             } catch (e) {
                 console.warn("ドラフト保存に失敗しました:", e);
+                return false;
             }
         }
 
         function flushEditorDraftSave() {
             clearTimeout(draftSaveTimer);
             draftSaveTimer = null;
-            saveEditorDraft();
+
+            const generationAtFlush = draftGeneration;
+            const codeAtFlush = editor.getValue();
+            if (draftFlushPromise
+                && draftFlushGeneration === generationAtFlush
+                && draftFlushCode === codeAtFlush) {
+                return draftFlushPromise;
+            }
+
+            const trackedPromise = Promise.resolve(saveEditorDraft()).finally(() => {
+                if (draftFlushPromise === trackedPromise) {
+                    draftFlushPromise = null;
+                    draftFlushGeneration = -1;
+                    draftFlushCode = "";
+                }
+            });
+            draftFlushPromise = trackedPromise;
+            draftFlushGeneration = generationAtFlush;
+            draftFlushCode = codeAtFlush;
+            return trackedPromise;
         }
 
         window.addEventListener('pagehide', () => {
             flushEditorDraftSave();
+            retryPendingDraftCleanup();
             flushIframeErrorStats();
         });
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 flushEditorDraftSave();
+                retryPendingDraftCleanup();
                 flushIframeErrorStats();
             }
         });
 
+        document.addEventListener('freeze', () => {
+            flushEditorDraftSave();
+            retryPendingDraftCleanup();
+            flushIframeErrorStats();
+        });
+
         async function deleteEditorDraft() {
-            clearTimeout(draftSaveTimer);
+            invalidateEditorDraftGeneration();
             try {
-                await idb.delete(DRAFT_ID);
+                await enqueueDraftOperation(() => idb.delete(DRAFT_ID));
+                draftCleanupPending = false;
+                return true;
             } catch (e) {
+                draftCleanupPending = true;
                 console.warn("ドラフト削除に失敗しました:", e);
+                return false;
             }
+        }
+
+        async function retryPendingDraftCleanup() {
+            if (!draftCleanupPending || editorDraftDirty || isDraftSaveSuppressed()) {
+                return false;
+            }
+            return deleteEditorDraft();
         }
 
         function showDraftSaveIndicator() {
@@ -1653,27 +1837,34 @@
         async function restoreEditorDraftOnStartup() {
             try {
                 const draft = await idb.get(DRAFT_ID);
-                if (!draft || !draft.code || editor.getValue().trim()) return;
+                const hasRestorableCode = Boolean(draft && String(draft.code || "").length);
+                const hasRestorableInstruction = Boolean(draft && String(draft.pendingAiInstruction || "").trim());
+                if (!draft || (!hasRestorableCode && !hasRestorableInstruction) || editor.getValue().trim()) return;
 
                 if (!confirm("前回の未保存編集を復元しますか？")) {
-                    await deleteEditorDraft();
+                    const deleted = await deleteEditorDraft();
+                    if (!deleted) showToast("旧ドラフトの削除に失敗しました");
                     return;
                 }
 
-                suppressDraftSave = true;
-                editor.setValue(draft.code);
-                currentAppName = draft.currentAppName || "";
-                currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
-                appNameDisplay.textContent = currentAppName ? `${currentAppName}（未保存復元）` : "（未保存ドラフト復元）";
-                filenameInput.value = currentAppName || "";
-                syncRunBarState();
-                updateStats();
+                invalidatePendingLoadRequests();
+                advanceWorkspaceGeneration();
+                beginDraftSaveSuppression();
+                try {
+                    editor.setValue(String(draft.code || ""));
+                    currentAppName = draft.currentAppName || "";
+                    currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
+                    pendingAiInstruction = String(draft.pendingAiInstruction || "");
+                    editorDraftDirty = false;
+                    appNameDisplay.textContent = currentAppName ? `${currentAppName}（未保存復元）` : "（未保存ドラフト復元）";
+                    filenameInput.value = currentAppName || "";
+                    syncRunBarState();
+                    updateStats();
+                } finally {
+                    endDraftSaveSuppression();
+                }
                 showToast("前回の未保存編集を復元しました");
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
             } catch (e) {
-                suppressDraftSave = false;
                 console.warn("ドラフト復元に失敗しました:", e);
             }
         }
@@ -1700,43 +1891,59 @@
             }
         }
 
-                        function clearCode() {
+                        async function clearCode() {
             if(confirm("エディタの内容をクリアしますか？\n(編集中の状態もリセットされます)")) {
-                suppressDraftSave = true;
-                pushReflectSnapshot(editor.getValue());
-                editor.setValue("");
-                                currentAppName = "";
-                appNameDisplay.textContent = "(新規作成中)";
-                currentAppHistory = [];
-                resetSaveStatusButton();
-                syncRunBarState();
-                deleteEditorDraft();
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
+                invalidatePendingLoadRequests();
+                advanceWorkspaceGeneration();
+                beginDraftSaveSuppression();
+                try {
+                    pushReflectSnapshot(editor.getValue());
+                    editor.setValue("");
+                    editorDraftDirty = false;
+                                    currentAppName = "";
+                    appNameDisplay.textContent = "(新規作成中)";
+                    currentAppHistory = [];
+                    pendingAiInstruction = "";
+                    resetSaveStatusButton();
+                    syncRunBarState();
+                } finally {
+                    endDraftSaveSuppression();
+                }
+
+                const deleted = await deleteEditorDraft();
+                if (!deleted) {
+                    showToast("コードはクリアしましたが、旧ドラフトの整理に失敗しました");
+                }
             }
         }
 
         async function createNewApp() {
             if (!confirm("現在開いているアプリは閉じられます。\n新規作成を開始しますか？")) return;
 
-            suppressDraftSave = true;
-            pushReflectSnapshot(editor.getValue());
-            editor.setValue("");
-            currentAppName = "";
-            currentAppHistory = [];
-            pendingAiInstruction = "";
-            appNameDisplay.textContent = "(新規作成中)";
-            filenameInput.value = "";
-            resetSaveStatusButton();
-            syncRunBarState();
-            await deleteEditorDraft();
+            invalidatePendingLoadRequests();
+            advanceWorkspaceGeneration();
+            beginDraftSaveSuppression();
+            try {
+                pushReflectSnapshot(editor.getValue());
+                editor.setValue("");
+                editorDraftDirty = false;
+                currentAppName = "";
+                currentAppHistory = [];
+                pendingAiInstruction = "";
+                appNameDisplay.textContent = "(新規作成中)";
+                filenameInput.value = "";
+                resetSaveStatusButton();
+                syncRunBarState();
+            } finally {
+                endDraftSaveSuppression();
+            }
+
+            const deleted = await deleteEditorDraft();
             frameDirty = true;
             switchTab('run');
-            showToast("新しいアプリの作成を開始します");
-            setTimeout(() => {
-                suppressDraftSave = false;
-            }, 0);
+            showToast(deleted
+                ? "新しいアプリの作成を開始します"
+                : "新規作成を開始しましたが、旧ドラフトの整理に失敗しました");
         }
 
         // --- New: Copy Function ---
@@ -2235,7 +2442,8 @@
                 document.body.appendChild(textArea);
                 textArea.select();
                 try {
-                    document.execCommand('copy');
+                    const copied = document.execCommand('copy');
+                    if (!copied) throw new Error("document.execCommand('copy') returned false");
                     onCopy();
                 } catch (e) {
                     alert("コピーに失敗しました。権限を確認してください。");
@@ -2270,14 +2478,15 @@ ${isLast ? "※これは最後の分割です。このあと別メッセージ�
 ${chunk}
 \`\`\``;
 
-                        writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`);
-            promptCopiedChunkIndexes.add(index);
-            const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
-            if (selectedBtn) {
-                selectedBtn.style.background = 'var(--success-color)';
-                selectedBtn.style.borderColor = 'var(--success-color)';
-                selectedBtn.style.color = '#fff';
-            }
+                        writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`, () => {
+                promptCopiedChunkIndexes.add(index);
+                const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
+                if (selectedBtn) {
+                    selectedBtn.style.background = 'var(--success-color)';
+                    selectedBtn.style.borderColor = 'var(--success-color)';
+                    selectedBtn.style.color = '#fff';
+                }
+            });
         }
 
                 function buildPromptCodeSection(currentCode, mode) {
@@ -2324,7 +2533,11 @@ ${currentCode}
 
                         writeTextWithFallback(prompt, "プロンプトをコピーしました", () => {
                 recordDevLog('prompt_copy', 'success', '', `type:${type}, codeAttach:${codeAttachMode}, instructionLength:${instruction.length}`);
-                if (instruction) pendingAiInstruction = instruction; // 履歴保存用に保持
+                if (instruction) {
+                    pendingAiInstruction = instruction;
+                    editorDraftDirty = true;
+                    scheduleEditorDraftSave();
+                }
                 instructionInput.value = "";
                 closeModal('prompt-modal');
             });
@@ -2384,10 +2597,6 @@ ${currentCode}
 
                 if (!Array.isArray(fixes)) throw new Error("配列ではありません");
 
-                // Helper: Entity conversion
-                const decodeEnt = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#039;/g, "'");
-                const encodeEnt = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-
                 const countOccurrences = (base, needle) => {
                     if (!needle) return 0;
                     let index = 0;
@@ -2418,66 +2627,13 @@ ${currentCode}
                     let target = String(beforeText).replace(/\r\n/g, '\n');
                     let replacement = String(afterText).replace(/\r\n/g, '\n');
 
-                    // 候補生成 (同値表現の展開)
-                    const variants = new Set([
-                        target,
-                        decodeEnt(target),
-                        encodeEnt(target),
-                        decodeEnt(decodeEnt(target))
-                    ]);
-
-                    let bestMatch = null;
-                    let totalFound = 0;
-                    let bestMatchWasTrimmed = false;
-
-                    // 1. 完全一致スキャン
-                    for (const cand of variants) {
-                        const occurrences = countOccurrences(code, cand);
-                        if (occurrences > 0) {
-                            totalFound += occurrences;
-                            if (!bestMatch) bestMatch = cand;
-                        }
-                    }
-
-                    // 2. ヒットなしならTrim一致スキャン
-                    if (totalFound === 0) {
-                        const variantsTrim = new Set();
-                        for (const v of variants) {
-                            const trimmed = v.trim();
-                            if (trimmed) variantsTrim.add(trimmed);
-                        }
-
-                        for (const cand of variantsTrim) {
-                            const occurrences = countOccurrences(code, cand);
-                            if (occurrences > 0) {
-                                totalFound += occurrences;
-                                if (!bestMatch) {
-                                    bestMatch = cand;
-                                    bestMatchWasTrimmed = true;
-                                }
-                            }
-                        }
-                    }
+                    // LF正規化後の完全一致だけを許可する。
+                    // trimやHTMLエンティティ変換は別箇所への誤適用を招くため自動では行わない。
+                    const totalFound = countOccurrences(code, target);
 
                     if (totalFound === 0) {
-                        const replacementFound = countOccurrences(code, replacement);
-                        if (replacementFound === 1 && replacement.length >= 30) {
-                            alreadyAppliedFixes.push({ reason: "afterが既に1箇所だけ存在するため適用済みと判断", fix });
-                            continue;
-                        }
-
-                        if (replacementFound > 0) {
-                            failedFixes.push({
-                                reason: replacement.length < 30
-                                    ? `afterは既に${replacementFound}箇所存在しますが、30文字未満のため適用済み判定せず未適用`
-                                    : `afterが既に${replacementFound}箇所存在するため、誤判定防止のため未適用`,
-                                fix
-                            });
-                            continue;
-                        }
-
                         failedFixes.push({
-                            reason: "対象コードが見つかりません",
+                            reason: "対象コードが見つかりません。afterの存在だけでは適用済みと判断しません",
                             fix
                         });
                         continue;
@@ -2491,18 +2647,9 @@ ${currentCode}
                         continue;
                     }
 
-                    // replaceテキストの形式合わせ
-                    if (bestMatch) {
-                        if (bestMatch === decodeEnt(target)) replacement = decodeEnt(replacement);
-                        else if (bestMatch === encodeEnt(target)) replacement = encodeEnt(replacement);
-                        else if (bestMatch === decodeEnt(decodeEnt(target))) replacement = decodeEnt(decodeEnt(replacement));
-
-                        if (bestMatchWasTrimmed) replacement = replacement.trim();
-
-                                                // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
-                        code = code.replace(bestMatch, () => replacement);
-                        appliedFixes.push(fix);
-                    }
+                                            // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
+                    code = code.replace(target, () => replacement);
+                    appliedFixes.push(fix);
                 }
 
                 if (appliedFixes.length > 0) {
@@ -2526,8 +2673,8 @@ ${currentCode}
 
                     displayFixError(`${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
                     displayFixRecovery(failedFixes, appliedFixes.length, alreadyAppliedFixes.length);
-                    failedFixes.forEach(item => {
-                        recordDevLog('reflect_failed', 'failed', item.reason || 'JSON反映失敗', resultSummary);
+                    failedFixes.forEach((item, itemIndex) => {
+                        recordDevLog(itemIndex === 0 ? 'reflect_failed' : 'reflect_failed_item', 'failed', item.reason || 'JSON反映失敗', resultSummary);
                     });
                     showToast(resultSummary);
                     return false;
@@ -2900,7 +3047,15 @@ nextBtn.onclick=nextStep;
         }
 
                 // --- Save / Load Logic ---
-        function openSaveModal() {
+        async function openSaveModal() {
+            try {
+                await ensureAppRecordIdInitialized();
+            } catch (error) {
+                console.error("保存IDの初期化に失敗しました:", error);
+                showToast("保存準備に失敗しました");
+                return;
+            }
+
             document.getElementById('save-modal').style.display = 'flex';
             // 既存の名前があればそれを、なければ日時ベースのデフォルト名をセット
             if (currentAppName) {
@@ -2931,62 +3086,87 @@ nextBtn.onclick=nextStep;
                         }
                     };
                     req.onsuccess = (e) => resolve(e.target.result);
-                    req.onerror = (e) => reject(e);
+                    req.onerror = () => reject(req.error || new Error("IndexedDBを開けませんでした。"));
+                });
+            },
+            runTransaction: async (mode, operation) => {
+                const db = await idb.open();
+                return new Promise((resolve, reject) => {
+                    let result;
+                    let settled = false;
+
+                    const closeAndResolve = () => {
+                        if (settled) return;
+                        settled = true;
+                        db.close();
+                        resolve(result);
+                    };
+                    const closeAndReject = (error) => {
+                        if (settled) return;
+                        settled = true;
+                        db.close();
+                        reject(error || new Error("IndexedDB transaction failed"));
+                    };
+
+                    try {
+                        const tx = db.transaction([STORE_NAME], mode);
+                        const store = tx.objectStore(STORE_NAME);
+                        tx.oncomplete = closeAndResolve;
+                        tx.onerror = () => closeAndReject(tx.error);
+                        tx.onabort = () => closeAndReject(tx.error || new Error("IndexedDB transaction aborted"));
+                        operation(store, value => {
+                            result = value;
+                        });
+                    } catch (error) {
+                        closeAndReject(error);
+                    }
                 });
             },
             getAll: async () => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readonly');
-                    const req = tx.objectStore(STORE_NAME).getAll();
-                    req.onsuccess = () => resolve(req.result.reverse());
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readonly', (store, setResult) => {
+                    const req = store.getAll();
+                    req.onsuccess = () => setResult(req.result.reverse());
                 });
             },
             get: async (id) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readonly');
-                    const req = tx.objectStore(STORE_NAME).get(id);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readonly', (store, setResult) => {
+                    const req = store.get(id);
+                    req.onsuccess = () => setResult(req.result);
                 });
             },
             put: async (item) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readwrite');
-                    const req = tx.objectStore(STORE_NAME).put(item);
-                    req.onsuccess = () => resolve();
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readwrite', store => {
+                    store.put(item);
                 });
             },
             delete: async (id) => {
-                const db = await idb.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction([STORE_NAME], 'readwrite');
-                    const req = tx.objectStore(STORE_NAME).delete(id);
-                    req.onsuccess = () => resolve();
-                    req.onerror = () => reject(req.error);
+                return idb.runTransaction('readwrite', store => {
+                    store.delete(id);
                 });
             }
         };
 
                 async function saveToLibrary() {
-            const projectName = filenameInput.value || "Untitled";
-            const code = editor.getValue();
+            if (librarySaveBusy) {
+                showToast("保存処理中です");
+                return;
+            }
+
+            const projectNameAtSaveStart = filenameInput.value || "Untitled";
+            const codeAtSaveStart = editor.getValue();
+            const workspaceGenerationAtSaveStart = workspaceGeneration;
+            const pendingInstructionAtSaveStart = pendingAiInstruction;
            
-            if(!code.trim()) {
+            if(!codeAtSaveStart.trim()) {
                 showToast("保存するコードがありません");
                 closeModal('save-modal');
                 return;
             }
 
-            // 履歴の追加
-            if (pendingAiInstruction) {
+            const historyForSave = Array.isArray(currentAppHistory) ? [...currentAppHistory] : [];
+            if (pendingInstructionAtSaveStart) {
                 const ts = new Date().toLocaleString();
-                currentAppHistory.unshift(`[${ts}] ${pendingAiInstruction}`);
-                pendingAiInstruction = ""; // 消費
+                historyForSave.unshift(`[${ts}] ${pendingInstructionAtSaveStart}`);
             }
 
             const now = new Date();
@@ -2995,32 +3175,102 @@ nextBtn.onclick=nextStep;
             const dd = String(now.getDate()).padStart(2, '0');
             const hh = String(now.getHours()).padStart(2, '0');
             const min = String(now.getMinutes()).padStart(2, '0');
-            const versionSuffix = `${yyyy}${mm}${dd}${hh}${min}`;
-            const appName = `${projectName}_${versionSuffix}`;
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            const versionSuffix = `${yyyy}${mm}${dd}${hh}${min}${ss}`;
+            const appName = `${projectNameAtSaveStart}_${versionSuffix}`;
 
             const appData = {
-                id: Date.now(),
+                id: createAppRecordId(),
                 name: appName,
-                projectName: projectName,
-                code: code,
+                projectName: projectNameAtSaveStart,
+                code: codeAtSaveStart,
                 date: now.toLocaleString(),
-                history: currentAppHistory
+                history: historyForSave
             };
 
-                        try {
+                        setLibrarySaveBusy(true);
+            closeModal('save-modal');
+
+            try {
                                 await idb.put(appData);
-                await deleteEditorDraft();
-                showToast(`「${appName}」を保存しました`);
-                // 保存成功したら状態を更新
-                currentAppName = projectName;
+
+                if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                    recordDevLog('save_app', 'success', 'workspace_changed', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                    return;
+                }
+
+                const pendingInstructionUnchangedAtCommit =
+                    isPendingAiInstructionUnchanged(pendingInstructionAtSaveStart);
+                const saveSnapshotStillCurrent =
+                    isEditorCodeUnchanged(codeAtSaveStart)
+                    && pendingInstructionUnchangedAtCommit;
+
+                currentAppHistory = historyForSave;
+                if (pendingInstructionUnchangedAtCommit) {
+                    pendingAiInstruction = "";
+                }
+                currentAppName = projectNameAtSaveStart;
                 appNameDisplay.textContent = appName;
-                setSaveStatusButtonSaved();
+
+                if (saveSnapshotStillCurrent) {
+                    editorDraftDirty = false;
+                    const draftDeleted = await deleteEditorDraft();
+
+                    if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                        recordDevLog('save_app', 'success', 'workspace_changed_after_cleanup', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                        return;
+                    }
+
+                    const stateChangedDuringCleanup =
+                        !isEditorCodeUnchanged(codeAtSaveStart)
+                        || !isPendingAiInstructionUnchanged("");
+
+                    if (stateChangedDuringCleanup) {
+                        editorDraftDirty = true;
+                        resetSaveStatusButton();
+                        const draftSaved = await saveEditorDraft();
+
+                        if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                            recordDevLog('save_app', 'success', 'workspace_changed_after_draft_save', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                            return;
+                        }
+
+                        syncRunBarState();
+                        showToast(draftSaved
+                            ? `「${appName}」を保存しました（保存後の変更は未保存です）`
+                            : `「${appName}」を保存しましたが、保存後の変更をドラフト保存できませんでした`);
+                        recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:false`);
+                        return;
+                    }
+
+                    setSaveStatusButtonSaved();
+                    syncRunBarState();
+                    showToast(draftDeleted
+                        ? `「${appName}」を保存しました`
+                        : `「${appName}」を保存しましたが、旧ドラフトの整理に失敗しました`);
+                    recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:true`);
+                    return;
+                }
+
+                editorDraftDirty = true;
+                resetSaveStatusButton();
+                const draftSaved = await saveEditorDraft();
+
+                if (!isCurrentWorkspaceGeneration(workspaceGenerationAtSaveStart)) {
+                    recordDevLog('save_app', 'success', 'workspace_changed_after_draft_save', `targetProject:${projectNameAtSaveStart}, version:${appName}`);
+                    return;
+                }
+
                 syncRunBarState();
-                recordDevLog('save_app', 'success', '', `project:${projectName}, version:${appName}`);
+                showToast(draftSaved
+                    ? `「${appName}」を保存しました（保存後の変更は未保存です）`
+                    : `「${appName}」を保存しましたが、保存後の変更をドラフト保存できませんでした`);
+                recordDevLog('save_app', 'success', '', `project:${projectNameAtSaveStart}, version:${appName}, currentMatches:false`);
             } catch (e) {
                 showToast("保存エラー: " + e.message);
+            } finally {
+                setLibrarySaveBusy(false);
             }
-            closeModal('save-modal');
         }
 
                                 async function downloadHTML() {
@@ -3034,8 +3284,8 @@ nextBtn.onclick=nextStep;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            await deleteEditorDraft();
+            // iOS Safariがダウンロード処理でBlob URLを参照し終える前に解放しない。
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
             closeModal('save-modal');
         }
 
@@ -3217,7 +3467,12 @@ nextBtn.onclick=nextStep;
 
         function normalizeGitHubToken(value) {
             return String(value ?? "")
-                .replace(/[\s\u200B-\u200D\uFEFF]+/g, "");
+                .normalize("NFKC")
+                .replace(/[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]+/g, "");
+        }
+
+        function isValidGitHubTokenHeaderValue(value) {
+            return /^[\x21-\x7E]+$/.test(String(value || ""));
         }
 
         function updateGitHubSessionToken(value) {
@@ -3262,10 +3517,12 @@ nextBtn.onclick=nextStep;
             const submitButton = document.getElementById('github-publish-submit');
             const cancelButton = document.getElementById('github-publish-cancel');
             if (submitButton) {
-                submitButton.disabled = githubPublishBusy || githubPublishState.pwa.iconImageLoading;
+                const pwaIconBusy = githubPublishState.mode === "pwa"
+                    && githubPublishState.pwa.iconImageLoading;
+                submitButton.disabled = githubPublishBusy || pwaIconBusy;
                 submitButton.textContent = githubPublishBusy
                     ? "公開中..."
-                    : (githubPublishState.pwa.iconImageLoading ? "アイコン読込中..." : "公開する");
+                    : (pwaIconBusy ? "アイコン読込中..." : "公開する");
             }
             if (cancelButton) cancelButton.disabled = githubPublishBusy;
             renderPwaIconPreview();
@@ -3313,6 +3570,9 @@ nextBtn.onclick=nextStep;
             }
             if (!options.token) {
                 throw createPublishValidationError("Personal Access Tokenを入力してください。");
+            }
+            if (!isValidGitHubTokenHeaderValue(options.token)) {
+                throw createPublishValidationError("Personal Access Tokenに全角文字または使用できない文字が含まれています。トークンをコピーし直してください。");
             }
             if (options.mode === "html") {
                 if (!options.htmlFileName) {
@@ -3402,7 +3662,6 @@ nextBtn.onclick=nextStep;
                     ? await publishPwaToGitHub(options)
                     : await publishSingleHtmlToGitHub(options);
 
-                await deleteEditorDraft();
                 if (options.mode === "pwa") {
                     recordDevLog('github_publish_pwa', 'success', '', `folder:${options.pwa.folderName}, files:5`);
                 } else {
@@ -3418,11 +3677,17 @@ nextBtn.onclick=nextStep;
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
 
-                const isApiError = error && error.publishErrorType === "api";
-                if (isApiError) {
-                    recordDevLog('github_publish_api', 'failed', `status:${error.status || "unknown"}`, `mode:${options.mode}`);
+                const isGitHubTransportError = error
+                    && (error.publishErrorType === "api" || error.publishErrorType === "network");
+                if (isGitHubTransportError) {
+                    recordDevLog(
+                        'github_publish_api',
+                        'failed',
+                        `${error.publishErrorType}:${error.status ?? "unknown"}`,
+                        `mode:${options.mode}, msg:${String(error?.message || "").slice(0, 150)}`
+                    );
                 } else {
-                    recordDevLog('github_publish_validation', 'failed', error?.publishErrorType || 'build', `mode:${options.mode}`);
+                    recordDevLog('github_publish_validation', 'failed', error?.publishErrorType || 'build', `mode:${options.mode}, msg:${String(error?.message || "").slice(0, 150)}`);
                 }
 
                 setGitHubPublishProgress(error?.message || "公開に失敗しました。", true);
@@ -3483,7 +3748,19 @@ nextBtn.onclick=nextStep;
                 throw createPublishValidationError("GitHubリポジトリのdefault_branchを取得できませんでした。");
             }
 
-            const initialHeadSha = await getGitHubBranchHead(options.repo, branch, options.token);
+            setGitHubPublishProgress(`branch「${branch}」のHEADを取得しています...`);
+            let initialHeadSha;
+            try {
+                initialHeadSha = await getGitHubBranchHead(options.repo, branch, options.token);
+            } catch (error) {
+                const isEmptyRepo = error && error.publishErrorType === "api"
+                    && (error.status === 409 || error.status === 404);
+                if (!isEmptyRepo) throw error;
+                // 空リポジトリ(初回コミットなし)ではGit Data API(blob/tree/commit/ref)が
+                // すべて409を返すため、初回だけContents APIで5ファイルを順次コミットする。
+                return publishPwaWithContentsApi(options, bundle);
+            }
+            setGitHubPublishProgress("HEADのcommit情報を取得しています...");
             const commitInfo = await githubApiRequest(
                 `${getGitHubRepoApiPath(options.repo)}/git/commits/${encodeURIComponent(initialHeadSha)}`,
                 { method: "GET" },
@@ -3494,24 +3771,38 @@ nextBtn.onclick=nextStep;
                 throw createPublishValidationError("現在のGit tree SHAを取得できませんでした。");
             }
 
-            setGitHubPublishProgress(`PWAファイルをGit Blobへ変換しています... (0/${bundle.files.length})`);
-            const blobFiles = [];
+            setGitHubPublishProgress(`PWAファイルをGit tree用データへ変換しています... (0/${bundle.files.length})`);
+            const treeEntries = [];
+            let uploadedBlobCount = 0;
             for (let index = 0; index < bundle.files.length; index++) {
                 const file = bundle.files[index];
-                const encoding = file.type === "binary" ? "base64" : "utf-8";
-                const content = file.type === "binary" ? file.base64 : file.content;
-                const blobSha = await createGitHubBlob(options.repo, content, encoding, options.token);
-                blobFiles.push({
+                const entry = {
                     path: file.path,
                     mode: "100644",
-                    type: "blob",
-                    sha: blobSha
-                });
-                setGitHubPublishProgress(`PWAファイルをGit Blobへ変換しています... (${index + 1}/${bundle.files.length})`);
+                    type: "blob"
+                };
+                const textContent = file.type === "text" ? String(file.content || "") : "";
+                const canInlineText = file.type === "text"
+                    && new TextEncoder().encode(textContent).length <= 1000000;
+
+                if (canInlineText) {
+                    // Create a treeのcontentへ直接渡し、テキスト3ファイルの個別Blob API呼び出しを省く。
+                    entry.content = textContent;
+                } else {
+                    const encoding = file.type === "binary" ? "base64" : "utf-8";
+                    const content = file.type === "binary" ? file.base64 : textContent;
+                    entry.sha = await createGitHubBlob(options.repo, content, encoding, options.token);
+                    uploadedBlobCount++;
+                }
+
+                treeEntries.push(entry);
+                setGitHubPublishProgress(
+                    `PWAファイルをGit tree用データへ変換しています... (${index + 1}/${bundle.files.length})\nAPIへ個別送信したBlob: ${uploadedBlobCount}件`
+                );
             }
 
             setGitHubPublishProgress("新しいGit treeを作成しています...");
-            const treeSha = await createGitHubTree(options.repo, baseTreeSha, blobFiles, options.token);
+            const treeSha = await createGitHubTree(options.repo, baseTreeSha, treeEntries, options.token);
 
             setGitHubPublishProgress("PWA公開コミットを作成しています...");
             const commitSha = await createGitHubCommit(
@@ -3537,6 +3828,45 @@ nextBtn.onclick=nextStep;
                 githubUrl: `https://github.com/${options.repo}/commit/${commitSha}`,
                 message: "PWAの5ファイルを1コミットで公開しました。",
                 note: "GitHubへの公開は完了しました。GitHub Pagesが有効でない場合は、リポジトリ設定のPagesから公開元を設定してください。"
+            };
+        }
+
+        // 空リポジトリへの初回公開用フォールバック。
+        // Git Data APIが使えないため、Contents APIで5ファイルを順次コミットする(5コミット)。
+        // 2回目以降の公開は、従来どおりGit Data APIの1コミット経路へ自動的に戻る。
+        async function publishPwaWithContentsApi(options, bundle) {
+            for (let index = 0; index < bundle.files.length; index++) {
+                const file = bundle.files[index];
+                setGitHubPublishProgress(`空リポジトリのため初回はContents APIで公開しています... (${index + 1}/${bundle.files.length})`);
+
+                const existing = await githubApiRequest(
+                    `${getGitHubRepoApiPath(options.repo)}/contents/${encodeGitHubPath(file.path)}`,
+                    { method: "GET", allowStatuses: [404] },
+                    options.token
+                );
+
+                const body = {
+                    message: `Publish ${file.path} via AppStudioMobile`,
+                    content: file.type === "binary" ? file.base64 : utf8ToBase64(file.content)
+                };
+                if (existing && existing.sha) body.sha = existing.sha;
+
+                await githubApiRequest(
+                    `${getGitHubRepoApiPath(options.repo)}/contents/${encodeGitHubPath(file.path)}`,
+                    {
+                        method: "PUT",
+                        body: JSON.stringify(body)
+                    },
+                    options.token
+                );
+            }
+
+            const [username, repository] = options.repo.split("/");
+            return {
+                publicUrl: `https://${username}.github.io/${repository}/${bundle.rootPath}/`,
+                githubUrl: `https://github.com/${options.repo}/tree/HEAD/${encodeGitHubPath(bundle.rootPath)}`,
+                message: "空リポジトリだったため、PWAの5ファイルをContents APIで公開しました(5コミット)。",
+                note: "次回以降の公開は1コミットで反映されます。GitHub Pagesが有効でない場合は、リポジトリ設定のPagesから公開元を設定してください。"
             };
         }
 
@@ -3769,7 +4099,7 @@ nextBtn.onclick=nextStep;
                 "navigator",
                 "\\s*\\.\\s*",
                 "serviceWorker",
-                "\\s*\\.\\s*",
+                "\\s*(?:\\?\\.\\s*|\\.\\s*)",
                 "register",
                 "\\s*\\("
             ].join(""), "g");
@@ -3839,11 +4169,10 @@ ${scriptEnd}`;
 
             let published = replacePwaMarkedRange(source, headStart, headEnd, headBlock);
             if (published === null) {
-                const headClose = published === null ? source.match(/<\/head\s*>/i) : null;
-                if (!headClose) {
+                const headPosition = findHtmlClosingTagOutsideRawText(source, "head");
+                if (headPosition === -1) {
                     throw createPublishValidationError("PWA公開には終了headタグが必要です。元HTMLを修正してから再実行してください。");
                 }
-                const headPosition = headClose.index;
                 published = source.slice(0, headPosition) + headBlock + "\n" + source.slice(headPosition);
             }
 
@@ -4062,7 +4391,13 @@ self.addEventListener("fetch", function (event) {
             const hasPreview = Boolean(githubPublishState.pwa.hasCustomIcon && githubPublishState.pwa.iconImagePreviewUrl);
 
             preview.style.display = hasPreview ? "block" : "none";
-            preview.src = hasPreview ? githubPublishState.pwa.iconImagePreviewUrl : "";
+            // src="" はベースURL(=このページ自体)を画像として読み込もうとし、
+            // Resource load errorの原因になるため、未使用時は属性ごと外す。
+            if (hasPreview) {
+                preview.src = githubPublishState.pwa.iconImagePreviewUrl;
+            } else {
+                preview.removeAttribute("src");
+            }
             placeholder.style.display = hasPreview ? "none" : "flex";
             placeholder.textContent = loading ? "画像を読み込み中..." : (error ? "画像を読み込めません" : "画像は指定されていません");
             status.textContent = loading
@@ -4486,6 +4821,159 @@ self.addEventListener("fetch", function (event) {
             return updatedHeadSha;
         }
 
+        function waitForGitHubRetry(delayMs) {
+            return new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        function canRetryGitHubRequest(method) {
+            // GETは安全に再試行できる。Gitオブジェクト作成POSTは重複してもbranchへ未反映で、
+            // PATCHは同じcommit SHAへの更新なので再試行可能。
+            // Contents APIのPUTは、応答消失時に実際は成功済みの可能性があるため自動再試行しない。
+            return method === "GET" || method === "POST" || method === "PATCH";
+        }
+
+        function requestGitHubApiWithXhr(apiPath, requestOptions = {}) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                const method = String(requestOptions.method || "GET").toUpperCase();
+                const url = `https://api.github.com${apiPath}`;
+
+                try {
+                    xhr.open(method, url, true);
+                    xhr.timeout = 30000;
+
+                    const headers = requestOptions.headers;
+                    const headerEntries = typeof Headers !== "undefined" && headers instanceof Headers
+                        ? Array.from(headers.entries())
+                        : Object.entries(headers || {});
+
+                    headerEntries.forEach(([name, value]) => {
+                        if (value !== undefined && value !== null) {
+                            xhr.setRequestHeader(String(name), String(value));
+                        }
+                    });
+                } catch (error) {
+                    reject(error);
+                    return;
+                }
+
+                xhr.onload = () => {
+                    const status = Number(xhr.status || 0);
+                    resolve({
+                        status,
+                        statusText: String(xhr.statusText || ""),
+                        ok: status >= 200 && status < 300,
+                        text: async () => String(xhr.responseText || "")
+                    });
+                };
+
+                xhr.onerror = () => reject(new TypeError("XMLHttpRequest network error"));
+                xhr.ontimeout = () => reject(new TypeError("XMLHttpRequest timeout"));
+                xhr.onabort = () => reject(new TypeError("XMLHttpRequest aborted"));
+
+                try {
+                    xhr.send(requestOptions.body ?? null);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        }
+
+        async function probeGitHubApiReachability() {
+            try {
+                // 認証ヘッダーやレスポンス読取りを伴わない通信で、
+                // api.github.comへの接続自体が実行環境から許可されているかだけを調べる。
+                await fetch(`https://api.github.com/rate_limit?appstudio_probe=${Date.now()}`, {
+                    method: "GET",
+                    mode: "no-cors",
+                    cache: "no-store"
+                });
+                return true;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function describeGitHubExecutionEnvironment() {
+            let embedded = false;
+            try {
+                embedded = window.top !== window.self;
+            } catch (error) {
+                embedded = true;
+            }
+
+            const protocol = String(location.protocol || "不明");
+            const origin = String(location.origin || "null");
+            return `実行環境: protocol=${protocol}, origin=${origin}, embedded=${embedded ? "yes" : "no"}`;
+        }
+
+        async function fetchGitHubApiWithRetry(apiPath, fetchOptions) {
+            const method = String(fetchOptions.method || "GET").toUpperCase();
+            const maxAttempts = canRetryGitHubRequest(method) ? 3 : 1;
+            let lastNetworkError = null;
+            let xhrError = null;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    const response = await fetch(`https://api.github.com${apiPath}`, fetchOptions);
+
+                    const retryableStatus = response.status === 429 || response.status >= 500;
+                    if (retryableStatus && attempt < maxAttempts) {
+                        setGitHubPublishProgress(
+                            `GitHub APIが一時エラーを返しました。再試行しています... (${attempt + 1}/${maxAttempts})`
+                        );
+                        await waitForGitHubRetry(700 * attempt);
+                        continue;
+                    }
+
+                    return response;
+                } catch (error) {
+                    lastNetworkError = error;
+
+                    // WebKitのfetch経路だけが失敗している場合に備え、最初の失敗時は
+                    // 同じGitHub API要求をXMLHttpRequestでも1回だけ試す。
+                    if (attempt === 1) {
+                        setGitHubPublishProgress("fetch通信に失敗しました。別の通信方式で再接続しています...");
+                        try {
+                            return await requestGitHubApiWithXhr(apiPath, fetchOptions);
+                        } catch (fallbackError) {
+                            xhrError = fallbackError;
+                        }
+                    }
+
+                    if (attempt >= maxAttempts) break;
+
+                    setGitHubPublishProgress(
+                        `GitHub通信を再試行しています... (${attempt + 1}/${maxAttempts})`
+                    );
+                    await waitForGitHubRetry(700 * attempt);
+                }
+            }
+
+            setGitHubPublishProgress("GitHubへの通信経路を診断しています...");
+            const apiReachable = await probeGitHubApiReachability();
+            const environment = describeGitHubExecutionEnvironment();
+            const fetchMessage = String(lastNetworkError?.message || "Load failed");
+            const xhrMessage = String(xhrError?.message || "XHRも接続できませんでした");
+
+            const diagnosis = apiReachable
+                ? "GitHubへの通常通信は可能ですが、Authorization付きのAPI通信が現在のブラウザまたは表示環境で遮断されています。埋め込みプレビューやアプリ内ブラウザではなく、Safariの通常タブ上のHTTPSページとしてAppStudioを開いてください。"
+                : "api.github.comへの通信自体が現在の実行環境で遮断されています。ホスト側のContent Security Policy、アプリ内ブラウザ、VPN、DNSフィルタ、コンテンツブロッカーはJavaScriptから回避できません。Safariの通常タブ上のHTTPSページとしてAppStudioを開いてください。";
+
+            const error = new Error(
+                `GitHub APIへ接続できませんでした。\n[対象: ${apiPath}]\n`
+                + `${diagnosis}\n`
+                + `${environment}\n`
+                + `fetch: ${fetchMessage}\n`
+                + `XMLHttpRequest: ${xhrMessage}`
+            );
+            error.publishErrorType = "network";
+            error.status = 0;
+            error.apiPath = apiPath;
+            error.githubApiReachable = apiReachable;
+            throw error;
+        }
+
         async function githubApiRequest(apiPath, options = {}, token = sessionGhToken) {
             const {
                 allowStatuses = [],
@@ -4493,15 +4981,29 @@ self.addEventListener("fetch", function (event) {
                 ...fetchOptions
             } = options;
 
-            const response = await fetch(`https://api.github.com${apiPath}`, {
+            const normalizedToken = normalizeGitHubToken(token);
+            if (!normalizedToken) {
+                throw createPublishValidationError("Personal Access Tokenが空です。");
+            }
+            if (!isValidGitHubTokenHeaderValue(normalizedToken)) {
+                throw createPublishValidationError("Personal Access TokenをHTTPヘッダーへ設定できません。全角文字や不可視文字が含まれていないか確認してください。");
+            }
+
+            // GitHubのブラウザ向けCORS preflightとの互換性を優先する。
+            // X-GitHub-Api-Versionは送らなくても2022-11-28が既定値になるため、
+            // 不要な非単純ヘッダーを増やさない。Content-Typeもbodyがある要求だけに付ける。
+            const requestHeaders = {
+                "Authorization": `Bearer ${normalizedToken}`,
+                "Accept": "application/vnd.github+json",
+                ...extraHeaders
+            };
+            if (fetchOptions.body !== undefined && fetchOptions.body !== null) {
+                requestHeaders["Content-Type"] = "application/json";
+            }
+
+            const response = await fetchGitHubApiWithRetry(apiPath, {
                 ...fetchOptions,
-                headers: {
-                    "Authorization": `Bearer ${token}`,
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "Content-Type": "application/json",
-                    ...extraHeaders
-                }
+                headers: requestHeaders
             });
 
             const responseText = await response.text();
@@ -4519,11 +5021,12 @@ self.addEventListener("fetch", function (event) {
                 const statusGuide = {
                     403: "権限不足、API制限、またはトークンの許可範囲を確認してください。",
                     404: "リポジトリ、branch、または対象パスが見つかりません。",
-                    409: "GitHub側の状態競合が発生しました。",
-                    422: "GitHubが更新内容を受理できませんでした。branch競合や入力値を確認してください。"
+                    409: "GitHub側の状態競合、またはリポジトリが空(初回コミットなし)の可能性があります。",
+                    422: "GitHubが更新内容を受理できませんでした。branch競合や入力値を確認してください。",
+                    429: "GitHub APIの呼び出し上限または一時的なレート制限です。少し時間を空けて再実行してください。"
                 };
                 const githubMessage = String(data?.message || response.statusText || "GitHub API error");
-                const error = new Error(`GitHub API ${response.status}: ${githubMessage}${statusGuide[response.status] ? `\n${statusGuide[response.status]}` : ""}`);
+                const error = new Error(`GitHub API ${response.status}: ${githubMessage}\n[対象: ${apiPath}]${statusGuide[response.status] ? `\n${statusGuide[response.status]}` : ""}`);
                 error.publishErrorType = "api";
                 error.status = response.status;
                 error.githubMessage = githubMessage;
@@ -4741,11 +5244,33 @@ self.addEventListener("fetch", function (event) {
         }
 
                                                                 async function loadApp(id) {
-            const app = await idb.get(id);
-            if(app) {
-                if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
-                suppressDraftSave = true;
+            const requestId = ++latestLoadRequestId;
+            let app;
+
+            try {
+                app = await idb.get(id);
+            } catch (error) {
+                console.error("アプリの読み込みに失敗しました:", error);
+                if (requestId === latestLoadRequestId) {
+                    showToast("アプリの読み込みに失敗しました");
+                }
+                return;
+            }
+
+            if (requestId !== latestLoadRequestId) return;
+            if (!app) {
+                showToast("読み込むアプリが見つかりませんでした");
+                return;
+            }
+
+            if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
+            if (requestId !== latestLoadRequestId) return;
+
+            const appliedWorkspaceGeneration = advanceWorkspaceGeneration();
+            beginDraftSaveSuppression();
+            try {
                 editor.setValue(app.code);
+                editorDraftDirty = false;
                 // メタ情報復元
                                 currentAppName = app.projectName || app.name;
                 appNameDisplay.textContent = app.name;
@@ -4754,14 +5279,20 @@ self.addEventListener("fetch", function (event) {
                 pendingAiInstruction = "";
                 resetSaveStatusButton();
                 syncRunBarState();
-                await deleteEditorDraft();
-                setTimeout(() => {
-                    suppressDraftSave = false;
-                }, 0);
-
-                switchTab('run');
-                showToast(`「${app.name}」を読み込みました`);
+            } finally {
+                endDraftSaveSuppression();
             }
+
+            const deleted = await deleteEditorDraft();
+            if (requestId !== latestLoadRequestId
+                || !isCurrentWorkspaceGeneration(appliedWorkspaceGeneration)) {
+                return;
+            }
+
+            switchTab('run');
+            showToast(deleted
+                ? `「${app.name}」を読み込みました`
+                : `「${app.name}」を読み込みましたが、旧ドラフトの整理に失敗しました`);
         }
 
         async function showHistoryModal(id) {
@@ -4800,7 +5331,9 @@ self.addEventListener("fetch", function (event) {
                 const fileName = app.name.endsWith('.html') ? app.name : app.name + '.html';
                 const file = new File([blob], fileName, { type: 'text/html' });
 
-                if (navigator.share && navigator.canShare({ files: [file] })) {
+                if (navigator.share
+                    && typeof navigator.canShare === "function"
+                    && navigator.canShare({ files: [file] })) {
                     await navigator.share({
                         files: [file],
                         title: app.name,
@@ -5257,7 +5790,18 @@ self.addEventListener("fetch", function (event) {
 
         function clearDevStatsLogs() {
             if (!confirm("開発統計ログをすべて削除しますか？\nこの操作は元に戻せません。")) return;
-            saveDevLogs([]);
+
+            if (iframeErrorStatsFlushTimer) {
+                clearTimeout(iframeErrorStatsFlushTimer);
+                iframeErrorStatsFlushTimer = null;
+            }
+            iframeErrorStatsBuffer = {};
+
+            if (!saveDevLogs([])) {
+                showToast("開発統計ログをリセットできませんでした");
+                return;
+            }
+
             renderDevStatsModal();
             showToast("開発統計ログをリセットしました");
         }
@@ -5305,7 +5849,10 @@ self.addEventListener("fetch", function (event) {
 
                 // Initialize
         updateStats();
-        restoreEditorDraftOnStartup().then(() => {
+        Promise.allSettled([
+            ensureAppRecordIdInitialized(),
+            restoreEditorDraftOnStartup()
+        ]).then(() => {
             syncRunBarState();
             reloadFrame();
         });
