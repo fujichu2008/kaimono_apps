@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-gravity-core-7ff256e45a12d2a87681";
+const CACHE_NAME = "appstudio-pwa-gravity-core-f39d2bd6a9b219fbde84";
 const CACHE_PREFIX = "appstudio-pwa-gravity-core-";
 const PRECACHE_URLS = [
     "./",
