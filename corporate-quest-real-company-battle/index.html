@@ -3324,6 +3324,19 @@ function atbLoop(now){
   }
   if(S.inputLock)return;
 
+  /* 敵ATBが85に達した時点で判断を一度だけ確定し、行動開始まで表示する */
+  if(B.e.atb>=85&&B.e.intent===null){
+    B.e.intent=cpuDecide(B.e,B.p);
+    renderBuffs($("eBuffs"),B.e);
+    if(B.e.intent&&B.e.intent.type==="big"){
+      queueBattleNarration(
+        "敵の大技インテント",
+        "相手が大技の構えに入った。ガードで受けるか、先に仕留めるか",
+        "danger",2400
+      );
+    }
+  }
+
   /* 同時に満タンになった場合も、手動プレイヤーのコマンド選択を優先する */
   if(B.p.atb>=100){
     if(S.auto){
@@ -3333,7 +3346,7 @@ function atbLoop(now){
   }
 
   if(B.e.atb>=100){
-    startATBAction(B.e,B.p,cpuDecide(B.e,B.p));
+    startATBAction(B.e,B.p,B.e.intent);
   }
 }
 
@@ -5681,7 +5694,8 @@ function mkFighter(co,side){
     base:Object.assign({},co.st),
     buffs:[],
     guarding:false, guardBonus:false,
-    atb:0,readyAt:0,
+    guardHits:0,preciseGuard:false,currentActionType:null,
+    atb:0,readyAt:0,intent:null,
     stun:0,summon:null,summonUsed:false,
     cds:{},
     stats:{dealt:0,maxHit:0,strats:{},guards:0,summons:0}};
@@ -5704,14 +5718,7 @@ function tickBuffs(f){
 const CTX={
   dealDamage(att,dfd,opt){
     opt=opt||{};
-    let attackMult=opt.mult||1;
-    if(att.justGuard){
-      attackMult*=1.6;
-      att.gauge=Math.min(100,att.gauge+20);
-      att.justGuard=false;
-      pushLog(att.side==="p"?"me":"en","ジャストガード反撃!");
-    }
-    const atk=eff(att,"atk")*attackMult;
+    const atk=eff(att,"atk")*(opt.mult||1);
     const tech=eff(att,"tech")*(opt.techScale!==undefined?opt.techScale:.3);
     const spd=opt.spdScale?eff(att,"spd")*opt.spdScale:0;
     let defv=eff(dfd,"def")*.4;
@@ -5723,12 +5730,41 @@ const CTX={
     type=Math.max(.78,Math.min(1.42,type));
     let dmg=((atk+tech+spd)*(0.9+Math.random()*0.2)-defv)*type+(opt.flat||0);
     dmg=Math.max(8,Math.round(dmg));
-    if(dfd.guarding)dmg=Math.max(4,Math.round(dmg*.35));
+    const guarded=!!dfd.guarding;
+    const preciseGuard=!!(
+      guarded&&
+      dfd.side==="p"&&
+      dfd.preciseGuard&&
+      att.currentActionType==="big"
+    );
+    if(guarded)dmg=Math.max(4,Math.round(dmg*(preciseGuard?.2:.35)));
     this.hurt(dfd,dmg);
+    if(guarded){
+      dfd.guardHits=Math.max(0,(dfd.guardHits||1)-1);
+      if(preciseGuard){
+        dfd.atb=Math.min(100,(dfd.atb||0)+25);
+        dfd.gauge=Math.min(100,dfd.gauge+20);
+        const arena=$("arena");
+        if(arena){
+          const cutin=document.createElement("div");
+          cutin.className="cutin";
+          cutin.textContent="READ GUARD!";
+          arena.appendChild(cutin);
+          setTimer(()=>cutin.remove(),1100);
+        }
+        arenaFlash("#4dc3ff");
+        SE.guard();
+        narrateBattle("preciseGuard",{actor:dfd,target:att});
+      }
+      if(dfd.guardHits<=0){
+        dfd.guarding=false;
+        dfd.preciseGuard=false;
+      }
+    }
     att.stats.dealt+=dmg;att.stats.maxHit=Math.max(att.stats.maxHit,dmg);
     att.gauge=Math.min(100,att.gauge+12);
     dfd.gauge=Math.min(100,dfd.gauge+BALANCE.defenderGaugeGain);
-    fxHit(dfd,dmg,dfd.guarding,type);
+    fxHit(dfd,dmg,guarded,type);
     return dmg;
   },
   hurt(f,n){f.hp=Math.max(0,f.hp-n);},
@@ -5954,6 +5990,11 @@ function startATBAction(self,foe,act){
   S.inputLock=true;
   closeAllOverlays();
   self.atb=0;self.readyAt=0;
+  self.currentActionType=act&&act.type==="skill"?"big":act&&act.type||null;
+  if(self.side==="e"){
+    self.intent=null;
+    renderBuffs($("eBuffs"),self);
+  }
   updateATBUI();
 
   const duration=actionDuration(act);
@@ -5963,6 +6004,8 @@ function startATBAction(self,foe,act){
       applyGuard(self);
     }else{
       self.guarding=false;
+      self.guardHits=0;
+      self.preciseGuard=false;
       execAction(self,foe,act);
     }
     renderBattle();
@@ -5973,6 +6016,7 @@ function startATBAction(self,foe,act){
     if(!S.battle||B.over)return;
     const allyActs=!!self.summon&&act.type!=="summon"&&foe.hp>0;
     if(allyActs){
+      self.currentActionType="summon";
       runSummonAlly(self,foe,CTX,true);
       renderBattle();
       checkKO();
@@ -5986,6 +6030,7 @@ function startATBAction(self,foe,act){
 function finishATBAction(self){
   const B=S.battle;
   if(!B||B.over)return;
+  self.currentActionType=null;
   tickBuffs(self);
   Object.keys(self.cds).forEach(k=>{if(self.cds[k]>0)self.cds[k]--;});
   B.turn++;
@@ -5996,7 +6041,18 @@ function finishATBAction(self){
 }
 function applyGuard(f){
   if(f.stun>0)return;
-  f.guarding=true;f.guardBonus=true;f.gauge=Math.min(100,f.gauge+20);
+  const B=S.battle;
+  const foe=B?(f.side==="p"?B.e:B.p):null;
+  f.guarding=true;
+  f.guardHits=1;
+  f.preciseGuard=!!(
+    f.side==="p"&&
+    foe&&
+    foe.intent&&
+    foe.intent.type==="big"&&
+    foe.atb>=85
+  );
+  f.guardBonus=true;f.gauge=Math.min(100,f.gauge+20);
   f.stats.guards++;fxGuard(f);
   pushLog(f.side==="p"?"me":"en",f.name+"は防御態勢。次の攻撃が強化される");
   narrateBattle("guard",{actor:f});
@@ -6044,17 +6100,6 @@ function execAction(self,foe,act){
   if(key==="mid"||key==="big"){
     const move=self.co[key],cost=move.cost;
     if(self.gauge<cost)return;
-    if(key==="big"&&foe.guarding){
-      foe.justGuard=true;
-      const cutin=document.createElement("div");
-      cutin.className="cutin";
-      cutin.textContent="JUST GUARD!";
-      $("arena").appendChild(cutin);
-      setTimer(()=>cutin.remove(),1100);
-      arenaFlash("#4dc3ff");
-      SE.guard();
-      narrateBattle("justGuard",{actor:foe,target:self});
-    }
     self.gauge-=cost;self.stats.strats[move.name]=(self.stats.strats[move.name]||0)+1;
     fxSkill(self,move.ic+" "+move.name,key==="big",move.name,key,move.narration);SE.skill();
     const logs=executeMove(self,foe,move,CTX,true);
@@ -6158,7 +6203,24 @@ function renderBuffs(el,f){
   if(f.guarding){const s=document.createElement("span");s.className="buff gd";s.textContent="🛡 GUARD";el.appendChild(s);}
   if(f.stun>0){const s=document.createElement("span");s.className="buff dn2";s.textContent=f.bound?"⛔ 営業停止・拘束中":"⛔ 行動不能";el.appendChild(s);}
   if(f.summon){const s=document.createElement("span");s.className="buff up";s.textContent=f.summon.ic+" 援軍"+f.summon.turns+"T";el.appendChild(s);}
-  if(f.gauge>=100&&f.side==="e"){const s=document.createElement("span");s.className="buff dn2";s.textContent="⚠ 大技チャージ";el.appendChild(s);}
+  if(f.gauge>=100&&f.side==="e"&&!f.intent){const s=document.createElement("span");s.className="buff dn2";s.textContent="⚠ 大技チャージ";el.appendChild(s);}
+  if(f.side==="e"&&f.intent){
+    const intentBadges={
+      attack:{text:"⚔ 攻撃準備",className:"buff"},
+      guard:{text:"🛡 防御準備",className:"buff"},
+      big:{text:"💥 大技チャージ",className:"buff dn2"},
+      mid:{text:"⚡ 中技準備",className:"buff"},
+      summon:{text:"🎩 召喚準備",className:"buff"},
+      strategy:{text:"📋 戦略行動",className:"buff"}
+    };
+    const badge=intentBadges[f.intent.type];
+    if(badge){
+      const s=document.createElement("span");
+      s.className=badge.className;
+      s.textContent=badge.text;
+      el.appendChild(s);
+    }
+  }
   const marketPower=marketAttrMultiplier(f.co.attr);
   if(marketPower>1.001){
     const s=document.createElement("span");s.className="buff up";
@@ -6323,10 +6385,10 @@ function narrateBattle(kind,data){
     return;
   }
 
-  if(kind==="justGuard"){
+  if(kind==="preciseGuard"){
     queueBattleNarration(
-      actorName+"のジャストガード",
-      actorName+"は大技の衝撃を見切って受け流した。蓄えた反発力が、次の一撃へ変わる。",
+      "敵の大技を完全に読んだ",
+      "大技の構えを見てから防御を合わせた。衝撃を受け流し、反撃の主導権を奪う",
       "gold",2200,true
     );
     return;
