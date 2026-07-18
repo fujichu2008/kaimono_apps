@@ -5700,9 +5700,27 @@ function mkFighter(co,side){
     cds:{},
     stats:{dealt:0,maxHit:0,strats:{},guards:0,summons:0}};
 }
-function addBuff(f,stat,mult,turns,label){
+function addBuff(f,stat,mult,turns,label,meta){
+  meta=meta||{};
+  const effectId=String(meta.effectId||"").slice(0,40);
+  const fresh=!!meta.fresh;
+  const existing=effectId?f.buffs.find(b=>b.effectId===effectId):null;
+  if(existing){
+    existing.stat=stat;
+    existing.mult=mult;
+    existing.turns=turns;
+    existing.label=label;
+    existing.fresh=fresh;
+    glSyncProtestFx(f);
+    return existing;
+  }
   f.buffs=f.buffs.filter(b=>!(b.stat===stat&&(b.mult>1)===(mult>1))); // 同系統は上書き
-  f.buffs.push({stat,mult,turns,label});
+  const buff={stat,mult,turns,label};
+  if(effectId)buff.effectId=effectId;
+  if(fresh)buff.fresh=true;
+  f.buffs.push(buff);
+  glSyncProtestFx(f);
+  return buff;
 }
 function eff(f,stat){
   let v=f.base[stat];
@@ -5710,8 +5728,109 @@ function eff(f,stat){
   return v;
 }
 function tickBuffs(f){
-  f.buffs.forEach(b=>b.turns--);
+  f.buffs.forEach(b=>{
+    if(b.fresh){
+      b.fresh=false;
+      return;
+    }
+    b.turns--;
+  });
   f.buffs=f.buffs.filter(b=>b.turns>0);
+  glSyncProtestFx(f);
+}
+let baseAtbRateForStun=null;
+let stunRecoveryRaf=0;
+let stunRecoveryLast=0;
+function isStunned(f){
+  return !!f&&Number(f.stun)>0;
+}
+function applyStun(f,turns){
+  if(!f)return false;
+  const amount=Math.max(1,Math.floor(Number(turns)||1));
+  f.stun=Math.max(Number(f.stun)||0,amount);
+  f.stunRecovery=0;
+  f.atb=0;
+  f.readyAt=0;
+  f.intent=null;
+  f.actionToken=(Number(f.actionToken)||0)+1;
+  const B=S.battle;
+  if(B&&!B.over&&(B.p===f||B.e===f)){
+    if(f.currentActionType){
+      f.currentActionType=null;
+      S.inputLock=false;
+    }
+    glSyncStunFx(f);
+    updateATBUI();
+    renderBattle();
+    startStunRecoveryLoop();
+  }
+  return true;
+}
+function clearStun(f){
+  if(!f)return;
+  f.stun=0;
+  f.stunRecovery=0;
+  f.atb=0;
+  f.readyAt=0;
+  if(f.bound){
+    f.bound=false;
+    glRemoveBind(f);
+  }
+  glSyncStunFx(f);
+  const B=S.battle;
+  if(B&&!B.over&&(B.p===f||B.e===f)){
+    pushLog("sys",f.name+"は行動不能から回復した");
+    updateATBUI();
+    renderBattle();
+  }
+}
+function updateStunRecovery(f,deltaTime){
+  if(!isStunned(f))return false;
+  f.atb=0;
+  f.readyAt=0;
+  const dt=Math.max(0,Number(deltaTime)||0);
+  const rate=typeof baseAtbRateForStun==="function"
+    ?Math.max(0,Number(baseAtbRateForStun(f))||0)
+    :0;
+  f.stunRecovery=(Number(f.stunRecovery)||0)+rate*dt;
+  while(f.stunRecovery>=100&&isStunned(f)){
+    f.stunRecovery-=100;
+    f.stun=Math.max(0,(Number(f.stun)||0)-1);
+  }
+  if(!isStunned(f)){
+    clearStun(f);
+    return false;
+  }
+  glSyncStunFx(f);
+  return true;
+}
+function stunRecoveryLoop(now){
+  stunRecoveryRaf=0;
+  const B=S.battle;
+  if(!B||B.over){
+    stunRecoveryLast=0;
+    return;
+  }
+  if(S.paused){
+    stunRecoveryLast=now;
+    stunRecoveryRaf=requestAnimationFrame(stunRecoveryLoop);
+    return;
+  }
+  const dt=stunRecoveryLast?Math.min(.05,(now-stunRecoveryLast)/1000):0;
+  stunRecoveryLast=now;
+  updateStunRecovery(B.p,dt);
+  updateStunRecovery(B.e,dt);
+  updateATBUI();
+  if(isStunned(B.p)||isStunned(B.e)){
+    stunRecoveryRaf=requestAnimationFrame(stunRecoveryLoop);
+  }else{
+    stunRecoveryLast=0;
+  }
+}
+function startStunRecoveryLoop(){
+  if(stunRecoveryRaf)return;
+  stunRecoveryLast=0;
+  stunRecoveryRaf=requestAnimationFrame(stunRecoveryLoop);
 }
 
 /* 戦闘計算: (攻×倍率 + 技×0.3[+速]) × 乱数0.9-1.1 − 防×0.4 ── 理解しやすさ優先 */
@@ -5770,16 +5889,18 @@ const CTX={
   hurt(f,n){f.hp=Math.max(0,f.hp-n);},
   heal(f,ratio){const before=f.hp,h=Math.round(f.maxHp*ratio);f.hp=Math.min(f.maxHp,f.hp+h);return f.hp-before;},
 };
+function playMoveVisual(self,foe,move){
+  if(!move)return;
+  const motionPower=move.power||(move.cost>=100?3:2);
+  /* デフォルト企業の大技は固有演出へ分岐。未登録(カスタム企業)や3D不可時は従来パターンへ退避 */
+  if(!(self.co&&self.co.big===move&&playUniqueBig(self.co,self,foe))){
+    playMotion(move.motion,self,foe,motionPower);
+  }
+}
 function executeMove(self,foe,move,ctx,visual){
   ctx=ctx||CTX;if(!move)return [];
   const logs=[];let total=0;
-  if(visual!==false){
-    const motionPower=move.power||(move.cost>=100?3:2);
-    /* デフォルト企業の大技は固有演出へ分岐。未登録(カスタム企業)や3D不可時は従来パターンへ退避 */
-    if(!(self.co&&self.co.big===move&&playUniqueBig(self.co,self,foe))){
-      playMotion(move.motion,self,foe,motionPower);
-    }
-  }
+  if(visual!==false)playMoveVisual(self,foe,move);
   (move.effects||[]).forEach(e=>{
     const target=e.target==="foe"?foe:self;
     if(e.kind==="damage"){const d=ctx.dealDamage(self,foe,e);total+=d;}
@@ -5813,7 +5934,10 @@ function executeMove(self,foe,move,ctx,visual){
     else if(e.kind==="buff"){addBuff(target,e.stat,e.mult,e.turns,e.label);}
     else if(e.kind==="stun"){
       const chance=foe.co.tier==="large"?(e.largeChance||e.chance):e.chance;
-      if(Math.random()<chance){foe.stun=Math.max(foe.stun,e.turns||1);logs.push(foe.name+"は行動不能");}
+      if(Math.random()<chance){
+        applyStun(foe,e.turns||1);
+        logs.push(foe.name+"は行動不能（ATB停止）");
+      }
     }
     else if(e.kind==="bind"){
       /* stunの拘束版: 命中時は相手を処分テープで物理的に縛るビジュアルへ変化 */
@@ -5829,6 +5953,120 @@ function executeMove(self,foe,move,ctx,visual){
   if(total)logs.unshift(foe.name+"へ "+total+" ダメージ");
   return logs;
 }
+SUMMONS.politician.damageScale=1.25;
+SUMMONS.politician.ultimateDamageScale=1.05;
+SUMMONS.jftc.damageScale=1.15;
+SUMMONS.jftc.ultimateDamageScale=1.05;
+
+const dealDamageBeforeGaugeControl=CTX.dealDamage;
+CTX.dealDamage=function(att,dfd,opt){
+  opt=opt||{};
+  const attackerGaugeBefore=Math.max(0,Number(att.gauge)||0);
+  const defenderGaugeBefore=Math.max(0,Number(dfd.gauge)||0);
+  const result=dealDamageBeforeGaugeControl.call(this,att,dfd,opt);
+
+  if(opt.attackerGaugeGain!==undefined){
+    const gain=Math.max(0,Number(opt.attackerGaugeGain)||0);
+    att.gauge=Math.min(100,attackerGaugeBefore+gain);
+  }
+  if(opt.defenderGaugeGain!==undefined){
+    const gain=Math.max(0,Number(opt.defenderGaugeGain)||0);
+    dfd.gauge=Math.min(100,defenderGaugeBefore+gain);
+  }
+  return result;
+};
+
+const COMPANY_MOVE_BALANCE={
+  mid:{damageScale:1.22,healScale:1.25,flatDamage:6,buffTurnBonus:1,spRefund:8,atbCut:0},
+  big:{damageScale:1.36,healScale:1.35,flatDamage:14,buffTurnBonus:1,spRefund:0,atbCut:18,minPierce:.18}
+};
+function companyMoveKind(self,move){
+  if(!self||!self.co||!move)return "";
+  if(move===self.co.mid)return "mid";
+  if(move===self.co.big||move===self.co.skill)return "big";
+  return "";
+}
+function companyMoveHasDamage(move){
+  return !!move&&Array.isArray(move.effects)&&move.effects.some(effect=>
+    effect&&["damage","riskDamage","multi"].includes(effect.kind)
+  );
+}
+function makeCompanyMoveContext(ctx,self,move){
+  const base=ctx||CTX;
+  const kind=companyMoveKind(self,move);
+  const balance=COMPANY_MOVE_BALANCE[kind];
+  if(!balance)return base;
+  let firstDamage=true;
+  const wrapped=Object.create(base);
+  wrapped.dealDamage=function(att,dfd,opt){
+    const adjusted=Object.assign({},opt||{});
+    const sourceMult=Number(adjusted.mult);
+    adjusted.mult=(Number.isFinite(sourceMult)?sourceMult:1)*balance.damageScale;
+    const sourceFlat=Number(adjusted.flat);
+    adjusted.flat=(Number.isFinite(sourceFlat)?sourceFlat:0)+balance.flatDamage;
+    if(kind==="big"){
+      const sourcePierce=Number(adjusted.pierce);
+      adjusted.pierce=Math.min(.85,Math.max(
+        Number.isFinite(sourcePierce)?sourcePierce:0,
+        balance.minPierce
+      ));
+    }
+    adjusted.attackerGaugeGain=firstDamage?(kind==="mid"?4:0):0;
+    adjusted.defenderGaugeGain=firstDamage?(kind==="mid"?8:10):0;
+    firstDamage=false;
+    return base.dealDamage.call(base,att,dfd,adjusted);
+  };
+  wrapped.heal=function(f,ratio){
+    const sourceRatio=Number(ratio);
+    const adjustedRatio=(Number.isFinite(sourceRatio)?sourceRatio:0)*balance.healScale;
+    return base.heal.call(base,f,adjustedRatio);
+  };
+  return wrapped;
+}
+const executeMoveBeforeCompanyBalance=executeMove;
+executeMove=function(self,foe,move,ctx,visual){
+  const kind=companyMoveKind(self,move);
+  const balance=COMPANY_MOVE_BALANCE[kind];
+  if(!balance){
+    return executeMoveBeforeCompanyBalance(self,foe,move,ctx,visual);
+  }
+
+  const previousBuffs=new Set([
+    ...(Array.isArray(self.buffs)?self.buffs:[]),
+    ...(Array.isArray(foe.buffs)?foe.buffs:[])
+  ]);
+  const balancedCtx=makeCompanyMoveContext(ctx,self,move);
+  const logs=executeMoveBeforeCompanyBalance(self,foe,move,balancedCtx,visual);
+  const addedBuffs=[
+    ...(Array.isArray(self.buffs)?self.buffs:[]),
+    ...(Array.isArray(foe.buffs)?foe.buffs:[])
+  ].filter(buff=>!previousBuffs.has(buff));
+
+  if(balance.buffTurnBonus>0&&addedBuffs.length){
+    addedBuffs.forEach(buff=>{
+      buff.turns=Math.max(1,Number(buff.turns)||1)+balance.buffTurnBonus;
+    });
+    logs.push("追加効果の継続 +"+balance.buffTurnBonus+"T");
+  }
+
+  if(balance.spRefund>0){
+    const before=Number(self.gauge)||0;
+    self.gauge=Math.min(100,before+balance.spRefund);
+    const refunded=Math.max(0,Math.round(self.gauge-before));
+    if(refunded>0)logs.push("戦術還元 SP+"+refunded);
+  }
+
+  if(balance.atbCut>0&&companyMoveHasDamage(move)&&foe.hp>0){
+    const before=Math.max(0,Number(foe.atb)||0);
+    foe.atb=Math.max(0,before-balance.atbCut);
+    foe.readyAt=0;
+    const reduced=Math.max(0,Math.round(before-foe.atb));
+    if(reduced>0)logs.push(foe.name+" ATB-"+reduced);
+  }
+
+  return logs;
+};
+
 function deploySummon(owner){
   if(owner.summonUsed||owner.gauge<60)return false;
   owner.gauge-=60;owner.summonUsed=true;owner.stats.summons++;
@@ -5844,6 +6082,21 @@ function deploySummon(owner){
   glSummonSpawn(owner);
   return true;
 }
+function makeSummonContext(ctx,damageScale){
+  const base=ctx||CTX;
+  const parsedScale=Number(damageScale);
+  const scale=Number.isFinite(parsedScale)?parsedScale:1;
+  return {
+    dealDamage(att,dfd,opt){
+      const scaledOpt=Object.assign({},opt||{});
+      const parsedMult=scaledOpt.mult===undefined?1:Number(scaledOpt.mult);
+      scaledOpt.mult=(Number.isFinite(parsedMult)?parsedMult:1)*scale;
+      return base.dealDamage.call(base,att,dfd,scaledOpt);
+    },
+    hurt(...args){return base.hurt.apply(base,args);},
+    heal(...args){return base.heal.apply(base,args);}
+  };
+}
 function runSummonAlly(owner,foe,ctx,visual){
   if(!owner.summon||owner.hp<=0||foe.hp<=0)return;
   const ally=owner.summon;
@@ -5853,8 +6106,11 @@ function runSummonAlly(owner,foe,ctx,visual){
   if(ally.id==="politician"&&summonDef.risk&&Math.random()<summonDef.risk.chance){
     const damage=Math.max(1,Math.round(owner.maxHp*summonDef.risk.damageRatio));
     ctx.hurt(owner,damage);
-    owner.stun=Math.max(owner.stun,summonDef.risk.stun||1);
-    owner.atb=0;
+    applyStun(owner,summonDef.risk.stun||1);
+    addBuff(owner,"atk",.78,3,"デモ隊・炎上",{
+      effectId:"protest",
+      fresh:true
+    });
     if(visual!==false){
       fxSkill(owner,"🔥 政治家炎上 / 抗議デモ発生",true,"政治家炎上 / 抗議デモ発生");
       playPoliticianBacklash(owner);
@@ -5879,8 +6135,12 @@ function runSummonAlly(owner,foe,ctx,visual){
   const ultimate=summonDef.ultimate;
   const isUltimate=!!ultimate&&Math.random()<(summonDef.ultimateChance||.08);
   const move=isUltimate?ultimate:ally.moves[Math.floor(Math.random()*ally.moves.length)];
+  const summonDamageScale=isUltimate
+    ?summonDef.ultimateDamageScale
+    :summonDef.damageScale;
+  const summonCtx=makeSummonContext(ctx,summonDamageScale);
   if(visual===false){
-    executeMove(owner,foe,move,ctx,false);
+    executeMove(owner,foe,move,summonCtx,false);
     ally.turns--;
     if(ally.turns<=0)owner.summon=null;
     return;
@@ -5893,7 +6153,7 @@ function runSummonAlly(owner,foe,ctx,visual){
     playSummonUltimateFx(ally.id,owner,foe,()=>{
       const B=S.battle;
       if(!B||B.over)return;
-      const logs=executeMove(owner,foe,move,CTX,true);
+      const logs=executeMove(owner,foe,move,summonCtx,true);
       logs.forEach(m=>pushLog(owner.side==="p"?"me":"en",ally.name+"【超必殺】: "+m));
       renderBattle();
       checkKO();
@@ -5905,7 +6165,7 @@ function runSummonAlly(owner,foe,ctx,visual){
       const B=S.battle;
       if(!B||B.over)return;
       playSummonMoveFx(move.name,owner,foe);
-      const logs=executeMove(owner,foe,move,CTX,true);
+      const logs=executeMove(owner,foe,move,summonCtx,true);
       arenaFlash(ally.id==="jftc"?"#dff9ff":"#ffe29a");
       camShake(1.15);
       logs.forEach(m=>pushLog(owner.side==="p"?"me":"en",ally.name+": "+m));
@@ -5984,13 +6244,35 @@ function actionDuration(act){
   if(act.type==="summon")return 2350;
   return 900;
 }
+function actionNeedsDeferredImpact(self,act){
+  if(!self||!act||self.stun>0)return false;
+  return ["attack","strategy","mid","big","skill"].includes(act.type);
+}
+function actionImpactDelay(self,act,duration){
+  const type=act&&act.type;
+  let delay=90;
+  if(type==="attack"||type==="strategy")delay=560;
+  else if(type==="mid")delay=800;
+  else if(type==="big"||type==="skill"){
+    /* 収録企業の固有大技は約2.3秒、カスタム企業の汎用大技は約1.1秒で着地する */
+    delay=self&&self.co&&!self.co.custom?2180:1080;
+  }
+  return Math.min(Math.max(90,duration-80),delay);
+}
 function startATBAction(self,foe,act){
   const B=S.battle;
-  if(!B||B.over||S.inputLock||S.paused||self.hp<=0||self.atb<100)return;
+  if(!B||B.over||S.inputLock||S.paused||self.hp<=0||self.atb<100||isStunned(self))return;
   S.inputLock=true;
   closeAllOverlays();
   self.atb=0;self.readyAt=0;
   self.currentActionType=act&&act.type==="skill"?"big":act&&act.type||null;
+  const actionToken=Number(self.actionToken)||0;
+  const actionValid=()=>
+    S.battle===B&&
+    !B.over&&
+    self.hp>0&&
+    !isStunned(self)&&
+    (Number(self.actionToken)||0)===actionToken;
   if(self.side==="e"){
     self.intent=null;
     renderBuffs($("eBuffs"),self);
@@ -5998,22 +6280,39 @@ function startATBAction(self,foe,act){
   updateATBUI();
 
   const duration=actionDuration(act);
+  const deferredImpact=actionNeedsDeferredImpact(self,act);
+  const impactDelay=actionImpactDelay(self,act,duration);
+
+  /* 先にモーションだけを開始し、HP・SP・バフ等の効果は着地直前まで確定しない */
   setTimer(()=>{
-    if(!S.battle||B.over)return;
+    if(!actionValid())return;
     if(act.type==="guard"){
       applyGuard(self);
     }else{
       self.guarding=false;
       self.guardHits=0;
       self.preciseGuard=false;
-      execAction(self,foe,act);
+      if(deferredImpact){
+        execAction(self,foe,act,{visualOnly:true});
+      }else{
+        execAction(self,foe,act);
+      }
     }
     renderBattle();
-    checkKO();
+    if(!deferredImpact)checkKO();
   },90);
 
+  if(deferredImpact){
+    setTimer(()=>{
+      if(!actionValid())return;
+      execAction(self,foe,act,{skipVisual:true});
+      renderBattle();
+      checkKO();
+    },impactDelay);
+  }
+
   setTimer(()=>{
-    if(!S.battle||B.over)return;
+    if(!actionValid())return;
     const allyActs=!!self.summon&&act.type!=="summon"&&foe.hp>0;
     if(allyActs){
       self.currentActionType="summon";
@@ -6021,10 +6320,12 @@ function startATBAction(self,foe,act){
       renderBattle();
       checkKO();
     }
-    if(B.over)return;
+    if(B.over||isStunned(self))return;
     const allyWait=allyActs?(self.summonCineMs||900):0;
     self.summonCineMs=0;
-    setTimer(()=>finishATBAction(self),allyWait);
+    setTimer(()=>{
+      if(actionValid())finishATBAction(self);
+    },allyWait);
   },duration);
 }
 function finishATBAction(self){
@@ -6058,25 +6359,33 @@ function applyGuard(f){
   narrateBattle("guard",{actor:f});
   SE.guard();
 }
-function execAction(self,foe,act){
+function execAction(self,foe,act,options){
+  options=options||{};
+  const visualOnly=!!options.visualOnly;
+  const skipVisual=!!options.skipVisual;
   if(self.hp<=0)return;
   const cls=self.side==="p"?"me":"en";
-  if(self.stun>0){
-    self.stun--;
-    pushLog(cls,self.name+(self.bound?"は拘束されて動けない":"は当局対応で行動できない"));
-    playMotion("pillar_red",self,self);
-    if(self.stun<=0&&self.bound){
-      self.bound=false;
-      glRemoveBind(self);
-      pushLog("sys",self.name+"は拘束から解放された");
-    }
+  if(isStunned(self)){
+    self.atb=0;
+    self.readyAt=0;
+    self.currentActionType=null;
+    pushLog(cls,self.name+(self.bound?"は拘束されて動けない":"は行動不能でATBが停止している"));
+    glSyncStunFx(self);
+    updateATBUI();
     return;
   }
   if(act.type==="guard")return;
   if(act.type==="attack"){
-    fxLunge(self);SE.attack();
+    if(visualOnly){
+      fxLunge(self);SE.attack();
+      playMotion(DEFAULT_ATTACK_MOTION[self.co.attr]||"burst_cyan",self,foe,1);
+      return;
+    }
+    if(!skipVisual){
+      fxLunge(self);SE.attack();
+      playMotion(DEFAULT_ATTACK_MOTION[self.co.attr]||"burst_cyan",self,foe,1);
+    }
     let mult=self.guardBonus?BALANCE.guardBonusMultiplier:1;self.guardBonus=false;
-    playMotion(DEFAULT_ATTACK_MOTION[self.co.attr]||"burst_cyan",self,foe,1);
     const d=CTX.dealDamage(self,foe,{mult});SE.hit();
     pushLog(cls,self.name+"の通常攻撃! "+d+" ダメージ"+(mult>1?"（反撃強化）":""));
     narrateBattle("attack",{actor:self,target:foe,damage:d});
@@ -6084,8 +6393,14 @@ function execAction(self,foe,act){
   }
   if(act.type==="strategy"){
     const st=STRATEGIES.find(x=>x.id===act.extra);if(!st)return;
+    if(visualOnly){
+      playMotion("orbit_green",self,self);fxSkill(self,st.ic+" "+st.name,false,st.name);SE.skill();
+      return;
+    }
+    if(!skipVisual){
+      playMotion("orbit_green",self,self);fxSkill(self,st.ic+" "+st.name,false,st.name);SE.skill();
+    }
     self.cds[st.id]=st.cd;self.stats.strats[st.name]=(self.stats.strats[st.name]||0)+1;
-    playMotion("orbit_green",self,self);fxSkill(self,st.ic+" "+st.name,false,st.name);SE.skill();
     st.fx(self,foe,CTX).forEach(m=>pushLog(cls,m));return;
   }
   if(act.type==="summon"){
@@ -6099,10 +6414,17 @@ function execAction(self,foe,act){
   const key=act.type==="skill"?"big":act.type;
   if(key==="mid"||key==="big"){
     const move=self.co[key],cost=move.cost;
+    if(visualOnly){
+      fxSkill(self,move.ic+" "+move.name,key==="big",move.name,key,move.narration);SE.skill();
+      playMoveVisual(self,foe,move);
+      return;
+    }
     if(self.gauge<cost)return;
     self.gauge-=cost;self.stats.strats[move.name]=(self.stats.strats[move.name]||0)+1;
-    fxSkill(self,move.ic+" "+move.name,key==="big",move.name,key,move.narration);SE.skill();
-    const logs=executeMove(self,foe,move,CTX,true);
+    if(!skipVisual){
+      fxSkill(self,move.ic+" "+move.name,key==="big",move.name,key,move.narration);SE.skill();
+    }
+    const logs=executeMove(self,foe,move,CTX,!skipVisual);
     logs.forEach(m=>pushLog(cls,self.name+": "+m));
   }
 }
@@ -6160,6 +6482,9 @@ function cpuDecide(self,foe){
 function renderBattle(){
   const B=S.battle;if(!B)return;
   const {p,e}=B;
+  glSyncProtestFx(p);glSyncProtestFx(e);
+  glSyncStunFx(p);glSyncStunFx(e);
+  renderStunUi();
   $("turnBadge").textContent="ACTION "+B.turn+" / "+p.co.attr+" vs "+e.co.attr;
   renderMarketPanel();
   $("eName").textContent=e.logo+" "+e.name+"［"+TIER_LABEL[e.co.tier]+"］";
@@ -6231,9 +6556,24 @@ function renderBuffs(el,f){
   }
   f.buffs.forEach(b=>{
     const s=document.createElement("span");s.className="buff "+(b.mult>=1?"up":"dn2");
-    s.textContent=b.label+"("+b.turns+")";el.appendChild(s);
+    s.textContent=b.effectId==="protest"
+      ?"☁ デモ隊 ATK-22% "+b.turns+"T"
+      :b.label+"("+b.turns+")";
+    el.appendChild(s);
   });
 }
+const renderBuffsBeforeStunLabel=renderBuffs;
+renderBuffs=function(el,f){
+  renderBuffsBeforeStunLabel(el,f);
+  if(!isStunned(f))return;
+  const existing=Array.from(el.querySelectorAll(".buff")).find(node=>
+    node.textContent.includes("行動不能")
+  );
+  const chip=existing||document.createElement("span");
+  chip.className="buff dn2";
+  chip.textContent="☁ 行動不能 "+f.stun+"T / ATB停止";
+  if(!existing)el.appendChild(chip);
+};
 function fxLunge(f){glLunge(f);}
 function fxGuard(f){playMotion("orbit_cyan",f,f);}
 function fxSkill(f,label,isUnique,moveName,moveKey,moveNarration){
@@ -6996,7 +7336,15 @@ function simulateBattle(coA,coB){
     const order=eff(a,"spd")>=eff(b,"spd")?[[a,b,aAct],[b,a,bAct]]:[[b,a,bAct],[a,b,aAct]];
     order.forEach(([s,f,act])=>{
       if(s.hp<=0||f.hp<=0)return;
-      if(act.type==="attack")silent.dealDamage(s,f,{mult:1});
+      if(isStunned(s)){
+        s.stun=Math.max(0,(Number(s.stun)||0)-1);
+        s.stunRecovery=0;
+        s.atb=0;
+        if(s.stun<=0){
+          s.stun=0;
+          s.bound=false;
+        }
+      }else if(act.type==="attack")silent.dealDamage(s,f,{mult:1});
       else if((act.type==="mid"||act.type==="big")&&s.gauge>=s.co[act.type].cost){
         s.gauge-=s.co[act.type].cost;executeMove(s,f,s.co[act.type],silent,false);
       }else if(act.type==="summon"&&!s.summonUsed&&s.gauge>=60){
@@ -7545,6 +7893,30 @@ $("btnCreateBack").addEventListener("click",()=>{SE.select();showScreen("select"
 /* ================================================================
    15. リサイズ・回転対応 (dvh+flexで自動追従。演出位置のみ再描画)
 ================================================================ */
+baseAtbRateForStun=atbRate;
+atbRate=function(f){
+  return isStunned(f)?0:baseAtbRateForStun(f);
+};
+const updateATBUIWithoutStun=updateATBUI;
+updateATBUI=function(){
+  const result=updateATBUIWithoutStun();
+  renderStunUi();
+  return result;
+};
+const playerCommandWithoutStun=playerCommand;
+playerCommand=function(type,extra){
+  const B=S.battle;
+  if(!B||B.over)return;
+  if(isStunned(B.p)){
+    B.p.atb=0;
+    B.p.readyAt=0;
+    closeAllOverlays();
+    updateATBUI();
+    return;
+  }
+  return playerCommandWithoutStun(type,extra);
+};
+
 const GL={
   renderer:null,scene:null,camera:null,clock:null,raf:0,active:false,
   fighters:{p:null,e:null},summons:{p:null,e:null},tweens:[],cars:[],city:[],shake:0,
@@ -7716,7 +8088,63 @@ function GLLoop(){
   GL.raf=requestAnimationFrame(GLLoop);
   const t=performance.now()*.001,dt=Math.min(.04,GL.clock.getDelta());
   Object.values(GL.fighters).forEach((g,i)=>{
-    if(!g||g.userData.sinking)return;
+    if(!g)return;
+    const protest=g.userData.protestFx;
+    if(protest){
+      const clouds=protest.userData.clouds;
+      const crowd=protest.userData.crowd;
+      if(clouds){
+        clouds.rotation.y+=dt*.24;
+        clouds.position.y=clouds.userData.baseY+Math.sin(t*1.15+i)*.10;
+        clouds.children.forEach((cloud,index)=>{
+          const u=cloud.userData;
+          const pulse=1+Math.sin(t*1.8+u.phase)*.055;
+          cloud.position.y=u.baseY+Math.sin(t*1.5+u.phase)*.055;
+          cloud.scale.set(
+            u.baseScale*pulse,
+            u.baseScale*.72*pulse,
+            u.baseScale*pulse
+          );
+        });
+      }
+      if(crowd){
+        crowd.children.forEach((placard,index)=>{
+          placard.rotation.z=placard.userData.baseRotZ+
+            Math.sin(t*2.4+placard.userData.phase)*.055;
+          placard.position.y=-.96+Math.abs(Math.sin(t*2.1+index))*.06;
+        });
+      }
+    }
+    const stun=g.userData.stunFx;
+    if(stun){
+      const clouds=stun.userData.clouds;
+      const lightning=stun.userData.lightning;
+      const sign=stun.userData.sign;
+      if(clouds){
+        clouds.rotation.y-=dt*.31;
+        clouds.position.y=clouds.userData.baseY+Math.sin(t*1.3+i)*.09;
+        clouds.children.forEach(cloud=>{
+          const u=cloud.userData;
+          const pulse=1+Math.sin(t*2.2+u.phase)*.07;
+          cloud.position.y=u.baseY+Math.sin(t*1.7+u.phase)*.05;
+          cloud.scale.set(
+            u.baseScale*pulse,
+            u.baseScale*.68*pulse,
+            u.baseScale*pulse
+          );
+        });
+      }
+      if(lightning){
+        lightning.material.opacity=.15+
+          Math.max(0,Math.sin(t*8.5+i*2.1))*.85;
+        lightning.scale.y=.88+Math.sin(t*7+i)*.12;
+      }
+      if(sign){
+        const pulse=1+Math.sin(t*3.4+i)*.06;
+        sign.scale.set(1.45*pulse,.72*pulse,1);
+      }
+    }
+    if(g.userData.sinking)return;
     if(g.userData.boundFx){
       /* 拘束中: 浮遊を止め、小刻みに震えるだけの姿勢へモーション変化 */
       g.position.y=g.userData.base.y;
@@ -8844,6 +9272,249 @@ function glRemoveBind(f){
   motionParticles(wp,0xbfd4ff,18,1.8,650,1.5);
   disposeObj(fx);
 }
+function protestPlacardTexture(text){
+  const c=document.createElement("canvas");c.width=256;c.height=160;
+  const x=c.getContext("2d");
+  x.fillStyle="#e8e3d8";x.fillRect(8,8,240,144);
+  x.strokeStyle="#551923";x.lineWidth=12;x.strokeRect(8,8,240,144);
+  x.fillStyle="#551923";x.font="900 58px system-ui";
+  x.textAlign="center";x.textBaseline="middle";
+  x.fillText(text,128,82);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;return t;
+}
+function glApplyProtestFx(f){
+  if(!GL.active||!window.THREE)return;
+  const g=fighter3D(f);
+  if(!g||g.userData.protestFx)return;
+  const T=THREE,fx=new T.Group(),clouds=new T.Group(),crowd=new T.Group();
+  const cloudMat=new T.MeshStandardMaterial({
+    color:0x151820,emissive:0x050608,emissiveIntensity:.38,
+    roughness:1,transparent:true,opacity:.82,depthWrite:false
+  });
+  [
+    [-.62,.02,.02,.62],
+    [-.18,.22,.08,.78],
+    [.38,.10,.02,.70],
+    [.72,-.05,-.03,.48]
+  ].forEach(([x,y,z,scale],index)=>{
+    const cloud=new T.Mesh(new T.SphereGeometry(.72,7,5),cloudMat);
+    cloud.position.set(x,y,z);
+    cloud.scale.set(scale,scale*.72,scale);
+    cloud.userData={
+      baseY:y,
+      baseScale:scale,
+      phase:index*1.35
+    };
+    clouds.add(cloud);
+  });
+  clouds.position.set(0,2.15,.18);
+  clouds.userData.baseY=2.15;
+
+  const poleMat=new T.MeshStandardMaterial({color:0x5b4632,roughness:.95});
+  ["NO","抗議","説明を"].forEach((text,index)=>{
+    const placard=new T.Group();
+    const pole=new T.Mesh(new T.BoxGeometry(.06,1.15,.05),poleMat);
+    pole.position.y=-.48;
+    const boardMat=new T.MeshBasicMaterial({
+      map:protestPlacardTexture(text),transparent:true,side:T.DoubleSide
+    });
+    const board=new T.Mesh(new T.PlaneGeometry(.88,.56),boardMat);
+    board.position.y=.18;
+    placard.add(pole,board);
+    placard.position.set((index-1)*.78,-.96,.82+Math.abs(index-1)*.08);
+    placard.rotation.z=(index-1)*-.08;
+    placard.userData={
+      baseRotZ:placard.rotation.z,
+      phase:index*1.7
+    };
+    crowd.add(placard);
+  });
+
+  fx.add(clouds,crowd);
+  fx.userData.clouds=clouds;
+  fx.userData.crowd=crowd;
+  g.add(fx);
+  g.userData.protestFx=fx;
+}
+function glRemoveProtestFx(f){
+  const g=fighter3D(f);
+  if(!g||!g.userData.protestFx)return;
+  const fx=g.userData.protestFx;
+  g.userData.protestFx=null;
+  disposeObj(fx);
+}
+function glSyncProtestFx(f){
+  if(!f)return;
+  const active=Array.isArray(f.buffs)&&f.buffs.some(b=>b.effectId==="protest"&&b.turns>0);
+  if(active)glApplyProtestFx(f);
+  else glRemoveProtestFx(f);
+}
+function ensureStunStyles(){
+  if(document.getElementById("cqStunStyles"))return;
+  const style=document.createElement("style");
+  style.id="cqStunStyles";
+  style.textContent=
+    "#fPlayer.stunned,#fEnemy.stunned{filter:saturate(.48) brightness(.72);transition:filter .2s ease;}"+
+    ".stun-atb-stop{filter:grayscale(1) brightness(.55)!important;box-shadow:inset 0 0 0 1px rgba(185,205,230,.22)!important;}"+
+    ".stun-atb-stop i,.stun-atb-stop .fill,.stun-atb-stop [class*='fill']{width:0!important;opacity:.22!important;}"+
+    ".stun-atb-badge{position:absolute;z-index:9;left:50%;top:8px;transform:translateX(-50%);padding:5px 9px;border:1px solid rgba(190,215,255,.38);border-radius:999px;background:rgba(8,13,24,.88);color:#d9e8ff;font:800 11px/1.1 system-ui;white-space:nowrap;pointer-events:none;box-shadow:0 0 18px rgba(120,165,255,.22);}"+
+    ".stun-atb-badge b{color:#fff;margin-left:5px;letter-spacing:.08em;}";
+  document.head.appendChild(style);
+}
+function stunAtbElements(f,panel){
+  const side=f.side==="p"?"p":"e";
+  const first=id=>document.getElementById(id);
+  const root=
+    first(side+"Atb")||
+    first(side+"ATB")||
+    first(side+"AtbGauge")||
+    first(side+"ATBGauge")||
+    (panel&&panel.querySelector(".atb,.atb-wrap,.atb-meter,[class*='atb'],[class*='ATB']"));
+  const fill=
+    first(side+"AtbBar")||
+    first(side+"ATBBar")||
+    first(side+"AtbFill")||
+    first(side+"ATBFill")||
+    (root&&root.querySelector("i,.fill,[class*='fill'],[class*='Fill']"));
+  const label=
+    first(side+"AtbNum")||
+    first(side+"ATBNum")||
+    first(side+"AtbText")||
+    first(side+"ATBText")||
+    (root&&root.querySelector(".num,.value,[class*='num'],[class*='value']"));
+  return {root,fill,label};
+}
+function setStunDisabled(button,active){
+  if(!button)return;
+  if(active){
+    button.dataset.stunDisabled="1";
+    button.disabled=true;
+  }else if(button.dataset.stunDisabled){
+    button.disabled=false;
+    delete button.dataset.stunDisabled;
+  }
+}
+function renderStunUi(){
+  ensureStunStyles();
+  const B=S.battle;if(!B)return;
+  const wasPlayerStopped=document.body.dataset.cqPlayerStunned==="1";
+  [B.p,B.e].forEach(f=>{
+    const active=isStunned(f);
+    const panel=$(f.side==="p"?"fPlayer":"fEnemy");
+    if(panel){
+      panel.classList.toggle("stunned",active);
+      let badge=panel.querySelector(".stun-atb-badge");
+      if(active&&!badge){
+        badge=document.createElement("div");
+        badge.className="stun-atb-badge";
+        panel.appendChild(badge);
+      }
+      if(badge){
+        badge.innerHTML=active
+          ?"☁ 行動不能 "+f.stun+"T <b>ATB STOP</b>"
+          :"";
+        badge.hidden=!active;
+      }
+    }
+    const ui=stunAtbElements(f,panel);
+    if(ui.root)ui.root.classList.toggle("stun-atb-stop",active);
+    if(active){
+      f.atb=0;
+      f.readyAt=0;
+      if(ui.fill)ui.fill.style.width="0%";
+      if(ui.label)ui.label.textContent="STOP";
+    }
+  });
+  const playerStopped=isStunned(B.p);
+  if(playerStopped)document.body.dataset.cqPlayerStunned="1";
+  else delete document.body.dataset.cqPlayerStunned;
+  ["cmdAttack","cmdGuard","cmdStrategy"].forEach(id=>
+    setStunDisabled($(id),playerStopped)
+  );
+  document.querySelectorAll("#stratList button").forEach(button=>
+    setStunDisabled(button,playerStopped)
+  );
+  if(wasPlayerStopped&&!playerStopped&&$("stratList")&&$("stratList").children.length){
+    renderStratSheet();
+  }
+}
+function stunSignTexture(){
+  const c=document.createElement("canvas");c.width=256;c.height=128;
+  const x=c.getContext("2d");
+  x.fillStyle="rgba(5,10,20,.9)";x.fillRect(6,16,244,96);
+  x.strokeStyle="#b9dcff";x.lineWidth=7;x.strokeRect(6,16,244,96);
+  x.fillStyle="#eaf6ff";x.font="900 54px system-ui";
+  x.textAlign="center";x.textBaseline="middle";x.fillText("STOP",128,66);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;return t;
+}
+function glApplyStunFx(f){
+  if(!GL.active||!window.THREE)return;
+  const g=fighter3D(f);
+  if(!g||g.userData.stunFx)return;
+  const T=THREE,fx=new T.Group(),clouds=new T.Group();
+  const cloudGeo=new T.SphereGeometry(.72,7,5);
+  const cloudMat=new T.MeshStandardMaterial({
+    color:0x202a3a,emissive:0x07111f,emissiveIntensity:.5,
+    roughness:1,transparent:true,opacity:.88,depthWrite:false
+  });
+  [
+    [-.72,0,0,.62],
+    [-.24,.20,.02,.82],
+    [.35,.12,-.02,.72],
+    [.78,-.02,.03,.50]
+  ].forEach(([x,y,z,scale],index)=>{
+    const cloud=new T.Mesh(cloudGeo,cloudMat);
+    cloud.position.set(x,y,z);
+    cloud.scale.set(scale,scale*.68,scale);
+    cloud.userData={baseY:y,baseScale:scale,phase:index*1.4};
+    clouds.add(cloud);
+  });
+  clouds.position.set(0,3.18,.18);
+  clouds.userData.baseY=3.18;
+
+  const lightningGeo=new T.BufferGeometry().setFromPoints([
+    new T.Vector3(-.12,3.12,.72),
+    new T.Vector3(.16,2.78,.74),
+    new T.Vector3(-.04,2.48,.76),
+    new T.Vector3(.25,2.10,.78)
+  ]);
+  const lightningMat=new T.LineBasicMaterial({
+    color:0xbce9ff,transparent:true,opacity:.75,
+    blending:T.AdditiveBlending,depthWrite:false
+  });
+  const lightning=new T.Line(lightningGeo,lightningMat);
+
+  const sign=new T.Sprite(new T.SpriteMaterial({
+    map:stunSignTexture(),transparent:true,depthWrite:false
+  }));
+  sign.position.set(0,4.05,.72);
+  sign.scale.set(1.45,.72,1);
+
+  fx.add(clouds,lightning,sign);
+  fx.userData={clouds,lightning,sign};
+  g.add(fx);
+  g.userData.stunFx=fx;
+}
+function glRemoveStunFx(f){
+  const g=fighter3D(f);
+  if(!g)return;
+  const fx=g.userData.stunFx;
+  g.userData.stunFx=null;
+  if(fx)disposeObj(fx);
+  const protest=g.userData.protestFx;
+  if(protest&&protest.userData.clouds)protest.userData.clouds.visible=true;
+}
+function glSyncStunFx(f){
+  if(!f)return;
+  const active=isStunned(f);
+  if(active)glApplyStunFx(f);
+  else glRemoveStunFx(f);
+  const g=fighter3D(f);
+  const protest=g&&g.userData.protestFx;
+  if(protest&&protest.userData.clouds){
+    protest.userData.clouds.visible=!active;
+  }
+}
 function glSummonSpawn(f){
   if(!GL.active)return;
   glSummonRemove(f);
@@ -9074,12 +9745,178 @@ function cleanupGL(){
   GL.fighters={p:null,e:null};GL.summons={p:null,e:null};
   GL.intro={t:0,dur:0,active:false};
 }
+let selectCommentObserver=null;
+function ensureSelectCommentStyle(){
+  if(document.getElementById("selectCompactCommentStyle"))return;
+  const style=document.createElement("style");
+  style.id="selectCompactCommentStyle";
+  style.textContent=`
+#scr-select .hd{
+  min-height:44px!important;
+  padding-top:6px!important;
+  padding-bottom:6px!important;
+}
+#scr-select .body{
+  display:flex!important;
+  flex-direction:column!important;
+  justify-content:flex-start!important;
+  align-content:initial!important;
+  gap:10px!important;
+  min-height:0!important;
+  overflow-x:hidden!important;
+  overflow-y:auto!important;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior-y:contain;
+  padding-top:6px!important;
+  padding-bottom:calc(116px + env(safe-area-inset-bottom,0px))!important;
+}
+#scr-select .body > *{
+  flex:0 0 auto!important;
+}
+#selectStage{
+  height:clamp(250px,34dvh,330px)!important;
+  min-height:250px!important;
+  max-height:330px!important;
+  overflow:hidden!important;
+}
+#selectCanvas{
+  display:block!important;
+  width:100%!important;
+  height:100%!important;
+  min-height:0!important;
+  max-height:none!important;
+  touch-action:pan-y!important;
+}
+.select-comment-host{
+  height:auto!important;
+  min-height:0!important;
+  overflow:visible!important;
+}
+#compareChart{
+  height:165px!important;
+}
+.select-company-comment{
+  margin-top:7px;
+  padding:9px 10px;
+  border-top:1px solid var(--line);
+  border-left:2px solid var(--gold);
+  background:rgba(8,16,33,.46);
+  border-radius:0 0 10px 10px;
+}
+.select-company-comment-label{
+  margin-bottom:4px;
+  color:var(--gold);
+  font-size:9px;
+  font-weight:900;
+  letter-spacing:.13em;
+}
+.select-company-comment-text{
+  margin:0;
+  color:#c6d3e6;
+  font-size:11px;
+  line-height:1.48;
+  white-space:pre-line;
+}
+@media(max-height:740px){
+  #selectStage{
+    height:230px!important;
+    min-height:230px!important;
+    max-height:230px!important;
+  }
+  #compareChart{
+    height:170px!important;
+  }
+}
+`;
+  document.head.appendChild(style);
+}
+function selectCompanyCommentText(co){
+  if(!co)return "企業を選択すると、ここに特徴と戦闘傾向が表示されます。";
+  const labels={hp:"耐久",atk:"攻撃",def:"防御",spd:"速度",tech:"技術",grw:"成長"};
+  const strengths=Object.keys(labels)
+    .map(key=>{
+      const value=Number(co.st&&co.st[key]);
+      const max=Number(STAT_MAX&&STAT_MAX[key])||1;
+      return {label:labels[key],score:Number.isFinite(value)?value/max:0};
+    })
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,2)
+    .map(item=>item.label);
+  const strengthText=strengths.length?strengths.join("・"):"総合力";
+  const midName=co.mid&&co.mid.name?co.mid.name:"中技";
+  const bigName=co.big&&co.big.name?co.big.name:"大技";
+  const overview=co.desc||"企業説明は登録されていません。";
+  return overview+"\n戦闘傾向: "+strengthText+"を強みに、中技「"+midName+"」で流れを作り、大技「"+bigName+"」で勝負を決める。";
+}
+function renderSelectCompanyComment(){
+  const screen=document.getElementById("scr-select");
+  if(!screen)return;
+  ensureSelectCommentStyle();
+
+  let box=document.getElementById("selectCompanyComment");
+  if(!box){
+    box=document.createElement("div");
+    box.id="selectCompanyComment";
+    box.className="select-company-comment";
+
+    const label=document.createElement("div");
+    label.className="select-company-comment-label";
+    label.textContent="COMPANY COMMENT";
+
+    const text=document.createElement("p");
+    text.id="selectCompanyCommentText";
+    text.className="select-company-comment-text";
+
+    box.append(label,text);
+
+    const chart=document.getElementById("compareChart");
+    const host=chart&&chart.parentElement?chart.parentElement:screen.querySelector(".body");
+    if(host){
+      host.classList.add("select-comment-host");
+      if(chart)chart.insertAdjacentElement("afterend",box);
+      else host.appendChild(box);
+    }
+  }
+
+  let co=null;
+  try{
+    if(typeof currentSelectCompany==="function")co=currentSelectCompany();
+  }catch(error){
+    console.error("[企業選択コメント]",error);
+  }
+  const text=document.getElementById("selectCompanyCommentText");
+  if(text)text.textContent=selectCompanyCommentText(co);
+}
+function initSelectScreenEnhancement(){
+  ensureSelectCommentStyle();
+  renderSelectCompanyComment();
+  if(selectCommentObserver)return;
+
+  const focusName=document.getElementById("selectFocusName");
+  const focusLogo=document.getElementById("selectFocusLogo");
+  const targets=[focusName,focusLogo].filter(Boolean);
+  if(!targets.length)return;
+
+  selectCommentObserver=new MutationObserver(()=>{
+    renderSelectCompanyComment();
+  });
+  targets.forEach(target=>{
+    selectCommentObserver.observe(target,{
+      childList:true,
+      subtree:true,
+      characterData:true
+    });
+  });
+}
+
+initSelectScreenEnhancement();
 window.addEventListener("resize",()=>{
   document.querySelectorAll(".dmg-pop").forEach(n=>n.remove());
   resizeGL();
   resizeSelect3D();
   resizeResult3D();
   drawCompareChart();
+  renderSelectCompanyComment();
 });
 </script>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
