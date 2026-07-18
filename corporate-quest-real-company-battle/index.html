@@ -5873,17 +5873,155 @@ function assertNoForbiddenCompanyJsonContent(value){
   const hit=findForbiddenCompanyJsonContent(value);
   if(hit)throw new Error(formatForbiddenCompanyJsonError(hit));
 }
+function normalizeJsonQuoteCharacters(input){
+  const source=String(input||"");
+  const doubleOpen=new Set(["“","„","〝","❝","«"]);
+  const doubleClose=new Set(["”","‟","〞","〟","❞","»"]);
+  const doubleSymmetric=new Set(["＂"]);
+  const singleOpen=new Set(["‘","‚","‛"]);
+  const singleClose=new Set(["’"]);
+  const singleSymmetric=new Set(["＇"]);
+  const isDoubleQuote=ch=>
+    ch==="\""||doubleOpen.has(ch)||doubleClose.has(ch)||doubleSymmetric.has(ch);
+  const isSingleQuote=ch=>
+    ch==="'"||singleOpen.has(ch)||singleClose.has(ch)||singleSymmetric.has(ch);
+  const quoteKind=ch=>isDoubleQuote(ch)?"double":isSingleQuote(ch)?"single":"";
+
+  let output="";
+  let inString=false;
+  let outerKind="";
+  let innerDoubleDepth=0;
+  let slashCount=0;
+
+  const previousNonSpaceIndex=index=>{
+    for(let i=index;i>=0;i--){
+      if(!/\s/.test(source[i]))return i;
+    }
+    return -1;
+  };
+  const nextNonSpaceIndex=index=>{
+    for(let i=index;i<source.length;i++){
+      if(!/\s/.test(source[i]))return i;
+    }
+    return -1;
+  };
+  const looksLikeJsonStringOpen=index=>{
+    const previousIndex=previousNonSpaceIndex(index-1);
+    if(previousIndex<0)return true;
+    return "{[,:".includes(source[previousIndex]);
+  };
+  const startsJsonValue=index=>{
+    if(index<0)return false;
+    const ch=source[index];
+    if(quoteKind(ch)||ch==="{"||ch==="["||ch==="-"||/[0-9]/.test(ch))return true;
+    return source.startsWith("true",index)||
+      source.startsWith("false",index)||
+      source.startsWith("null",index);
+  };
+  const looksLikeJsonStringClose=index=>{
+    const nextIndex=nextNonSpaceIndex(index+1);
+    if(nextIndex<0)return true;
+    const next=source[nextIndex];
+    if(next==="}"||next==="]")return true;
+    if(next===":"){
+      return startsJsonValue(nextNonSpaceIndex(nextIndex+1));
+    }
+    if(next===","){
+      const following=nextNonSpaceIndex(nextIndex+1);
+      return following<0||
+        source[following]==="}"||
+        source[following]==="]"||
+        startsJsonValue(following);
+    }
+    return false;
+  };
+
+  for(let i=0;i<source.length;i++){
+    const ch=source[i];
+    if(ch==="\\"){
+      slashCount++;
+      continue;
+    }
+
+    const pendingSlashes="\\".repeat(slashCount);
+    const escaped=inString&&slashCount%2===1;
+    slashCount=0;
+    const kind=quoteKind(ch);
+
+    if(!kind){
+      output+=pendingSlashes+ch;
+      continue;
+    }
+
+    if(!inString){
+      if(!looksLikeJsonStringOpen(i)){
+        output+=pendingSlashes+ch;
+        continue;
+      }
+      output+=pendingSlashes+"\"";
+      inString=true;
+      outerKind=kind;
+      innerDoubleDepth=0;
+      continue;
+    }
+
+    if(escaped){
+      if(kind==="double"){
+        output+=pendingSlashes+"\"";
+      }else{
+        output+="\\".repeat(Math.max(0,pendingSlashes.length-1))+"'";
+      }
+      continue;
+    }
+
+    output+=pendingSlashes;
+    if(kind===outerKind&&looksLikeJsonStringClose(i)){
+      output+="\"";
+      inString=false;
+      outerKind="";
+      innerDoubleDepth=0;
+      continue;
+    }
+
+    if(kind==="single"){
+      output+="'";
+      continue;
+    }
+
+    if(doubleOpen.has(ch)){
+      output+="「";
+      innerDoubleDepth++;
+      continue;
+    }
+    if(doubleClose.has(ch)){
+      output+="」";
+      if(innerDoubleDepth>0)innerDoubleDepth--;
+      continue;
+    }
+
+    if(innerDoubleDepth>0){
+      output+="」";
+      innerDoubleDepth--;
+    }else{
+      output+="「";
+      innerDoubleDepth++;
+    }
+  }
+
+  output+="\\".repeat(slashCount);
+  return output;
+}
 function diagnoseCompanyJsonError(text,error){
   const forbidden=findForbiddenCompanyJsonContent(text,"入力全体");
   if(forbidden)return formatForbiddenCompanyJsonError(forbidden);
-  const smart=text.match(/[“”＂〝〞❝❞]/);
-  if(smart){
-    const codePoint="U+"+smart[0].codePointAt(0).toString(16).toUpperCase().padStart(4,"0");
-    return "禁止されたスマートクオートまたは全角引用符「"+smart[0]+"」が含まれています。JSON構文ではASCII半角ダブルクオート U+0022 だけを使用してください。検出文字: "+codePoint+" / 位置: "+(smart.index+1);
+  const quoteError=text.match(/[“”„‟＂〝〞〟❝❞«»‘’‚‛＇]/);
+  if(quoteError){
+    const codePoint="U+"+quoteError[0].codePointAt(0).toString(16).toUpperCase().padStart(4,"0");
+    return "補正できない位置にスマートクオート、全角引用符、または装飾引用符「"+quoteError[0]+"」が含まれています。JSONのキーと文字列値は半角ダブルクオートで囲んでください。検出文字: "+codePoint+" / 位置: "+(quoteError.index+1);
   }
   const single=text.match(/(?:^|[,{])\s*'[^']*'\s*:/);
   if(single){
-    return "キーがシングルクオートで囲まれています。JSONのキーは半角ダブルクオートで囲んでください。";
+    return "シングルクオート形式を補正できませんでした。キーと文字列値を半角ダブルクオートで囲んでください。";
   }
   if(/,\s*[}\]]/.test(text)){
     return "末尾カンマが含まれています。最後の項目の直後にあるカンマを削除してください。";
@@ -5928,6 +6066,8 @@ function parseCompanyJsonPayload(input){
   if(typeof input==="string"){
     let text=input.replace(/^\uFEFF/,"").trim();
     if(!text)throw new Error("JSONが空です");
+
+    text=normalizeJsonQuoteCharacters(text);
 
     const forbiddenRaw=findForbiddenCompanyJsonContent(text,"入力全体");
     if(forbiddenRaw){
