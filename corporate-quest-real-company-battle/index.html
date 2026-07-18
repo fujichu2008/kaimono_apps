@@ -1,0 +1,4445 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<title>CORPORATE QUEST - Real Company Battle</title>
+<!--
+================================================================
+ CORPORATE QUEST — Real Company Battle
+================================================================
+【設計方針(冒頭コメント)】
+■ 修正箇所: 対象コードが空のため、ゼロから新規設計。
+■ 制約条件の実装状況:
+  - 単一HTML / ビルド無し / 外部画像アセット無し / Three.js r128(CDN)をバトル3D描画に使用
+  - スマホファースト縦画面 (100dvh + safe-area-inset)
+  - state一元管理 (S オブジェクト) / DOMは表示専用
+  - 画面遷移は showScreen() に集約 / 遷移時にタイマー・演出を停止
+  - inputLock によるターン二重実行防止
+  - WebAudio は初回ユーザー操作後に初期化
+  - localStorage 不可環境でも本体動作 (try/catch でフォールバック)
+  - window error ハンドラで画面上部にエラーバナー表示
+  - 企業追加はフォーム入力 → 数値クランプ検証 → textContent描画でXSS安全
+■ 改善提案(将来拡張):
+  - 企業データは COMPANIES 配列に集約。AI生成企業は同スキーマのJSONを
+    addCustomCompany() に渡すだけで追加可能。
+  - トーナメントは簡易CPUシミュレーション版。将来はバトル画面での
+    観戦モードに差し替え可能な構造 (simulateBattle を battle 実行に置換)。
+================================================================
+-->
+<style>
+:root{
+  --ink:#0a0f1e; --panel:#121a2e; --panel2:#1a2440; --line:#27334f;
+  --bull:#2ed47c; --bear:#ff5a6e; --gold:#f5c044; --cyan:#4dc3ff;
+  --txt:#e8edf7; --sub:#8fa0bf;
+  --sat:env(safe-area-inset-top,0px); --sab:env(safe-area-inset-bottom,0px);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+  background:var(--ink);color:var(--txt);overflow:hidden;
+  font-size:16px;line-height:1.5;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation;
+}
+.mono{font-family:ui-monospace,"SF Mono",Consolas,monospace}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{opacity:.4;pointer-events:none}
+button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+input,select{font-family:inherit;font-size:16px}
+
+/* ---------- 画面共通 ---------- */
+.screen{
+  position:fixed;inset:0;display:none;flex-direction:column;
+  height:100dvh;padding-top:var(--sat);padding-bottom:var(--sab);
+  background:
+    radial-gradient(120% 60% at 50% -10%,#16224a 0%,transparent 60%),
+    var(--ink);
+}
+.screen.active{display:flex}
+.btn{
+  min-height:56px;padding:0 20px;border-radius:14px;
+  font-weight:700;font-size:17px;letter-spacing:.04em;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  border:1px solid var(--line);background:var(--panel2);
+  transition:transform .08s,filter .15s;
+}
+.btn:active{transform:scale(.97);filter:brightness(1.2)}
+.btn-primary{background:linear-gradient(135deg,#1f6feb,#2ea0ff);border-color:#2ea0ff;box-shadow:0 4px 18px rgba(46,160,255,.35)}
+.btn-gold{background:linear-gradient(135deg,#8a6410,#c99a24);border-color:var(--gold)}
+.btn-danger{background:linear-gradient(135deg,#7a1f2c,#b0334a);border-color:var(--bear)}
+.btn-sm{min-height:44px;font-size:14px;padding:0 14px;border-radius:10px}
+
+/* ---------- ティッカー(シグネチャ演出) ---------- */
+.ticker{
+  overflow:hidden;white-space:nowrap;border-block:1px solid var(--line);
+  background:#0d1428;color:var(--sub);font-size:13px;padding:6px 0;flex-shrink:0;
+}
+.ticker span{display:inline-block;padding-left:100%;animation:tick 28s linear infinite}
+@keyframes tick{to{transform:translateX(-100%)}}
+.up{color:var(--bull)} .dn{color:var(--bear)}
+
+/* ---------- エラーバナー ---------- */
+#errBanner{
+  position:fixed;top:var(--sat);left:0;right:0;z-index:999;display:none;
+  background:#5c1620;color:#ffd7dc;font-size:12px;padding:8px 12px;
+  border-bottom:1px solid var(--bear);
+}
+
+/* ---------- タイトル ---------- */
+#scr-title{justify-content:space-between;text-align:center;overflow:hidden}
+.title-hero{
+  flex:1;position:relative;display:flex;flex-direction:column;
+  justify-content:center;align-items:center;padding:24px;overflow:hidden;
+}
+.title-grid{
+  position:absolute;inset:-45% -20%;pointer-events:none;
+  background:
+    repeating-linear-gradient(90deg,rgba(77,195,255,.08) 0 1px,transparent 1px 46px),
+    repeating-linear-gradient(0deg,rgba(77,195,255,.08) 0 1px,transparent 1px 46px);
+  transform:perspective(430px) rotateX(58deg) translateY(16%);
+  animation:gridFlow 6.5s linear infinite;
+}
+@keyframes gridFlow{to{background-position:0 46px,0 46px}}
+.title-glow{
+  position:absolute;left:50%;top:44%;width:min(480px,120vw);aspect-ratio:1;
+  transform:translate(-50%,-50%);pointer-events:none;border-radius:50%;
+  background:radial-gradient(circle,rgba(46,140,255,.2),transparent 62%);
+  animation:glowBreath 4.2s ease-in-out infinite alternate;
+}
+@keyframes glowBreath{to{transform:translate(-50%,-50%) scale(1.18);opacity:.72}}
+.title-scan{
+  position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent,rgba(130,205,255,.1) 50%,transparent);
+  background-size:100% 200px;background-repeat:no-repeat;
+  animation:scanMove 4.4s linear infinite;
+}
+@keyframes scanMove{from{background-position:0 -200px}to{background-position:0 110vh}}
+.title-inner{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center}
+.title-logo{
+  font-size:11px;letter-spacing:.6em;color:var(--cyan);text-indent:.6em;
+  opacity:0;animation:riseIn .8s .15s ease-out forwards;
+}
+.title-main{
+  margin-top:12px;display:flex;flex-direction:column;line-height:.96;
+  font-size:clamp(44px,13vw,78px);font-weight:900;font-style:italic;letter-spacing:.02em;
+}
+.title-main span{
+  background:linear-gradient(100deg,#eef6ff 22%,#5fb5ff 44%,#ffffff 50%,#4dc3ff 56%,#d9edff 78%);
+  background-size:240% 100%;
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 6px 26px rgba(46,160,255,.42));
+  animation:riseIn .7s .32s ease-out both,sheen 4.6s 1.3s linear infinite;
+}
+.title-main .t2{
+  font-size:1.26em;
+  background:linear-gradient(100deg,#ffe9b0 22%,#f5c044 44%,#fff8dc 50%,#e2a41f 58%,#ffd97a 78%);
+  background-size:240% 100%;
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 6px 26px rgba(245,192,68,.42));
+  animation:riseIn .7s .48s ease-out both,sheen 4.6s 1.7s linear infinite;
+}
+@keyframes sheen{from{background-position:130% 0}to{background-position:-130% 0}}
+@keyframes riseIn{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+.title-rule{
+  width:min(300px,64vw);height:1px;margin:18px auto 12px;
+  background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+  animation:ruleGlow 2.4s ease-in-out infinite alternate;
+}
+@keyframes ruleGlow{from{opacity:.35}to{opacity:1;box-shadow:0 0 14px rgba(77,195,255,.8)}}
+.title-sub{
+  color:var(--gold);font-weight:700;letter-spacing:.42em;text-indent:.42em;font-size:13px;
+  opacity:0;animation:riseIn .8s .72s ease-out forwards;
+}
+.title-actions{display:flex;flex-direction:column;gap:12px;width:min(320px,86%);margin:0 auto;padding-bottom:10px;position:relative;z-index:2}
+#btnStart{
+  letter-spacing:.2em;font-size:16px;
+  animation:startPulse 1.4s ease-in-out infinite alternate;
+}
+@keyframes startPulse{to{box-shadow:0 4px 32px rgba(46,160,255,.62);filter:brightness(1.15)}}
+.notice{font-size:9px;color:#54627e;letter-spacing:.1em;padding:4px 20px 10px;margin:0 auto}
+.title-row{display:flex;gap:10px}
+.title-row .btn{flex:1;font-size:13px;letter-spacing:.1em}
+
+/* ---------- 企業選択 ---------- */
+.hd{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px 14px;border-bottom:1px solid var(--line);flex-shrink:0;
+}
+.hd h2{font-size:17px;letter-spacing:.06em}
+.vs-slots{
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;
+  padding:10px 14px;flex-shrink:0;
+}
+.slot{
+  width:100%;appearance:none;text-align:left;color:inherit;
+  border:1px dashed var(--line);border-radius:14px;padding:10px;min-height:70px;
+  display:flex;align-items:center;gap:9px;background:var(--panel);
+  cursor:pointer;touch-action:manipulation;
+  transition:transform .08s,filter .15s,border-color .15s,box-shadow .15s;
+}
+.slot:active{transform:scale(.975);filter:brightness(1.18)}
+.slot.filled{border-style:solid}
+.slot .logo{font-size:30px;flex-shrink:0}
+.slot-copy{flex:1;min-width:0}
+.slot .nm{
+  display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:700;font-size:14px;
+}
+.slot .ind{
+  display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11px;color:var(--sub);
+}
+.slot .hint{flex:1;color:var(--sub);font-size:13px}
+.slot .pick{
+  flex-shrink:0;padding:3px 6px;border:1px solid currentColor;border-radius:6px;
+  font-size:9px;font-weight:700;line-height:1.3;opacity:.72;
+}
+.vs-mark{font-weight:900;color:var(--gold);font-style:italic;font-size:20px}
+#slotP{color:#86edb5}
+#slotC{color:#ff9aaa}
+#slotP.filled{border-color:var(--bull);background:linear-gradient(135deg,#0c2a1c,var(--panel));box-shadow:inset 0 0 14px rgba(46,212,124,.14),0 0 12px rgba(46,212,124,.14)}
+#slotC.filled{border-color:var(--bear);background:linear-gradient(135deg,#2c0f16,var(--panel));box-shadow:inset 0 0 14px rgba(255,90,110,.14),0 0 12px rgba(255,90,110,.14)}
+.select-showcase{
+  flex:1;min-height:0;overflow-y:auto;padding:0 12px 12px;
+  display:grid;grid-template-rows:minmax(270px,1.15fr) auto;gap:10px;
+}
+.select-stage{
+  position:relative;min-height:270px;overflow:hidden;border-radius:18px;
+  border:1px solid rgba(77,195,255,.25);
+  background:
+    radial-gradient(circle at 50% 60%,rgba(65,175,255,.2),transparent 42%),
+    linear-gradient(180deg,#061125,#020610 75%);
+  box-shadow:inset 0 0 35px rgba(31,135,220,.12),0 8px 25px rgba(0,0,0,.32);
+}
+#selectCanvas{
+  position:absolute;inset:0;width:100%;height:100%;display:block;
+  touch-action:none;cursor:grab;
+}
+#selectCanvas:active{cursor:grabbing}
+.select-nav{
+  position:absolute;top:50%;z-index:4;transform:translateY(-50%);
+  width:44px;height:64px;border:1px solid rgba(160,215,255,.38);
+  border-radius:12px;background:rgba(4,12,30,.66);backdrop-filter:blur(5px);
+  color:#dff5ff;font-size:27px;display:grid;place-items:center;
+  box-shadow:0 4px 18px rgba(0,0,0,.35);
+}
+.select-nav:active{transform:translateY(-50%) scale(.94)}
+#btnSelectPrev{left:8px}
+#btnSelectNext{right:8px}
+.select-focus-card{
+  position:absolute;left:50%;bottom:7px;z-index:3;transform:translateX(-50%);
+  width:min(330px,calc(100% - 112px));min-height:56px;padding:6px 8px;
+  border:1px solid rgba(150,211,255,.3);border-radius:12px;
+  background:linear-gradient(180deg,rgba(8,20,46,.72),rgba(3,9,23,.78));
+  backdrop-filter:blur(4px);
+  display:grid;grid-template-columns:38px minmax(0,1fr) 44px;align-items:center;gap:7px;
+  box-shadow:0 6px 18px rgba(0,0,0,.38),inset 0 0 14px rgba(77,195,255,.06);
+  pointer-events:none;
+}
+.select-focus-logo{
+  width:36px;height:36px;border-radius:9px;display:grid;place-items:center;
+  color:#fff;font-size:16px;font-weight:900;border:1px solid rgba(255,255,255,.32);
+  box-shadow:inset 0 0 12px rgba(255,255,255,.12);
+}
+.select-focus-copy{min-width:0}
+.select-focus-name{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:14px;font-weight:850;color:#f3f8ff;
+}
+.select-focus-meta{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:9px;color:var(--cyan);margin-top:1px;
+}
+#btnFocusDetail{
+  pointer-events:auto;min-width:44px;min-height:34px;padding:0 7px;
+  border:1px solid var(--line);border-radius:9px;background:rgba(20,31,57,.82);
+  font-size:10px;color:#dcecff;
+}
+.select-swipe-hint{
+  position:absolute;top:8px;left:50%;z-index:3;transform:translateX(-50%);
+  color:#bfe5ff;font-size:9px;letter-spacing:.12em;white-space:nowrap;pointer-events:none;
+  padding:3px 12px;border:1px solid rgba(77,195,255,.35);border-radius:99px;
+  background:rgba(4,12,30,.62);
+  animation:hintPulse 1.9s ease-in-out infinite alternate;
+}
+@keyframes hintPulse{to{box-shadow:0 0 12px rgba(77,195,255,.4)}}
+.compare-panel{
+  border:1px solid var(--line);border-radius:16px;background:rgba(13,21,41,.92);
+  padding:10px;display:grid;gap:8px;
+}
+.compare-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.compare-head h3{font-size:13px;letter-spacing:.07em}
+.compare-legends{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+.compare-legend{font-size:9px;white-space:nowrap}
+.compare-legend.focus{color:var(--gold)}
+.compare-legend.player{color:#49d8ff}
+.compare-legend.enemy{color:#ff6175}
+#compareChart{width:100%;height:210px;display:block}
+.tag{font-size:10px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:2px 8px;color:var(--sub)}
+.sel-foot{padding:8px 12px calc(8px + var(--sab));display:flex;gap:8px;flex-shrink:0;border-top:1px solid var(--line)}
+.sel-foot .btn{flex:1;min-height:48px;font-size:14px}
+@media (max-height:720px){
+  .select-showcase{grid-template-rows:minmax(230px,1fr) auto}
+  .select-stage{min-height:230px}
+  #compareChart{height:175px}
+  .select-focus-card{min-height:64px}
+}
+
+/* ---------- 詳細シート / ボトムシート共通 ---------- */
+.sheet-wrap{position:fixed;inset:0;z-index:60;display:none}
+.sheet-wrap.open{display:block}
+.sheet-bg{position:absolute;inset:0;background:rgba(4,8,18,.6);backdrop-filter:blur(2px)}
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;max-height:78dvh;overflow-y:auto;
+  background:var(--panel);border-radius:22px 22px 0 0;border-top:1px solid var(--line);
+  padding:14px 16px calc(18px + var(--sab));
+  animation:rise .22s ease-out;
+}
+@keyframes rise{from{transform:translateY(30%);opacity:.4}to{transform:none;opacity:1}}
+.sheet .grab{width:44px;height:5px;border-radius:99px;background:var(--line);margin:0 auto 12px}
+.detail-hd{display:flex;gap:14px;align-items:center;margin-bottom:10px}
+.detail-hd .logo{font-size:44px}
+.detail-hd .nm{font-size:19px;font-weight:800}
+.detail-hd .ind{color:var(--cyan);font-size:12px}
+.detail-desc{color:var(--sub);font-size:13px;margin-bottom:12px}
+.stat-rows{display:grid;gap:7px;margin-bottom:12px}
+.stat-row{display:grid;grid-template-columns:64px 1fr 44px;align-items:center;gap:8px;font-size:12px}
+.stat-row .bar{height:8px;border-radius:99px;background:var(--panel2);overflow:hidden}
+.stat-row .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--bull));border-radius:99px}
+.skill-box{background:var(--panel2);border:1px solid var(--gold);border-radius:12px;padding:10px 12px;margin-bottom:14px}
+.skill-box .sk-nm{color:var(--gold);font-weight:700;font-size:14px}
+.skill-box .sk-ds{font-size:12px;color:var(--sub)}
+.detail-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+/* ---------- バトル ---------- */
+#scr-battle{background:
+  radial-gradient(100% 50% at 50% 0%,#1a2a55 0%,transparent 55%),
+  linear-gradient(180deg,#0a0f1e 0%,#0d1530 55%,#0a0f1e 100%)}
+.b-top{padding:8px 12px 4px;flex-shrink:0}
+.b-toprow{display:flex;align-items:center;gap:8px}
+.b-toprow .nm{font-weight:800;font-size:15px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#btnMenu{min-width:44px;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:18px}
+.hpwrap{display:flex;align-items:center;gap:8px;margin-top:2px}
+.hpbar{flex:1;height:14px;border-radius:99px;background:#0c1226;border:1px solid var(--line);overflow:hidden;position:relative}
+.hpbar i{display:block;height:100%;border-radius:99px;transition:width .45s cubic-bezier(.2,.8,.3,1)}
+.hp-enemy i{background:linear-gradient(90deg,#b0334a,var(--bear))}
+.hp-player i{background:linear-gradient(90deg,#149a58,var(--bull))}
+.hpnum{font-size:12px;color:var(--sub);min-width:86px;text-align:right}
+.buffs{display:flex;gap:4px;min-height:20px;margin-top:3px;flex-wrap:wrap}
+.buff{font-size:10px;border-radius:6px;padding:1px 6px;border:1px solid var(--line);background:var(--panel)}
+.buff.up{border-color:var(--bull)} .buff.dn2{border-color:var(--bear);color:var(--bear)}
+.buff.gd{border-color:var(--cyan);color:var(--cyan)}
+
+.b-arena{flex:1;position:relative;min-height:0;overflow:hidden}
+.grid-floor{
+  position:absolute;inset:auto 0 0 0;height:46%;
+  background:
+    linear-gradient(transparent 0,rgba(77,195,255,.06) 100%),
+    repeating-linear-gradient(90deg,rgba(77,195,255,.12) 0 1px,transparent 1px 44px),
+    repeating-linear-gradient(0deg,rgba(77,195,255,.12) 0 1px,transparent 1px 34px);
+  transform:perspective(300px) rotateX(48deg);transform-origin:top;
+}
+.fighter{position:absolute;display:flex;flex-direction:column;align-items:center;gap:4px;transition:transform .18s}
+.fighter .avatar{
+  width:min(24vw,110px);height:min(24vw,110px);border-radius:24px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:min(13vw,58px);
+  background:linear-gradient(160deg,var(--panel2),var(--panel));
+  border:2px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.45);
+}
+.fighter .tick{font-size:11px;color:var(--sub);letter-spacing:.1em}
+#fEnemy{top:6%;right:8%}
+#fEnemy .avatar{border-color:#5c2733}
+#fPlayer{bottom:8%;left:8%}
+#fPlayer .avatar{border-color:#1d5c3c}
+.fx-atk-p{animation:lungeP .4s ease-out}
+.fx-atk-e{animation:lungeE .4s ease-out}
+@keyframes lungeP{30%{transform:translate(30px,-22px)}60%{transform:translate(14px,-10px)}}
+@keyframes lungeE{30%{transform:translate(-30px,22px)}60%{transform:translate(-14px,10px)}}
+.fx-hit{animation:shake .38s}
+@keyframes shake{20%{transform:translateX(-8px)}40%{transform:translateX(7px)}60%{transform:translateX(-5px)}80%{transform:translateX(3px)}}
+.fx-guard .avatar{box-shadow:0 0 0 5px rgba(77,195,255,.55),0 10px 30px rgba(0,0,0,.45)}
+.fx-skill .avatar{animation:glow .8s}
+@keyframes glow{
+  0%{box-shadow:0 0 0 0 rgba(245,192,68,.8)}
+  60%{box-shadow:0 0 40px 14px rgba(245,192,68,.55)}
+  100%{box-shadow:0 10px 30px rgba(0,0,0,.45)}
+}
+.dmg-pop{
+  position:absolute;font-weight:900;font-size:26px;pointer-events:none;z-index:5;
+  text-shadow:0 2px 8px #000;animation:pop .8s ease-out forwards;
+}
+@keyframes pop{
+  0%{opacity:0;transform:translateY(6px) scale(.7)}
+  20%{opacity:1;transform:translateY(-6px) scale(1.15)}
+  100%{opacity:0;transform:translateY(-42px) scale(1)}
+}
+.cutin{
+  position:absolute;left:0;right:0;top:38%;z-index:6;pointer-events:none;
+  text-align:center;font-weight:900;font-size:clamp(20px,6.4vw,32px);
+  color:var(--gold);text-shadow:0 0 24px rgba(245,192,68,.7),0 2px 6px #000;
+  background:linear-gradient(90deg,transparent,rgba(10,14,30,.85) 22%,rgba(10,14,30,.85) 78%,transparent);
+  padding:12px 0;animation:cutin 1s ease forwards;
+}
+@keyframes cutin{0%{opacity:0;letter-spacing:.6em}15%{opacity:1;letter-spacing:.12em}80%{opacity:1}100%{opacity:0}}
+.turn-badge{
+  position:absolute;top:8px;left:50%;transform:translateX(-50%);
+  font-size:11px;color:var(--sub);background:rgba(13,20,40,.8);
+  border:1px solid var(--line);border-radius:99px;padding:3px 12px;z-index:4;
+}
+
+.b-me{padding:4px 12px;flex-shrink:0}
+.resource-row{
+  display:grid;grid-template-columns:minmax(0,1fr) 62px;
+  align-items:center;gap:10px;margin-top:3px;
+}
+.atb-panel{display:grid;gap:4px;min-width:0}
+.atb-label{
+  display:flex;align-items:center;justify-content:space-between;
+  color:#8fdcff;font-size:10px;letter-spacing:.12em;
+}
+.atb-label strong{color:var(--sub);font-size:10px}
+.atb-label strong.ready{
+  color:#fff59a;text-shadow:0 0 10px rgba(255,229,95,.8);
+  animation:atbReadyPulse .72s ease-in-out infinite alternate;
+}
+.atbbar{
+  position:relative;width:100%;height:10px;border-radius:99px;
+  overflow:hidden;background:#07101d;border:1px solid rgba(77,195,255,.3);
+  box-shadow:inset 0 0 8px rgba(0,0,0,.75);
+}
+.atbbar i{
+  display:block;width:0;height:100%;border-radius:99px;
+  background:linear-gradient(90deg,#1678bd,#39d8ff,#e9fbff);
+  box-shadow:0 0 10px rgba(77,195,255,.7);
+  transition:width .08s linear;
+}
+.atbbar.ready i{
+  background:linear-gradient(90deg,#c18b16,#ffe263,#fff8c3);
+  box-shadow:0 0 15px rgba(255,220,80,.95);
+  animation:atbBarReady .6s ease-in-out infinite alternate;
+}
+.enemy-atb{
+  display:grid;grid-template-columns:30px minmax(0,1fr) 42px;
+  align-items:center;gap:6px;margin-top:3px;
+}
+.enemy-atb > span{font-size:9px;color:#7fb9d8;letter-spacing:.08em}
+.enemy-atb .atbbar{height:7px}
+.enemy-atb strong{font-size:9px;color:var(--sub);text-align:right}
+.sp-ring{
+  --sp:0;
+  position:relative;width:60px;height:60px;border-radius:50%;
+  display:grid;place-items:center;
+  background:conic-gradient(
+    var(--gold) calc(var(--sp) * 1%),
+    rgba(245,192,68,.12) 0
+  );
+  box-shadow:0 0 14px rgba(245,192,68,.22),inset 0 0 8px rgba(0,0,0,.55);
+  transition:background .12s linear;
+}
+.sp-ring::before{
+  content:"";position:absolute;inset:6px;border-radius:50%;
+  background:radial-gradient(circle at 38% 32%,#26304a,#080d1b 66%);
+  border:1px solid rgba(245,192,68,.28);
+}
+.sp-ring.full{
+  animation:spRingFull .68s ease-in-out infinite alternate;
+}
+.sp-core{
+  position:relative;z-index:1;display:grid;place-items:center;
+  line-height:1;text-align:center;
+}
+.sp-core span{font-size:9px;color:#d6ae45;letter-spacing:.12em}
+.sp-core strong{margin-top:3px;font-size:18px;color:#fff0a6}
+@keyframes pulse{50%{filter:brightness(1.6)}}
+@keyframes atbReadyPulse{to{filter:brightness(1.65)}}
+@keyframes atbBarReady{to{filter:brightness(1.45)}}
+@keyframes spRingFull{
+  to{filter:brightness(1.38);box-shadow:0 0 24px rgba(245,192,68,.7)}
+}
+
+.b-cmd{
+  flex-shrink:0;padding:8px 12px calc(12px + var(--sab));
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;border-top:1px solid var(--line);
+  background:rgba(10,15,30,.9);
+}
+.cmd{
+  min-height:64px;border-radius:16px;font-weight:900;font-size:15px;letter-spacing:.04em;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  border:1px solid var(--line);transition:transform .08s;
+}
+.cmd:active{transform:scale(.95)}
+.cmd.atb-locked{
+  opacity:.42;filter:saturate(.4);transform:none;
+}
+.cmd.atb-ready{
+  box-shadow:0 0 15px rgba(255,220,82,.22),inset 0 0 12px rgba(255,255,255,.06);
+}
+.cmd small{font-size:10px;font-weight:500;color:rgba(255,255,255,.7)}
+#cmdAttack{background:linear-gradient(150deg,#7a1f2c,#c0334a);border-color:#e0556c}
+#cmdGuard{background:linear-gradient(150deg,#134a72,#1f7fb8);border-color:var(--cyan)}
+#cmdStrategy{background:linear-gradient(150deg,#7a5c10,#b8901f);border-color:var(--gold)}
+.b-subrow{grid-column:1/-1;display:flex;justify-content:flex-end}
+#btnLog{min-height:44px;font-size:12px;color:var(--sub);padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+
+/* ---------- 3Dバトルアリーナ上書き ---------- */
+#scr-battle{
+  background:#020510;
+  isolation:isolate;
+}
+.b-top,.b-me,.b-cmd{
+  position:relative;z-index:12;
+  background:rgba(5,10,24,.48);
+}
+.b-top{padding:5px 10px 2px;border-bottom:1px solid rgba(77,195,255,.14)}
+.b-me{padding:2px 10px;border-top:1px solid rgba(77,195,255,.10)}
+.buffs:empty{display:none}
+.b-arena{
+  flex:1;position:relative;min-height:240px;overflow:hidden;isolation:isolate;
+  background:
+    radial-gradient(circle at 50% 65%,rgba(33,170,255,.12),transparent 46%),
+    linear-gradient(180deg,#02040d,#081225 72%,#02040d);
+}
+#battleCanvas{
+  position:absolute;inset:0;z-index:0;width:100%;height:100%;display:block;
+  pointer-events:none;
+}
+.arena-vignette{
+  position:absolute;inset:0;pointer-events:none;z-index:1;
+  background:
+    linear-gradient(180deg,rgba(0,0,0,.08),transparent 24%,transparent 82%,rgba(0,0,0,.18)),
+    radial-gradient(ellipse at center,transparent 66%,rgba(0,0,0,.22) 100%);
+}
+#arenaFlash{position:absolute;inset:0;z-index:3;pointer-events:none;opacity:0;mix-blend-mode:screen}
+#arenaFlash.flash{animation:arenaFlash .32s ease-out}
+@keyframes arenaFlash{0%{opacity:.9}100%{opacity:0}}
+.arena-label{
+  position:absolute;z-index:4;top:30px;left:50%;transform:translateX(-50%);
+  color:#85dfff;font-size:9px;letter-spacing:.18em;white-space:nowrap;
+  text-shadow:0 0 10px rgba(77,195,255,.75);opacity:.62;pointer-events:none;
+}
+.summon-chip{
+  position:absolute;z-index:5;display:none;max-width:42%;
+  padding:4px 8px;border:1px solid rgba(245,192,68,.55);border-radius:9px;
+  background:rgba(6,10,24,.68);font-size:10px;color:#ffe29a;
+  box-shadow:0 0 12px rgba(245,192,68,.16);pointer-events:none;
+}
+#summonEnemy{right:8px;top:118px}
+#summonPlayer{left:8px;bottom:94px}
+.summon-chip.show{display:block}
+.dmg-pop{z-index:8;pointer-events:none}
+.cutin{z-index:9;top:42%;pointer-events:none}
+.turn-badge{
+  z-index:6;background:rgba(2,7,18,.56);border-color:rgba(77,195,255,.28);
+  pointer-events:none;
+}
+.market-panel{
+  position:absolute;left:50%;top:55px;z-index:7;
+  width:min(620px,calc(100% - 22px));padding:7px 10px 8px;
+  transform:translateX(-50%);
+  border:1px solid rgba(139,183,231,.36);border-radius:9px;
+  background:linear-gradient(180deg,rgba(9,21,43,.88),rgba(4,10,24,.88));
+  box-shadow:inset 0 0 18px rgba(77,195,255,.06),0 5px 18px rgba(0,0,0,.32);
+  backdrop-filter:blur(3px);pointer-events:none;
+}
+.market-panel.changed{animation:marketShift .92s ease-out}
+.market-panel.tone-danger{border-color:rgba(255,80,105,.65);box-shadow:inset 0 0 22px rgba(255,60,80,.11),0 5px 20px rgba(0,0,0,.38)}
+.market-panel.tone-gold{border-color:rgba(245,192,68,.62);box-shadow:inset 0 0 22px rgba(245,192,68,.1),0 5px 20px rgba(0,0,0,.38)}
+.market-panel.tone-serious{border-color:rgba(77,195,255,.55)}
+.market-panel.neutral{opacity:.76}
+.market-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:7px}
+.market-label{
+  padding:1px 5px;border:1px solid currentColor;border-radius:4px;
+  color:#8fdcff;font:700 8px/1.5 ui-monospace,"SF Mono",monospace;letter-spacing:.13em;
+}
+#marketTitle{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:#f4f8ff;font-size:11px;letter-spacing:.03em;
+}
+#marketRemain{color:var(--gold);font-size:9px;white-space:nowrap}
+#marketImpact{
+  margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:#b8c9e3;font-size:9px;
+}
+.market-strategy-note{
+  margin:0 0 9px;padding:9px 10px;border:1px solid rgba(77,195,255,.34);
+  border-radius:11px;background:rgba(8,19,39,.82);
+}
+.market-strategy-note b{display:block;color:#9de9ff;font-size:12px;margin-bottom:3px}
+.market-strategy-note span{display:block;color:var(--sub);font-size:10px;line-height:1.45}
+@keyframes marketShift{
+  0%{opacity:.15;transform:translateX(-50%) scale(.92);filter:brightness(2.3)}
+  32%{opacity:1;transform:translateX(-50%) scale(1.025)}
+  100%{transform:translateX(-50%) scale(1);filter:none}
+}
+.battle-narration{
+  position:absolute;left:50%;bottom:12px;z-index:10;
+  width:min(640px,calc(100% - 20px));min-height:76px;
+  padding:9px 12px 11px;border:1px solid rgba(151,204,255,.48);
+  border-radius:6px;
+  background:
+    linear-gradient(180deg,rgba(18,32,66,.96),rgba(4,10,28,.97)),
+    radial-gradient(circle at 25% 0%,rgba(83,168,255,.18),transparent 55%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.06),
+    inset 0 0 22px rgba(38,111,206,.16),
+    0 8px 30px rgba(0,0,0,.58),
+    0 0 18px rgba(77,195,255,.12);
+  opacity:0;visibility:hidden;
+  transform:translate(-50%,12px) scale(.985);
+  transition:opacity .16s ease,transform .16s ease,visibility .16s;
+  pointer-events:none;
+}
+.battle-narration.show{
+  opacity:1;visibility:visible;
+  transform:translate(-50%,0) scale(1);
+}
+.battle-narration::after{
+  content:"";position:absolute;left:8px;right:8px;bottom:4px;height:1px;
+  background:linear-gradient(90deg,transparent,currentColor,transparent);
+  opacity:.32;
+}
+.battle-narration-head{
+  display:flex;align-items:center;gap:8px;margin-bottom:4px;
+  min-width:0;
+}
+#battleNarrationTag{
+  flex-shrink:0;padding:1px 6px;border:1px solid currentColor;border-radius:3px;
+  font:700 8px/1.5 ui-monospace,"SF Mono",monospace;
+  letter-spacing:.14em;opacity:.78;
+}
+#battleNarrationTitle{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:#f4f8ff;font-size:12px;letter-spacing:.05em;
+  text-shadow:0 1px 5px #000;
+}
+#battleNarrationText{
+  color:#edf4ff;font-size:13px;font-weight:650;line-height:1.48;
+  text-shadow:0 1px 5px #000;
+  animation:narrationReveal .28s ease-out;
+}
+.battle-narration.tone-serious{color:#71cfff;border-color:rgba(91,190,255,.62)}
+.battle-narration.tone-gold{color:#ffd35d;border-color:rgba(255,204,80,.7);box-shadow:inset 0 0 22px rgba(255,190,40,.12),0 8px 30px rgba(0,0,0,.58),0 0 22px rgba(255,190,40,.18)}
+.battle-narration.tone-humor{color:#dd9cff;border-color:rgba(205,126,255,.65)}
+.battle-narration.tone-danger{color:#ff6b74;border-color:rgba(255,75,87,.78);box-shadow:inset 0 0 24px rgba(255,42,58,.15),0 8px 30px rgba(0,0,0,.58),0 0 24px rgba(255,42,58,.24)}
+.battle-narration.tone-system{color:#9de9ff;border-color:rgba(142,224,255,.58)}
+@keyframes narrationReveal{
+  from{opacity:0;transform:translateY(5px);filter:blur(2px)}
+  to{opacity:1;transform:none;filter:none}
+}
+@media (max-height:700px){
+  .battle-narration{bottom:8px;min-height:65px;padding:7px 10px 8px}
+  #battleNarrationText{font-size:12px;line-height:1.38}
+}
+.b-cmd{
+  grid-template-columns:repeat(3,1fr);
+  position:relative;padding:6px 10px calc(8px + var(--sab));
+}
+.cmd{min-height:54px}
+.b-subrow{
+  position:absolute;right:10px;top:-43px;z-index:14;
+  width:auto;display:block;pointer-events:auto;
+}
+#btnLog{
+  min-height:36px;padding:0 11px;
+  background:rgba(5,10,24,.62);backdrop-filter:none;
+}
+.strat-section{
+  margin:12px 2px 7px;color:var(--cyan);font-size:11px;font-weight:800;
+  letter-spacing:.12em;
+}
+.strat-item.mid{border-color:#5ad7ff}
+.strat-item.big{border-color:#ffb14d;background:linear-gradient(135deg,#28200c,var(--panel2))}
+.strat-item.summon{border-color:#d78bff;background:linear-gradient(135deg,#24112d,var(--panel2))}
+.skill-box .sk-ds{white-space:pre-line}
+.logo-crest{
+  width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
+  font-weight:900;font-size:18px;color:#fff;border:1px solid rgba(255,255,255,.25);
+  box-shadow:inset 0 0 16px rgba(255,255,255,.12),0 5px 16px rgba(0,0,0,.3)
+}
+@media (max-height:700px){
+  .b-top{padding:3px 8px 1px}
+  .b-me{padding:1px 8px}
+  .b-arena{min-height:220px}
+  .cmd{min-height:50px}
+  .b-cmd{padding-top:5px}
+  .arena-label{display:none}
+}
+
+/* 戦略シート */
+.strat-item{
+  width:100%;display:flex;align-items:center;gap:12px;text-align:left;
+  min-height:60px;padding:10px 12px;border:1px solid var(--line);border-radius:14px;
+  background:var(--panel2);margin-bottom:8px;
+}
+.strat-item .ic{font-size:26px}
+.strat-item .t{flex:1}
+.strat-item .t b{font-size:15px;display:block}
+.strat-item .t span{font-size:11px;color:var(--sub)}
+.strat-item .cd{font-size:11px;color:var(--bear);min-width:52px;text-align:right}
+.strat-item.skill{border-color:var(--gold)}
+.strat-item.skill .t b{color:var(--gold)}
+
+/* ログ・メニュー・確認 */
+.modal{
+  position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;
+  background:rgba(4,8,18,.65);padding:20px;
+}
+.modal.open{display:flex}
+.modal-box{
+  width:min(420px,100%);background:var(--panel);border:1px solid var(--line);
+  border-radius:18px;padding:16px;max-height:76dvh;display:flex;flex-direction:column;gap:12px;
+}
+.modal-box h3{font-size:16px;letter-spacing:.05em}
+#logBody{flex:1;overflow-y:auto;font-size:13px;display:flex;flex-direction:column;gap:6px;min-height:120px}
+#logBody p{border-left:3px solid var(--line);padding-left:8px;color:var(--sub)}
+#logBody p.me{border-color:var(--bull);color:var(--txt)}
+#logBody p.en{border-color:var(--bear);color:var(--txt)}
+#logBody p.sys{border-color:var(--gold)}
+.menu-grid{display:grid;gap:10px}
+.vol-row{display:flex;align-items:center;gap:10px;font-size:14px}
+.vol-row input[type=range]{flex:1;accent-color:var(--cyan);min-height:44px}
+
+/* ---------- 結果 ---------- */
+#scr-result{align-items:center;justify-content:center;text-align:center;gap:14px;padding:20px}
+.res-title{font-size:clamp(42px,13vw,72px);font-weight:900;letter-spacing:.08em}
+.res-title.win{color:var(--bull);text-shadow:0 0 40px rgba(46,212,124,.5)}
+.res-title.lose{color:var(--bear);text-shadow:0 0 40px rgba(255,90,110,.4)}
+.res-vs{color:var(--sub);font-size:14px}
+.res-card{
+  width:min(380px,92%);background:var(--panel);border:1px solid var(--line);
+  border-radius:18px;padding:16px;text-align:left;display:grid;gap:8px;font-size:14px;
+}
+.res-card .row{display:flex;justify-content:space-between;gap:10px}
+.res-card .row span:first-child{color:var(--sub);flex-shrink:0}
+.res-card .row span:last-child{text-align:right}
+.res-rank{font-size:34px;font-weight:900;color:var(--gold)}
+.res-actions{display:grid;gap:10px;width:min(320px,88%)}
+
+/* ---------- トーナメント ---------- */
+#scr-tour .body{flex:1;overflow-y:auto;padding:14px}
+.t-round{margin-bottom:16px}
+.t-round h4{color:var(--cyan);font-size:13px;letter-spacing:.1em;margin-bottom:8px}
+.t-match{
+  background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:10px 12px;display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:14px;
+}
+.t-match .side{flex:1;display:flex;align-items:center;gap:6px;min-width:0}
+.t-match .side.right{justify-content:flex-end}
+.t-match .side .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.t-match .side.winner .n{color:var(--gold);font-weight:800}
+.t-champ{
+  text-align:center;padding:18px;background:linear-gradient(160deg,#3a2c05,#171204);
+  border:1px solid var(--gold);border-radius:18px;margin-top:6px;
+}
+.t-champ .c{font-size:40px}
+.t-champ .n{font-size:20px;font-weight:900;color:var(--gold)}
+
+/* ---------- 企業作成 ---------- */
+#scr-create .body{flex:1;overflow-y:auto;padding:14px;display:grid;gap:12px;align-content:start}
+.f-row{display:grid;gap:5px}
+.f-row label{font-size:12px;color:var(--sub)}
+.f-row input,.f-row select{
+  min-height:48px;background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;color:var(--txt);padding:0 12px;
+}
+.f-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.f-note{font-size:11px;color:#6b7a99}
+
+@media (min-width:760px){
+  .select-showcase{
+    grid-template-columns:minmax(380px,1.15fr) minmax(330px,.85fr);
+    grid-template-rows:1fr;max-width:1050px;width:100%;margin:0 auto;
+  }
+  .select-stage{min-height:420px}
+  #compareChart{height:300px}
+  .b-cmd{max-width:640px;margin:0 auto;width:100%}
+  .b-top,.b-me{max-width:760px;margin:0 auto;width:100%}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
+</style>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#007acc">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+</head>
+<body>
+
+<div id="errBanner"></div>
+
+<!-- ============ タイトル ============ -->
+<section class="screen active" id="scr-title">
+  <div class="ticker"><span id="tickerText"></span></div>
+  <div class="title-hero">
+    <div class="title-grid"></div>
+    <div class="title-glow"></div>
+    <div class="title-scan"></div>
+    <div class="title-inner">
+      <div class="title-logo mono">TOKYO CORPORATE ARENA</div>
+      <h1 class="title-main"><span>CORPORATE</span><span class="t2">QUEST</span></h1>
+      <div class="title-rule"></div>
+      <div class="title-sub">経営が、武器になる。</div>
+    </div>
+  </div>
+  <div class="title-actions">
+    <button class="btn btn-primary" id="btnStart">ENTER THE ARENA</button>
+    <div class="title-row">
+      <button class="btn" id="btnTour">🏆 TOURNAMENT</button>
+      <button class="btn" id="btnSoundToggle">🔊 SOUND</button>
+    </div>
+  </div>
+  <p class="notice mono">FICTION / PARODY — 能力・勝敗・演出はすべて架空です</p>
+</section>
+
+<!-- ============ 企業選択 ============ -->
+<section class="screen" id="scr-select">
+  <div class="hd">
+    <button class="btn btn-sm" id="btnSelBack">← 戻る</button>
+    <h2>企業選択</h2>
+    <button class="btn btn-sm" id="btnAddCo">＋ 企業追加</button>
+  </div>
+  <div class="vs-slots">
+    <button type="button" class="slot" id="slotP" aria-label="自社枠。閲覧中の会社を自社に設定">
+      <span class="hint">自社を選択</span><span class="pick">ここに設定</span>
+    </button>
+    <div class="vs-mark">VS</div>
+    <button type="button" class="slot" id="slotC" aria-label="相手枠。閲覧中の会社を相手に設定">
+      <span class="hint">相手を選択</span><span class="pick">ここに設定</span>
+    </button>
+  </div>
+  <div class="select-showcase">
+    <div class="select-stage" id="selectStage">
+      <canvas id="selectCanvas" aria-label="3D企業選択カルーセル"></canvas>
+      <div class="select-swipe-hint mono">タップで 自社 → 敵 の順に自動セット</div>
+      <button class="select-nav" id="btnSelectPrev" aria-label="前の企業">‹</button>
+      <button class="select-nav" id="btnSelectNext" aria-label="次の企業">›</button>
+      <div class="select-focus-card">
+        <div class="select-focus-logo" id="selectFocusLogo"></div>
+        <div class="select-focus-copy">
+          <div class="select-focus-name" id="selectFocusName"></div>
+          <div class="select-focus-meta mono" id="selectFocusMeta"></div>
+        </div>
+        <button id="btnFocusDetail">詳細</button>
+      </div>
+    </div>
+
+    <div class="compare-panel">
+      <div class="compare-head">
+        <h3>能力比較</h3>
+        <div class="compare-legends">
+          <span class="compare-legend focus" id="legendFocus">◆ 閲覧中</span>
+          <span class="compare-legend player" id="legendPlayer">● 自社: 未選択</span>
+          <span class="compare-legend enemy" id="legendEnemy">● 敵: 未選択</span>
+        </div>
+      </div>
+      <canvas id="compareChart" aria-label="企業能力比較レーダーチャート"></canvas>
+    </div>
+  </div>
+
+  <div class="sel-foot">
+    <button class="btn" id="btnRandom">🎲 ランダム</button>
+    <button class="btn btn-primary" id="btnBattleStart" disabled>バトル開始</button>
+  </div>
+</section>
+
+<!-- 企業詳細シート -->
+<div class="sheet-wrap" id="sheetDetail">
+  <div class="sheet-bg" data-close="sheetDetail"></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <div class="detail-hd">
+      <div class="logo" id="dLogo"></div>
+      <div><div class="nm" id="dName"></div><div class="ind" id="dInd"></div></div>
+    </div>
+    <p class="detail-desc" id="dDesc"></p>
+    <div class="stat-rows" id="dStats"></div>
+    <div class="skill-box"><div class="sk-nm" id="dSkillName"></div><div class="sk-ds" id="dSkillDesc"></div></div>
+    <div class="detail-actions">
+      <button class="btn" id="btnPickP">自社にする</button>
+      <button class="btn btn-danger" id="btnPickC">相手にする</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ バトル ============ -->
+<section class="screen" id="scr-battle">
+  <div class="b-top">
+    <div class="b-toprow">
+      <span class="nm" id="eName"></span>
+      <button id="btnMenu" aria-label="メニュー">☰</button>
+    </div>
+    <div class="hpwrap">
+      <div class="hpbar hp-enemy"><i id="eHpBar"></i></div>
+      <span class="hpnum mono" id="eHpNum"></span>
+    </div>
+    <div class="buffs" id="eBuffs"></div>
+    <div class="enemy-atb">
+      <span class="mono">ATB</span>
+      <div class="atbbar" id="eAtb"><i id="eAtbBar"></i></div>
+      <strong class="mono" id="eAtbText">0%</strong>
+    </div>
+  </div>
+
+  <div class="b-arena" id="arena">
+    <canvas id="battleCanvas" aria-label="東京3D企業バトルアリーナ"></canvas>
+    <div class="arena-vignette"></div>
+    <div id="arenaFlash"></div>
+    <div class="turn-badge mono" id="turnBadge">TURN 1</div>
+    <div class="arena-label mono">TOKYO CORPORATE ARENA / NIGHT SESSION</div>
+    <div class="market-panel neutral" id="marketPanel" aria-live="polite">
+      <div class="market-head">
+        <span class="market-label">MARKET</span>
+        <strong id="marketTitle">市場監視中</strong>
+        <span class="mono" id="marketRemain">変化待ち</span>
+      </div>
+      <div id="marketImpact">属性効果は現在ありません</div>
+    </div>
+    <div class="summon-chip" id="summonEnemy"></div>
+    <div class="summon-chip" id="summonPlayer"></div>
+    <div class="battle-narration tone-system" id="battleNarration" aria-live="polite" aria-atomic="true">
+      <div class="battle-narration-head">
+        <span id="battleNarrationTag">BATTLE REPORT</span>
+        <strong id="battleNarrationTitle"></strong>
+      </div>
+      <div id="battleNarrationText"></div>
+    </div>
+  </div>
+
+  <div class="b-me">
+    <div class="b-toprow"><span class="nm" id="pName"></span></div>
+    <div class="hpwrap">
+      <div class="hpbar hp-player"><i id="pHpBar"></i></div>
+      <span class="hpnum mono" id="pHpNum"></span>
+    </div>
+    <div class="resource-row">
+      <div class="atb-panel">
+        <div class="atb-label mono">
+          <span>ACTIVE TIME</span>
+          <strong id="pAtbText">WAIT 0%</strong>
+        </div>
+        <div class="atbbar" id="pAtb"><i id="pAtbBar"></i></div>
+      </div>
+      <div class="sp-ring" id="pGauge" style="--sp:0">
+        <div class="sp-core mono">
+          <span>SP</span>
+          <strong id="pGaugeNum">0</strong>
+        </div>
+      </div>
+    </div>
+    <div class="buffs" id="pBuffs"></div>
+  </div>
+
+  <div class="b-cmd">
+    <button class="cmd" id="cmdAttack">ATTACK<small>通常攻撃</small></button>
+    <button class="cmd" id="cmdGuard">GUARD<small>防御+反撃準備</small></button>
+    <button class="cmd" id="cmdStrategy">STRATEGY<small>経営戦略</small></button>
+    <div class="b-subrow"><button id="btnLog">📜 LOG</button></div>
+  </div>
+</section>
+
+<!-- 戦略ボトムシート -->
+<div class="sheet-wrap" id="sheetStrat">
+  <div class="sheet-bg" data-close="sheetStrat"></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <h3 style="margin-bottom:10px">経営戦略を選択</h3>
+    <div id="stratList"></div>
+    <button class="btn" style="width:100%" data-close="sheetStrat">閉じる</button>
+  </div>
+</div>
+
+<!-- ログモーダル -->
+<div class="modal" id="modalLog">
+  <div class="modal-box">
+    <h3>📜 バトルログ</h3>
+    <div id="logBody"></div>
+    <button class="btn" data-close="modalLog">閉じる</button>
+  </div>
+</div>
+
+<!-- メニューモーダル -->
+<div class="modal" id="modalMenu">
+  <div class="modal-box">
+    <h3>☰ メニュー</h3>
+    <div class="menu-grid">
+      <button class="btn" id="btnAuto">🤖 AUTO: OFF</button>
+      <button class="btn" id="btnPause">⏸ PAUSE</button>
+      <div class="vol-row">🔊<input type="range" id="volSlider" min="0" max="100" value="60" aria-label="音量"><button class="btn btn-sm" id="btnMute">MUTE</button></div>
+      <button class="btn btn-danger" id="btnExit">🚪 バトルを終了する</button>
+      <button class="btn" data-close="modalMenu">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 確認モーダル -->
+<div class="modal" id="modalConfirm">
+  <div class="modal-box">
+    <h3 id="confirmMsg">バトルを終了しますか?</h3>
+    <div class="menu-grid">
+      <button class="btn btn-danger" id="btnConfirmYes">終了する</button>
+      <button class="btn" data-close="modalConfirm">続ける</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 結果 ============ -->
+<section class="screen" id="scr-result">
+  <div class="res-title" id="resTitle"></div>
+  <div class="res-vs" id="resVs"></div>
+  <div class="res-card">
+    <div class="row"><span>バトル評価</span><span class="res-rank mono" id="resRank"></span></div>
+    <div class="row"><span>経過ターン</span><span class="mono" id="resTurns"></span></div>
+    <div class="row"><span>最大ダメージ</span><span class="mono" id="resMaxHit"></span></div>
+    <div class="row"><span>勝敗の主因</span><span id="resFactor"></span></div>
+    <div class="row"><span>使用戦略</span><span id="resStrats"></span></div>
+  </div>
+  <div class="res-actions">
+    <button class="btn btn-primary" id="btnRematch">🔁 再戦する</button>
+    <button class="btn" id="btnReselect">企業選択へ戻る</button>
+    <button class="btn" id="btnResTitle">タイトルへ</button>
+  </div>
+</section>
+
+<!-- ============ トーナメント ============ -->
+<section class="screen" id="scr-tour">
+  <div class="hd">
+    <button class="btn btn-sm" id="btnTourBack">← タイトル</button>
+    <h2>簡易トーナメント</h2>
+    <button class="btn btn-sm" id="btnTourRun">再抽選</button>
+  </div>
+  <div class="body" id="tourBody"></div>
+</section>
+
+<!-- ============ 企業作成 ============ -->
+<section class="screen" id="scr-create">
+  <div class="hd">
+    <button class="btn btn-sm" id="btnCreateBack">← 戻る</button>
+    <h2>企業追加</h2>
+    <span style="width:70px"></span>
+  </div>
+  <div class="body">
+    <div class="f-row"><label>企業名 (必須・20文字まで)</label><input id="fName" maxlength="20" placeholder="例: ミライ精機"></div>
+    <div class="f-row"><label>業種</label>
+      <select id="fInd">
+        <option>製造</option><option>IT</option><option>金融</option><option>商社</option>
+        <option>食品</option><option>医薬</option><option>運輸</option><option>エネルギー</option>
+      </select>
+    </div>
+    <div class="f-row"><label>シンボル (絵文字1つ)</label><input id="fLogo" maxlength="2" placeholder="🏭"></div>
+    <div class="f-row"><label>説明 (40文字まで)</label><input id="fDesc" maxlength="40" placeholder="どんな会社?"></div>
+    <div class="f-stats">
+      <div class="f-row"><label>HP (200〜1200)</label><input id="fHp" type="number" value="600"></div>
+      <div class="f-row"><label>攻撃 (20〜150)</label><input id="fAtk" type="number" value="70"></div>
+      <div class="f-row"><label>防御 (20〜150)</label><input id="fDef" type="number" value="70"></div>
+      <div class="f-row"><label>速度 (20〜150)</label><input id="fSpd" type="number" value="70"></div>
+      <div class="f-row"><label>技術 (20〜150)</label><input id="fTech" type="number" value="70"></div>
+      <div class="f-row"><label>成長 (20〜150)</label><input id="fGrw" type="number" value="70"></div>
+    </div>
+    <p class="f-note">※ 範囲外の数値は自動で制限されます。固有スキルは能力値から自動生成。保存先: この端末 (localStorage)。</p>
+    <button class="btn btn-primary" id="btnCreateSave">保存して選択画面へ</button>
+  </div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+"use strict";
+/* ================================================================
+   1. エラーハンドリング
+================================================================ */
+window.addEventListener("error", e=>{
+  try{
+    const b=document.getElementById("errBanner");
+    b.textContent="⚠ エラー: "+(e.message||"unknown")+" — ゲームは可能な範囲で継続します";
+    b.style.display="block";
+    clearTimeout(b._t); b._t=setTimeout(()=>b.style.display="none",6000);
+  }catch(_){}
+});
+
+/* ================================================================
+   2. 企業データ (ロジックと分離。ここに追加するだけで企業が増える)
+   skill.fx: (self, foe, ctx) => ログ文字列[]  ※ctx経由で演出/計算補助
+================================================================ */
+const STAT_MAX={hp:1200, atk:150, def:150, spd:150, tech:150, grw:150};
+let COMPANIES=[
+ {id:"aoba",  name:"アオバ重工", ind:"重工業", logo:"🏗️", tick:"AOBA",
+  desc:"巨大プラントを支える老舗。守りは鉄壁、動きは重い。",
+  tags:["高耐久","装置産業","B2B"],
+  st:{hp:900,atk:75,def:110,spd:40,tech:60,grw:45},
+  skill:{name:"大規模設備投資", ic:"🏭", desc:"防御+40%(3T)し、受けた反動で次の攻撃が強化される",
+   fx:(s,f)=>{addBuff(s,"def",1.4,3,"防+40%");addBuff(s,"atk",1.25,2,"攻+25%");
+     return [s.name+"は巨大プラントを増強!防御と次の一手が強化された"];}}},
+ {id:"sirius",name:"シリウス電算", ind:"IT・クラウド", logo:"🛰️", tick:"SIRS",
+  desc:"急成長のクラウド企業。技術と速度で市場を撃ち抜く。",
+  tags:["高技術","高速","SaaS"],
+  st:{hp:560,atk:70,def:50,spd:120,tech:130,grw:110},
+  skill:{name:"ゼロデイ・ローンチ", ic:"⚡", desc:"技術力に依存した大ダメージ(防御無視50%)",
+   fx:(s,f,c)=>{const d=c.dealDamage(s,f,{mult:1.2,techScale:1.6,pierce:.5});
+     return [s.name+"の新サービスが市場を直撃! "+d+" ダメージ"];}}},
+ {id:"hinata",name:"ヒナタ食品", ind:"食品", logo:"🍞", tick:"HNTA",
+  desc:"国民的ブランドを持つ食品メーカー。粘り強さが武器。",
+  tags:["安定","ブランド","BtoC"],
+  st:{hp:760,atk:65,def:80,spd:65,tech:55,grw:85},
+  skill:{name:"国民的ブランド", ic:"🌟", desc:"HPを25%回復し、攻撃+20%(3T)",
+   fx:(s,f,c)=>{const h=c.heal(s,.25);addBuff(s,"atk",1.2,3,"攻+20%");
+     return [s.name+"のブランド力が消費者を動かす!HP "+h+" 回復"];}}},
+ {id:"krgn", name:"クロガネ商事", ind:"総合商社", logo:"🌐", tick:"KRGN",
+  desc:"世界中に商流を張り巡らせる総合商社。攻めの経営。",
+  tags:["高攻撃","多角化","グローバル"],
+  st:{hp:680,atk:105,def:65,spd:75,tech:70,grw:80},
+  skill:{name:"市場席巻", ic:"⚔️", desc:"2回連続攻撃(各0.8倍)",
+   fx:(s,f,c)=>{const d1=c.dealDamage(s,f,{mult:.8});const d2=c.dealDamage(s,f,{mult:.8});
+     return [s.name+"が二正面作戦を展開! "+d1+" + "+d2+" ダメージ"];}}},
+ {id:"minamo",name:"ミナモ製薬", ind:"医薬", logo:"🧪", tick:"MNMO",
+  desc:"研究開発に全てを賭ける製薬企業。当たれば巨大。",
+  tags:["高技術","低耐久","R&D"],
+  st:{hp:520,atk:60,def:55,spd:70,tech:135,grw:95},
+  skill:{name:"新薬承認", ic:"💊", desc:"HP35%回復+技術+30%(3T)",
+   fx:(s,f,c)=>{const h=c.heal(s,.35);addBuff(s,"tech",1.3,3,"技+30%");
+     return [s.name+"の新薬が承認!HP "+h+" 回復、研究が加速する"];}}},
+ {id:"raiden",name:"ライデン自動車", ind:"自動車", logo:"🏎️", tick:"RDEN",
+  desc:"EVで攻める自動車メーカー。速さは正義。",
+  tags:["高速","量産","EV"],
+  st:{hp:700,atk:90,def:70,spd:110,tech:90,grw:75},
+  skill:{name:"フルモデルチェンジ", ic:"🔧", desc:"速度依存の強攻撃+自身の速度+20%(3T)",
+   fx:(s,f,c)=>{const d=c.dealDamage(s,f,{mult:1.1,spdScale:.8});addBuff(s,"spd",1.2,3,"速+20%");
+     return [s.name+"の新型が市場を疾走! "+d+" ダメージ"];}}},
+ {id:"hoshimi",name:"ホシミ銀行", ind:"金融", logo:"🏦", tick:"HSMI",
+  desc:"資本の力で盤面を支配するメガバンク。",
+  tags:["資本力","高耐久","金融"],
+  st:{hp:820,atk:60,def:95,spd:55,tech:65,grw:60},
+  skill:{name:"量的緩和", ic:"💰", desc:"HP20%回復+相手の攻撃-25%(3T)",
+   fx:(s,f,c)=>{const h=c.heal(s,.2);addBuff(f,"atk",.75,3,"攻-25%");
+     return [s.name+"が市場に資金を注入!HP "+h+" 回復、相手の勢いを削いだ"];}}},
+ {id:"tsubaki",name:"ツバキ航空", ind:"運輸・航空", logo:"✈️", tick:"TBKI",
+  desc:"ハイリスク・ハイリターンの空の覇者。",
+  tags:["高リスク","攻撃型","逆転"],
+  st:{hp:600,atk:95,def:55,spd:85,tech:75,grw:90},
+  skill:{name:"増便ラッシュ", ic:"🎰", desc:"70%で2.2倍の大ダメージ、30%で自分が疲弊(自傷10%)",
+   fx:(s,f,c)=>{if(Math.random()<.7){const d=c.dealDamage(s,f,{mult:2.2});
+       return [s.name+"の大増便が的中!! "+d+" 大ダメージ!"];}
+     const self=Math.round(s.maxHp*.1);c.hurt(s,self);
+     return [s.name+"の増便は空振り… 燃料費で "+self+" の自傷ダメージ"];}}},
+];
+
+/* ================================================================
+   2.1 実在企業スナップショット / 属性 / 召喚 / モーション定義
+   - 財務値は公開情報をゲーム用に整理したスナップショット。単位は10億円。
+   - 企業区分は法令上の判定ではなく、資本金だけを見るゲーム内簡易分類。
+     資本金3億円以下を中小企業、3億円超を大企業として統一する。
+   - 売上高、従業員数、上場区分、企業グループ全体の規模は区分に使用しない。
+   - moveは純データ。将来JSON企業追加へ移行しやすい構造。
+================================================================ */
+const ATTR_INFO={
+  "インフラ":{color:"#30d7ff",hex:0x30d7ff},
+  "素材":{color:"#ffb84a",hex:0xffb84a},
+  "金融":{color:"#5cff9b",hex:0x5cff9b},
+  "IT":{color:"#b47cff",hex:0xb47cff},
+  "消費":{color:"#ff668e",hex:0xff668e}
+};
+const ATTR_ADV={"IT":"金融","金融":"素材","素材":"インフラ","インフラ":"消費","消費":"IT"};
+const CAPITAL_CLASS_THRESHOLD=0.3; // 10億円単位。0.3＝3億円
+const TIER_LABEL={
+  large:"大企業（資本金3億円超）",
+  sme:"中小企業（資本金3億円以下）"
+};
+function capitalTier(fin){
+  const capital=Number(fin&&fin.capital);
+  return Number.isFinite(capital)&&capital>CAPITAL_CLASS_THRESHOLD?"large":"sme";
+}
+function attrMultiplier(a,b){
+  if(ATTR_ADV[a]===b)return 1.3;
+  if(ATTR_ADV[b]===a)return .8;
+  return 1;
+}
+function deriveStats(fin,bias){
+  bias=bias||{};
+  const scale=Math.log10(Math.max(1,fin.revenue||1)+10);
+  const cap=Math.log10(Math.max(.1,fin.capital||.1)+1);
+  return {
+    hp:clamp(260+scale*175+(bias.hp||0),200,1200,600),
+    atk:clamp(48+(fin.margin||3)*4.2+(bias.atk||0),20,150,70),
+    def:clamp(45+cap*20+(bias.def||0),20,150,70),
+    spd:clamp(137-scale*13+(bias.spd||0),20,150,70),
+    tech:clamp(62+(bias.tech||0),20,150,70),
+    grw:clamp(62+(bias.grw||0),20,150,70)
+  };
+}
+function mv(name,ic,desc,motion,effects,cost,power){
+  return {name,ic,desc,motion,effects:effects||[],cost:cost||0,power:power||0};
+}
+function makeRealCompany(o){
+  /* 入力されたtierに依存せず、資本金3億円基準で毎回区分を再計算する */
+  o.tier=capitalTier(o.fin);
+  o.st=deriveStats(o.fin,o.bias);
+  o.tags=[o.attr,TIER_LABEL[o.tier],o.fin.period].concat(o.tags||[]);
+  o.skill=o.big; // 旧ロジック互換
+  return o;
+}
+const SUMMONS={
+  politician:{
+    id:"politician",name:"大物政治家（架空）",ic:"🎩",turns:3,
+    desc:"強力だが炎上リスクを抱える、実在人物をモデルにしない風刺キャラクター。",
+    risk:{chance:.20,damageRatio:.08,stun:1},
+    moves:[
+      mv("鶴の一声","📣","強烈な圧力で攻撃し、相手の攻撃力を低下","beam_gold",
+        [{kind:"damage",mult:.88,flat:34},{kind:"buff",target:"foe",stat:"atk",mult:.72,turns:2,label:"政治圧力"}],0,3),
+      mv("永田町ホットライン","☎️","三方向から連続攻撃し、相手ATBを後退","thrust_gold",
+        [{kind:"multi",hits:3,mult:.42},{kind:"atbDrain",amount:34}],0,3),
+      mv("予算獲得ロビー","💴","HP・SP・ATBを同時回復","orbit_gold",
+        [{kind:"heal",ratio:.13},{kind:"gauge",amount:30},{kind:"atbBoost",amount:25}],0,3),
+      mv("記憶にございません","🫥","弱体効果を解除し、防御と速度を上昇","tornado_violet",
+        [{kind:"cleanse"},{kind:"buff",target:"self",stat:"def",mult:1.35,turns:2,label:"答弁防御"},{kind:"buff",target:"self",stat:"spd",mult:1.20,turns:2,label:"逃げ足"}],0,3),
+      mv("閣議決定バリア","🏛️","防御態勢を取り、巨大な政策障壁を展開","pillar_gold",
+        [{kind:"guard"},{kind:"buff",target:"self",stat:"def",mult:1.28,turns:2,label:"閣議防壁"}],0,3),
+      mv("政治献金シャワー","💸","札束の豪雨で直接殴打。目が眩んだ相手の攻撃力を低下","bills_gold",
+        [{kind:"damage",mult:.78,flat:26},{kind:"buff",target:"foe",stat:"atk",mult:.80,turns:2,label:"札束で目が眩む"}],0,3),
+      mv("闇のフィクサー光線","🕶️","出所不明の黒い人脈光線。防御を回り込みSPも吸収","darkray_violet",
+        [{kind:"damage",mult:1.05,pierce:.3},{kind:"drainGauge",amount:24},{kind:"gauge",amount:12}],0,3),
+      mv("天下り顧問派遣","🪑","相手企業へ顧問を送り込み、内側から防御と技術を低下","thrust_violet",
+        [{kind:"damage",mult:.45},{kind:"buff",target:"foe",stat:"def",mult:.78,turns:3,label:"顧問が居座る"},{kind:"buff",target:"foe",stat:"tech",mult:.84,turns:3,label:"稟議が増える"}],0,3),
+      mv("秘書が全部やりました","🙇","責任を秘書へ転嫁。弱体解除＋HP回復＋相手ATB後退","orbit_violet",
+        [{kind:"cleanse"},{kind:"heal",ratio:.10},{kind:"atbDrain",amount:30}],0,3),
+      mv("派閥総動員","👥","派閥議員が続々参戦し、五連続の陳情アタック","burst_gold",
+        [{kind:"multi",hits:5,mult:.30},{kind:"atbDrain",amount:12}],0,3)
+    ]
+  },
+  jftc:{
+    id:"jftc",name:"公正取引委員会（ゲーム表現）",ic:"⚖️",turns:3,
+    desc:"白い公用車で現れる真面目な職員。実際の権限を正確に再現するものではないパロディ。",
+    moves:[
+      mv("立入検査・一斉展開","🔍","調査官が一斉展開。大企業に強く、技術力も低下","rain_cyan",
+        [{kind:"damage",mult:.82,vsLarge:1.75},{kind:"buff",target:"foe",stat:"tech",mult:.72,turns:2,label:"調査対応"}],0,3),
+      mv("排除措置命令","📜","巨大な命令書を落とし、大企業を高確率で行動不能","pillar_red",
+        [{kind:"damage",mult:.55,vsLarge:1.55},{kind:"stun",chance:.58,largeChance:.92,turns:1}],0,3),
+      mv("報告資料徴求","🗂️","大量の資料要求でSPとATBを奪い、攻撃力を低下","tornado_violet",
+        [{kind:"drainGauge",amount:38},{kind:"atbDrain",amount:42},{kind:"buff",target:"foe",stat:"atk",mult:.78,turns:2,label:"資料作成"}],0,3),
+      mv("課徴金インパクト","💥","大企業に極めて強い一撃を与え、防御力を低下","slam_gold",
+        [{kind:"damage",mult:1.18,vsLarge:1.80},{kind:"buff",target:"foe",stat:"def",mult:.74,turns:2,label:"課徴金衝撃"}],0,3),
+      mv("改善計画モニタリング","📋","相手の強化効果を解除し、継続監視でスロウ","orbit_cyan",
+        [{kind:"dispel",target:"foe"},{kind:"buff",target:"foe",stat:"spd",mult:.68,turns:3,label:"継続監視"},{kind:"gauge",amount:16}],0,3),
+      mv("営業停止処分","⛔","巨大な処分テープで相手を縛り上げ、高確率で行動不能に拘束","bind_gold",
+        [{kind:"damage",mult:.45},{kind:"bind",chance:.65,largeChance:.9,turns:1}],0,3),
+      mv("ガサ入れ段ボール搬出","📦","段ボールの雨で資料を押収。三連撃＋SP没収","rain_gold",
+        [{kind:"multi",hits:3,mult:.40},{kind:"drainGauge",amount:26}],0,3),
+      mv("独禁法メガハンマー","🔨","条文が刻まれた巨大ハンマーの一撃。大企業に特効","slam_red",
+        [{kind:"damage",mult:1.05,vsLarge:1.9},{kind:"buff",target:"foe",stat:"spd",mult:.8,turns:2,label:"ハンマー後遺症"}],0,3),
+      mv("リニエンシー勧告","🤝","『先に白状すれば減免』の囁きで組織を動揺させる","orbit_green",
+        [{kind:"buff",target:"foe",stat:"atk",mult:.76,turns:2,label:"内部通報の疑心"},{kind:"buff",target:"foe",stat:"tech",mult:.85,turns:2,label:"証拠隠せない"},{kind:"gauge",amount:20}],0,3),
+      mv("談合摘発サーチライト","🔦","闇夜の密談を白色光線で照射。防御無視＋強化解除","darkray_cyan",
+        [{kind:"damage",mult:.95,pierce:.5},{kind:"dispel",target:"foe"}],0,3)
+    ]
+  }
+};
+const MOTION_PATTERNS=["beam","burst","slash","thrust","wave","rain","tornado","slam","orbit","pillar","bills","darkray","bind"];
+const MOTION_PALETTES={
+  cyan:0x30d7ff,gold:0xffb84a,green:0x5cff9b,violet:0xb47cff,red:0xff4f72
+};
+const MOTIONS={};
+MOTION_PATTERNS.forEach(pattern=>{
+  Object.keys(MOTION_PALETTES).forEach(color=>{
+    MOTIONS[pattern+"_"+color]={pattern,color:MOTION_PALETTES[color]};
+  });
+});
+const DEFAULT_ATTACK_MOTION={
+  "インフラ":"beam_cyan","素材":"slash_gold","金融":"wave_green","IT":"thrust_violet","消費":"burst_red"
+};
+
+COMPANIES=[
+ makeRealCompany({
+  id:"toyota",name:"トヨタ自動車",short:"T",ind:"自動車",logo:"T",tick:"7203",brand:"#eb0a1e",
+  desc:"世界規模の生産・販売網と改善文化を持つモビリティ企業。",
+  attr:"消費",tier:"large",summon:"politician",
+  fin:{capital:635.4,revenue:48036.7,margin:10.0,employees:383853,period:"2025年3月期",metric:"売上収益",source:"Toyota IR"},
+  bias:{hp:90,def:14,tech:20,grw:8},
+  mid:mv("カイゼン連鎖","🔧","攻撃＋ヘイスト。ATB蓄積速度が上昇","orbit_red",
+    [{kind:"damage",mult:1.05},{kind:"buff",target:"self",stat:"spd",mult:1.24,turns:3,label:"ヘイスト"}],40),
+  big:mv("グローバル量産包囲網","🚘","速度依存の大ダメージ","rain_red",
+    [{kind:"damage",mult:1.45,spdScale:.75}],100)
+ }),
+ makeRealCompany({
+  id:"ntt",name:"NTT",short:"N",ind:"通信・ICT",logo:"N",tick:"9432",brand:"#19a5ff",
+  desc:"通信基盤と法人ICTを束ねる国内最大級のインフラ企業。",
+  attr:"インフラ",tier:"large",summon:"politician",
+  fin:{capital:938.0,revenue:14409.1,margin:11.8,employees:333850,period:"2026年3月期",metric:"営業収益",source:"NTT公式会社概要"},
+  bias:{hp:70,def:18,tech:22},
+  mid:mv("IOWN先行実装","🌐","技術依存攻撃＋通信高速化ヘイスト","beam_cyan",
+    [{kind:"damage",mult:.95,techScale:.9},{kind:"buff",target:"self",stat:"tech",mult:1.22,turns:3,label:"技+22%"},{kind:"buff",target:"self",stat:"spd",mult:1.18,turns:3,label:"低遅延ヘイスト"}],40),
+  big:mv("全国網フルルート","📡","防御を一部無視する広域攻撃","pillar_cyan",
+    [{kind:"damage",mult:1.65,techScale:.65,pierce:.45}],100)
+ }),
+ makeRealCompany({
+  id:"mufg",name:"三菱UFJ FG",short:"M",ind:"金融",logo:"M",tick:"8306",brand:"#e6002d",
+  desc:"銀行・信託・証券を束ね、巨大な資本力で市場を動かす金融グループ。",
+  attr:"金融",tier:"large",summon:"politician",
+  fin:{capital:2141.5,revenue:5944.4,margin:24.0,employees:153000,period:"2026年3月期",metric:"連結業務粗利益",source:"MUFG IR"},
+  bias:{hp:45,def:28,spd:-8,tech:10},
+  mid:mv("信用創造","💳","HP回復＋防御上昇","orbit_green",
+    [{kind:"heal",ratio:.13},{kind:"buff",target:"self",stat:"def",mult:1.18,turns:3,label:"防+18%"}],40),
+  big:mv("兆円キャノン","💴","資本力を圧縮した高威力ビーム","beam_green",
+    [{kind:"damage",mult:1.82,techScale:.35}],100)
+ }),
+ makeRealCompany({
+  id:"nipponsteel",name:"日本製鉄",short:"鉄",ind:"鉄鋼・素材",logo:"鉄",tick:"5401",brand:"#244a78",
+  desc:"鉄鋼を中核に巨大設備と技術蓄積で産業基盤を支える素材企業。",
+  attr:"素材",tier:"large",summon:"politician",
+  fin:{capital:569.519,revenue:10063.2,margin:6.5,employees:113845,period:"2026年3月期",metric:"売上収益",source:"日本製鉄 資本金・株式情報"},
+  bias:{hp:80,def:30,spd:-14,tech:15},
+  mid:mv("高炉フルブロー","🔥","高熱攻撃＋設備負荷によるスロウ","pillar_gold",
+    [{kind:"damage",mult:1.12},{kind:"buff",target:"foe",stat:"def",mult:.82,turns:3,label:"防-18%"},{kind:"buff",target:"foe",stat:"spd",mult:.82,turns:2,label:"設備スロウ"}],40),
+  big:mv("メガストラクチャー","🏗️","重い一撃。インフラ属性にさらに強い","slam_gold",
+    [{kind:"damage",mult:1.75,vsAttr:"インフラ",vsAttrMult:1.35}],100)
+ }),
+ makeRealCompany({
+  id:"sony",name:"ソニーグループ",short:"S",ind:"エンタメ・半導体",logo:"S",tick:"6758",brand:"#3974ff",
+  desc:"ゲーム・音楽・映画・イメージセンサーを横断する創造企業。",
+  attr:"IT",tier:"large",summon:"politician",
+  fin:{capital:881.357,revenue:12479.6,margin:12.1,employees:112300,period:"2026年3月期",metric:"売上高",source:"Sony Group Form 20-F"},
+  bias:{spd:12,tech:38,grw:14},
+  mid:mv("クリエイター・シナジー","🎮","技術攻撃＋SP回復","burst_violet",
+    [{kind:"damage",mult:.92,techScale:.9},{kind:"gauge",amount:18}],40),
+  big:mv("センサー・オーバードライブ","📷","高い技術力で防御を貫く","slash_violet",
+    [{kind:"damage",mult:1.42,techScale:1.05,pierce:.55}],100)
+ }),
+ makeRealCompany({
+  id:"softbankg",name:"ソフトバンクグループ",short:"SB",ind:"投資・AI",logo:"SB",tick:"9984",brand:"#c8c8c8",
+  desc:"AIと投資ポートフォリオを軸に大きな変動性を持つ戦略持株会社。",
+  attr:"IT",tier:"large",summon:"politician",
+  fin:{capital:238.772,revenue:7243.8,margin:8.0,employees:65352,period:"2026年3月期",metric:"売上高スナップショット",source:"SoftBank Group公式会社概要"},
+  bias:{atk:14,spd:10,tech:34,grw:28,def:-8},
+  mid:mv("ビジョン・ファンド再評価","🦄","ランダム倍率の投資攻撃","tornado_violet",
+    [{kind:"riskDamage",low:.65,high:1.55}],40),
+  big:mv("AI全振り宣言","🤖","大ダメージ＋自身防御低下","beam_violet",
+    [{kind:"damage",mult:1.95,techScale:.55},{kind:"buff",target:"self",stat:"def",mult:.8,turns:2,label:"集中投資"}],100)
+ }),
+ makeRealCompany({
+  id:"jtb",name:"JTB",short:"J",ind:"旅行・交流",logo:"J",tick:"JTB",brand:"#e60012",
+  desc:"旅行、地域交流、MICEなどを展開する総合交流企業。",
+  attr:"消費",tier:"sme",summon:"jftc",
+  fin:{capital:.1,revenue:1133.3,margin:1.5,employees:18000,period:"2026年3月期",metric:"連結売上高",source:"JTB公式会社概要・決算情報"},
+  bias:{spd:24,grw:18,tech:8},
+  mid:mv("ダイナミックパッケージ","🧳","連続攻撃＋旅程最適化ヘイスト","thrust_red",
+    [{kind:"multi",hits:2,mult:.63},{kind:"buff",target:"self",stat:"spd",mult:1.25,turns:2,label:"旅程ヘイスト"}],40),
+  big:mv("インバウンド大奔流","🗼","大波攻撃＋大混雑スロウ","wave_red",
+    [{kind:"damage",mult:1.62},{kind:"buff",target:"foe",stat:"spd",mult:.68,turns:3,label:"大混雑スロウ"}],100)
+ }),
+ makeRealCompany({
+  id:"iris",name:"アイリスオーヤマ",short:"I",ind:"生活用品・製造",logo:"I",tick:"IRIS",brand:"#d71920",
+  desc:"生活者視点の商品開発と高速な製品投入を強みにするメーカー。",
+  attr:"素材",tier:"sme",summon:"jftc",
+  fin:{capital:.1,revenue:245.8,margin:6.0,employees:6303,period:"FY2025",metric:"単体売上高",source:"アイリスオーヤマ公式会社概要"},
+  bias:{spd:34,tech:18,grw:24},
+  mid:mv("メーカーベンダー高速回転","💡","高速攻撃＋SP獲得","thrust_gold",
+    [{kind:"damage",mult:1.08,spdScale:.42},{kind:"gauge",amount:16}],40),
+  big:mv("年間新商品ラッシュ","📦","多数の商品が降り注ぐ連続攻撃","rain_gold",
+    [{kind:"multi",hits:4,mult:.43}],100)
+ })
+];
+
+/* 企業固有技ナレーション
+   - 中技(mid)・大技(big)ごとに独立した候補を持つ。
+   - 実在企業への事実断定ではなく、事業特性と会社員あるあるを使ったゲーム内風刺。
+   - toneは既存の serious / gold / humor / danger / system を再利用する。
+*/
+const COMPANY_MOVE_NARRATIONS={
+  toyota:{
+    mid:[
+      {tone:"serious",text:"工程を一つ詰め、ムダを一つ消す。派手さはないが、気づけば相手だけが残業している。"},
+      {tone:"humor",text:"改善提案が現場を走る。小さな修正のはずが、全社展開だけは異様に速い。"},
+      {tone:"serious",text:"止めて直す。遠回りに見えて、最終的に一番早いのがこの会社の怖さだ。"}
+    ],
+    big:[
+      {tone:"gold",text:"一台の強さではない。調達、生産、物流、販売が同時に動き、市場そのものを包囲する。"},
+      {tone:"gold",text:"世界中の工場が同じ拍で脈打つ。会議室で引いた線が、数百万台の動きに変わった。"},
+      {tone:"humor",text:"『量産できて初めて技術』。その現実論が、理想論ごと相手を押し流す。"}
+    ]
+  },
+  ntt:{
+    mid:[
+      {tone:"humor",text:"光より速いのは通信ではない。社内で『実証開始』の看板が立つ速度だ。"},
+      {tone:"serious",text:"遅延を削り、距離を消す。説明資料の未来図が、珍しく戦場で実装された。"},
+      {tone:"humor",text:"回線だけでなく意思決定まで低遅延化。通常は、そこが最大のボトルネックである。"}
+    ],
+    big:[
+      {tone:"gold",text:"全国の交換局とデータセンターが一本の神経になる。逃げ場は圏外にも残されていない。"},
+      {tone:"serious",text:"つながることが前提の社会は、つながった瞬間から巨大な武器になる。"},
+      {tone:"humor",text:"固定、モバイル、法人網。別々に見えた請求書が、一斉射撃の明細へ変わった。"}
+    ]
+  },
+  mufg:{
+    mid:[
+      {tone:"serious",text:"信用が数字を生み、数字が防壁になる。現金を積むより、はるかに銀行らしい守り方だ。"},
+      {tone:"humor",text:"資金繰りに余白が生まれる。現場は安心し、財務部だけが金利条件を確認している。"},
+      {tone:"serious",text:"貸借対照表が深呼吸した。相手には見えないが、こちらの耐久力だけが増えていく。"}
+    ],
+    big:[
+      {tone:"humor",text:"桁が一つ違う。砲身より先に、稟議の承認欄が眩しく光った。"},
+      {tone:"gold",text:"兆という単位が圧縮される。担当者がExcelで扱うには、少し重すぎる弾丸だ。"},
+      {tone:"serious",text:"資本力は声を荒らげない。ただ数字のゼロを増やし、相手の選択肢を消していく。"}
+    ]
+  },
+  nipponsteel:{
+    mid:[
+      {tone:"serious",text:"高炉が息を吹き返す。止める判断より、動かし続ける覚悟のほうが重い。"},
+      {tone:"humor",text:"温度も圧力も桁違い。現場の『少し様子を見ます』が、最も信用できない瞬間だ。"},
+      {tone:"humor",text:"設備負荷は上がる。保全担当の血圧も上がる。それでも出銑は止まらない。"}
+    ],
+    big:[
+      {tone:"gold",text:"橋、船、工場、都市。見えない場所で支えてきた重量が、今だけは相手の上に落ちる。"},
+      {tone:"humor",text:"設備予算の重さが、そのまま質量を持った。投資審査会なら即座に差し戻される規模だ。"},
+      {tone:"serious",text:"軽量化が美徳の時代に、重さそのものを説得力へ変える。素材企業の回答は物理的だ。"}
+    ]
+  },
+  sony:{
+    mid:[
+      {tone:"humor",text:"ゲーム、音楽、映画、半導体。部門の壁を越えた瞬間、社内調整の壁だけが残った。"},
+      {tone:"serious",text:"感性と技術が接続する。KPIでは測りにくいが、売れた後は全員が説明できる。"},
+      {tone:"humor",text:"クリエイターの閃きに技術者が追いつく。予算会議だけが、まだ前年度の速度で動いている。"}
+    ],
+    big:[
+      {tone:"serious",text:"暗闇でも輪郭を捉える。相手が気づく前に、戦場のすべてが撮像済みだ。"},
+      {tone:"gold",text:"見えないところで世界を見ている。カメラの中の小さな部品が、巨大企業を貫く。"},
+      {tone:"humor",text:"画素は嘘をつかない。説明資料は、ときどきつく。センサーだけが現実を撃ち抜いた。"}
+    ]
+  },
+  softbankg:{
+    mid:[
+      {tone:"humor",text:"評価額が上がれば先見の明、下がれば長期目線。投資の言葉は相場に合わせてよく伸びる。"},
+      {tone:"humor",text:"ユニコーンが走り出す。利益はまだ遠いが、プレゼン資料ではすでに世界を変えている。"},
+      {tone:"serious",text:"再評価の一声で景色が変わる。現金は動いていないのに、戦場だけが大きく揺れた。"}
+    ],
+    big:[
+      {tone:"humor",text:"AIへ全振り。昨日までの重点領域は、今日から『選択と集中の対象』になった。"},
+      {tone:"humor",text:"未来を先に買いに行く。転んだときの説明資料まで、たぶん生成AIが用意する。"},
+      {tone:"gold",text:"勝つまで賭ければ敗北ではない。その理屈ごと、巨大な演算量が相手へ降り注ぐ。"}
+    ]
+  },
+  jtb:{
+    mid:[
+      {tone:"serious",text:"航空、宿泊、移動を一括最適化。旅行者は楽になり、担当者の調整表だけが複雑になる。"},
+      {tone:"humor",text:"旅程が組み替わる。空席と空室を埋める速度は、社内会議の日程調整より速い。"},
+      {tone:"humor",text:"別々のサービスが一つの商品になる。顧客には便利、裏側には無数の締切だ。"}
+    ],
+    big:[
+      {tone:"humor",text:"人の波が都市へ流れ込む。売上は伸び、現場の休憩時間だけが縮んでいく。"},
+      {tone:"gold",text:"インバウンドが大奔流になる。歓迎ボードの裏で、オペレーションは限界突破した。"},
+      {tone:"humor",text:"観光需要は国境を越える。混雑もクレームも、多言語対応でやって来る。"}
+    ]
+  },
+  iris:{
+    mid:[
+      {tone:"serious",text:"企画、製造、卸の距離を詰める。会議を一つ飛ばすだけで、商品が一週間早く棚に並ぶ。"},
+      {tone:"humor",text:"生活者の不満を見つけ、そのまま商品名にする。市場調査より売場の声が速い。"},
+      {tone:"serious",text:"作って売る、売りながら直す。完成を待たない会社だけが、季節商品に間に合う。"}
+    ],
+    big:[
+      {tone:"humor",text:"新商品が雨のように降る。当たり外れを議論する前に、次の商品が会議室へ入ってきた。"},
+      {tone:"humor",text:"棚を面で取りに行く。SKUの数は攻撃力であり、物流担当には別の意味で攻撃だ。"},
+      {tone:"gold",text:"一発必中ではない。外しても次を出す。その回転数が、慎重な競合を置き去りにする。"}
+    ]
+  }
+};
+
+/* 技名と一対一で対応する固有解説。
+   同じ企業・同じ分類でも文章を共有せず、その技が何を表現し、
+   なぜゲーム効果につながるのかを個別に説明する。
+   COMPANY_MOVE_NARRATIONSは旧企業データのフォールバックとして残す。
+*/
+const MOVE_EXPLANATIONS={
+  "カイゼン連鎖":{
+    tone:"serious",
+    text:"標準作業の乱れと工程間の停滞を一つずつ潰し、改善した工程を次工程へ連鎖させる。小さな短縮の累積が攻撃となり、同時にATB速度を引き上げる。"
+  },
+  "グローバル量産包囲網":{
+    tone:"gold",
+    text:"世界各地の調達網、完成車工場、物流拠点、販売網を同時稼働させる総力戦。単発の製品力ではなく、供給を途切れさせない量産能力が速度依存の大打撃になる。"
+  },
+  "IOWN先行実装":{
+    tone:"serious",
+    text:"光電融合を軸とする次世代通信構想を戦場へ先行投入する。伝送遅延と処理負荷を減らすため、技術攻撃だけでなく技術力とATB速度も同時に上昇する。"
+  },
+  "全国網フルルート":{
+    tone:"gold",
+    text:"固定網、モバイル網、局舎、データセンターを全国規模で迂回接続する。複数経路から到達する通信は一つの防壁では止めにくく、防御の一部を無視する。"
+  },
+  "信用創造":{
+    tone:"serious",
+    text:"融資によって預金通貨を生み、取引先と自社の資金循環を拡張する銀行固有の仕組み。新しい資金余力がHPを戻し、厚い与信基盤が防御力へ変わる。"
+  },
+  "兆円キャノン":{
+    tone:"gold",
+    text:"巨大な預金、融資、証券、信託の残高を一つの資本弾へ圧縮する。日常業務では分散管理される兆円単位の力を、戦場だけで一点集中させる高威力砲撃。"
+  },
+  "高炉フルブロー":{
+    tone:"serious",
+    text:"高炉へ熱風と還元材を最大投入し、銑鉄生産を一気に引き上げる。圧倒的な熱量が相手の防御を軟化させ、巨大設備への対応負荷が行動速度も落とす。"
+  },
+  "メガストラクチャー":{
+    tone:"gold",
+    text:"橋梁、建築、造船、エネルギー設備を支える鋼材の物量を巨大構造物として落とす。鉄を大量に必要とするインフラ企業ほど、その重量から逃れにくい。"
+  },
+  "クリエイター・シナジー":{
+    tone:"serious",
+    text:"ゲーム、音楽、映画のIPと、機器・半導体の技術を一つの体験へ接続する。作品の魅力が技術攻撃となり、再利用できるIP価値が追加SPを生む。"
+  },
+  "センサー・オーバードライブ":{
+    tone:"gold",
+    text:"イメージセンサーの感度、読み出し速度、画像処理を限界まで高める。暗所や高速物体まで捉える検出能力により、相手の防御姿勢を見抜いて深く貫通する。"
+  },
+  "ビジョン・ファンド再評価":{
+    tone:"humor",
+    text:"未上場投資先の将来価値を現在の評価額へ反映する。期待が膨らめば巨額の利益、見通しが崩れれば巨額の損失となるため、攻撃倍率そのものが大きく変動する。"
+  },
+  "AI全振り宣言":{
+    tone:"gold",
+    text:"資金、人材、経営メッセージをAI領域へ極端に集中させる。集中投資は技術火力を跳ね上げる一方、他の選択肢を削るため自社防御も低下する。"
+  },
+  "ダイナミックパッケージ":{
+    tone:"serious",
+    text:"航空券、宿泊、移動商品を在庫と価格の変動に合わせてリアルタイムに組み直す。複数サービスが連続攻撃となり、旅程最適化が次の行動も早める。"
+  },
+  "インバウンド大奔流":{
+    tone:"gold",
+    text:"訪日客の移動、宿泊、買物、地域体験を巨大な需要の流れへ変える。市場を押し流す一方、混雑と受入負荷が相手の行動速度を大幅に低下させる。"
+  },
+  "メーカーベンダー高速回転":{
+    tone:"serious",
+    text:"製造機能と卸機能を一体化し、売場で拾った生活者の不満を短期間で商品へ戻す。企画から販売までの距離の短さが速度攻撃と次の商品用SPを生む。"
+  },
+  "年間新商品ラッシュ":{
+    tone:"gold",
+    text:"単一の大型商品に賭けず、多数の生活用品を高速投入して売場の面を取る。商品数そのものが四連続攻撃となり、一つを防いでも次の新商品が降ってくる。"
+  },
+  "鶴の一声":{
+    tone:"humor",
+    text:"正式な審議を積み上げる代わりに、有力者の短い発言で優先順位を一変させる。決定速度が直接ダメージとなり、相手は逆らいにくさから攻撃力を失う。"
+  },
+  "永田町ホットライン":{
+    tone:"humor",
+    text:"省庁、党内、関係団体へ同時に電話をつなぎ、三つの経路から働きかける。連続する調整依頼が三連撃となり、相手のATBを実務対応で後退させる。"
+  },
+  "予算獲得ロビー":{
+    tone:"gold",
+    text:"政策目的と地元要望を予算項目へ結び付け、必要資源を確保する。予算成立によってHP、SP、ATBの三つが同時に回復する政治型の補給技。"
+  },
+  "記憶にございません":{
+    tone:"humor",
+    text:"過去の具体的な関与を確定させない答弁で、追及の前提そのものを曖昧にする。既存の弱体効果を外し、答弁防御と退避速度を同時に高める。"
+  },
+  "閣議決定バリア":{
+    tone:"gold",
+    text:"個人の発言ではなく内閣として決定した形式を取り、政策方針を巨大な公的障壁へ変える。防御態勢と防御力上昇を同時に得る。"
+  },
+  "政治献金シャワー":{
+    tone:"humor",
+    text:"出所を聞いてはいけない札束が戦場に舞い踊る。浴びた側は視界と判断力を同時に失い、攻撃精度が落ちる。なお領収書は発行されない。"
+  },
+  "闇のフィクサー光線":{
+    tone:"danger",
+    text:"名刺に肩書のない人物たちの人脈が、黒い光線となって撃ち出される。正面の防御を回り込み、相手が蓄えた戦略資源まで静かに吸い上げる。"
+  },
+  "天下り顧問派遣":{
+    tone:"humor",
+    text:"『よく知る人物』が相手企業の顧問席に着任する。仕事は主に承認印と昔話だが、意思決定は確実に遅くなり、防御と技術が内側から緩む。"
+  },
+  "秘書が全部やりました":{
+    tone:"humor",
+    text:"すべての責任が秘書へ相転移する伝統の防御術。本人の弱体は解除され、追及する側は怒りで手元が狂い、次の行動が遅れる。"
+  },
+  "派閥総動員":{
+    tone:"humor",
+    text:"当選回数も役職もばらばらの議員たちが続々参戦し、五連続の陳情圧力を叩き込む。一人ひとりは軽いが、数と時間の消耗が確実に効く。"
+  },
+  "営業停止処分":{
+    tone:"danger",
+    text:"巨大な処分テープと封印書類が相手を物理的に縛り上げる。拘束された企業は次の行動そのものを失い、震えたまま戦場に立ち尽くす。"
+  },
+  "ガサ入れ段ボール搬出":{
+    tone:"humor",
+    text:"調査官が段ボールを抱えて走り込み、帳簿もPCも記念品も等しく搬出する。三度の搬出が三連撃となり、押収資料の分だけSPも没収される。"
+  },
+  "独禁法メガハンマー":{
+    tone:"danger",
+    text:"条文が刻印された巨大ハンマーが市場支配力の頂点へ振り下ろされる。事業規模が大きいほど打点は重く、衝撃の後遺症で動きも鈍る。"
+  },
+  "リニエンシー勧告":{
+    tone:"humor",
+    text:"『最初に白状した社だけ課徴金を減免します』という囁きが組織内を駆け巡る。誰が先に駆け込むか分からない疑心暗鬼が、攻撃と技術を内側から削ぐ。"
+  },
+  "談合摘発サーチライト":{
+    tone:"serious",
+    text:"料亭の奥座敷まで届く白色光線が、闇夜の握手を白日の下に晒す。隠れる場所を失った相手は防御ごと貫かれ、積み上げた強化も無効化される。"
+  },
+  "立入検査・一斉展開":{
+    tone:"serious",
+    text:"複数の調査官が事業所へ入り、帳簿、メール、契約資料を同時に確認する。管理範囲が広い大企業ほど対応負荷が増し、技術部門も資料確保で弱体化する。"
+  },
+  "排除措置命令":{
+    tone:"danger",
+    text:"問題とされた行為の停止と再発防止を命じ、従来の戦い方そのものを封じる。事業規模が大きいほど変更範囲も広く、高確率で次の行動を止める。"
+  },
+  "報告資料徴求":{
+    tone:"humor",
+    text:"取引経緯、価格決定過程、社内承認、関連メールを期限付きで提出させる。担当者のSPとATBを奪い、攻撃に使うはずだった人員を資料作成へ転用させる。"
+  },
+  "課徴金インパクト":{
+    tone:"danger",
+    text:"違反行為によって得た経済的利益へ金銭的負担を課すという発想を一撃化する。取引規模の大きい企業ほど衝撃が増し、財務防壁も崩れる。"
+  },
+  "改善計画モニタリング":{
+    tone:"serious",
+    text:"一度の是正報告で終わらせず、改善計画の実施状況を継続確認する。相手の一時的な強化を解除し、定期報告と再点検で長期間速度を落とす。"
+  },
+  "研究開発":{
+    tone:"serious",
+    text:"今すぐ売上になる活動を抑え、試験、設計、検証へ人員と資金を振り向ける。短期攻撃を一度見送る代わりに、以後の攻撃力と技術力を高める。"
+  },
+  "事業再編":{
+    tone:"serious",
+    text:"不採算事業、重複組織、遊休資産を切り離し、経営資源を中核事業へ戻す。失った体力の一部を回復するが、整理対象の現場にはまったく回復技に見えない。"
+  },
+  "広報戦略":{
+    tone:"humor",
+    text:"同じ事実でも見出し、順序、説明者を整えて市場の受け止め方を変える。相手の実力を直接下げず、攻勢を続けにくくすることで攻撃力を低下させる。"
+  },
+  "投資":{
+    tone:"serious",
+    text:"この瞬間の攻撃機会を設備、人材、システムへ振り替える。現在の一手を捨てる代わりに、将来の中技・大技へ使えるSPを大きく蓄積する。"
+  },
+  "大物政治家（架空） 参戦":{
+    tone:"gold",
+    text:"企業単独では動かせない政策、予算、関係機関への接点を持つ架空の援軍が到着する。強力な三ターン支援と引き換えに、発言炎上のリスクも戦場へ持ち込む。"
+  },
+  "公正取引委員会（ゲーム表現） 参戦":{
+    tone:"serious",
+    text:"取引資料と法令確認を武器にするゲーム上の調査チームが到着する。大企業ほど対応範囲が広がる設計で、三ターンにわたり強化解除や行動阻害を行う。"
+  },
+  "政治家炎上 / 抗議デモ発生":{
+    tone:"danger",
+    text:"援軍の不用意な発言が企業本体の信用問題へ波及した。広報、法務、経営陣が火消しへ拘束されるため、自傷ダメージと一回の行動不能が発生する。"
+  }
+};
+
+/* 共通戦略 (STRATEGY内) */
+const STRATEGIES=[
+ {id:"rnd", name:"研究開発", ic:"🔬", cd:3, desc:"攻撃+20%・技術+20%(3T)",
+  fx:(s)=>{addBuff(s,"atk",1.2,3,"攻+20%");addBuff(s,"tech",1.2,3,"技+20%");
+    return [s.name+"は研究開発に注力。基礎体力が向上した"];}},
+ {id:"rst", name:"事業再編", ic:"🔄", cd:4, desc:"HPを18%回復",
+  fx:(s,f,c)=>{const h=c.heal(s,.18);return [s.name+"は不採算事業を整理。HP "+h+" 回復"];}},
+ {id:"pr",  name:"広報戦略", ic:"📣", cd:3, desc:"相手の攻撃-20%(3T)",
+  fx:(s,f)=>{addBuff(f,"atk",.8,3,"攻-20%");return [s.name+"の広報が世論を動かす。相手の勢いが鈍った"];}},
+ {id:"inv", name:"投資", ic:"📈", cd:2, desc:"SPゲージ+40 (このターンは攻撃しない)",
+  fx:(s)=>{s.gauge=Math.min(100,s.gauge+40);return [s.name+"は将来へ投資。SPゲージが大きく上昇"];}},
+];
+
+/* ================================================================
+   2.2 市場変化
+   - すべてゲーム用の架空シナリオ。現実の政策・相場予測ではない。
+   - 追い風は攻撃力換算で最大+14%、逆風は最大-12%。
+   - 既存の属性相性と合算した最終倍率も0.78〜1.42に制限し、
+     市場だけで勝敗が確定しないようにする。
+================================================================ */
+const MARKET_EVENTS=[
+  {id:"rare_metal",ic:"⛏️",title:"中国がレアメタル輸出を規制",boost:["素材"],drag:["IT","消費"],up:1.13,down:.91,duration:4,tone:"danger",
+   desc:"希少資源の供給が細り、代替材と在庫を持つ素材企業の交渉力が上昇。電子機器と完成品は調達負荷を受ける。"},
+  {id:"us_tariff",ic:"🛃",title:"米政権が追加関税を発表",boost:["インフラ","素材"],drag:["消費","IT"],up:1.11,down:.92,duration:4,tone:"danger",
+   desc:"域内生産と基礎産業には追い風だが、国境をまたぐ完成品とデジタル機器のコストが増える。"},
+  {id:"rate_hike",ic:"🏦",title:"世界的な金利上昇",boost:["金融"],drag:["IT","消費"],up:1.14,down:.91,duration:4,tone:"gold",
+   desc:"利ざや改善で金融が強くなる一方、将来利益を先に買う成長企業と個人消費には資金調達の重さがかかる。"},
+  {id:"rate_cut",ic:"🕊️",title:"主要中銀が利下げへ転換",boost:["IT","消費"],drag:["金融"],up:1.12,down:.93,duration:4,tone:"serious",
+   desc:"低い資金コストが投資と消費を押し上げる。金融は利ざや縮小に備え、守りを固める局面となる。"},
+  {id:"chip_shortage",ic:"💾",title:"世界的な半導体不足",boost:["IT"],drag:["消費","インフラ"],up:1.12,down:.91,duration:3,tone:"danger",
+   desc:"供給枠を確保した技術企業の価値が上がる一方、自動車、機器、通信設備の生産計画は部品待ちになる。"},
+  {id:"chip_recovery",ic:"🏭",title:"半導体供給が急回復",boost:["IT","消費"],drag:["素材"],up:1.10,down:.94,duration:3,tone:"serious",
+   desc:"滞留していた生産が再開し、デジタル製品と完成品が市場へ流れ込む。材料不足による価格優位は薄れる。"},
+  {id:"oil_spike",ic:"🛢️",title:"原油価格が急騰",boost:["素材"],drag:["消費","インフラ"],up:1.12,down:.90,duration:4,tone:"danger",
+   desc:"資源と代替素材の価格決定力が増す。輸送、電力、旅行、生活用品には広くコスト圧力がかかる。"},
+  {id:"oil_drop",ic:"⛽",title:"原油価格が急落",boost:["消費","インフラ"],drag:["素材"],up:1.10,down:.93,duration:4,tone:"serious",
+   desc:"燃料費低下で移動と生活サービスが活性化する一方、資源価格を支えにしていた素材側の勢いは鈍る。"},
+  {id:"yen_weak",ic:"💱",title:"円安が急加速",boost:["素材","IT"],drag:["消費"],up:1.10,down:.91,duration:4,tone:"gold",
+   desc:"海外売上の円換算額と輸出採算が改善する。輸入品、燃料、海外旅行を抱える消費側には逆風となる。"},
+  {id:"yen_strong",ic:"🪙",title:"急速な円高転換",boost:["消費","インフラ"],drag:["素材","IT"],up:1.09,down:.93,duration:4,tone:"serious",
+   desc:"輸入コストが下がり、国内投資と消費の余力が増える。海外収益の円換算と輸出価格競争力は弱まる。"},
+  {id:"infra_stimulus",ic:"🏗️",title:"大型インフラ投資が決定",boost:["インフラ","素材"],drag:["金融"],up:1.13,down:.94,duration:5,tone:"gold",
+   desc:"通信、交通、建設、鋼材へ長期需要が発生する。資金は実物投資へ向かい、金融市場の短期運用余地は縮む。"},
+  {id:"austerity",ic:"✂️",title:"各国で財政緊縮が進行",boost:["金融"],drag:["インフラ","消費"],up:1.09,down:.91,duration:4,tone:"danger",
+   desc:"財政規律と信用力が評価される一方、公共事業と需要刺激策が抑えられ、実体経済は慎重姿勢になる。"},
+  {id:"cyber_wave",ic:"🛡️",title:"大規模サイバー攻撃が多発",boost:["IT"],drag:["金融","インフラ"],up:1.14,down:.90,duration:3,tone:"danger",
+   desc:"防御技術と復旧サービスへの需要が急増する。決済網と基幹インフラは停止リスクへの対応で速度を失う。"},
+  {id:"datacenter_boom",ic:"🖥️",title:"データセンター需要が急拡大",boost:["IT","インフラ"],drag:["消費"],up:1.12,down:.94,duration:4,tone:"gold",
+   desc:"計算資源、通信回線、電力設備への投資が集中する。家計向け市場からは資金と電力が吸い上げられる。"},
+  {id:"ai_boom",ic:"🤖",title:"生成AI投資ブーム",boost:["IT","金融"],drag:["消費"],up:1.13,down:.94,duration:4,tone:"gold",
+   desc:"計算基盤と成長投資へ資金が集まり、技術企業と投資主体が加速する。非AI分野の予算は後回しになる。"},
+  {id:"ai_rules",ic:"📜",title:"AI規制と監査義務が強化",boost:["金融","インフラ"],drag:["IT"],up:1.09,down:.90,duration:4,tone:"danger",
+   desc:"統制、本人確認、公共基盤の信頼性が評価される。AI開発側は説明資料、監査、再設計に戦力を割かれる。"},
+  {id:"consumption_rebound",ic:"🛍️",title:"個人消費が急回復",boost:["消費","金融"],drag:["素材"],up:1.12,down:.94,duration:4,tone:"gold",
+   desc:"旅行、娯楽、耐久財、決済が活発化する。原材料在庫を抱える企業は、完成品側の値下げ要求を受けやすい。"},
+  {id:"recession",ic:"📉",title:"世界景気の後退懸念",boost:["インフラ"],drag:["消費","素材"],up:1.09,down:.90,duration:4,tone:"danger",
+   desc:"生活に不可欠な通信と基盤サービスへ資金が逃避する。景気敏感な完成品と素材需要は急速に弱まる。"},
+  {id:"logistics_disruption",ic:"🚢",title:"国際物流が大混乱",boost:["インフラ"],drag:["素材","消費"],up:1.11,down:.90,duration:3,tone:"danger",
+   desc:"物流網を押さえる基盤企業の価値が上がる。材料と完成品は港湾滞留により、必要な場所へ届かない。"},
+  {id:"logistics_recover",ic:"📦",title:"港湾と物流網が正常化",boost:["素材","消費"],drag:["インフラ"],up:1.10,down:.94,duration:3,tone:"serious",
+   desc:"滞留在庫が一斉に動き、材料と商品供給が回復する。混乱対応による物流プレミアムは縮小する。"},
+  {id:"rebuild",ic:"🚧",title:"大規模な復旧需要が発生",boost:["インフラ","素材"],drag:["消費"],up:1.13,down:.93,duration:4,tone:"danger",
+   desc:"通信、道路、建物、資材の復旧が最優先となる。通常の消費活動は延期され、基礎産業へ資源が集中する。"},
+  {id:"power_shortage",ic:"⚡",title:"異常気象で電力が逼迫",boost:["インフラ"],drag:["IT","消費"],up:1.12,down:.90,duration:3,tone:"danger",
+   desc:"電力供給と需給制御の価値が上昇する。データ処理、店舗、工場は使用電力を抑え、攻勢を弱める。"},
+  {id:"renewable_support",ic:"🌱",title:"再生可能エネルギー支援拡大",boost:["インフラ","素材"],drag:["金融"],up:1.11,down:.94,duration:5,tone:"serious",
+   desc:"送電網、蓄電、設備材料に長期案件が生まれる。政策資金が設備へ固定され、短期金融取引には向かいにくい。"},
+  {id:"construction_slow",ic:"🏢",title:"住宅・建設需要が減速",boost:["金融"],drag:["素材","インフラ"],up:1.08,down:.91,duration:4,tone:"danger",
+   desc:"新規投資より現金と信用管理が重視される。鋼材、設備、通信工事は案件延期の影響を受ける。"},
+  {id:"tourism_boom",ic:"🗺️",title:"国際観光需要が急増",boost:["消費","インフラ"],drag:["IT"],up:1.11,down:.94,duration:4,tone:"gold",
+   desc:"旅行、宿泊、交通、決済が連動して伸びる。投資家の関心は画面の中から現地体験へ一時的に移る。"},
+  {id:"pandemic",ic:"🧬",title:"感染症再拡大への警戒",boost:["IT","金融"],drag:["消費"],up:1.11,down:.89,duration:3,tone:"danger",
+   desc:"遠隔業務、デジタルサービス、資金繰り支援の需要が増える。移動、観光、対面消費は急ブレーキを受ける。"},
+  {id:"deregulation",ic:"🔓",title:"広範な規制緩和が発表",boost:["消費","IT"],drag:["インフラ"],up:1.11,down:.94,duration:4,tone:"gold",
+   desc:"新サービスと新規参入が加速する。既存制度と許認可を防壁にしていた基盤企業は競争対応を迫られる。"},
+  {id:"antitrust",ic:"⚖️",title:"競争政策の監視が強化",boost:["消費","素材"],drag:["IT","金融"],up:1.09,down:.90,duration:4,tone:"danger",
+   desc:"取引先と利用者の選択肢が広がり、分散した供給側に追い風となる。巨大なデータ・資本集約企業は対応負荷を負う。"},
+  {id:"wage_hike",ic:"💴",title:"世界的な賃上げが加速",boost:["消費"],drag:["素材","インフラ"],up:1.13,down:.92,duration:4,tone:"gold",
+   desc:"家計所得が増えて需要が強まる一方、人員と現場作業を多く抱える産業では固定費が先に上昇する。"},
+  {id:"payment_outage",ic:"💳",title:"国際決済ネットワークに障害",boost:["IT"],drag:["金融","消費"],up:1.10,down:.88,duration:3,tone:"danger",
+   desc:"復旧技術と代替システムが求められる。資金移動と購買が止まり、金融と消費は一時的に攻撃機会を失う。"}
+];
+
+function marketImpactText(event){
+  if(!event)return "属性効果は現在ありません";
+  const up=Math.round((event.up-1)*100);
+  const down=Math.round((1-event.down)*100);
+  return "追い風: "+event.boost.join("・")+" +"+up+"%　/　逆風: "+event.drag.join("・")+" -"+down+"%";
+}
+function marketAttrMultiplier(attr,battle){
+  const B=battle||S.battle;
+  const event=B&&B.market&&B.market.event;
+  if(!event)return 1;
+  if(event.boost.indexOf(attr)>=0)return Math.max(1,Math.min(1.14,event.up));
+  if(event.drag.indexOf(attr)>=0)return Math.max(.88,Math.min(1,event.down));
+  return 1;
+}
+function marketTempoMultiplier(attr,battle){
+  const power=marketAttrMultiplier(attr,battle);
+  return 1+(power-1)*.55;
+}
+function chooseMarketEvent(B){
+  const recent=B.market.history.slice(-7);
+  const pool=MARKET_EVENTS.filter(event=>recent.indexOf(event.id)<0);
+  const source=pool.length?pool:MARKET_EVENTS;
+  return source[Math.floor(Math.random()*source.length)];
+}
+function activateMarketEvent(B,event,visual){
+  B.market.event=event;
+  B.market.history.push(event.id);
+  if(B.market.history.length>12)B.market.history.shift();
+  B.market.nextTurn=B.turn+event.duration;
+  if(visual===false)return;
+
+  const impact=marketImpactText(event);
+  pushLog("sys","【市場変化】"+event.title+" / "+impact);
+  queueBattleNarration(
+    event.ic+" MARKET CHANGE / "+event.title,
+    event.desc+" "+impact,
+    event.tone||"system",3200
+  );
+  const flash=event.tone==="danger"?"#ff526d":event.tone==="gold"?"#ffd15c":"#68d7ff";
+  arenaFlash(flash);camShake(.7);
+  tone(event.tone==="danger"?130:420,.26,"sawtooth",.16,0,event.tone==="danger"?70:720);
+  renderMarketPanel();
+  const panel=$("marketPanel");
+  if(panel){
+    panel.classList.remove("changed");
+    void panel.offsetWidth;
+    panel.classList.add("changed");
+    setTimer(()=>panel.classList.remove("changed"),950);
+  }
+}
+function advanceMarketCycle(B,visual){
+  if(!B||B.over||!B.market)return;
+  if(B.turn<B.market.nextTurn)return;
+  activateMarketEvent(B,chooseMarketEvent(B),visual!==false);
+}
+function renderMarketPanel(){
+  const panel=$("marketPanel"),B=S.battle;
+  if(!panel||!B||!B.market)return;
+  const event=B.market.event;
+  const remaining=Math.max(0,B.market.nextTurn-B.turn);
+  const changing=panel.classList.contains("changed");
+  if(!event){
+    panel.className="market-panel neutral"+(changing?" changed":"");
+    $("marketTitle").textContent="市場監視中";
+    $("marketRemain").textContent="変化まで "+remaining+" ACTION";
+    $("marketImpact").textContent="属性効果は現在ありません。SPを蓄え、最初の変化に備えてください。";
+    return;
+  }
+  panel.className="market-panel tone-"+(event.tone||"serious")+(changing?" changed":"");
+  $("marketTitle").textContent=event.ic+" "+event.title;
+  $("marketRemain").textContent="残り "+remaining+" ACTION";
+  $("marketImpact").textContent=marketImpactText(event);
+}
+
+/* ================================================================
+   3. 状態 (一元管理・DOMは表示専用)
+================================================================ */
+const S={
+  screen:"title",
+  playerCoId:null, cpuCoId:null,
+  battle:null,               // {p, e, turn, over}
+  inputLock:false,
+  auto:false, paused:false,
+  log:[],
+  settings:{volume:.6, muted:false},
+  timers:new Set(),          // 画面遷移時に停止するタイマー
+};
+function setTimer(fn,ms){const t=setTimeout(()=>{S.timers.delete(t);fn();},ms);S.timers.add(t);return t;}
+function clearTimers(){S.timers.forEach(clearTimeout);S.timers.clear();}
+
+let atbRaf=0,atbLast=0,atbUiStamp=0;
+function atbRate(f){
+  const speed=Math.max(20,eff(f,"spd"));
+  return (7.5+speed*.135)*marketTempoMultiplier(f.co.attr);
+}
+function stopATBLoop(){
+  if(atbRaf)cancelAnimationFrame(atbRaf);
+  atbRaf=0;atbLast=0;atbUiStamp=0;
+}
+function startATBLoop(){
+  stopATBLoop();
+  atbLast=performance.now();
+  atbRaf=requestAnimationFrame(atbLoop);
+}
+function atbLoop(now){
+  atbRaf=requestAnimationFrame(atbLoop);
+  const B=S.battle;
+  const dt=Math.min(.05,Math.max(0,(now-atbLast)/1000));
+  atbLast=now;
+  if(!B||B.over||S.screen!=="battle"||S.paused)return;
+  if(document.querySelector(".sheet-wrap.open,.modal.open"))return;
+
+  /* 手動操作中は、プレイヤーATBが満タンの間、戦闘時間全体を停止する */
+  if(B.p.atb>=100&&!S.auto){
+    if(now-atbUiStamp>45){
+      atbUiStamp=now;
+      updateATBUI();
+    }
+    return;
+  }
+
+  if(!S.inputLock){
+    [B.p,B.e].forEach(f=>{
+      if(f.hp<=0||f.atb>=100)return;
+      const before=f.atb;
+      f.atb=Math.min(100,f.atb+atbRate(f)*dt);
+      if(before<100&&f.atb>=100)f.readyAt=now;
+    });
+  }
+
+  if(now-atbUiStamp>45){
+    atbUiStamp=now;
+    updateATBUI();
+  }
+  if(S.inputLock)return;
+
+  /* 同時に満タンになった場合も、手動プレイヤーのコマンド選択を優先する */
+  if(B.p.atb>=100){
+    if(S.auto){
+      startATBAction(B.p,B.e,cpuDecide(B.p,B.e));
+    }
+    return;
+  }
+
+  if(B.e.atb>=100){
+    startATBAction(B.e,B.p,cpuDecide(B.e,B.p));
+  }
+}
+
+let customCompanies=[];
+const LS_KEY="cq_custom_v1";
+try{const raw=localStorage.getItem(LS_KEY);if(raw)customCompanies=JSON.parse(raw)||[];}catch(_){customCompanies=[];}
+function allCompanies(){return COMPANIES.concat(customCompanies.map(reviveCustom));}
+function reviveCustom(c){ /* localStorage由来: 新スキーマを補完 */
+  const co=Object.assign({},c);
+  co.attr=co.attr||"消費";
+  co.brand=co.brand||"#4dc3ff";
+  co.fin=co.fin||{capital:0,revenue:0,margin:0,employees:0,period:"ユーザー入力",metric:"手入力",source:"custom"};
+  /* 過去データのtoriteki区分も、資本金3億円基準へ自動移行する */
+  co.tier=capitalTier(co.fin);
+  co.summon=co.summon||(co.tier==="large"?"politician":"jftc");
+  co.mid=co.mid||mv("機動的な改善","🛠️","速度依存の中技","thrust_cyan",
+    [{kind:"damage",mult:1.05,spdScale:.35}],40);
+  co.big=co.big||mv(co.skillName||"総力戦","🚩","全能力を活かした大技","burst_red",
+    [{kind:"damage",mult:1.55,techScale:.5}],100);
+  co.skill=co.big;
+  return co;
+}
+function findCo(id){return allCompanies().find(c=>c.id===id)||null;}
+
+/* ================================================================
+   4. サウンド (WebAudio / ユーザー操作後に初期化)
+================================================================ */
+let AC=null, master=null, bgm={on:false,t:null,step:0};
+function audioInit(){
+  if(AC)return;
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    master=AC.createGain(); master.connect(AC.destination);
+    applyVolume();
+  }catch(_){AC=null;}
+}
+function applyVolume(){if(master)master.gain.value=S.settings.muted?0:S.settings.volume*.5;}
+function tone(freq,dur,type,vol,when,slide){
+  if(!AC)return;
+  const t0=AC.currentTime+(when||0);
+  const o=AC.createOscillator(),g=AC.createGain();
+  o.type=type||"square"; o.frequency.setValueAtTime(freq,t0);
+  if(slide)o.frequency.exponentialRampToValueAtTime(slide,t0+dur);
+  g.gain.setValueAtTime(vol||.2,t0);
+  g.gain.exponentialRampToValueAtTime(.001,t0+dur);
+  o.connect(g);g.connect(master);o.start(t0);o.stop(t0+dur+.02);
+}
+function noise(dur,vol){
+  if(!AC)return;
+  const n=AC.sampleRate*dur,buf=AC.createBuffer(1,n,AC.sampleRate),d=buf.getChannelData(0);
+  for(let i=0;i<n;i++)d[i]=(Math.random()*2-1)*(1-i/n);
+  const src=AC.createBufferSource(),g=AC.createGain();
+  src.buffer=buf;g.gain.value=vol||.25;src.connect(g);g.connect(master);src.start();
+}
+const SE={
+  select(){tone(880,.07,"square",.15);tone(1320,.09,"square",.12,.06);},
+  attack(){tone(220,.12,"sawtooth",.2,0,80);noise(.08,.15);},
+  hit(){noise(.14,.3);tone(110,.14,"square",.2,0,60);},
+  guard(){tone(520,.16,"triangle",.2,0,780);},
+  skill(){tone(392,.1,"square",.18);tone(523,.1,"square",.18,.09);tone(659,.18,"square",.2,.18,880);},
+  win(){[523,659,784,1046].forEach((f,i)=>tone(f,.22,"square",.2,i*.14));},
+  lose(){[392,330,262,196].forEach((f,i)=>tone(f,.3,"triangle",.2,i*.2));},
+};
+const BGM_BASS=[110,110,131,98], BGM_LEAD=[440,0,523,440, 392,0,440,330];
+function bgmStart(){
+  if(!AC||bgm.on)return; bgm.on=true; bgm.step=0;
+  bgm.t=setInterval(()=>{
+    if(S.paused||S.settings.muted)return;
+    const i=bgm.step++;
+    tone(BGM_BASS[i%4],.22,"triangle",.10);
+    const L=BGM_LEAD[i%8]; if(L)tone(L,.12,"square",.05);
+  },260);
+}
+function bgmStop(){if(bgm.t){clearInterval(bgm.t);bgm.t=null;}bgm.on=false;}
+
+/* ================================================================
+   5. 画面遷移 (一箇所に集約)
+================================================================ */
+const $=id=>document.getElementById(id);
+function showScreen(name){
+  clearTimers();
+  resetBattleNarration();
+  closeAllOverlays();
+  if(name!=="select")cleanupSelect3D();
+  if(name!=="battle"){
+    stopATBLoop();
+    cleanupGL();
+  }
+  S.screen=name; S.inputLock=false;
+  document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
+  $("scr-"+name).classList.add("active");
+  document.querySelectorAll(".dmg-pop,.cutin").forEach(n=>n.remove());
+}
+function closeAllOverlays(){
+  document.querySelectorAll(".sheet-wrap.open").forEach(n=>n.classList.remove("open"));
+  document.querySelectorAll(".modal.open").forEach(n=>n.classList.remove("open"));
+}
+document.querySelectorAll("[data-close]").forEach(el=>{
+  el.addEventListener("click",()=>{$(el.dataset.close).classList.remove("open");});
+});
+
+/* ================================================================
+   6. タイトル
+================================================================ */
+(function initTicker(){
+  const items=COMPANIES.map(c=>{
+    const v=(Math.random()*8-3).toFixed(1);
+    const cls=v>=0?"up":"dn", ar=v>=0?"▲":"▼";
+    return `${c.tick} <b class="${cls}">${ar}${Math.abs(v)}%</b>`;
+  });
+  $("tickerText").innerHTML=(items.join("　◆　")+"　◆　").repeat(2);
+})();
+$("btnStart").addEventListener("click",()=>{
+  audioInit();SE.select();bgmStart();showScreen("select");renderSelect();
+});
+$("btnTour").addEventListener("click",()=>{
+  audioInit();SE.select();showScreen("tour");runTournament();
+});
+$("btnSoundToggle").addEventListener("click",e=>{
+  audioInit();
+  S.settings.muted=!S.settings.muted;applyVolume();
+  e.currentTarget.textContent=S.settings.muted?"🔇 MUTED":"🔊 SOUND";
+  if(!S.settings.muted)SE.select();
+});
+
+/* ================================================================
+   7. 企業選択
+================================================================ */
+let detailCoId=null;
+const SELECT3D={
+  renderer:null,scene:null,camera:null,root:null,clock:null,raf:0,
+  companies:[],items:[],index:0,step:0,targetRot:0,
+  raycaster:null,pointer:null,
+  dragging:false,pointerId:null,
+  dragStartX:0,dragLastX:0,dragLastAt:0,dragDelta:0,
+  angularVelocity:0,inertia:false
+};
+function renderSelect(){
+  const companies=allCompanies();
+  if(!companies.length)return;
+  SELECT3D.companies=companies;
+  const preferred=S.playerCoId||S.cpuCoId;
+  const preferredIndex=companies.findIndex(c=>c.id===preferred);
+  if(preferredIndex>=0)SELECT3D.index=preferredIndex;
+  SELECT3D.index=Math.max(0,Math.min(companies.length-1,SELECT3D.index));
+  renderSlots();
+  initSelect3D();
+  updateSelectFocus(false);
+}
+function initSelect3D(){
+  cleanupSelect3D();
+  const canvas=$("selectCanvas");
+  if(!canvas||!window.THREE||!SELECT3D.companies.length)return;
+  try{
+    const T=THREE;
+    const contextOptions={
+      alpha:true,antialias:true,premultipliedAlpha:true,
+      preserveDrawingBuffer:false,powerPreference:"default"
+    };
+    const gl=
+      canvas.getContext("webgl2",contextOptions)||
+      canvas.getContext("webgl",contextOptions)||
+      canvas.getContext("experimental-webgl",contextOptions);
+    if(!gl)throw new Error("WebGLコンテキストを作成できません");
+    if(gl.isContextLost&&gl.isContextLost())throw new Error("WebGLコンテキストが失われています");
+
+    /* iOS WebViewでprecision情報がnullになるケースを吸収する */
+    const nativeGetPrecision=gl.getShaderPrecisionFormat&&gl.getShaderPrecisionFormat.bind(gl);
+    if(nativeGetPrecision){
+      try{
+        gl.getShaderPrecisionFormat=(shaderType,precisionType)=>
+          nativeGetPrecision(shaderType,precisionType)||
+          {rangeMin:0,rangeMax:0,precision:0};
+      }catch(_){}
+    }
+
+    SELECT3D.renderer=new T.WebGLRenderer({
+      canvas,context:gl,antialias:true,alpha:true,powerPreference:"default"
+    });
+    SELECT3D.renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.35));
+    SELECT3D.renderer.setClearColor(0x000000,0);
+    SELECT3D.renderer.outputEncoding=T.sRGBEncoding;
+    SELECT3D.scene=new T.Scene();
+    SELECT3D.scene.fog=new T.FogExp2(0x061021,.035);
+    SELECT3D.camera=new T.PerspectiveCamera(42,1,.1,80);
+    SELECT3D.camera.position.set(0,2.0,11.8);
+    SELECT3D.camera.lookAt(0,.8,0);
+    SELECT3D.clock=new T.Clock();
+    SELECT3D.raycaster=new T.Raycaster();
+    SELECT3D.pointer=new T.Vector2();
+    SELECT3D.root=new T.Group();
+    SELECT3D.scene.add(SELECT3D.root);
+    SELECT3D.scene.add(new T.HemisphereLight(0xa9ddff,0x06101e,1.25));
+    const key=new T.DirectionalLight(0xffffff,1.35);key.position.set(-4,8,7);SELECT3D.scene.add(key);
+    const cyan=new T.PointLight(0x27cfff,2.3,20);cyan.position.set(-5,2,4);SELECT3D.scene.add(cyan);
+    const red=new T.PointLight(0xff365f,1.8,18);red.position.set(5,1,-2);SELECT3D.scene.add(red);
+
+    const floor=new T.Mesh(
+      new T.CircleGeometry(5.8,64),
+      new T.MeshStandardMaterial({color:0x06111f,metalness:.8,roughness:.28,transparent:true,opacity:.86})
+    );
+    floor.rotation.x=-Math.PI/2;floor.position.y=-1.28;SELECT3D.scene.add(floor);
+    [2.5,4.1,5.35].forEach((radius,i)=>{
+      const ring=new T.Mesh(
+        new T.TorusGeometry(radius,.025,8,96),
+        new T.MeshBasicMaterial({color:i===1?0xff3e68:0x32d9ff,transparent:true,opacity:.48})
+      );
+      ring.rotation.x=Math.PI/2;ring.position.y=-1.24;SELECT3D.scene.add(ring);
+    });
+
+    const starsGeo=new T.BufferGeometry(),stars=[];
+    for(let i=0;i<150;i++)stars.push((Math.random()-.5)*25,Math.random()*11-1,(Math.random()-.5)*20);
+    starsGeo.setAttribute("position",new T.Float32BufferAttribute(stars,3));
+    SELECT3D.scene.add(new T.Points(
+      starsGeo,
+      new T.PointsMaterial({color:0x94dcff,size:.055,transparent:true,opacity:.62,depthWrite:false})
+    ));
+
+    const count=SELECT3D.companies.length;
+    SELECT3D.step=Math.PI*2/count;
+    SELECT3D.targetRot=-SELECT3D.index*SELECT3D.step;
+    SELECT3D.root.rotation.y=SELECT3D.targetRot;
+    SELECT3D.items=[];
+    SELECT3D.companies.forEach((co,i)=>{
+      const angle=i*SELECT3D.step;
+      const pos=new T.Vector3(Math.sin(angle)*4.55,.35,Math.cos(angle)*4.55);
+      const crest=makeCrest(co,pos,.5);
+      crest.userData.selectIndex=i;
+      crest.userData.baseY=pos.y;
+      crest.userData.selectScale=.5;
+      SELECT3D.root.add(crest);
+      SELECT3D.items.push(crest);
+    });
+
+    canvas.addEventListener("pointerdown",selectPointerDown);
+    canvas.addEventListener("pointermove",selectPointerMove);
+    canvas.addEventListener("pointerup",selectPointerUp);
+    canvas.addEventListener("pointercancel",selectPointerUp);
+    resizeSelect3D();
+    SELECT3D.raf=requestAnimationFrame(select3DLoop);
+  }catch(err){
+    cleanupSelect3D();
+    const b=$("errBanner");
+    b.textContent="⚠ 企業選択3Dの初期化に失敗: "+err.message;
+    b.style.display="block";
+  }
+}
+function selectIndexFromRotation(rotation){
+  const count=SELECT3D.companies.length;
+  if(!count||!SELECT3D.step)return 0;
+  const raw=Math.round(-rotation/SELECT3D.step);
+  return ((raw%count)+count)%count;
+}
+function syncSelectFocusFromRotation(playSound){
+  const index=selectIndexFromRotation(SELECT3D.targetRot);
+  if(index===SELECT3D.index)return;
+  SELECT3D.index=index;
+  updateSelectFocus(!!playSound);
+}
+function snapSelectRotation(playSound){
+  if(!SELECT3D.step)return;
+  SELECT3D.targetRot=-Math.round(-SELECT3D.targetRot/SELECT3D.step)*SELECT3D.step;
+  syncSelectFocusFromRotation(playSound);
+}
+function select3DLoop(){
+  if(!SELECT3D.renderer||!SELECT3D.scene||!SELECT3D.camera)return;
+  SELECT3D.raf=requestAnimationFrame(select3DLoop);
+  const dt=Math.min(.04,SELECT3D.clock.getDelta());
+  const t=performance.now()*.001;
+
+  /* 指を離した後も慣性で回し、減速後に最寄りの企業へ吸着する */
+  if(!SELECT3D.dragging&&SELECT3D.inertia){
+    SELECT3D.targetRot+=SELECT3D.angularVelocity*dt;
+    SELECT3D.angularVelocity*=Math.exp(-6.2*dt);
+    syncSelectFocusFromRotation(false);
+    if(Math.abs(SELECT3D.angularVelocity)<.08){
+      SELECT3D.inertia=false;
+      SELECT3D.angularVelocity=0;
+      snapSelectRotation(true);
+    }
+  }
+
+  const follow=SELECT3D.dragging?22:SELECT3D.inertia?15:11;
+  SELECT3D.root.rotation.y+=(SELECT3D.targetRot-SELECT3D.root.rotation.y)*Math.min(1,dt*follow);
+  SELECT3D.items.forEach((crest,i)=>{
+    const selected=i===SELECT3D.index;
+    const targetScale=selected?.78:.46;
+    const nextScale=crest.scale.x+(targetScale-crest.scale.x)*Math.min(1,dt*8);
+    crest.scale.setScalar(nextScale);
+    crest.position.y=crest.userData.baseY+Math.sin(t*1.8+i*.75)*(selected?.14:.07);
+    crest.rotation.y=-SELECT3D.root.rotation.y;
+    if(crest.userData.halo){
+      crest.userData.halo.rotation.z+=dt*(selected?1.35:.55);
+      const co=SELECT3D.companies[i];
+      const isP=co&&co.id===S.playerCoId,isE=co&&co.id===S.cpuCoId;
+      crest.userData.halo.material.color.setHex(
+        isP?0x2ed47c:isE?0xff5a6e:(co&&ATTR_INFO[co.attr]?ATTR_INFO[co.attr].hex:0x4dc3ff)
+      );
+      crest.userData.halo.material.opacity=(isP||isE)?1:selected?.9:.38;
+    }
+  });
+  SELECT3D.camera.position.x=Math.sin(t*.25)*.22;
+  SELECT3D.camera.position.y=2+Math.sin(t*.4)*.08;
+  SELECT3D.camera.lookAt(0,.75,0);
+  SELECT3D.renderer.render(SELECT3D.scene,SELECT3D.camera);
+}
+function selectPointerDown(e){
+  SELECT3D.dragging=true;
+  SELECT3D.inertia=false;
+  SELECT3D.pointerId=e.pointerId;
+  SELECT3D.dragStartX=e.clientX;
+  SELECT3D.dragLastX=e.clientX;
+  SELECT3D.dragLastAt=performance.now();
+  SELECT3D.dragDelta=0;
+  SELECT3D.angularVelocity=0;
+  try{e.currentTarget.setPointerCapture(e.pointerId);}catch(_){}
+}
+function selectPointerMove(e){
+  if(!SELECT3D.dragging||e.pointerId!==SELECT3D.pointerId)return;
+  const now=performance.now();
+  const dx=e.clientX-SELECT3D.dragLastX;
+  const dt=Math.max(8,now-SELECT3D.dragLastAt);
+  const angularDelta=dx*.0085;
+  SELECT3D.targetRot+=angularDelta;
+  SELECT3D.angularVelocity=angularDelta/(dt/1000);
+  SELECT3D.dragDelta=e.clientX-SELECT3D.dragStartX;
+  SELECT3D.dragLastX=e.clientX;
+  SELECT3D.dragLastAt=now;
+  syncSelectFocusFromRotation(false);
+}
+function selectPointerUp(e){
+  if(!SELECT3D.dragging||e.pointerId!==SELECT3D.pointerId)return;
+  SELECT3D.dragging=false;
+  SELECT3D.pointerId=null;
+  try{e.currentTarget.releasePointerCapture(e.pointerId);}catch(_){}
+
+  if(Math.abs(SELECT3D.dragDelta)>6){
+    SELECT3D.inertia=Math.abs(SELECT3D.angularVelocity)>.12;
+    if(!SELECT3D.inertia)snapSelectRotation(true);
+    return;
+  }
+
+  SELECT3D.angularVelocity=0;
+  SELECT3D.inertia=false;
+  snapSelectRotation(false);
+  if(!SELECT3D.raycaster||!SELECT3D.camera)return;
+  const canvas=$("selectCanvas"),rect=canvas.getBoundingClientRect();
+  SELECT3D.pointer.x=((e.clientX-rect.left)/rect.width)*2-1;
+  SELECT3D.pointer.y=-((e.clientY-rect.top)/rect.height)*2+1;
+  SELECT3D.scene.updateMatrixWorld(true);
+  SELECT3D.raycaster.setFromCamera(SELECT3D.pointer,SELECT3D.camera);
+  const hits=SELECT3D.raycaster.intersectObjects(SELECT3D.items,true);
+  if(!hits.length)return;
+  let obj=hits[0].object;
+  while(obj.parent&&obj.parent!==SELECT3D.root)obj=obj.parent;
+  if(Number.isInteger(obj.userData.selectIndex)){
+    selectCompanyAt(obj.userData.selectIndex);
+    smartAssignCompany(SELECT3D.companies[obj.userData.selectIndex]);
+  }
+}
+/* 2タップ選択: 未割当なら自社→敵の順に自動割当。
+   両方割当済みなら敵を差し替え、割当済み企業の再タップは解除。 */
+function smartAssignCompany(co){
+  if(!co)return;
+  SE.select();
+  if(S.playerCoId===co.id)S.playerCoId=null;
+  else if(S.cpuCoId===co.id)S.cpuCoId=null;
+  else if(!S.playerCoId)S.playerCoId=co.id;
+  else S.cpuCoId=co.id;
+  renderSlots();
+}
+function stepSelectCompany(delta){
+  const count=SELECT3D.companies.length;if(!count)return;
+  SELECT3D.inertia=false;SELECT3D.angularVelocity=0;
+  snapSelectRotation(false);
+  SELECT3D.index=(SELECT3D.index+delta+count)%count;
+  SELECT3D.targetRot-=delta*SELECT3D.step;
+  updateSelectFocus(true);
+}
+function selectCompanyAt(index){
+  const count=SELECT3D.companies.length;if(!count)return;
+  SELECT3D.inertia=false;SELECT3D.angularVelocity=0;
+  snapSelectRotation(false);
+  let delta=index-SELECT3D.index;
+  if(delta>count/2)delta-=count;
+  if(delta<-count/2)delta+=count;
+  SELECT3D.index=index;
+  SELECT3D.targetRot-=delta*SELECT3D.step;
+  updateSelectFocus(true);
+}
+function currentSelectCompany(){
+  return SELECT3D.companies[SELECT3D.index]||null;
+}
+function companyOverall(co){
+  if(!co)return 0;
+  const values=[co.st.hp/1200,co.st.atk/150,co.st.def/150,co.st.spd/150,co.st.tech/150,co.st.grw/150];
+  return Math.round(values.reduce((a,b)=>a+b,0)/values.length*100);
+}
+function formatCapital(capitalBillion){
+  /* データ内の10億円単位を、JTBのような小資本金でも分かりやすい億円表示へ変換 */
+  const oku=Number(capitalBillion||0)*10;
+  const rounded=Math.round(oku*1000)/1000;
+  return rounded.toLocaleString("ja-JP",{maximumFractionDigits:3})+"億円";
+}
+function updateSelectFocus(playSound){
+  const co=currentSelectCompany();if(!co)return;
+  detailCoId=co.id;
+  $("selectFocusLogo").textContent=co.logo;
+  $("selectFocusLogo").style.background=co.brand||"#274b80";
+  $("selectFocusName").textContent=co.name;
+  $("selectFocusMeta").textContent=co.ind+" / "+co.attr+" / 総合 "+companyOverall(co);
+  $("legendFocus").textContent="◆ 閲覧中: "+co.name;
+  drawCompareChart();
+  if(playSound)SE.select();
+}
+function drawCompareChart(){
+  const canvas=$("compareChart");if(!canvas)return;
+  const rect=canvas.getBoundingClientRect();
+  if(rect.width<10||rect.height<10)return;
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=Math.round(rect.width*dpr);canvas.height=Math.round(rect.height*dpr);
+  const ctx=canvas.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const w=rect.width,h=rect.height,cx=w/2,cy=h*.52;
+  const radius=Math.min(w*.31,h*.37);
+  const axes=[
+    {label:"HP",key:"hp",max:1200},
+    {label:"攻撃",key:"atk",max:150},
+    {label:"防御",key:"def",max:150},
+    {label:"速度",key:"spd",max:150},
+    {label:"技術",key:"tech",max:150},
+    {label:"成長",key:"grw",max:150}
+  ];
+  const point=(i,r)=>{
+    const a=-Math.PI/2+i*Math.PI*2/axes.length;
+    return{x:cx+Math.cos(a)*r,y:cy+Math.sin(a)*r};
+  };
+  ctx.clearRect(0,0,w,h);
+  for(let level=1;level<=5;level++){
+    ctx.beginPath();
+    axes.forEach((_,i)=>{
+      const p=point(i,radius*level/5);
+      i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y);
+    });
+    ctx.closePath();ctx.strokeStyle="rgba(122,157,201,"+(level===5?.42:.18)+")";ctx.lineWidth=1;ctx.stroke();
+  }
+  axes.forEach((axis,i)=>{
+    const p=point(i,radius),lp=point(i,radius+17);
+    ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(p.x,p.y);
+    ctx.strokeStyle="rgba(110,147,192,.25)";ctx.stroke();
+    ctx.fillStyle="#a9bad5";ctx.font="11px system-ui";ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(axis.label,lp.x,lp.y);
+  });
+  const drawRadar=(co,stroke,fill,dashed)=>{
+    if(!co)return;
+    ctx.save();ctx.beginPath();
+    axes.forEach((axis,i)=>{
+      const value=Math.max(0,Math.min(1,co.st[axis.key]/axis.max));
+      const p=point(i,radius*value);
+      i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y);
+    });
+    ctx.closePath();ctx.setLineDash(dashed?[6,4]:[]);ctx.lineWidth=dashed?1.8:2.4;
+    ctx.strokeStyle=stroke;ctx.fillStyle=fill;ctx.fill();ctx.stroke();ctx.setLineDash([]);
+    axes.forEach((axis,i)=>{
+      const value=Math.max(0,Math.min(1,co.st[axis.key]/axis.max));
+      const p=point(i,radius*value);
+      ctx.beginPath();ctx.arc(p.x,p.y,dashed?2.2:3,0,Math.PI*2);ctx.fillStyle=stroke;ctx.fill();
+    });
+    ctx.restore();
+  };
+  const player=findCo(S.playerCoId),enemy=findCo(S.cpuCoId),focus=currentSelectCompany();
+  drawRadar(player,"#48d9ff","rgba(50,204,255,.12)",false);
+  drawRadar(enemy,"#ff5f76","rgba(255,70,95,.12)",false);
+  if(focus&&(!player||focus.id!==player.id)&&(!enemy||focus.id!==enemy.id)){
+    drawRadar(focus,"#f5c044","rgba(245,192,68,.055)",true);
+  }
+  $("legendPlayer").textContent="● 自社: "+(player?player.name:"未選択");
+  $("legendEnemy").textContent="● 敵: "+(enemy?enemy.name:"未選択");
+}
+function resizeSelect3D(){
+  if(!SELECT3D.renderer||!SELECT3D.camera)return;
+  const stage=$("selectStage"),rect=stage.getBoundingClientRect();
+  const w=Math.max(1,rect.width),h=Math.max(1,rect.height);
+  SELECT3D.renderer.setSize(w,h,false);
+  SELECT3D.camera.aspect=w/h;SELECT3D.camera.updateProjectionMatrix();
+}
+function cleanupSelect3D(){
+  if(SELECT3D.raf)cancelAnimationFrame(SELECT3D.raf);
+  SELECT3D.raf=0;
+  const canvas=$("selectCanvas");
+  if(canvas){
+    canvas.removeEventListener("pointerdown",selectPointerDown);
+    canvas.removeEventListener("pointermove",selectPointerMove);
+    canvas.removeEventListener("pointerup",selectPointerUp);
+    canvas.removeEventListener("pointercancel",selectPointerUp);
+  }
+  if(SELECT3D.scene){
+    SELECT3D.scene.traverse(obj=>{
+      if(obj.geometry)obj.geometry.dispose();
+      if(obj.material){
+        const materials=Array.isArray(obj.material)?obj.material:[obj.material];
+        materials.forEach(mat=>{if(mat.map)mat.map.dispose();mat.dispose();});
+      }
+    });
+  }
+  if(SELECT3D.renderer){
+    /* iOS SafariではforceContextLoss直後の再生成が失敗しやすいためdisposeのみ行う */
+    try{SELECT3D.renderer.dispose();}catch(_){}
+  }
+  SELECT3D.renderer=null;SELECT3D.scene=null;SELECT3D.camera=null;
+  SELECT3D.root=null;SELECT3D.clock=null;SELECT3D.items=[];
+  SELECT3D.raycaster=null;SELECT3D.pointer=null;
+  SELECT3D.dragging=false;SELECT3D.pointerId=null;
+  SELECT3D.dragStartX=0;SELECT3D.dragLastX=0;SELECT3D.dragLastAt=0;SELECT3D.dragDelta=0;
+  SELECT3D.angularVelocity=0;SELECT3D.inertia=false;
+}
+function renderSlots(){
+  const p=findCo(S.playerCoId),c=findCo(S.cpuCoId);
+  fillSlot($("slotP"),p,"自社を選択");
+  fillSlot($("slotC"),c,"相手を選択");
+  $("btnBattleStart").disabled=!(p&&c);
+  drawCompareChart();
+}
+function fillSlot(el,co,hint){
+  const role=el.id==="slotP"?"自社":"相手";
+  el.textContent="";
+  el.classList.toggle("filled",!!co);
+  el.setAttribute("aria-label",role+"枠。閲覧中の会社を"+role+"に設定");
+  el.title="閲覧中の会社を"+role+"に設定";
+
+  const pick=document.createElement("span");
+  pick.className="pick";
+  pick.textContent=co?"タップで解除":"未選択";
+
+  if(!co){
+    const s=document.createElement("span");
+    s.className="hint";
+    s.textContent=hint;
+    el.append(s,pick);
+    return;
+  }
+
+  const lg=document.createElement("span");
+  lg.className="logo";
+  lg.textContent=co.logo;
+
+  const box=document.createElement("span");
+  box.className="slot-copy";
+  const nm=document.createElement("span");
+  nm.className="nm";
+  nm.textContent=co.name;
+  const ind=document.createElement("span");
+  ind.className="ind";
+  ind.textContent=co.ind;
+  box.append(nm,ind);
+  el.append(lg,box,pick);
+}
+$("btnSelectPrev").addEventListener("click",()=>stepSelectCompany(-1));
+$("btnSelectNext").addEventListener("click",()=>stepSelectCompany(1));
+function assignFocusedCompany(side){
+  /* VS枠タップ: 割当済みなら解除、未割当なら閲覧中の企業を割当 */
+  SE.select();
+  const co=currentSelectCompany();
+  if(side==="p")S.playerCoId=S.playerCoId?null:(co?co.id:null);
+  else S.cpuCoId=S.cpuCoId?null:(co?co.id:null);
+  renderSlots();
+}
+$("slotP").addEventListener("click",()=>assignFocusedCompany("p"));
+$("slotC").addEventListener("click",()=>assignFocusedCompany("e"));
+$("btnFocusDetail").addEventListener("click",()=>{
+  const co=currentSelectCompany();if(co){SE.select();openDetail(co.id);}
+});
+function openDetail(id){
+  const c=findCo(id);if(!c)return;
+  detailCoId=id;
+  $("dLogo").textContent=c.logo;
+  $("dLogo").className="logo logo-crest";
+  $("dLogo").style.background=c.brand||"#344";
+  $("dName").textContent=c.name;
+  $("dInd").textContent=c.ind+" / "+c.attr+" / "+TIER_LABEL[c.tier];
+  $("dDesc").textContent=(c.desc||"")+" ※企業区分は資本金のみで判定するゲーム内基準です。法令上の中小企業判定ではありません。";
+  const rows=$("dStats");rows.textContent="";
+  [["HP","hp"],["攻撃","atk"],["防御","def"],["速度","spd"],["技術","tech"],["成長","grw"]].forEach(([lb,k])=>{
+    const r=document.createElement("div");r.className="stat-row";
+    const l=document.createElement("span");l.textContent=lb;
+    const b=document.createElement("div");b.className="bar";
+    const i=document.createElement("i");i.style.width=Math.min(100,c.st[k]/STAT_MAX[k]*100)+"%";b.appendChild(i);
+    const v=document.createElement("span");v.className="mono";v.textContent=c.st[k];
+    r.append(l,b,v);rows.appendChild(r);
+  });
+  const fin=c.fin||{};
+  $("dSkillName").textContent="財務スナップショット / 技構成";
+  $("dSkillDesc").textContent=
+    (fin.period||"")+"　"+(fin.metric||"売上")+" "+Number(fin.revenue||0).toLocaleString()+"十億円\n"+
+    "資本金 "+formatCapital(fin.capital)+" / 区分 "+TIER_LABEL[c.tier]+" / 利益率指標 "+(fin.margin||0)+"%\n"+
+    "中技: "+c.mid.name+"（SP40）\n大技: "+c.big.name+"（SP100）\n"+
+    "召喚: "+SUMMONS[c.summon].name+"（SP60・1回）\n出典メモ: "+(fin.source||"custom");
+  $("sheetDetail").classList.add("open");
+}
+$("btnPickP").addEventListener("click",()=>{SE.select();S.playerCoId=detailCoId;$("sheetDetail").classList.remove("open");renderSlots();});
+$("btnPickC").addEventListener("click",()=>{SE.select();S.cpuCoId=detailCoId;$("sheetDetail").classList.remove("open");renderSlots();});
+$("btnRandom").addEventListener("click",()=>{
+  SE.select();
+  const cs=allCompanies();
+  const a=cs[Math.floor(Math.random()*cs.length)];
+  let b=cs[Math.floor(Math.random()*cs.length)];
+  if(cs.length>1)while(b.id===a.id)b=cs[Math.floor(Math.random()*cs.length)];
+  S.playerCoId=a.id;S.cpuCoId=b.id;
+  const index=SELECT3D.companies.findIndex(co=>co.id===a.id);
+  if(index>=0)selectCompanyAt(index);
+  renderSlots();
+});
+$("btnSelBack").addEventListener("click",()=>{SE.select();showScreen("title");});
+$("btnAddCo").addEventListener("click",()=>{SE.select();showScreen("create");});
+$("btnBattleStart").addEventListener("click",()=>{SE.select();startBattle();});
+
+/* ================================================================
+   8. バトル: モデル
+================================================================ */
+function mkFighter(co,side){
+  return {co, side, name:co.name, logo:co.logo, tick:co.tick||"CO",
+    maxHp:co.st.hp, hp:co.st.hp, gauge:0,
+    base:Object.assign({},co.st),
+    buffs:[],
+    guarding:false, guardBonus:false,
+    atb:0,readyAt:0,
+    stun:0,summon:null,summonUsed:false,
+    cds:{},
+    stats:{dealt:0,maxHit:0,strats:{},guards:0,summons:0}};
+}
+function addBuff(f,stat,mult,turns,label){
+  f.buffs=f.buffs.filter(b=>!(b.stat===stat&&(b.mult>1)===(mult>1))); // 同系統は上書き
+  f.buffs.push({stat,mult,turns,label});
+}
+function eff(f,stat){
+  let v=f.base[stat];
+  f.buffs.forEach(b=>{if(b.stat===stat)v*=b.mult;});
+  return v;
+}
+function tickBuffs(f){
+  f.buffs.forEach(b=>b.turns--);
+  f.buffs=f.buffs.filter(b=>b.turns>0);
+}
+
+/* 戦闘計算: (攻×倍率 + 技×0.3[+速]) × 乱数0.9-1.1 − 防×0.4 ── 理解しやすさ優先 */
+const CTX={
+  dealDamage(att,dfd,opt){
+    opt=opt||{};
+    const atk=eff(att,"atk")*(opt.mult||1);
+    const tech=eff(att,"tech")*(opt.techScale!==undefined?opt.techScale:.3);
+    const spd=opt.spdScale?eff(att,"spd")*opt.spdScale:0;
+    let defv=eff(dfd,"def")*.4;
+    if(opt.pierce)defv*=(1-opt.pierce);
+    let type=attrMultiplier(att.co.attr,dfd.co.attr);
+    if(opt.vsLarge&&dfd.co.tier==="large")type*=opt.vsLarge;
+    if(opt.vsAttr&&dfd.co.attr===opt.vsAttr)type*=opt.vsAttrMult||1.25;
+    type*=marketAttrMultiplier(att.co.attr);
+    type=Math.max(.78,Math.min(1.42,type));
+    let dmg=((atk+tech+spd)*(0.9+Math.random()*0.2)-defv)*type+(opt.flat||0);
+    dmg=Math.max(8,Math.round(dmg));
+    if(dfd.guarding)dmg=Math.max(4,Math.round(dmg*.35));
+    this.hurt(dfd,dmg);
+    att.stats.dealt+=dmg;att.stats.maxHit=Math.max(att.stats.maxHit,dmg);
+    att.gauge=Math.min(100,att.gauge+12);
+    dfd.gauge=Math.min(100,dfd.gauge+16);
+    fxHit(dfd,dmg,dfd.guarding,type);
+    return dmg;
+  },
+  hurt(f,n){f.hp=Math.max(0,f.hp-n);},
+  heal(f,ratio){const before=f.hp,h=Math.round(f.maxHp*ratio);f.hp=Math.min(f.maxHp,f.hp+h);return f.hp-before;},
+};
+function executeMove(self,foe,move,ctx,visual){
+  ctx=ctx||CTX;if(!move)return [];
+  const logs=[];let total=0;
+  if(visual!==false){
+    const motionPower=move.power||move.cost>=100?3:move.cost>=40?2:2;
+    playMotion(move.motion,self,foe,motionPower);
+  }
+  (move.effects||[]).forEach(e=>{
+    const target=e.target==="foe"?foe:self;
+    if(e.kind==="damage"){const d=ctx.dealDamage(self,foe,e);total+=d;}
+    else if(e.kind==="riskDamage"){const mult=e.low+Math.random()*(e.high-e.low);const d=ctx.dealDamage(self,foe,{mult});total+=d;}
+    else if(e.kind==="multi"){for(let i=0;i<e.hits;i++)total+=ctx.dealDamage(self,foe,{mult:e.mult});}
+    else if(e.kind==="heal"){const h=ctx.heal(self,e.ratio);logs.push("HP "+h+"回復");}
+    else if(e.kind==="gauge"){self.gauge=Math.min(100,self.gauge+e.amount);logs.push("SP+"+e.amount);}
+    else if(e.kind==="drainGauge"){foe.gauge=Math.max(0,foe.gauge-e.amount);logs.push(foe.name+" SP-"+e.amount);}
+    else if(e.kind==="atbDrain"){
+      foe.atb=Math.max(0,(foe.atb||0)-e.amount);
+      logs.push(foe.name+" ATB-"+e.amount);
+    }
+    else if(e.kind==="atbBoost"){
+      self.atb=Math.min(100,(self.atb||0)+e.amount);
+      logs.push("ATB+"+e.amount);
+    }
+    else if(e.kind==="cleanse"){
+      const before=self.buffs.length;
+      self.buffs=self.buffs.filter(b=>b.mult>=1);
+      if(before!==self.buffs.length)logs.push("弱体効果を解除");
+    }
+    else if(e.kind==="dispel"){
+      const before=target.buffs.length;
+      target.buffs=target.buffs.filter(b=>b.mult<=1);
+      if(before!==target.buffs.length)logs.push(target.name+"の強化効果を解除");
+    }
+    else if(e.kind==="guard"){
+      self.guarding=true;self.guardBonus=true;
+      logs.push("防御態勢を展開");
+    }
+    else if(e.kind==="buff"){addBuff(target,e.stat,e.mult,e.turns,e.label);}
+    else if(e.kind==="stun"){
+      const chance=foe.co.tier==="large"?(e.largeChance||e.chance):e.chance;
+      if(Math.random()<chance){foe.stun=Math.max(foe.stun,e.turns||1);logs.push(foe.name+"は行動不能");}
+    }
+    else if(e.kind==="bind"){
+      /* stunの拘束版: 命中時は相手を処分テープで物理的に縛るビジュアルへ変化 */
+      const chance=foe.co.tier==="large"?(e.largeChance||e.chance):e.chance;
+      if(Math.random()<chance){
+        foe.stun=Math.max(foe.stun,e.turns||1);
+        foe.bound=true;
+        if(visual!==false)glApplyBind(foe);
+        logs.push(foe.name+"は処分テープで拘束され行動不能");
+      }
+    }
+  });
+  if(total)logs.unshift(foe.name+"へ "+total+" ダメージ");
+  return logs;
+}
+function deploySummon(owner){
+  if(owner.summonUsed||owner.gauge<60)return false;
+  owner.gauge-=60;owner.summonUsed=true;owner.stats.summons++;
+  const base=SUMMONS[owner.co.summon];
+  owner.summon={id:base.id,name:base.name,ic:base.ic,turns:base.turns,moves:base.moves};
+  glSummonSpawn(owner);
+  return true;
+}
+function runSummonAlly(owner,foe,ctx,visual){
+  if(!owner.summon||owner.hp<=0||foe.hp<=0)return;
+  const ally=owner.summon;
+  const summonDef=SUMMONS[ally.id];
+
+  /* 大物政治家は強力だが、援護行動のたびに炎上リスクを判定する */
+  if(ally.id==="politician"&&summonDef.risk&&Math.random()<summonDef.risk.chance){
+    const damage=Math.max(1,Math.round(owner.maxHp*summonDef.risk.damageRatio));
+    ctx.hurt(owner,damage);
+    owner.stun=Math.max(owner.stun,summonDef.risk.stun||1);
+    owner.atb=0;
+    if(visual!==false){
+      fxSkill(owner,"🔥 政治家炎上 / 抗議デモ発生",true,"政治家炎上 / 抗議デモ発生");
+      playPoliticianBacklash(owner);
+      fxHit(owner,damage,false,1);
+      pushLog(owner.side==="p"?"me":"en",ally.name+"が炎上。抗議デモと風評被害で "+damage+" ダメージ");
+      pushLog("sys",owner.name+"は炎上対応に追われ、次の行動が不能");
+    }
+    ally.turns--;
+    if(ally.turns<=0){
+      owner.summon=null;
+      if(visual!==false){
+        pushLog("sys",ally.name+"を迎える車が到着。説明責任を果たすため退場する");
+        setTimer(()=>glSummonDepart(owner),850);
+      }
+    }
+    return;
+  }
+
+  const move=ally.moves[Math.floor(Math.random()*ally.moves.length)];
+  if(visual===false){
+    executeMove(owner,foe,move,ctx,false);
+    ally.turns--;
+    if(ally.turns<=0)owner.summon=null;
+    return;
+  }
+  /* 召喚獣は自ら相手のもとへ駆け寄り、着弾の瞬間に技効果を適用する */
+  fxSkill(owner,ally.ic+" "+ally.name+" / "+move.name,true,move.name);
+  glSummonStrike(owner,foe,()=>{
+    const B=S.battle;
+    if(!B||B.over)return;
+    const logs=executeMove(owner,foe,move,CTX,true);
+    arenaFlash(ally.id==="jftc"?"#dff9ff":"#ffe29a");
+    camShake(1.15);
+    logs.forEach(m=>pushLog(owner.side==="p"?"me":"en",ally.name+": "+m));
+    renderBattle();
+    checkKO();
+  });
+  ally.turns--;
+  if(ally.turns<=0){
+    owner.summon=null;
+    pushLog("sys",ally.name+"の迎車が到着。公務へ戻る準備を始めた");
+    setTimer(()=>glSummonDepart(owner),2050);
+  }
+}
+
+function startBattle(){
+  const p=findCo(S.playerCoId),c=findCo(S.cpuCoId);
+  if(!p||!c)return;
+  S.battle={
+    p:mkFighter(p,"p"),e:mkFighter(c,"e"),turn:1,over:false,
+    market:{event:null,history:[],nextTurn:3+Math.floor(Math.random()*2)}
+  };
+  S.log=[];S.auto=false;S.paused=false;S.inputLock=false;
+  $("btnAuto").textContent="🤖 AUTO: OFF";
+  $("btnPause").textContent="⏸ PAUSE";
+  showScreen("battle");
+  initGL(p,c);
+  tone(90,2.6,"sawtooth",.09,0,640);
+  tone(45,2.8,"triangle",.11);
+  startATBLoop();
+  pushLog("sys","―― "+p.name+" vs "+c.name+" / ATB東京決戦 開戦 ――");
+  narrateBattle("start",{actor:S.battle.p,target:S.battle.e});
+  const type=attrMultiplier(p.attr,c.attr);
+  if(type!==1)pushLog("sys",type>1?p.attr+"属性が有利":"相手の"+c.attr+"属性が有利");
+  renderBattle();
+}
+
+/* ================================================================
+   9. バトル: 進行
+================================================================ */
+function playerCommand(cmd,extra){
+  const B=S.battle;
+  if(!B||B.over||S.inputLock||S.paused||B.p.atb<100)return;
+  startATBAction(B.p,B.e,{type:cmd,extra});
+}
+function actionDuration(act){
+  if(!act)return 800;
+  if(act.type==="guard")return 500;
+  if(act.type==="attack")return 850;
+  if(act.type==="strategy")return 900;
+  if(act.type==="mid")return 1150;
+  if(act.type==="big"||act.type==="skill")return 1500;
+  if(act.type==="summon")return 2350;
+  return 900;
+}
+function startATBAction(self,foe,act){
+  const B=S.battle;
+  if(!B||B.over||S.inputLock||S.paused||self.hp<=0||self.atb<100)return;
+  S.inputLock=true;
+  closeAllOverlays();
+  self.atb=0;self.readyAt=0;
+  updateATBUI();
+
+  const duration=actionDuration(act);
+  setTimer(()=>{
+    if(!S.battle||B.over)return;
+    if(act.type==="guard"){
+      applyGuard(self);
+    }else{
+      self.guarding=false;
+      execAction(self,foe,act);
+    }
+    renderBattle();
+    checkKO();
+  },90);
+
+  setTimer(()=>{
+    if(!S.battle||B.over)return;
+    const allyActs=!!self.summon&&act.type!=="summon"&&foe.hp>0;
+    if(allyActs){
+      runSummonAlly(self,foe,CTX,true);
+      renderBattle();
+      checkKO();
+    }
+    if(B.over)return;
+    setTimer(()=>finishATBAction(self),allyActs?900:0);
+  },duration);
+}
+function finishATBAction(self){
+  const B=S.battle;
+  if(!B||B.over)return;
+  tickBuffs(self);
+  Object.keys(self.cds).forEach(k=>{if(self.cds[k]>0)self.cds[k]--;});
+  B.turn++;
+  advanceMarketCycle(B,true);
+  S.inputLock=false;
+  renderBattle();
+  updateATBUI();
+}
+function applyGuard(f){
+  if(f.stun>0)return;
+  f.guarding=true;f.guardBonus=true;f.gauge=Math.min(100,f.gauge+20);
+  f.stats.guards++;fxGuard(f);
+  pushLog(f.side==="p"?"me":"en",f.name+"は防御態勢。次の攻撃が強化される");
+  narrateBattle("guard",{actor:f});
+  SE.guard();
+}
+function execAction(self,foe,act){
+  if(self.hp<=0)return;
+  const cls=self.side==="p"?"me":"en";
+  if(self.stun>0){
+    self.stun--;
+    pushLog(cls,self.name+(self.bound?"は拘束されて動けない":"は当局対応で行動できない"));
+    playMotion("pillar_red",self,self);
+    if(self.stun<=0&&self.bound){
+      self.bound=false;
+      glRemoveBind(self);
+      pushLog("sys",self.name+"は拘束から解放された");
+    }
+    return;
+  }
+  if(act.type==="guard")return;
+  if(act.type==="attack"){
+    fxLunge(self);SE.attack();
+    let mult=self.guardBonus?1.2:1;self.guardBonus=false;
+    playMotion(DEFAULT_ATTACK_MOTION[self.co.attr]||"burst_cyan",self,foe,1);
+    const d=CTX.dealDamage(self,foe,{mult});SE.hit();
+    pushLog(cls,self.name+"の通常攻撃! "+d+" ダメージ"+(mult>1?"（反撃強化）":""));
+    narrateBattle("attack",{actor:self,target:foe,damage:d});
+    return;
+  }
+  if(act.type==="strategy"){
+    const st=STRATEGIES.find(x=>x.id===act.extra);if(!st)return;
+    self.cds[st.id]=st.cd;self.stats.strats[st.name]=(self.stats.strats[st.name]||0)+1;
+    playMotion("orbit_green",self,self);fxSkill(self,st.ic+" "+st.name,false,st.name);SE.skill();
+    st.fx(self,foe,CTX).forEach(m=>pushLog(cls,m));return;
+  }
+  if(act.type==="summon"){
+    if(deploySummon(self)){
+      const ally=SUMMONS[self.co.summon];
+      fxSkill(self,ally.ic+" "+ally.name+" 参戦",true,ally.name+" 参戦");SE.skill();
+      pushLog(cls,self.name+"は "+ally.name+" を召喚した（3ターン）");
+    }
+    return;
+  }
+  const key=act.type==="skill"?"big":act.type;
+  if(key==="mid"||key==="big"){
+    const move=self.co[key],cost=move.cost;
+    if(self.gauge<cost)return;
+    self.gauge-=cost;self.stats.strats[move.name]=(self.stats.strats[move.name]||0)+1;
+    fxSkill(self,move.ic+" "+move.name,key==="big",move.name,key);SE.skill();
+    const logs=executeMove(self,foe,move,CTX,true);
+    logs.forEach(m=>pushLog(cls,self.name+": "+m));
+  }
+}
+function endTurn(){
+  /* ATB方式では、各企業の行動完了時にfinishATBAction()が処理する。 */
+}
+function checkKO(){
+  const B=S.battle;
+  if(B.over)return;
+  if(B.p.hp<=0||B.e.hp<=0){
+    B.over=true;S.inputLock=true;
+    const win=B.e.hp<=0&&B.p.hp>0;
+    const winner=win?B.p:B.e;
+    const loser=win?B.e:B.p;
+    pushLog("sys",win?B.e.name+"はバトル継続不能になった…":B.p.name+"はバトル継続不能になった…");
+    narrateBattle("ko",{actor:winner,target:loser});
+    glSinkLoser(loser);
+    setTimer(()=>showResult(win),3400);
+  }
+}
+
+/* ================================================================
+   10. CPU判断 (状況を見て選択)
+================================================================ */
+function cpuDecide(self,foe){
+  const hpR=self.hp/self.maxHp;
+  const selfMarket=marketAttrMultiplier(self.co.attr);
+  const foeMarket=marketAttrMultiplier(foe.co.attr);
+  const marketAdvantage=selfMarket-foeMarket;
+
+  if(self.stun>0)return {type:"attack"};
+  if(!self.summonUsed&&self.gauge>=60&&(hpR<.72||foe.co.tier==="large")&&Math.random()<.55)return {type:"summon"};
+  if(hpR<.3&&!(self.cds.rst>0)&&Math.random()<.72)return {type:"strategy",extra:"rst"};
+
+  /* 強い逆風では守備・研究・投資で次の市場変化を待つ */
+  if(marketAdvantage<-.10&&foe.atb>=62&&Math.random()<.46)return {type:"guard"};
+  if(selfMarket<.96&&!(self.cds.rnd>0)&&Math.random()<.34)return {type:"strategy",extra:"rnd"};
+  if(selfMarket<.96&&self.gauge<60&&Math.random()<.25)return {type:"strategy",extra:"inv"};
+
+  /* 追い風ではSPを温存し過ぎず、大技・中技で主導権を取る */
+  if(self.gauge>=100&&Math.random()<(selfMarket>1.04?.92:.72))return {type:"big"};
+  if(self.gauge>=40&&Math.random()<(selfMarket>1.04?.64:.42))return {type:"mid"};
+
+  if(foe.gauge>=90&&Math.random()<.38)return {type:"guard"};
+  if(!(self.cds.rnd>0)&&Math.random()<.18)return {type:"strategy",extra:"rnd"};
+  if(self.gauge>=18&&self.gauge<60&&Math.random()<.18)return {type:"strategy",extra:"inv"};
+  if(Math.random()<(marketAdvantage<0?.18:.08))return {type:"guard"};
+  return {type:"attack"};
+}
+
+/* ================================================================
+   11. バトル: 描画・演出 (DOMは表示のみ)
+================================================================ */
+function renderBattle(){
+  const B=S.battle;if(!B)return;
+  const {p,e}=B;
+  $("turnBadge").textContent="ACTION "+B.turn+" / "+p.co.attr+" vs "+e.co.attr;
+  renderMarketPanel();
+  $("eName").textContent=e.logo+" "+e.name+"［"+TIER_LABEL[e.co.tier]+"］";
+  $("pName").textContent=p.logo+" "+p.name+"［"+TIER_LABEL[p.co.tier]+"］";
+  $("eHpBar").style.width=(e.hp/e.maxHp*100)+"%";
+  $("pHpBar").style.width=(p.hp/p.maxHp*100)+"%";
+  $("eHpNum").textContent=e.hp+" / "+e.maxHp;
+  $("pHpNum").textContent=p.hp+" / "+p.maxHp;
+  $("pGauge").style.setProperty("--sp",Math.max(0,Math.min(100,p.gauge)));
+  $("pGaugeNum").textContent=Math.round(p.gauge);
+  $("pGauge").classList.toggle("full",p.gauge>=100);
+  renderBuffs($("eBuffs"),e);renderBuffs($("pBuffs"),p);
+  const se=$("summonEnemy"),sp=$("summonPlayer");
+  se.classList.toggle("show",!!e.summon);sp.classList.toggle("show",!!p.summon);
+  se.textContent=e.summon?e.summon.ic+" "+e.summon.name+" / "+e.summon.turns+"T":"";
+  sp.textContent=p.summon?p.summon.ic+" "+p.summon.name+" / "+p.summon.turns+"T":"";
+  updateATBUI();
+}
+function updateATBUI(){
+  const B=S.battle;if(!B)return;
+  const p=B.p,e=B.e;
+  const pValue=Math.max(0,Math.min(100,p.atb));
+  const eValue=Math.max(0,Math.min(100,e.atb));
+  $("pAtbBar").style.width=pValue+"%";
+  $("eAtbBar").style.width=eValue+"%";
+  $("pAtb").classList.toggle("ready",pValue>=100);
+  $("eAtb").classList.toggle("ready",eValue>=100);
+  $("pAtbText").textContent=pValue>=100?"COMMAND READY":"WAIT "+Math.floor(pValue)+"%";
+  $("pAtbText").classList.toggle("ready",pValue>=100);
+  $("eAtbText").textContent=eValue>=100?"READY":Math.floor(eValue)+"%";
+
+  const canCommand=pValue>=100&&!S.inputLock&&!S.paused&&!B.over;
+  [$("cmdAttack"),$("cmdGuard"),$("cmdStrategy")].forEach(btn=>{
+    btn.disabled=!canCommand;
+    btn.classList.toggle("atb-locked",!canCommand);
+    btn.classList.toggle("atb-ready",canCommand);
+  });
+}
+function renderBuffs(el,f){
+  el.textContent="";
+  if(f.guarding){const s=document.createElement("span");s.className="buff gd";s.textContent="🛡 GUARD";el.appendChild(s);}
+  if(f.stun>0){const s=document.createElement("span");s.className="buff dn2";s.textContent=f.bound?"⛔ 営業停止・拘束中":"⛔ 行動不能";el.appendChild(s);}
+  if(f.summon){const s=document.createElement("span");s.className="buff up";s.textContent=f.summon.ic+" 援軍"+f.summon.turns+"T";el.appendChild(s);}
+  if(f.gauge>=100&&f.side==="e"){const s=document.createElement("span");s.className="buff up";s.textContent="⚡SP MAX";el.appendChild(s);}
+  const marketPower=marketAttrMultiplier(f.co.attr);
+  if(marketPower>1.001){
+    const s=document.createElement("span");s.className="buff up";
+    s.textContent="📈市場 +"+Math.round((marketPower-1)*100)+"%";el.appendChild(s);
+  }else if(marketPower<.999){
+    const s=document.createElement("span");s.className="buff dn2";
+    s.textContent="📉市場 -"+Math.round((1-marketPower)*100)+"%";el.appendChild(s);
+  }
+  f.buffs.forEach(b=>{
+    const s=document.createElement("span");s.className="buff "+(b.mult>=1?"up":"dn2");
+    s.textContent=b.label+"("+b.turns+")";el.appendChild(s);
+  });
+}
+function fxLunge(f){glLunge(f);}
+function fxGuard(f){playMotion("orbit_cyan",f,f);}
+function fxSkill(f,label,isUnique,moveName,moveKey){
+  narrateBattle("special",{
+    actor:f,
+    label,
+    isUnique:!!isUnique,
+    moveName:moveName||"",
+    moveKey:moveKey||""
+  });
+}
+function fxHit(f,dmg,guarded,type){
+  camShake(dmg>160?1.2:.55);
+  arenaFlash(type>1?"#ffd34d":guarded?"#4dc3ff":"#ff5a6e");
+  const arena=$("arena"),pt=toScreen(f),pop=document.createElement("div");
+  pop.className="dmg-pop mono";
+  pop.textContent=(type>1?"▲ ":"")+(type<1?"▽ ":"")+(guarded?dmg+" 🛡":dmg);
+  pop.style.color=type>1?"#ffe16a":type<1?"#a5b3c9":guarded?"var(--cyan)":"var(--bear)";
+  pop.style.left=(pt.x-22)+"px";pop.style.top=(pt.y-34)+"px";
+  arena.appendChild(pop);setTimer(()=>pop.remove(),850);
+}
+function pushLog(cls,msg){
+  S.log.push({cls,msg});
+  if(S.log.length>60)S.log.shift();
+  const body=$("logBody");
+  if($("modalLog").classList.contains("open"))renderLog();
+}
+function renderLog(){
+  const body=$("logBody");body.textContent="";
+  S.log.forEach(l=>{const p=document.createElement("p");p.className=l.cls;p.textContent=l.msg;body.appendChild(p);});
+  body.scrollTop=body.scrollHeight;
+}
+
+/* ---------- 画面内バトルナレーション ---------- */
+let battleNarrationQueue=[];
+let battleNarrationShowing=false;
+let battleNarrationToken=0;
+
+function narrationPick(items){
+  return items[Math.floor(Math.random()*items.length)];
+}
+function resetBattleNarration(){
+  battleNarrationQueue.length=0;
+  battleNarrationShowing=false;
+  battleNarrationToken++;
+  const box=$("battleNarration");
+  if(!box)return;
+  box.className="battle-narration tone-system";
+  $("battleNarrationTitle").textContent="";
+  $("battleNarrationText").textContent="";
+}
+function queueBattleNarration(title,text,tone,duration,priority){
+  if(!$("battleNarration")||!title||!text)return;
+  const item={
+    title:String(title),text:String(text),
+    tone:tone||"serious",duration:duration||1900
+  };
+  if(priority){
+    battleNarrationQueue.length=0;
+    battleNarrationShowing=false;
+    battleNarrationToken++;
+    showBattleNarration(item);
+    return;
+  }
+  battleNarrationQueue.push(item);
+  if(battleNarrationQueue.length>7)battleNarrationQueue.shift();
+  pumpBattleNarration();
+}
+function pumpBattleNarration(){
+  if(battleNarrationShowing||!battleNarrationQueue.length)return;
+  showBattleNarration(battleNarrationQueue.shift());
+}
+function showBattleNarration(item){
+  const box=$("battleNarration");
+  if(!box)return;
+  battleNarrationShowing=true;
+  const token=++battleNarrationToken;
+  box.className="battle-narration tone-"+item.tone;
+  $("battleNarrationTag").textContent=item.tone==="danger"?"BREAKING":item.tone==="humor"?"SIDE NOTE":"BATTLE REPORT";
+  $("battleNarrationTitle").textContent=item.title;
+  $("battleNarrationText").textContent=item.text;
+  void box.offsetWidth;
+  box.classList.add("show");
+  setTimer(()=>{
+    if(token!==battleNarrationToken)return;
+    box.classList.remove("show");
+    setTimer(()=>{
+      if(token!==battleNarrationToken)return;
+      battleNarrationShowing=false;
+      pumpBattleNarration();
+    },170);
+  },item.duration);
+}
+function narrateBattle(kind,data){
+  data=data||{};
+  const actor=data.actor;
+  const target=data.target;
+  const actorName=actor?actor.name:"戦場";
+  const targetName=target?target.name:"相手";
+  const damage=Math.max(0,Math.round(data.damage||0));
+
+  if(kind==="start"){
+    queueBattleNarration(
+      "TOKYO CORPORATE ARENA",
+      narrationPick([
+        actorName+"と"+targetName+"。二つの経営思想が、東京の夜に激突する。",
+        "決算書では決着しない。"+actorName+"対"+targetName+"、戦闘開始。",
+        "市場は静かに見守っている。少なくとも、開始前までは。"
+      ]),
+      "system",2400,true
+    );
+    return;
+  }
+
+  if(kind==="attack"){
+    const humorous=Math.random()<.32;
+    queueBattleNarration(
+      actorName+"の通常攻撃",
+      humorous?narrationPick([
+        targetName+"に"+damage+"ダメージ。会議で言えば、かなり空気が悪い。",
+        "説明資料を飛び越えて、物理的な説得が到達した。"+damage+"ダメージ。",
+        targetName+"は"+damage+"の損害。担当部署は『想定外』とコメントした。"
+      ]):narrationPick([
+        actorName+"が間合いを詰める。鋭い一撃が"+targetName+"を捉え、"+damage+"ダメージ。",
+        "迷いのない攻撃。"+targetName+"の戦力を"+damage+"削り取った。",
+        "市場の均衡が崩れる。"+actorName+"の一撃、"+damage+"ダメージ。"
+      ]),
+      humorous?"humor":"serious",1700
+    );
+    return;
+  }
+
+  if(kind==="guard"){
+    const humorous=Math.random()<.3;
+    queueBattleNarration(
+      actorName+"は防御態勢",
+      humorous?narrationPick([
+        "守りは固い。稟議よりは、はるかに早く完成した。",
+        "危険を察知し、責任の所在より先に防壁を設置した。",
+        "いったん持ち帰る構えだ。物理攻撃まで持ち帰れるかは不明。"
+      ]):narrationPick([
+        actorName+"は重心を落とし、次の衝撃に備える。",
+        "攻め急がない。"+actorName+"は反撃の瞬間を待っている。",
+        "防壁が展開される。次の一撃は、容易には通らない。"
+      ]),
+      humorous?"humor":"serious",1650
+    );
+    return;
+  }
+
+  if(kind==="special"){
+    const label=String(data.label||"経営戦略");
+    const exactExplanation=data.moveName?MOVE_EXPLANATIONS[data.moveName]:null;
+
+    if(exactExplanation){
+      queueBattleNarration(
+        label,
+        exactExplanation.text,
+        exactExplanation.tone||(data.isUnique?"gold":"serious"),
+        data.isUnique?3000:2700
+      );
+      return;
+    }
+
+    const companyMoveSet=actor&&actor.co?COMPANY_MOVE_NARRATIONS[actor.co.id]:null;
+    const companyMoveLines=companyMoveSet&&data.moveKey?companyMoveSet[data.moveKey]:null;
+
+    if(companyMoveLines&&companyMoveLines.length){
+      const selected=narrationPick(companyMoveLines);
+      queueBattleNarration(
+        label,
+        selected.text,
+        selected.tone||(data.isUnique?"gold":"serious"),
+        data.isUnique?2650:2250
+      );
+      return;
+    }
+
+    if(/炎上|抗議デモ/.test(label)){
+      queueBattleNarration(
+        label,
+        narrationPick([
+          "発言の一部が切り取られた。もっとも、切り取らなくても十分まずかった。",
+          "デモ隊が集結。釈明会見の予定だけが、驚くほど迅速に決まった。",
+          "支持率と戦闘力が同時に急落。火消し担当者のATBだけが異常に速い。",
+          "戦場に怒号が響く。広報部はすでに、長い夜を覚悟している。"
+        ]),
+        "danger",2600,true
+      );
+      return;
+    }
+
+    if(/公正取引委員会|立入検査|排除措置|報告資料|課徴金|改善計画|モニタリング/.test(label)){
+      queueBattleNarration(
+        label,
+        narrationPick([
+          "白い公用車が静かに止まる。相手の法務部だけが、静かではない。",
+          "調査官は淡々としている。その淡々さが、何よりも重い。",
+          "書類の束が戦場を覆う。提出期限、様式、添付資料。すべて厳守だ。",
+          "感情のない確認が続く。逃げ道だけが、丁寧に塞がれていく。",
+          "『念のため確認です』。その一言で、戦場の温度が数度下がった。"
+        ]),
+        Math.random()<.25?"humor":"serious",2400
+      );
+      return;
+    }
+
+    if(/大物政治家|鶴の一声|永田町|予算獲得|閣議決定|記憶にございません/.test(label)){
+      queueBattleNarration(
+        label,
+        narrationPick([
+          "電話が一本入った。市場も担当者も、同じタイミングで震え始める。",
+          "圧力ではない。強いお願いだ。少なくとも議事録には、そう残る。",
+          "たった一言で空気が変わった。なお、発言者の記憶はすでに曖昧だ。",
+          "永田町から追い風が吹く。風向きを質問できる者はいない。",
+          "政治力が戦場を上書きする。ルールブックは、いったん閉じられた。"
+        ]),
+        Math.random()<.55?"humor":"gold",2300
+      );
+      return;
+    }
+
+    if(/参戦/.test(label)){
+      queueBattleNarration(
+        label,
+        narrationPick([
+          actorName+"が援軍を要請。戦場に新たな影が現れた。",
+          "第三者が戦場へ入る。公平な展開になる保証はない。",
+          "援軍到着。戦況は複雑になり、バトルログは長くなった。"
+        ]),
+        Math.random()<.28?"humor":"gold",2200
+      );
+      return;
+    }
+
+    if(data.isUnique){
+      queueBattleNarration(
+        label,
+        narrationPick([
+          actorName+"が企業の総力を解放する。戦場の光景が一変した。",
+          "蓄積された資本、技術、人材。そのすべてが一撃へ収束する。",
+          "決着を狙う大技。東京の夜景さえ、その輝きにかすんだ。",
+          "経営判断が、今だけは天災に近い形で具現化する。"
+        ]),
+        "gold",2350
+      );
+      return;
+    }
+
+    queueBattleNarration(
+      label,
+      narrationPick([
+        actorName+"が新たな経営判断を下した。戦況が動き始める。",
+        "盤面を変える一手。数字の裏にあった戦略が、形を持つ。",
+        "現場への説明は後だ。まずは効果を確認しよう。",
+        "経営会議では割れた案だが、戦場では即時承認された。"
+      ]),
+      Math.random()<.24?"humor":"serious",1850
+    );
+    return;
+  }
+
+  if(kind==="ko"){
+    queueBattleNarration(
+      actorName+"、勝負を制す",
+      narrationPick([
+        targetName+"の戦闘継続能力が尽きた。最後まで立っていたのは"+actorName+"だ。",
+        "決着。市場の夜に、"+actorName+"の名だけが残る。",
+        targetName+"は崩れ落ちた。勝敗を分けたのは、最後の一手への執念だった。",
+        "戦闘終了。明日の株価について、ナレーターは一切責任を負わない。"
+      ]),
+      Math.random()<.18?"humor":"gold",2600,true
+    );
+  }
+}
+
+/* ---------- コマンドUI ---------- */
+$("cmdAttack").addEventListener("click",()=>playerCommand("attack"));
+$("cmdGuard").addEventListener("click",()=>playerCommand("guard"));
+$("cmdStrategy").addEventListener("click",()=>{
+  const B=S.battle;
+  if(!B||B.over||S.inputLock||S.paused||B.p.atb<100)return;
+  SE.select();renderStratSheet();$("sheetStrat").classList.add("open");
+});
+function renderStratSheet(){
+  const B=S.battle,p=B.p,list=$("stratList");list.textContent="";
+  const market=B.market&&B.market.event;
+  if(market){
+    const note=document.createElement("div");note.className="market-strategy-note";
+    const title=document.createElement("b");title.textContent=market.ic+" "+market.title;
+    const text=document.createElement("span");
+    const selfPower=marketAttrMultiplier(p.co.attr);
+    const foePower=marketAttrMultiplier(B.e.co.attr);
+    const selfLabel=selfPower>1?"追い風 +"+Math.round((selfPower-1)*100)+"%":selfPower<1?"逆風 -"+Math.round((1-selfPower)*100)+"%":"影響なし";
+    const foeLabel=foePower>1?"追い風 +"+Math.round((foePower-1)*100)+"%":foePower<1?"逆風 -"+Math.round((1-foePower)*100)+"%":"影響なし";
+    text.textContent="自社: "+selfLabel+" / 相手: "+foeLabel+"。逆風ならGUARD・投資・回復で次の変化を待ち、追い風ならSP技を集中させる。";
+    note.append(title,text);list.appendChild(note);
+  }
+  const head=document.createElement("div");head.className="strat-section";head.textContent="COMPANY ACTIONS";list.appendChild(head);
+  [["mid","中技",p.co.mid,"mid"],["big","大技",p.co.big,"big"]].forEach(([type,label,move,cls])=>{
+    const btn=document.createElement("button");btn.className="strat-item "+cls;
+    btn.disabled=p.gauge<move.cost;
+    const ic=document.createElement("span");ic.className="ic";ic.textContent=move.ic;
+    const t=document.createElement("span");t.className="t";
+    const b=document.createElement("b");b.textContent="【"+label+"】"+move.name;
+    const d=document.createElement("span");d.textContent=move.desc;t.append(b,d);
+    const cost=document.createElement("span");cost.className="cd";cost.textContent=p.gauge>=move.cost?"READY":"SP "+move.cost;
+    btn.append(ic,t,cost);btn.addEventListener("click",()=>{SE.select();playerCommand(type);});list.appendChild(btn);
+  });
+  const ally=SUMMONS[p.co.summon],sm=document.createElement("button");sm.className="strat-item summon";
+  sm.disabled=p.summonUsed||p.gauge<60;
+  const si=document.createElement("span");si.className="ic";si.textContent=ally.ic;
+  const st=document.createElement("span");st.className="t";
+  const sb=document.createElement("b");sb.textContent="【召喚】"+ally.name;
+  const sd=document.createElement("span");sd.textContent=ally.desc+" 3ターン共闘";st.append(sb,sd);
+  const sc=document.createElement("span");sc.className="cd";sc.textContent=p.summonUsed?"使用済":p.gauge>=60?"READY":"SP 60";
+  sm.append(si,st,sc);sm.addEventListener("click",()=>{SE.select();playerCommand("summon");});list.appendChild(sm);
+  const h2=document.createElement("div");h2.className="strat-section";h2.textContent="COMMON STRATEGIES";list.appendChild(h2);
+  STRATEGIES.forEach(stg=>{
+    const btn=document.createElement("button");btn.className="strat-item";
+    const onCd=p.cds[stg.id]>0;btn.disabled=onCd;
+    const ic=document.createElement("span");ic.className="ic";ic.textContent=stg.ic;
+    const t=document.createElement("span");t.className="t";
+    const b=document.createElement("b");b.textContent=stg.name;
+    const d=document.createElement("span");d.textContent=stg.desc;t.append(b,d);
+    const c=document.createElement("span");c.className="cd";c.textContent=onCd?"CD "+p.cds[stg.id]:"";
+    btn.append(ic,t,c);btn.addEventListener("click",()=>{SE.select();playerCommand("strategy",stg.id);});list.appendChild(btn);
+  });
+}
+$("btnLog").addEventListener("click",()=>{SE.select();renderLog();$("modalLog").classList.add("open");});
+$("btnMenu").addEventListener("click",()=>{SE.select();$("modalMenu").classList.add("open");});
+$("btnAuto").addEventListener("click",e=>{
+  S.auto=!S.auto;
+  e.currentTarget.textContent=S.auto?"🤖 AUTO: ON":"🤖 AUTO: OFF";
+  SE.select();
+  $("modalMenu").classList.remove("open");
+  if(S.auto&&!S.inputLock&&S.battle&&!S.battle.over&&!S.paused){
+    const a=cpuDecide(S.battle.p,S.battle.e);
+    playerCommand(a.type,a.extra);
+  }
+});
+$("btnPause").addEventListener("click",e=>{
+  S.paused=!S.paused;
+  e.currentTarget.textContent=S.paused?"▶ 再開":"⏸ PAUSE";
+  SE.select();
+  if(!S.paused){$("modalMenu").classList.remove("open");
+    if(S.auto&&!S.inputLock&&S.battle&&!S.battle.over){
+      const a=cpuDecide(S.battle.p,S.battle.e);playerCommand(a.type,a.extra);}}
+});
+$("btnExit").addEventListener("click",()=>{
+  $("modalMenu").classList.remove("open");
+  $("confirmMsg").textContent="バトルを終了して企業選択へ戻りますか?";
+  $("modalConfirm").classList.add("open");
+});
+$("btnConfirmYes").addEventListener("click",()=>{
+  SE.select();S.battle=null;showScreen("select");renderSelect();
+});
+$("volSlider").addEventListener("input",e=>{
+  S.settings.volume=e.target.value/100;S.settings.muted=false;applyVolume();
+});
+$("btnMute").addEventListener("click",e=>{
+  S.settings.muted=!S.settings.muted;applyVolume();
+  e.currentTarget.textContent=S.settings.muted?"UNMUTE":"MUTE";
+});
+
+/* ================================================================
+   12. 結果画面
+================================================================ */
+function showResult(win){
+  const B=S.battle,{p,e}=B;
+  showScreen("result");
+  (win?SE.win:SE.lose)();
+  const t=$("resTitle");
+  t.textContent=win?"VICTORY":"DEFEAT";
+  t.className="res-title "+(win?"win":"lose");
+  $("resVs").textContent=p.logo+" "+p.name+"  vs  "+e.logo+" "+e.name;
+  $("resTurns").textContent=(B.turn-1)+" アクション";
+  $("resMaxHit").textContent=p.stats.maxHit+" ダメージ";
+  // 主因の推定
+  let factor;
+  const hpR=p.hp/p.maxHp;
+  const skills=Object.keys(p.stats.strats);
+  if(!win)factor=e.name+"の攻勢を支えきれなかった";
+  else if(hpR>0.7)factor="安定した経営で圧勝";
+  else if(p.stats.maxHit>=p.maxHp*0.25)factor="大技の一撃が決め手";
+  else if(p.stats.guards>=3)factor="堅実な防御からの反撃";
+  else factor="消耗戦を粘り勝ち";
+  $("resFactor").textContent=factor;
+  $("resStrats").textContent=skills.length?skills.slice(0,3).join(" / "):"通常攻撃のみ";
+  let rank;
+  if(!win)rank="—";
+  else if(hpR>0.7&&B.turn<=10)rank="S";
+  else if(hpR>0.4)rank="A";
+  else if(hpR>0.15)rank="B";
+  else rank="C";
+  $("resRank").textContent=rank;
+}
+$("btnRematch").addEventListener("click",()=>{SE.select();startBattle();});
+$("btnReselect").addEventListener("click",()=>{SE.select();S.battle=null;showScreen("select");renderSelect();});
+$("btnResTitle").addEventListener("click",()=>{SE.select();S.battle=null;showScreen("title");});
+
+/* ================================================================
+   13. 簡易トーナメント (CPU同士の高速シミュレーション)
+================================================================ */
+function simulateBattle(coA,coB){
+  const a=mkFighter(coA,"p"),b=mkFighter(coB,"e");
+  const silent={ dealDamage:(x,y,o)=>{ // 演出なし版
+      o=o||{};
+      const atk=eff(x,"atk")*(o.mult||1);
+      const tech=eff(x,"tech")*(o.techScale!==undefined?o.techScale:.3);
+      const spd=o.spdScale?eff(x,"spd")*o.spdScale:0;
+      let defv=eff(y,"def")*.4;if(o.pierce)defv*=(1-o.pierce);
+      let d=Math.max(8,Math.round((atk+tech+spd)*(0.9+Math.random()*0.2)-defv));
+      if(y.guarding)d=Math.max(4,Math.round(d*0.35));
+      y.hp=Math.max(0,y.hp-d);
+      x.gauge=Math.min(100,x.gauge+12);y.gauge=Math.min(100,y.gauge+16);
+      return d;},
+    hurt:(f,n)=>{f.hp=Math.max(0,f.hp-n);},
+    heal:(f,r)=>{const h=Math.round(f.maxHp*r);f.hp=Math.min(f.maxHp,f.hp+h);return h;}};
+  for(let t=0;t<40&&a.hp>0&&b.hp>0;t++){
+    a.guarding=false;b.guarding=false;
+    const aAct=cpuDecide(a,b),bAct=cpuDecide(b,a);
+    if(aAct.type==="guard"){a.guarding=true;a.gauge=Math.min(100,a.gauge+20);}
+    if(bAct.type==="guard"){b.guarding=true;b.gauge=Math.min(100,b.gauge+20);}
+    const order=eff(a,"spd")>=eff(b,"spd")?[[a,b,aAct],[b,a,bAct]]:[[b,a,bAct],[a,b,aAct]];
+    order.forEach(([s,f,act])=>{
+      if(s.hp<=0||f.hp<=0)return;
+      if(act.type==="attack")silent.dealDamage(s,f,{mult:1});
+      else if((act.type==="mid"||act.type==="big")&&s.gauge>=s.co[act.type].cost){
+        s.gauge-=s.co[act.type].cost;executeMove(s,f,s.co[act.type],silent,false);
+      }else if(act.type==="summon"&&!s.summonUsed&&s.gauge>=60){
+        deploySummon(s);
+      }else if(act.type==="strategy"){const st=STRATEGIES.find(x=>x.id===act.extra);
+        if(st&&!(s.cds[st.id]>0)){s.cds[st.id]=st.cd;try{st.fx(s,f,silent);}catch(_){}}}
+    });
+    runSummonAlly(a,b,silent,false);runSummonAlly(b,a,silent,false);
+    tickBuffs(a);tickBuffs(b);
+    Object.keys(a.cds).forEach(k=>a.cds[k]>0&&a.cds[k]--);
+    Object.keys(b.cds).forEach(k=>b.cds[k]>0&&b.cds[k]--);
+  }
+  if(a.hp===b.hp)return Math.random()<.5?coA:coB;
+  return a.hp>b.hp?coA:coB;
+}
+function runTournament(){
+  const body=$("tourBody");body.textContent="";
+  const pool=allCompanies().slice();
+  // ランダムに4社選出
+  for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];}
+  const entrants=pool.slice(0,4);
+  const semi=[[entrants[0],entrants[1]],[entrants[2],entrants[3]]];
+  const semiW=semi.map(m=>simulateBattle(m[0],m[1]));
+  const champ=simulateBattle(semiW[0],semiW[1]);
+  const mkRound=(title,matches,winners)=>{
+    const r=document.createElement("div");r.className="t-round";
+    const h=document.createElement("h4");h.textContent=title;r.appendChild(h);
+    matches.forEach((m,i)=>{
+      const el=document.createElement("div");el.className="t-match";
+      const L=document.createElement("div");L.className="side"+(winners[i].id===m[0].id?" winner":"");
+      L.innerHTML="";const ln=document.createElement("span");ln.className="n";ln.textContent=m[0].logo+" "+m[0].name;L.appendChild(ln);
+      const vs=document.createElement("span");vs.textContent="vs";vs.style.color="var(--sub)";vs.style.fontSize="11px";
+      const R=document.createElement("div");R.className="side right"+(winners[i].id===m[1].id?" winner":"");
+      const rn=document.createElement("span");rn.className="n";rn.textContent=m[1].name+" "+m[1].logo;R.appendChild(rn);
+      el.append(L,vs,R);r.appendChild(el);
+    });
+    return r;
+  };
+  body.appendChild(mkRound("SEMI FINAL",semi,semiW));
+  body.appendChild(mkRound("FINAL",[[semiW[0],semiW[1]]],[champ]));
+  const c=document.createElement("div");c.className="t-champ";
+  const ci=document.createElement("div");ci.className="c";ci.textContent="🏆 "+champ.logo;
+  const cn=document.createElement("div");cn.className="n";cn.textContent=champ.name;
+  const cs=document.createElement("div");cs.style.cssText="font-size:12px;color:var(--sub)";cs.textContent="優勝 — 市場の頂点に立った";
+  c.append(ci,cn,cs);body.appendChild(c);
+}
+$("btnTourBack").addEventListener("click",()=>{SE.select();showScreen("title");});
+$("btnTourRun").addEventListener("click",()=>{SE.select();runTournament();});
+
+/* ================================================================
+   14. 企業作成 (検証・クランプ・安全表示・保存)
+================================================================ */
+function clamp(v,min,max,def){v=Number(v);if(!isFinite(v))return def;return Math.min(max,Math.max(min,Math.round(v)));}
+function addCustomCompany(data){ // AI生成企業もこのAPIで追加可能
+  const id="c_"+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const co={id, name:String(data.name||"").slice(0,20)||"名称未設定",
+    ind:String(data.ind||"その他").slice(0,10),
+    logo:(String(data.logo||"🏢").slice(0,2))||"🏢",
+    tick:"USR", desc:String(data.desc||"").slice(0,40),
+    tags:["カスタム"],custom:true,brand:"#4dc3ff",
+    attr:"消費",tier:"sme",summon:"jftc",
+    fin:{capital:0,revenue:0,margin:0,employees:0,period:"ユーザー入力",metric:"手入力",source:"custom"},
+    st:{hp:clamp(data.hp,200,1200,600),atk:clamp(data.atk,20,150,70),
+        def:clamp(data.def,20,150,70),spd:clamp(data.spd,20,150,70),
+        tech:clamp(data.tech,20,150,70),grw:clamp(data.grw,20,150,70)},
+    skillName:"総力戦"};
+  customCompanies.push(co);
+  try{localStorage.setItem(LS_KEY,JSON.stringify(customCompanies));}
+  catch(_){pushLog&&0;/* 保存不可でもゲームは継続 */}
+  return co;
+}
+$("btnCreateSave").addEventListener("click",()=>{
+  const name=$("fName").value.trim();
+  if(!name){$("fName").focus();$("fName").style.borderColor="var(--bear)";return;}
+  $("fName").style.borderColor="";
+  SE.select();
+  addCustomCompany({name, ind:$("fInd").value, logo:$("fLogo").value.trim(),
+    desc:$("fDesc").value.trim(),
+    hp:$("fHp").value, atk:$("fAtk").value, def:$("fDef").value,
+    spd:$("fSpd").value, tech:$("fTech").value, grw:$("fGrw").value});
+  $("fName").value="";$("fDesc").value="";$("fLogo").value="";
+  showScreen("select");renderSelect();
+});
+$("btnCreateBack").addEventListener("click",()=>{SE.select();showScreen("select");renderSelect();});
+
+/* ================================================================
+   15. リサイズ・回転対応 (dvh+flexで自動追従。演出位置のみ再描画)
+================================================================ */
+const GL={
+  renderer:null,scene:null,camera:null,clock:null,raf:0,active:false,
+  fighters:{p:null,e:null},summons:{p:null,e:null},tweens:[],cars:[],city:[],shake:0,
+  windows:[],signs:[],beacons:[],skyBeams:[],drones:[],cityUpdateAt:0,
+  intro:{t:0,dur:0,active:false}
+};
+function initGL(pCo,eCo){
+  cleanupGL();
+  const canvas=$("battleCanvas");
+  if(!window.THREE||!canvas){
+    const b=$("errBanner");b.textContent="⚠ Three.jsを読み込めないため3D表示を開始できません";b.style.display="block";return;
+  }
+  try{
+    const T=THREE;
+    GL.renderer=new T.WebGLRenderer({canvas,antialias:true,powerPreference:"high-performance"});
+    GL.renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.5));
+    GL.renderer.outputEncoding=T.sRGBEncoding;
+    GL.renderer.shadowMap.enabled=true;GL.renderer.shadowMap.type=T.PCFSoftShadowMap;
+    GL.scene=new T.Scene();GL.scene.background=new T.Color(0x02040d);GL.scene.fog=new T.FogExp2(0x07101d,.026);
+    GL.camera=new T.PerspectiveCamera(44,1,.1,180);
+    GL.camera.position.set(0,7.2,16.8);GL.camera.lookAt(0,2.2,0);
+    GL.clock=new T.Clock();GL.active=true;
+    GL.intro={t:0,dur:3.6,active:true};
+    GL.scene.add(new T.HemisphereLight(0x7bc8ff,0x080814,1.15));
+    const sun=new T.DirectionalLight(0xffffff,1.2);sun.position.set(-5,12,8);sun.castShadow=true;GL.scene.add(sun);
+    const neon1=new T.PointLight(0x00ccff,2.2,24);neon1.position.set(-7,4,3);GL.scene.add(neon1);
+    const neon2=new T.PointLight(0xff225f,2.0,20);neon2.position.set(7,3,-2);GL.scene.add(neon2);
+    buildTokyoStage();
+    GL.fighters.p=makeCrest(pCo,new T.Vector3(-3.25,1.2,2.4),.9);
+    GL.fighters.e=makeCrest(eCo,new T.Vector3(3.25,2.0,-1.8),.84);
+    GL.scene.add(GL.fighters.p,GL.fighters.e);
+    resizeGL();GLLoop();
+  }catch(err){
+    cleanupGL();const b=$("errBanner");b.textContent="⚠ 3D初期化失敗: "+err.message;b.style.display="block";
+  }
+}
+let _winTexPool=null;
+function windowTexture(){
+  /* 窓明かりテクスチャを4種生成してキャッシュ。ビルごとにcloneしrepeatのみ変える */
+  if(!_winTexPool){
+    _winTexPool=[];
+    for(let v=0;v<4;v++){
+      const c=document.createElement("canvas");c.width=64;c.height=128;
+      const x=c.getContext("2d");
+      x.fillStyle="#000";x.fillRect(0,0,64,128);
+      for(let gy=0;gy<16;gy++)for(let gx=0;gx<6;gx++){
+        if(Math.random()<.42)continue;
+        x.fillStyle=Math.random()>.4?"#7fe3ff":"#ffcf8a";
+        x.globalAlpha=.35+Math.random()*.65;
+        x.fillRect(4+gx*10,4+gy*8,6,4);
+      }
+      x.globalAlpha=1;
+      _winTexPool.push(new THREE.CanvasTexture(c));
+    }
+  }
+  return _winTexPool[Math.floor(Math.random()*_winTexPool.length)];
+}
+function buildTokyoStage(){
+  const T=THREE,s=GL.scene;
+  const ground=new T.Mesh(new T.CircleGeometry(8.8,64),new T.MeshStandardMaterial({color:0x07111c,metalness:.82,roughness:.28}));
+  ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;s.add(ground);
+  [5.3,7.1,8.5].forEach((r,i)=>{
+    const ring=new T.Mesh(new T.TorusGeometry(r,.035,8,96),new T.MeshBasicMaterial({color:i===1?0xff225f:0x18cfff,transparent:true,opacity:.58}));
+    ring.rotation.x=Math.PI/2;ring.position.y=.035;s.add(ring);
+  });
+  const road=new T.Mesh(new T.TorusGeometry(10.6,.42,10,128),new T.MeshStandardMaterial({color:0x11151d,metalness:.6,roughness:.45}));
+  road.rotation.x=Math.PI/2;road.position.y=1.2;s.add(road);
+  const geo=new T.BoxGeometry(1,1,1);
+  /* ビルはカメラから見てアリーナ後方の半円に限定し、前景の遮蔽物化を防ぐ */
+  for(let i=0;i<46;i++){
+    const a=Math.PI+(i+.5)/46*Math.PI+(Math.random()-.5)*.06,r=11.5+Math.random()*8;
+    const h=2.5+Math.random()*11,w=.8+Math.random()*1.8,d=.8+Math.random()*1.8;
+    const mat=new T.MeshStandardMaterial({color:0x070d17,emissive:Math.random()>.5?0x062840:0x240818,emissiveIntensity:.2,roughness:.85});
+    const b=new T.Mesh(geo,mat);b.scale.set(w,h,d);b.position.set(Math.cos(a)*r,h/2-1.1,Math.sin(a)*r);
+    /* 旧 rotation.y=-a は+Z(窓面)が横を向く誤り。局所+Zが(sinθ,cosθ)を向く性質から
+       中心方向(-cos a,-sin a)へ向けるには θ=atan2(-cos a,-sin a) が正しい */
+    b.rotation.y=Math.atan2(-Math.cos(a),-Math.sin(a))+(Math.random()-.5)*.2;
+    s.add(b);GL.city.push(b);
+    const winTex=windowTexture().clone();
+    winTex.wrapS=winTex.wrapT=T.RepeatWrapping;
+    winTex.repeat.set(Math.max(1,Math.round(w/.6)),Math.max(2,Math.round(h/1.4)));
+    winTex.needsUpdate=true;
+    const winMat=new T.MeshBasicMaterial({
+      map:winTex,transparent:true,opacity:.9,
+      blending:T.AdditiveBlending,depthWrite:false
+    });
+    const win=new T.Mesh(new T.PlaneGeometry(.97,.94),winMat);
+    win.position.set(0,.01,.505);
+    win.userData={phase:Math.random()*Math.PI*2,speed:.5+Math.random()*1.6,base:.62+Math.random()*.28,blinky:Math.random()<.08};
+    b.add(win);GL.windows.push(win);
+    if(h>8&&Math.random()<.65){
+      const beacon=new T.Mesh(new T.SphereGeometry(.1,8,6),new T.MeshBasicMaterial({color:0xff3344,transparent:true,opacity:1}));
+      beacon.position.set(Math.cos(a)*r,h-1.05,Math.sin(a)*r);
+      beacon.userData={phase:Math.random()*Math.PI*2};
+      s.add(beacon);GL.beacons.push(beacon);
+    }
+  }
+  /* 夜景モーション: 回転サーチライトと巡回ドローン */
+  for(let i=0;i<3;i++){
+    const beamGeo=new T.ConeGeometry(1.6,24,10,1,true);
+    beamGeo.translate(0,12,0);
+    const beam=new T.Mesh(beamGeo,new T.MeshBasicMaterial({color:0x3fd2ff,transparent:true,opacity:.055,side:T.DoubleSide,depthWrite:false,blending:T.AdditiveBlending}));
+    const ba=Math.PI*(1.18+i*.32);
+    beam.position.set(Math.cos(ba)*13.5,-.9,Math.sin(ba)*13.5);
+    beam.rotation.z=.45;
+    beam.userData={speed:.3+i*.14,offset:i*2.1};
+    s.add(beam);GL.skyBeams.push(beam);
+  }
+  for(let i=0;i<4;i++){
+    const drone=new T.Mesh(new T.SphereGeometry(.08,6,5),new T.MeshBasicMaterial({color:i%2?0x74dcff:0xffa0b8}));
+    drone.userData={r:12.5+Math.random()*4.5,h:6.5+Math.random()*6,speed:.1+Math.random()*.12,a:Math.random()*Math.PI*2};
+    s.add(drone);GL.drones.push(drone);
+  }
+  const tower=new T.Group();
+  const shaft=new T.Mesh(new T.CylinderGeometry(.2,1.05,9,6,1,true),new T.MeshBasicMaterial({color:0xff5038,wireframe:true}));
+  shaft.position.y=3.5;tower.add(shaft);
+  [0,2,4,6].forEach(y=>{const band=new T.Mesh(new T.TorusGeometry(.85-y*.07,.07,6,24),new T.MeshBasicMaterial({color:0xffffff}));band.rotation.x=Math.PI/2;band.position.y=y;tower.add(band);});
+  const antenna=new T.Mesh(new T.CylinderGeometry(.04,.08,3,8),new T.MeshBasicMaterial({color:0xff3322}));antenna.position.y=9.3;tower.add(antenna);
+  tower.position.set(-9,-.9,-12);s.add(tower);
+  for(let i=0;i<18;i++){
+    const car=new T.Mesh(new T.BoxGeometry(.18,.07,.55),new T.MeshBasicMaterial({color:i%2?0xff3355:0x44ddff}));
+    car.userData={a:i/18*Math.PI*2,speed:.08+Math.random()*.05,r:10.6};s.add(car);GL.cars.push(car);
+  }
+  const starsGeo=new T.BufferGeometry(),pts=[];
+  for(let i=0;i<180;i++){pts.push((Math.random()-.5)*70,8+Math.random()*28,(Math.random()-.5)*70);}
+  starsGeo.setAttribute("position",new T.Float32BufferAttribute(pts,3));
+  s.add(new T.Points(starsGeo,new T.PointsMaterial({color:0x9fdcff,size:.08,transparent:true,opacity:.7})));
+}
+function crestTexture(co){
+  const c=document.createElement("canvas");c.width=512;c.height=512;const x=c.getContext("2d");
+  const g=x.createLinearGradient(0,0,512,512);g.addColorStop(0,co.brand||"#274b80");g.addColorStop(1,"#060914");
+  x.fillStyle=g;x.fillRect(0,0,512,512);
+  x.strokeStyle=ATTR_INFO[co.attr].color;x.lineWidth=18;x.strokeRect(20,20,472,472);
+  x.fillStyle="#fff";x.textAlign="center";x.textBaseline="middle";
+  x.font="900 150px system-ui";x.fillText(co.short||co.logo||co.name[0],256,205);
+  x.font="700 38px system-ui";x.fillText(co.name.slice(0,11),256,350);
+  x.font="600 25px monospace";x.fillStyle=ATTR_INFO[co.attr].color;x.fillText(co.attr+" / "+TIER_LABEL[co.tier],256,407);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;return t;
+}
+function makeCrest(co,pos,scale){
+  const T=THREE,g=new T.Group();g.position.copy(pos);g.scale.setScalar(scale);g.userData.base=pos.clone();
+  const slab=new T.Mesh(new T.BoxGeometry(2.25,2.25,.38),[
+    new T.MeshStandardMaterial({color:0x111827,metalness:.7,roughness:.25}),
+    new T.MeshStandardMaterial({color:0x111827,metalness:.7,roughness:.25}),
+    new T.MeshStandardMaterial({color:0x111827}),
+    new T.MeshStandardMaterial({color:0x111827}),
+    new T.MeshBasicMaterial({map:crestTexture(co)}),
+    new T.MeshStandardMaterial({color:co.brand||0x222222})
+  ]);
+  slab.castShadow=true;g.add(slab);
+  const halo=new T.Mesh(new T.TorusGeometry(1.55,.055,10,64),new T.MeshBasicMaterial({color:ATTR_INFO[co.attr].hex,transparent:true,opacity:.85}));
+  halo.position.z=-.3;g.add(halo);g.userData.halo=halo;
+  return g;
+}
+function GLLoop(){
+  if(!GL.active)return;
+  GL.raf=requestAnimationFrame(GLLoop);
+  const t=performance.now()*.001,dt=Math.min(.04,GL.clock.getDelta());
+  Object.values(GL.fighters).forEach((g,i)=>{
+    if(!g||g.userData.sinking)return;
+    if(g.userData.boundFx){
+      /* 拘束中: 浮遊を止め、小刻みに震えるだけの姿勢へモーション変化 */
+      g.position.y=g.userData.base.y;
+      g.rotation.z=Math.sin(t*26+i)*.02;
+      g.userData.halo.rotation.z+=dt*.15;
+      if(g.userData.boundFx.userData.spin)g.userData.boundFx.userData.spin.rotation.y+=dt*.9;
+    }else{
+      g.position.y=g.userData.base.y+Math.sin(t*1.7+i)*.16;
+      g.userData.halo.rotation.z+=dt*(i?-.7:.7);
+    }
+  });
+  Object.values(GL.summons).forEach((root,i)=>{
+    const c=root&&root.userData.character;
+    if(!c||!c.userData.arrived||!c.userData.stand)return;
+    c.position.y=c.userData.stand.y+Math.sin(t*2.1+i*.8)*.035;
+    if(c.userData.head)c.userData.head.rotation.y=Math.sin(t*.75+i)*.09;
+    if(c.userData.arm)c.userData.arm.rotation.z=c.userData.arm.userData.baseRotZ+Math.sin(t*1.5+i)*.045;
+  });
+  GL.cars.forEach(c=>{c.userData.a+=dt*c.userData.speed;const a=c.userData.a,r=c.userData.r;c.position.set(Math.cos(a)*r,1.32,Math.sin(a)*r);c.rotation.y=-a;});
+  GL.city.forEach((b,i)=>{if(i%5===0)b.material.emissiveIntensity=.16+Math.sin(t*1.8+i)*.1;});
+  if(performance.now()-GL.cityUpdateAt>90){
+    GL.cityUpdateAt=performance.now();
+    GL.windows.forEach(w=>{
+      const u=w.userData;
+      w.material.opacity=u.blinky
+        ?(Math.sin(t*u.speed*3.2+u.phase)>.45?u.base+.42:.04)
+        :u.base+Math.sin(t*u.speed+u.phase)*.12;
+    });
+    GL.beacons.forEach(bc=>{bc.material.opacity=Math.sin(t*3.1+bc.userData.phase)>.25?1:.1;});
+  }
+  GL.skyBeams.forEach(b=>{b.rotation.y=t*b.userData.speed+b.userData.offset;});
+  GL.drones.forEach(d=>{const u=d.userData;u.a+=dt*u.speed;d.position.set(Math.cos(u.a)*u.r,u.h+Math.sin(t*.85+u.a)*.55,Math.sin(u.a)*u.r);});
+  for(let i=GL.tweens.length-1;i>=0;i--){
+    const tw=GL.tweens[i],p=Math.min(1,(performance.now()-tw.start)/tw.dur);
+    tw.fn(p);if(p>=1){GL.tweens.splice(i,1);if(tw.done)tw.done();}
+  }
+  if(GL.intro.active){
+    GL.intro.t+=dt;
+    const ip=Math.min(1,GL.intro.t/GL.intro.dur);
+    const ie=1-Math.pow(1-ip,3);
+    const ang=Math.PI*2*(1-ie);
+    const ir=9.2+7.6*Math.pow(ie,8);
+    const iy=2.2+5*ie;
+    GL.camera.position.set(Math.sin(ang)*ir,iy,Math.cos(ang)*ir);
+    GL.camera.lookAt(0,1.4+.6*ie,0);
+    if(ip>=1)GL.intro.active=false;
+  }else{
+    if(GL.shake>0){GL.shake*=.84;GL.camera.position.x=(Math.random()-.5)*GL.shake;GL.camera.position.y=7.2+(Math.random()-.5)*GL.shake;}
+    else{GL.camera.position.x=Math.sin(t*.18)*.35;GL.camera.position.y=7.2+Math.sin(t*.25)*.12;}
+    GL.camera.lookAt(0,2.0,0);
+  }
+  GL.renderer.render(GL.scene,GL.camera);
+}
+function tween(dur,fn,done){GL.tweens.push({start:performance.now(),dur,fn,done});}
+function fighter3D(f){return f&&GL.fighters[f.side]||null}
+function glLunge(f){
+  const g=fighter3D(f);if(!g)return;const base=g.userData.base.clone(),dir=f.side==="p"?1:-1;
+  tween(420,p=>{const q=p<.45?p/.45:(1-p)/.55;g.position.x=base.x+dir*q*2.3;g.position.z=base.z-dir*q*1.2;},()=>g.position.copy(base));
+}
+function glSinkLoser(f){
+  const g=fighter3D(f);
+  if(!g||!GL.active)return;
+  g.userData.sinking=true;
+  const T=THREE,base=g.position.clone();
+  const ground=new T.Vector3(base.x,.06,base.z);
+  camShake(2.4);
+  arenaFlash("#ff5a6e");
+  tone(52,2.2,"sawtooth",.28,0,30);
+  noise(.9,.4);
+  /* 地割れリング + 土煙 + 段階的な轟音 */
+  for(let i=0;i<3;i++){
+    const ring=simpleFx(new T.RingGeometry(.25+i*.22,.6+i*.3,48),0xffb14d,ground.clone().add(new T.Vector3(0,.04+i*.02,0)),1500-i*140,(o,p)=>{
+      o.rotation.x=-Math.PI/2;
+      o.scale.setScalar(.4+p*(3.4+i*.8));
+    });
+    if(ring&&ring.material)ring.material.depthWrite=false;
+  }
+  motionParticles(ground.clone().add(new T.Vector3(0,.5,0)),0x9aa5bd,46,3.6,1600,.7);
+  setTimer(()=>{noise(.5,.3);camShake(1.7);motionParticles(ground.clone(),0x707b94,28,2.6,1200,.6);},700);
+  setTimer(()=>{noise(.4,.24);camShake(1.2);arenaFlash("#8a93a8");},1400);
+  tween(2400,p=>{
+    const q=p*p;
+    g.position.x=base.x+(Math.random()-.5)*.16*(1-p);
+    g.position.z=base.z+(Math.random()-.5)*.16*(1-p);
+    g.position.y=base.y-q*5.4;
+    g.rotation.x=q*.4;
+    g.rotation.z=q*(f.side==="p"?-.55:.55);
+    if(g.userData.halo)g.userData.halo.material.opacity=Math.max(0,.85-p*1.3);
+  },()=>{g.visible=false;});
+}
+function simpleFx(geometry,color,pos,life,update){
+  if(!GL.scene)return null;
+  const mat=new THREE.MeshBasicMaterial({color,transparent:true,opacity:.9,side:THREE.DoubleSide});
+  const m=new THREE.Mesh(geometry,mat);m.position.copy(pos);GL.scene.add(m);
+  tween(life,p=>{mat.opacity=1-p;if(update)update(m,p);},()=>{GL.scene.remove(m);geometry.dispose();mat.dispose();});
+  return m;
+}
+function motionParticles(pos,color,count,spread,life,rise){
+  if(!GL.scene)return;
+  const T=THREE,geo=new T.BufferGeometry();
+  const positions=new Float32Array(count*3),velocities=[];
+  for(let i=0;i<count;i++){
+    positions[i*3]=pos.x;positions[i*3+1]=pos.y;positions[i*3+2]=pos.z;
+    const dir=new T.Vector3(
+      (Math.random()-.5)*2,
+      (Math.random()-.18)*(rise||1.4),
+      (Math.random()-.5)*2
+    ).normalize().multiplyScalar(.45+Math.random()*spread);
+    velocities.push(dir);
+  }
+  geo.setAttribute("position",new T.BufferAttribute(positions,3));
+  const mat=new T.PointsMaterial({
+    color,size:.12+spread*.035,transparent:true,opacity:1,
+    depthWrite:false,blending:T.AdditiveBlending
+  });
+  const pts=new T.Points(geo,mat);GL.scene.add(pts);
+  tween(life,p=>{
+    const arr=geo.attributes.position.array;
+    for(let i=0;i<count;i++){
+      const v=velocities[i],drag=1-p*.35;
+      arr[i*3]=pos.x+v.x*p*spread*drag;
+      arr[i*3+1]=pos.y+v.y*p*spread-p*p*spread*.32;
+      arr[i*3+2]=pos.z+v.z*p*spread*drag;
+    }
+    geo.attributes.position.needsUpdate=true;
+    mat.opacity=1-p;
+    mat.size=(.12+spread*.035)*(1+p*.8);
+  },()=>{
+    if(GL.scene)GL.scene.remove(pts);
+    geo.dispose();mat.dispose();
+  });
+}
+function motionArc(from,to,color,life,bend){
+  if(!GL.scene)return;
+  const T=THREE,points=[],segments=18;
+  for(let i=0;i<=segments;i++){
+    const p=i/segments,v=from.clone().lerp(to,p);
+    v.x+=(Math.random()-.5)*(bend||.35)*Math.sin(Math.PI*p);
+    v.y+=Math.sin(Math.PI*p)*(bend||.35)+(Math.random()-.5)*.15;
+    v.z+=(Math.random()-.5)*(bend||.35)*Math.sin(Math.PI*p);
+    points.push(v);
+  }
+  const geo=new T.BufferGeometry().setFromPoints(points);
+  const mat=new T.LineBasicMaterial({color,transparent:true,opacity:1,blending:T.AdditiveBlending});
+  const line=new T.Line(geo,mat);GL.scene.add(line);
+  tween(life,p=>{mat.opacity=1-p;line.scale.setScalar(1+p*.035);},()=>{
+    if(GL.scene)GL.scene.remove(line);geo.dispose();mat.dispose();
+  });
+}
+function motionImpact(pos,color,power){
+  const T=THREE,life=power===3?1050:power===2?760:520;
+  const rings=power===3?5:power===2?3:1;
+  for(let i=0;i<rings;i++){
+    const ring=simpleFx(
+      new T.RingGeometry(.18+i*.08,.32+i*.1,48),color,
+      pos.clone().add(new T.Vector3(0,.04+i*.025,0)),life-i*55,
+      (o,p)=>{
+        o.rotation.x=-Math.PI/2;
+        o.rotation.z=p*(i%2?3:-3);
+        o.scale.setScalar(1+p*(3.2+power*1.25+i*.35));
+      }
+    );
+    if(ring&&ring.material)ring.material.depthWrite=false;
+  }
+  motionParticles(pos.clone().add(new T.Vector3(0,.7,0)),color,power===3?58:power===2?32:14,power===3?4.8:power===2?3.1:1.8,life,1.8);
+  camShake(power===3?1.75:power===2?.85:.36);
+  if(power>=2)arenaFlash("#"+new T.Color(color).getHexString());
+  if(power===3){
+    setTimer(()=>arenaFlash("#ffffff"),110);
+    const shell=simpleFx(new T.SphereGeometry(1.05,24,16),color,pos.clone().add(new T.Vector3(0,1,0)),900,(o,p)=>{
+      o.scale.setScalar(.25+p*4.8);
+      o.rotation.y=p*5;
+      o.rotation.x=p*3;
+    });
+    if(shell&&shell.material){shell.material.wireframe=true;shell.material.opacity=.7;}
+    if(GL.camera){
+      const original=GL.camera.fov;
+      tween(900,p=>{
+        GL.camera.fov=original-Math.sin(Math.PI*p)*9;
+        GL.camera.updateProjectionMatrix();
+      },()=>{
+        if(GL.camera){GL.camera.fov=original;GL.camera.updateProjectionMatrix();}
+      });
+    }
+  }
+}
+function playMotion(id,att,dfd,power){
+  if(!GL.active)return;
+  power=clamp(power,1,3,1);
+  const spec=MOTIONS[id]||MOTIONS.burst_cyan,a=fighter3D(att),d=fighter3D(dfd);
+  if(!a||!d)return;
+  const ap=a.position.clone(),dp=d.position.clone(),T=THREE,c=spec.color;
+  const intensity=power===3?2.35:power===2?1.5:1;
+  const life=power===3?1050:power===2?760:520;
+
+  if(power>=2){
+    const chargeCount=power===3?4:2;
+    for(let i=0;i<chargeCount;i++){
+      simpleFx(new T.TorusGeometry(.75+i*.18,.045+i*.012,8,48),c,ap.clone(),life*.72,(o,p)=>{
+        o.rotation.x=p*(5+i);
+        o.rotation.y=p*(7-i);
+        o.scale.setScalar(.45+p*(1.25+power*.2));
+      });
+    }
+    motionParticles(ap.clone().add(new T.Vector3(0,.4,0)),c,power===3?32:18,power===3?2.5:1.5,life*.75,1.6);
+  }
+
+  if(spec.pattern==="beam"){
+    const mid=ap.clone().lerp(dp,.5),len=ap.distanceTo(dp);
+    const beams=power===3?5:power===2?3:1;
+    for(let i=0;i<beams;i++){
+      const offset=(i-(beams-1)/2)*.17*intensity;
+      const start=ap.clone().add(new T.Vector3(0,offset,offset*.35));
+      const end=dp.clone().add(new T.Vector3(0,-offset,offset*.35));
+      const center=start.clone().lerp(end,.5),length=start.distanceTo(end);
+      const m=simpleFx(new T.CylinderGeometry(.09*intensity,.18*intensity,length,16),c,center,life,(o,p)=>{
+        o.scale.x=o.scale.z=1+Math.sin(Math.PI*p)*(1.1+power*.55);
+      });
+      if(m)m.quaternion.setFromUnitVectors(new T.Vector3(0,1,0),end.clone().sub(start).normalize());
+    }
+    if(power===3){
+      for(let i=0;i<4;i++)motionArc(ap,dp,c,life*.7,1.1+i*.18);
+    }
+  }else if(spec.pattern==="slash"){
+    const slashes=power===3?7:power===2?4:1;
+    for(let i=0;i<slashes;i++){
+      const pos=dp.clone().add(new T.Vector3((i-(slashes-1)/2)*.22,(Math.random()-.5)*1.2,(Math.random()-.5)*.35));
+      simpleFx(new T.PlaneGeometry(3.8*intensity,.22*intensity),c,pos,life-i*35,(o,p)=>{
+        o.rotation.z=-1.25+i*.36+p*(2.2-i*.08);
+        o.rotation.y=(i%2?-.35:.35);
+        o.scale.x=1+p*(.7+power*.35);
+      });
+    }
+  }else if(spec.pattern==="thrust"){
+    glLunge(att);
+    const thrusts=power===3?5:power===2?3:1;
+    for(let i=0;i<thrusts;i++){
+      const pos=dp.clone().lerp(ap,.5).add(new T.Vector3(0,(i-(thrusts-1)/2)*.22,(Math.random()-.5)*.5));
+      const cone=simpleFx(new T.ConeGeometry(.28*intensity,2.8*intensity,18),c,pos,life-i*35,(o,p)=>{
+        o.rotation.z=Math.PI/2;o.scale.setScalar(.45+p*(1.05+power*.3));
+      });
+      if(cone)cone.rotation.y=(Math.random()-.5)*.25;
+    }
+    if(power>=2)motionArc(ap,dp,c,life*.68,power===3?1.25:.65);
+  }else if(spec.pattern==="wave"){
+    const waves=power===3?6:power===2?3:1;
+    for(let i=0;i<waves;i++){
+      simpleFx(new T.TorusGeometry(.55+i*.14,.07*intensity,10,64),c,ap.clone().lerp(dp,.4+i*.06),life-i*45,(o,p)=>{
+        o.rotation.x=Math.PI/2;
+        o.rotation.z=p*(i%2?4:-4);
+        o.scale.setScalar(.55+p*(3.2+power*.85));
+      });
+    }
+  }else if(spec.pattern==="pillar"){
+    const pillars=power===3?5:power===2?3:1;
+    for(let i=0;i<pillars;i++){
+      const x=(i-(pillars-1)/2)*.48;
+      const pos=dp.clone().add(new T.Vector3(x,3+(i%2)*.7,(Math.random()-.5)*.45));
+      const m=simpleFx(new T.CylinderGeometry(.35*intensity,.85*intensity,8.5+power*1.5,24,1,true),c,pos,life-i*40,(o,p)=>{
+        o.scale.x=o.scale.z=.35+p*(1.4+power*.35);
+      });
+      if(m&&m.material)m.material.depthWrite=false;
+    }
+    if(power===3){
+      for(let i=0;i<4;i++)motionArc(dp.clone().add(new T.Vector3(0,7,0)),dp,c,life*.7,1.2);
+    }
+  }else if(spec.pattern==="orbit"){
+    const rings=power===3?8:power===2?5:3;
+    for(let i=0;i<rings;i++){
+      simpleFx(new T.TorusGeometry(.8+i*.17,.045+i*.006,8,48),c,ap.clone(),life,(o,p)=>{
+        o.rotation.x=p*(5+i*.7)+i;
+        o.rotation.y=p*(8-i*.35);
+        o.rotation.z=i*.4;
+        o.scale.setScalar(.55+p*(.8+power*.3));
+      });
+    }
+  }else if(spec.pattern==="rain"){
+    const count=power===3?38:power===2?23:12;
+    for(let i=0;i<count;i++){
+      const pos=dp.clone().add(new T.Vector3((Math.random()-.5)*(3+power),4+Math.random()*(4+power*1.2),(Math.random()-.5)*(3+power)));
+      const shard=simpleFx(new T.BoxGeometry(.11*intensity,.65*intensity,.11*intensity),c,pos,life*.55+Math.random()*life*.35,(o,p)=>{
+        o.position.y-=p*(5+power*2.4);
+        o.rotation.x+=p*4;o.rotation.z+=p*5;
+      });
+      if(shard)shard.rotation.y=Math.random()*Math.PI;
+    }
+  }else if(spec.pattern==="tornado"){
+    const rings=power===3?13:power===2?8:5;
+    for(let i=0;i<rings;i++){
+      const height=i*.31;
+      simpleFx(new T.TorusGeometry(.38+i*.11,.045*intensity,8,42),c,dp.clone().add(new T.Vector3(0,height,0)),life-i*25,(o,p)=>{
+        o.rotation.x=Math.PI/2;
+        o.rotation.z=p*(12+power*5)+i;
+        o.scale.setScalar(.5+p*(1.1+power*.25));
+        o.position.y+=Math.sin(p*Math.PI)*1.1;
+      });
+    }
+    if(power===3){
+      motionParticles(dp.clone().add(new T.Vector3(0,1.8,0)),c,54,4.2,life,2.8);
+    }
+  }else if(spec.pattern==="slam"){
+    const base=a.userData.base.clone();
+    tween(life*.78,p=>{
+      const forward=p<.58?p/.58:(1-p)/.42;
+      a.position.x=base.x+(dp.x-base.x)*forward*.72;
+      a.position.z=base.z+(dp.z-base.z)*forward*.72;
+      a.position.y=base.y+Math.sin(Math.PI*p)*(2.2+power*1.05);
+      a.rotation.z=Math.sin(Math.PI*p)*(att.side==="p"?-.25:.25);
+    },()=>{
+      a.position.copy(base);a.rotation.z=0;
+    });
+    const rings=power===3?6:power===2?3:1;
+    for(let i=0;i<rings;i++){
+      simpleFx(new T.RingGeometry(.15+i*.08,.72+i*.12,48),c,dp.clone().add(new T.Vector3(0,.05+i*.02,0)),life-i*55,(o,p)=>{
+        o.rotation.x=-Math.PI/2;
+        o.scale.setScalar(.25+p*(4.2+power*1.2+i*.25));
+      });
+    }
+  }else if(spec.pattern==="bills"){
+    /* 札束乱舞: 攻撃側から札束が渦を巻いて相手へ降り注ぐ */
+    const count=power===3?36:power===2?26:16;
+    for(let i=0;i<count;i++){
+      const from=ap.clone().add(new T.Vector3((Math.random()-.5)*.8,1.3+Math.random()*.8,(Math.random()-.5)*.8));
+      simpleFx(new T.PlaneGeometry(.36,.18),i%3?c:0x8fe39a,from.clone(),life*.65+Math.random()*life*.5,(o,p)=>{
+        o.position.x=from.x+(dp.x-from.x)*p+Math.sin(p*9+i)*.55;
+        o.position.y=from.y+(dp.y+1.5-from.y)*p+Math.sin(p*12+i)*.3-p*p*1.1;
+        o.position.z=from.z+(dp.z-from.z)*p+Math.cos(p*8+i)*.55;
+        o.rotation.x+=.22;o.rotation.y+=.17;o.rotation.z+=.1;
+      });
+    }
+    motionParticles(dp.clone().add(new T.Vector3(0,1.6,0)),c,power*10,2.4,life,1.2);
+  }else if(spec.pattern==="darkray"){
+    /* 闇の光線: 黒い外殻ビーム＋色付きコアの二重構造 */
+    const start=ap.clone().add(new T.Vector3(0,1.15,0)),end=dp.clone().add(new T.Vector3(0,1.15,0));
+    const center=start.clone().lerp(end,.5),len=start.distanceTo(end);
+    const axis=end.clone().sub(start).normalize();
+    const outer=simpleFx(new T.CylinderGeometry(.4*intensity,.55*intensity,len,16),0x0d0114,center,life,(o,p)=>{
+      o.scale.x=o.scale.z=1+Math.sin(Math.PI*p)*.55;
+    });
+    if(outer){outer.quaternion.setFromUnitVectors(new T.Vector3(0,1,0),axis);outer.material.opacity=.88;}
+    const core=simpleFx(new T.CylinderGeometry(.11*intensity,.16*intensity,len,12),c,center,life,(o,p)=>{
+      o.scale.x=o.scale.z=1+Math.sin(Math.PI*p)*1.7;
+    });
+    if(core)core.quaternion.setFromUnitVectors(new T.Vector3(0,1,0),axis);
+    for(let i=0;i<3+power;i++)motionArc(start,end,c,life*.7,.9+i*.2);
+    motionParticles(end.clone(),c,power===3?40:24,3,life,1.6);
+  }else if(spec.pattern==="bind"){
+    /* 拘束: テープ状リングが螺旋で相手を締め上げる */
+    const rings=power===3?8:6;
+    for(let i=0;i<rings;i++){
+      simpleFx(new T.TorusGeometry(1.4,.06*intensity,8,44),i%2?0x14161c:c,dp.clone().add(new T.Vector3(0,-1+i*.4,0)),life+i*55,(o,p)=>{
+        o.rotation.x=Math.PI/2;
+        o.rotation.z=p*5+i;
+        o.scale.setScalar(2-Math.min(1,p*1.35)*1.05);
+      });
+    }
+    motionParticles(dp.clone().add(new T.Vector3(0,.8,0)),c,22,1.8,life,1.1);
+  }else{
+    motionParticles(dp.clone().add(new T.Vector3(0,.9,0)),c,power===3?68:power===2?38:18,power===3?5.2:power===2?3.3:2,life,2.1);
+    const bursts=power===3?5:power===2?3:1;
+    for(let i=0;i<bursts;i++){
+      simpleFx(new T.IcosahedronGeometry(.32+i*.11,1),c,dp.clone().add(new T.Vector3((Math.random()-.5)*.8,.6+i*.2,(Math.random()-.5)*.8)),life-i*45,(o,p)=>{
+        o.scale.setScalar(.25+p*(2.2+power*.65));
+        o.rotation.x=p*7;o.rotation.y=p*9;
+      });
+    }
+  }
+
+  setTimer(()=>motionImpact(dp,c,power),power===3?260:power===2?180:110);
+}
+function camShake(n){GL.shake=Math.max(GL.shake,n||.5)}
+function arenaFlash(color){
+  const el=$("arenaFlash");if(!el)return;el.style.background=color;el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");
+}
+function toScreen(f){
+  const arena=$("arena"),r=arena.getBoundingClientRect(),g=fighter3D(f);
+  if(!g||!GL.camera)return{x:f.side==="p"?r.width*.28:r.width*.72,y:f.side==="p"?r.height*.68:r.height*.32};
+  const v=new THREE.Vector3();g.getWorldPosition(v);v.y+=1.2;v.project(GL.camera);
+  return{x:(v.x*.5+.5)*r.width,y:(-.5*v.y+.5)*r.height};
+}
+function addSummonPart(parent,geometry,material,x,y,z,sx,sy,sz,rx,ry,rz){
+  const m=new THREE.Mesh(geometry,material);
+  m.position.set(x,y,z);
+  m.scale.set(sx===undefined?1:sx,sy===undefined?1:sy,sz===undefined?1:sz);
+  m.rotation.set(rx||0,ry||0,rz||0);
+  m.castShadow=true;
+  parent.add(m);
+  return m;
+}
+function makeSummonCharacter(kind){
+  const T=THREE,g=new T.Group();
+  const politician=kind==="politician";
+  const skin=new T.MeshStandardMaterial({color:politician?0xc99172:0xd5a07d,roughness:.82,flatShading:true});
+  const suit=new T.MeshStandardMaterial({color:politician?0x17171d:0x15243a,roughness:.7,flatShading:true});
+  const shirt=new T.MeshStandardMaterial({color:0xf0f2f4,roughness:.8});
+  const tie=new T.MeshStandardMaterial({color:politician?0x7d1724:0x1d6aa5,roughness:.65});
+  const hair=new T.MeshStandardMaterial({color:politician?0xb8bbc2:0x14161a,roughness:.92,flatShading:true});
+  const dark=new T.MeshStandardMaterial({color:0x08090c,roughness:.75});
+  const accent=new T.MeshBasicMaterial({color:politician?0xffc95c:0x74dcff});
+
+  addSummonPart(g,new T.CylinderGeometry(.12,.14,.72,8),suit,-.2,.46,0);
+  addSummonPart(g,new T.CylinderGeometry(.12,.14,.72,8),suit,.2,.46,0);
+  addSummonPart(g,new T.BoxGeometry(.31,.16,.48),dark,-.2,.08,.12);
+  addSummonPart(g,new T.BoxGeometry(.31,.16,.48),dark,.2,.08,.12);
+  addSummonPart(g,new T.BoxGeometry(.82,1.05,.48),suit,0,1.28,0,1,1,1,0,0,0);
+  addSummonPart(g,new T.BoxGeometry(.30,.72,.05),shirt,0,1.38,.265);
+  addSummonPart(g,new T.BoxGeometry(.09,.50,.055),tie,0,1.34,.31);
+  const armL=addSummonPart(g,new T.CylinderGeometry(.09,.11,.82,8),suit,-.53,1.28,0,1,1,1,0,0,-.09);
+  const armR=addSummonPart(g,new T.CylinderGeometry(.09,.11,.82,8),suit,.53,1.28,0,1,1,1,0,0,.09);
+  addSummonPart(g,new T.SphereGeometry(.12,10,8),skin,-.55,.86,.02);
+  addSummonPart(g,new T.SphereGeometry(.12,10,8),skin,.55,.86,.02);
+
+  if(politician){
+    addSummonPart(g,new T.SphereGeometry(.48,14,10),suit,0,1.30,.04,1.05,1.05,.70);
+  }
+
+  const head=addSummonPart(g,new T.SphereGeometry(.42,16,12),skin,0,2.15,.02,1,politician?1.08:1,.94);
+  addSummonPart(g,new T.SphereGeometry(.055,8,6),dark,-.14,2.20,.40);
+  addSummonPart(g,new T.SphereGeometry(.055,8,6),dark,.14,2.20,.40);
+  addSummonPart(g,new T.SphereGeometry(.075,10,8),skin,0,2.08,.43,1,1.15,.9);
+  addSummonPart(g,new T.BoxGeometry(.20,.025,.025),dark,0,1.94,.41);
+
+  if(politician){
+    addSummonPart(g,new T.SphereGeometry(.17,10,8),hair,-.33,2.38,.02,.75,1.45,.95);
+    addSummonPart(g,new T.SphereGeometry(.17,10,8),hair,.33,2.38,.02,.75,1.45,.95);
+    addSummonPart(g,new T.SphereGeometry(.10,9,7),skin,-.41,2.14,.02,.65,1.2,.8);
+    addSummonPart(g,new T.SphereGeometry(.10,9,7),skin,.41,2.14,.02,.65,1.2,.8);
+    addSummonPart(g,new T.BoxGeometry(.18,.025,.025),hair,-.14,2.31,.405,1,1,1,0,0,-.08);
+    addSummonPart(g,new T.BoxGeometry(.18,.025,.025),hair,.14,2.31,.405,1,1,1,0,0,.08);
+    addSummonPart(g,new T.BoxGeometry(.24,.012,.018),hair,0,2.47,.37);
+    addSummonPart(g,new T.BoxGeometry(.20,.012,.018),hair,0,2.40,.39);
+    addSummonPart(g,new T.BoxGeometry(.14,.012,.018),hair,-.18,2.02,.405,1,1,1,0,0,.16);
+    addSummonPart(g,new T.BoxGeometry(.14,.012,.018),hair,.18,2.02,.405,1,1,1,0,0,-.16);
+  }else{
+    addSummonPart(g,new T.SphereGeometry(.43,14,10),hair,0,2.43,-.01,1.02,.47,.98);
+    [-.14,.14].forEach(x=>{
+      const lens=addSummonPart(g,new T.TorusGeometry(.11,.018,6,18),dark,x,2.20,.425);
+      lens.rotation.z=.02;
+    });
+    addSummonPart(g,new T.BoxGeometry(.08,.025,.025),dark,0,2.20,.425);
+    const bag=addSummonPart(g,new T.BoxGeometry(.42,.34,.13),new T.MeshStandardMaterial({color:0x3b2a1f,roughness:.8}),.62,.67,.02);
+    const handle=addSummonPart(g,new T.TorusGeometry(.12,.025,6,16,Math.PI),dark,.62,.91,.02);
+    handle.rotation.z=Math.PI;
+    bag.castShadow=true;
+  }
+
+  const ring=addSummonPart(g,new T.TorusGeometry(.58,.035,8,40),accent,0,.02,0);
+  ring.rotation.x=Math.PI/2;
+  g.userData.head=head;
+  g.userData.arm=armR;
+  armR.userData.baseRotZ=armR.rotation.z;
+  g.userData.arrived=false;
+  return g;
+}
+function makeSummonVehicle(kind,direction){
+  const T=THREE,g=new T.Group(),politician=kind==="politician";
+  const bodyMat=new T.MeshStandardMaterial({
+    color:politician?0x050608:0xe9eef4,
+    metalness:politician?.82:.58,roughness:politician?.2:.34
+  });
+  const trimMat=new T.MeshStandardMaterial({color:politician?0x292b31:0x23699b,metalness:.55,roughness:.32});
+  const glassMat=new T.MeshStandardMaterial({color:0x17334b,metalness:.45,roughness:.18,transparent:true,opacity:.82});
+  const tireMat=new T.MeshStandardMaterial({color:0x08090b,roughness:.92});
+  const lampMat=new T.MeshBasicMaterial({color:0xfff0b0});
+  const rearMat=new T.MeshBasicMaterial({color:0xff3c55});
+
+  addSummonPart(g,new T.BoxGeometry(3.15,.48,1.18),bodyMat,0,.45,0);
+  addSummonPart(g,new T.BoxGeometry(1.48,.58,1.04),bodyMat,-direction*.18,.92,0);
+  addSummonPart(g,new T.BoxGeometry(.92,.39,1.06),glassMat,direction*.23,.94,0);
+  addSummonPart(g,new T.BoxGeometry(.52,.30,1.08),glassMat,-direction*.62,.94,0);
+  addSummonPart(g,new T.BoxGeometry(3.02,.08,1.205),trimMat,0,.38,0);
+  addSummonPart(g,new T.BoxGeometry(.18,.10,.42),lampMat,direction*1.60,.48,-.31);
+  addSummonPart(g,new T.BoxGeometry(.18,.10,.42),lampMat,direction*1.60,.48,.31);
+  addSummonPart(g,new T.BoxGeometry(.16,.10,.36),rearMat,-direction*1.59,.48,-.33);
+  addSummonPart(g,new T.BoxGeometry(.16,.10,.36),rearMat,-direction*1.59,.48,.33);
+
+  const wheels=[];
+  [-1.02,1.02].forEach(x=>{
+    [-.64,.64].forEach(z=>{
+      const w=addSummonPart(g,new T.CylinderGeometry(.26,.26,.17,14),tireMat,x,.22,z);
+      w.rotation.x=Math.PI/2;
+      wheels.push(w);
+    });
+  });
+
+  const doorPivot=new T.Group();
+  doorPivot.position.set(-direction*.58,.68,.60);
+  const door=addSummonPart(doorPivot,new T.BoxGeometry(.86,.55,.055),bodyMat,direction*.40,0,0);
+  g.add(doorPivot);
+  if(!politician){
+    addSummonPart(g,new T.BoxGeometry(2.72,.07,.028),trimMat,0,.54,.605);
+  }
+  const light=new T.PointLight(politician?0xffd27a:0xdff8ff,1.15,7);
+  light.position.set(direction*1.82,.54,.15);
+  g.add(light);
+  g.userData.wheels=wheels;
+  g.userData.door=doorPivot;
+  g.userData.direction=direction;
+  return g;
+}
+function disposeObj(obj){
+  if(!obj||obj.userData&&obj.userData.disposed)return;
+  if(obj.userData)obj.userData.disposed=true;
+  const geometries=new Set(),materials=new Set(),textures=new Set();
+  obj.traverse(node=>{
+    if(node.userData)node.userData.disposed=true;
+    if(node.geometry)geometries.add(node.geometry);
+    if(node.material){
+      const list=Array.isArray(node.material)?node.material:[node.material];
+      list.forEach(mat=>{
+        if(!mat)return;
+        materials.add(mat);
+        Object.keys(mat).forEach(key=>{
+          const value=mat[key];
+          if(value&&value.isTexture)textures.add(value);
+        });
+      });
+    }
+  });
+  textures.forEach(texture=>texture.dispose());
+  geometries.forEach(geometry=>geometry.dispose());
+  materials.forEach(material=>material.dispose());
+  if(obj.parent)obj.parent.remove(obj);
+}
+function playPoliticianBacklash(f){
+  const root=GL.summons[f.side],character=root&&root.userData.character;
+  if(!character)return;
+  const base=character.position.clone();
+  tween(720,p=>{
+    if(!character.parent)return;
+    character.position.x=base.x+Math.sin(p*Math.PI*8)*.10;
+    character.rotation.z=Math.sin(p*Math.PI*7)*.10;
+  },()=>{
+    character.position.x=base.x;
+    character.rotation.z=0;
+  });
+  motionParticles(base.clone().add(new THREE.Vector3(0,1.25,0)),0xff4f72,30,2.4,780,1.8);
+}
+function glSummonStrike(owner,foe,onImpact){
+  /* 召喚キャラが相手クレストの足元まで跳躍ダッシュし、着弾時にonImpactで技効果を適用。
+     3D不在・到着前は即時実行にフォールバックし、進行は止めない。 */
+  const root=GL.active?GL.summons[owner.side]:null;
+  const ch=root&&root.userData.character;
+  const target=fighter3D(foe);
+  if(!ch||!target||!ch.userData.arrived||!ch.userData.stand){
+    if(onImpact)onImpact();
+    return;
+  }
+  const T=THREE,inward=owner.side==="p"?1:-1;
+  const home=ch.userData.stand.clone();
+  const tp=target.userData.base.clone();
+  const strike=new T.Vector3(tp.x-inward*1.5,.07,tp.z+.85);
+  ch.userData.arrived=false;
+  motionParticles(home.clone().add(new T.Vector3(0,.3,0)),0xcfe6ff,12,1.2,450,.9);
+  tween(430,p=>{
+    if(!ch.parent)return;
+    const q=1-Math.pow(1-p,3);
+    ch.position.lerpVectors(home,strike,q);
+    ch.position.y=.07+Math.sin(Math.PI*p)*1.05;
+    ch.rotation.y=inward*Math.sin(Math.PI*p)*.5;
+  },()=>{
+    if(!ch.parent){if(onImpact)onImpact();return;}
+    ch.position.copy(strike);
+    ch.rotation.y=0;
+    const arm=ch.userData.arm;
+    if(arm)tween(300,p=>{arm.rotation.z=arm.userData.baseRotZ-inward*Math.sin(Math.PI*p)*1.6;},()=>{arm.rotation.z=arm.userData.baseRotZ;});
+    camShake(.7);
+    if(onImpact)onImpact();
+    setTimer(()=>{
+      if(!ch.parent)return;
+      tween(520,p=>{
+        if(!ch.parent)return;
+        const q=1-Math.pow(1-p,3);
+        ch.position.lerpVectors(strike,home,q);
+        ch.position.y=.07+Math.sin(Math.PI*p)*.6;
+      },()=>{
+        if(!ch.parent)return;
+        ch.position.copy(home);
+        ch.userData.arrived=true;
+      });
+    },760);
+  });
+}
+function bindSealTexture(){
+  const c=document.createElement("canvas");c.width=128;c.height=192;
+  const x=c.getContext("2d");
+  x.fillStyle="#fff3dc";x.fillRect(0,0,128,192);
+  x.strokeStyle="#c8172c";x.lineWidth=10;x.strokeRect(10,10,108,172);
+  x.fillStyle="#c8172c";x.font="900 46px system-ui";x.textAlign="center";x.textBaseline="middle";
+  x.fillText("営業",64,64);
+  x.fillText("停止",64,128);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;return t;
+}
+function glApplyBind(f){
+  if(!GL.active)return;
+  const g=fighter3D(f);
+  if(!g||g.userData.boundFx)return;
+  const T=THREE,fx=new T.Group(),spin=new T.Group();
+  const tape=new T.MeshBasicMaterial({color:0xffd23f});
+  const dark=new T.MeshBasicMaterial({color:0x14161c});
+  for(let i=0;i<4;i++){
+    const ring=new T.Mesh(new T.TorusGeometry(1.42,.08,8,44),i%2?dark:tape);
+    ring.rotation.x=Math.PI/2;
+    ring.position.y=-.8+i*.55;
+    spin.add(ring);
+  }
+  fx.add(spin);fx.userData.spin=spin;
+  [.72,-.72].forEach(rz=>{
+    const cross=new T.Mesh(new T.TorusGeometry(1.58,.065,8,44),tape);
+    cross.rotation.z=rz;fx.add(cross);
+  });
+  const seal=new T.Mesh(new T.PlaneGeometry(.95,1.4),new T.MeshBasicMaterial({map:bindSealTexture(),transparent:true}));
+  seal.position.set(.18,.05,.65);seal.rotation.z=-.14;fx.add(seal);
+  g.add(fx);
+  g.userData.boundFx=fx;
+  const wp=new T.Vector3();g.getWorldPosition(wp);
+  motionParticles(wp,0xffd23f,26,2.2,900,1.3);
+  camShake(.9);
+}
+function glRemoveBind(f){
+  const g=fighter3D(f);
+  if(!g||!g.userData.boundFx)return;
+  const fx=g.userData.boundFx;
+  g.userData.boundFx=null;
+  g.rotation.z=0;
+  const wp=new THREE.Vector3();g.getWorldPosition(wp);
+  motionParticles(wp,0xbfd4ff,18,1.8,650,1.5);
+  disposeObj(fx);
+}
+function glSummonSpawn(f){
+  if(!GL.active)return;
+  glSummonRemove(f);
+  const T=THREE,kind=f.co.summon,inward=f.side==="p"?1:-1;
+  const fighter=fighter3D(f);
+  const anchor=fighter&&fighter.userData.base
+    ?fighter.userData.base.clone()
+    :(f.side==="p"?new T.Vector3(-3.25,1.2,2.4):new T.Vector3(3.25,2,-1.8));
+  const stand=new T.Vector3(anchor.x+inward*1.62,.07,anchor.z+.58);
+  const stop=new T.Vector3(anchor.x-inward*1.72,.08,anchor.z+.88);
+  const start=stop.clone().add(new T.Vector3(-inward*8.6,0,0));
+  const exit=stop.clone().add(new T.Vector3(inward*18.5,0,0));
+  const root=new T.Group();
+  const character=makeSummonCharacter(kind);
+  const vehicle=makeSummonVehicle(kind,inward);
+  root.userData.character=character;
+  root.userData.vehicle=vehicle;
+  root.userData.kind=kind;
+  root.add(character,vehicle);
+  GL.summons[f.side]=root;
+  GL.scene.add(root);
+
+  const emerge=stop.clone().add(new T.Vector3(inward*.20,0,.82));
+  character.position.copy(emerge);
+  character.scale.setScalar(.001);
+  vehicle.position.copy(start);
+  const startPos=start.clone(),stopPos=stop.clone();
+  motionParticles(start.clone().add(new T.Vector3(0,.35,0)),kind==="politician"?0xffc95c:0xcff5ff,18,1.5,600,1.1);
+
+  tween(780,p=>{
+    if(!root.parent)return;
+    const q=1-Math.pow(1-p,3);
+    vehicle.position.lerpVectors(startPos,stopPos,q);
+    vehicle.rotation.z=Math.sin(Math.PI*p)*-.025*inward;
+    vehicle.userData.wheels.forEach(w=>w.rotation.z-=inward*.34);
+  },()=>{
+    if(!root.parent)return;
+    vehicle.position.copy(stopPos);
+    vehicle.rotation.z=0;
+    const door=vehicle.userData.door;
+    tween(220,p=>{if(door)door.rotation.y=inward*1.12*p;});
+    const finalScale=f.side==="p"?.78:.72;
+    tween(560,p=>{
+      if(!character.parent)return;
+      const q=1-Math.pow(1-p,3);
+      character.position.lerpVectors(emerge,stand,q);
+      character.scale.setScalar(finalScale*(.05+.95*q)+Math.sin(Math.PI*q)*.05);
+      character.rotation.y=Math.sin(Math.PI*q)*-.18*inward;
+    },()=>{
+      character.position.copy(stand);
+      character.scale.setScalar(finalScale);
+      character.rotation.y=0;
+      character.userData.arrived=true;
+      character.userData.stand=stand.clone();
+      motionParticles(stand.clone().add(new T.Vector3(0,1.0,0)),kind==="politician"?0xffc95c:0x74dcff,24,1.9,650,1.4);
+      arenaFlash(kind==="politician"?"#ffe29a":"#dff9ff");
+    });
+
+    setTimer(()=>{
+      if(!root.parent)return;
+      const doorNow=vehicle.userData.door;
+      tween(180,p=>{if(doorNow)doorNow.rotation.y=inward*1.12*(1-p);});
+      const leaveFrom=vehicle.position.clone();
+      tween(900,p=>{
+        if(!vehicle.parent)return;
+        const q=p*p;
+        vehicle.position.lerpVectors(leaveFrom,exit,q);
+        vehicle.userData.wheels.forEach(w=>w.rotation.z-=inward*(.35+p*.7));
+      },()=>{
+        if(vehicle.parent)vehicle.parent.remove(vehicle);
+        disposeObj(vehicle);
+        root.userData.vehicle=null;
+      });
+    },660);
+  });
+}
+function glSummonDepart(f){
+  const root=GL.summons[f.side];
+  if(!root)return;
+  if(!GL.active||!GL.scene){
+    glSummonRemove(f);
+    return;
+  }
+  if(root.userData.departing)return;
+
+  const character=root.userData.character;
+  if(!character||!character.parent){
+    glSummonRemove(f);
+    return;
+  }
+
+  root.userData.departing=true;
+  character.userData.arrived=false;
+
+  const T=THREE;
+  const kind=root.userData.kind||f.co.summon;
+  const inward=f.side==="p"?1:-1;
+  const pickupDirection=-inward;
+  const stand=(character.userData.stand||character.position).clone();
+  const stop=stand.clone().add(new T.Vector3(-inward*3.34,.01,.30));
+  const approach=stop.clone().add(new T.Vector3(inward*10.5,0,0));
+  const exit=stop.clone().add(new T.Vector3(-inward*18.5,0,0));
+  const doorPoint=stop.clone().add(new T.Vector3(inward*.20,0,.82));
+  const boardPoint=doorPoint.clone().add(new T.Vector3(0,.25,0));
+  const finalScale=Math.max(.01,character.scale.x||.72);
+
+  if(root.userData.vehicle){
+    disposeObj(root.userData.vehicle);
+    root.userData.vehicle=null;
+  }
+
+  const vehicle=makeSummonVehicle(kind,pickupDirection);
+  vehicle.position.copy(approach);
+  root.add(vehicle);
+  root.userData.vehicle=vehicle;
+
+  motionParticles(
+    approach.clone().add(new T.Vector3(0,.35,0)),
+    kind==="politician"?0xffc95c:0xcff5ff,
+    18,1.5,650,1.1
+  );
+  tone(kind==="politician"?145:430,.18,"triangle",.10,0,kind==="politician"?95:620);
+
+  const approachFrom=approach.clone();
+  tween(900,p=>{
+    if(!root.parent||!vehicle.parent)return;
+    const q=1-Math.pow(1-p,3);
+    vehicle.position.lerpVectors(approachFrom,stop,q);
+    vehicle.rotation.z=Math.sin(Math.PI*p)*.025*inward;
+    vehicle.userData.wheels.forEach(w=>w.rotation.z+=inward*(.32+p*.28));
+  },()=>{
+    if(!root.parent||!vehicle.parent)return;
+    vehicle.position.copy(stop);
+    vehicle.rotation.z=0;
+
+    arenaFlash(kind==="politician"?"#ffe29a":"#dff9ff");
+    motionParticles(
+      stop.clone().add(new T.Vector3(0,.28,0)),
+      kind==="politician"?0xffc95c:0xcff5ff,
+      14,1.1,520,.7
+    );
+
+    const door=vehicle.userData.door;
+    tween(220,p=>{
+      if(door)door.rotation.y=pickupDirection*1.12*p;
+    },()=>{
+      if(!root.parent||!character.parent)return;
+      const walkFrom=character.position.clone();
+
+      tween(620,p=>{
+        if(!character.parent)return;
+        const q=1-Math.pow(1-p,3);
+        character.position.lerpVectors(walkFrom,doorPoint,q);
+        character.position.y=.07+Math.sin(Math.PI*p)*.34;
+        character.rotation.y=pickupDirection*Math.sin(Math.PI*p)*.24;
+        if(character.userData.arm){
+          character.userData.arm.rotation.z=
+            character.userData.arm.userData.baseRotZ+
+            Math.sin(p*Math.PI*6)*.20;
+        }
+      },()=>{
+        if(!character.parent)return;
+        character.position.copy(doorPoint);
+        character.rotation.y=0;
+        if(character.userData.arm){
+          character.userData.arm.rotation.z=character.userData.arm.userData.baseRotZ;
+        }
+
+        const boardingFrom=character.position.clone();
+        tween(280,p=>{
+          if(!character.parent)return;
+          const q=p*p;
+          character.position.lerpVectors(boardingFrom,boardPoint,q);
+          character.scale.setScalar(finalScale*(1-q*.98));
+          character.rotation.y=pickupDirection*q*Math.PI*.45;
+        },()=>{
+          if(!root.parent)return;
+          character.visible=false;
+
+          tween(190,p=>{
+            if(door)door.rotation.y=pickupDirection*1.12*(1-p);
+          },()=>{
+            if(!root.parent||!vehicle.parent)return;
+            const leaveFrom=vehicle.position.clone();
+            tone(kind==="politician"?110:360,.28,"sawtooth",.11,0,kind==="politician"?210:620);
+
+            tween(1150,p=>{
+              if(!vehicle.parent)return;
+              const q=p*p;
+              vehicle.position.lerpVectors(leaveFrom,exit,q);
+              vehicle.rotation.z=-Math.sin(Math.PI*p)*.018*inward;
+              vehicle.userData.wheels.forEach(w=>w.rotation.z+=inward*(.38+p*.82));
+            },()=>{
+              if(GL.summons[f.side]===root)GL.summons[f.side]=null;
+              disposeObj(root);
+            });
+          });
+        });
+      });
+    });
+  });
+}
+function glSummonRemove(f){
+  const root=GL.summons[f.side];
+  if(root){
+    if(root.parent)root.parent.remove(root);
+    disposeObj(root);
+  }
+  GL.summons[f.side]=null;
+}
+function resizeGL(){
+  if(!GL.renderer||!GL.camera)return;
+  const r=$("arena").getBoundingClientRect(),w=Math.max(1,r.width),h=Math.max(1,r.height);
+  GL.renderer.setSize(w,h,false);GL.camera.aspect=w/h;GL.camera.updateProjectionMatrix();
+}
+function cleanupGL(){
+  GL.active=false;if(GL.raf)cancelAnimationFrame(GL.raf);GL.raf=0;
+  if(GL.scene)disposeObj(GL.scene);
+  if(GL.renderer){try{GL.renderer.dispose();GL.renderer.forceContextLoss&&GL.renderer.forceContextLoss();}catch(_){} }
+  GL.renderer=null;GL.scene=null;GL.camera=null;GL.clock=null;
+  GL.tweens=[];GL.cars=[];GL.city=[];GL.windows=[];GL.signs=[];
+  GL.beacons=[];GL.skyBeams=[];GL.drones=[];GL.cityUpdateAt=0;
+  GL.fighters={p:null,e:null};GL.summons={p:null,e:null};
+  GL.intro={t:0,dur:0,active:false};
+}
+window.addEventListener("resize",()=>{
+  document.querySelectorAll(".dmg-pop").forEach(n=>n.remove());
+  resizeGL();
+  resizeSelect3D();
+  drawCompareChart();
+});
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_START -->
+<script>
+window.addEventListener("load", function () {
+    if (location.protocol !== "file:" && location.protocol !== "about:" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(function (error) {
+            console.warn("Service Worker registration failed:", error);
+        });
+    }
+});
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_END -->
+</body>
+</html>
