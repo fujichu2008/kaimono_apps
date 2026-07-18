@@ -1054,6 +1054,15 @@ input,select{font-family:inherit;font-size:16px}
         </div>
 
         <div class="forge-field">
+          <label for="forgeRegion">企業所在地 ●</label>
+          <select id="forgeRegion">
+            <option value="japan">日本企業のみ</option>
+            <option value="foreign">外国企業のみ</option>
+            <option value="mixed">日本企業・外国企業を混在</option>
+          </select>
+        </div>
+
+        <div class="forge-field">
           <label for="forgeBattleStyle">戦闘スタイル</label>
           <select id="forgeBattleStyle">
             <option value="varied">攻守速をバランス良く分散</option>
@@ -1083,7 +1092,7 @@ input,select{font-family:inherit;font-size:16px}
           <label>生成データに含める要素</label>
           <div class="forge-options">
             <label class="forge-check"><input type="checkbox" id="forgeIncludeFinance" checked>財務スナップショット</label>
-            <label class="forge-check"><input type="checkbox" id="forgeIncludeStats" checked>能力値6項目</label>
+            <label class="forge-check"><input type="checkbox" id="forgeIncludeStats" checked>円換算財務から能力値を算出</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeMoves" checked>中技・大技</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeNarration" checked>技固有ナレーション</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeClassify" checked>属性・召喚タイプ</label>
@@ -1101,8 +1110,8 @@ input,select{font-family:inherit;font-size:16px}
       </div>
       <div class="forge-schema">
         <span>基本情報<br>name / ind / logo</span>
-        <span>財務情報<br>fin / source</span>
-        <span>能力値<br>hp / atk / def...</span>
+        <span>財務情報<br>現地通貨 / 為替 / 出典</span>
+        <span>能力値<br>円換算後に自動算出</span>
         <span>技データ<br>mid / big / effects</span>
         <span>演出指定<br>motion / tone</span>
         <span>企業分類<br>attr / summon</span>
@@ -1422,6 +1431,7 @@ input,select{font-family:inherit;font-size:16px}
   </div>
   <div class="body">
     <div class="f-row"><label>企業名 (必須・20文字まで)</label><input id="fName" maxlength="20" placeholder="例: ミライ精機"></div>
+    <div class="f-row"><label>本社所在国</label><input id="fCountry" maxlength="30" value="日本" placeholder="例: 日本、米国、ドイツ"></div>
     <div class="f-row"><label>業種</label>
       <select id="fInd">
         <option>製造</option><option>IT</option><option>金融</option><option>商社</option>
@@ -1540,13 +1550,24 @@ function deriveStats(fin,bias){
   bias=bias||{};
   const scale=Math.log10(Math.max(1,fin.revenue||1)+10);
   const cap=Math.log10(Math.max(.1,fin.capital||.1)+1);
+  const hasBias=Object.keys(bias).length>0;
+  const revenuePerEmployee=fin.employees>0
+    ?(fin.revenue*1000)/fin.employees
+    :0;
+  const productivity=Math.log10(Math.max(1,revenuePerEmployee)+1);
+  const financialTech=hasBias
+    ?0
+    :clamp((productivity-1.6)*14,-10,20,0);
+  const financialGrowth=hasBias
+    ?0
+    :clamp((fin.growth||0)*2.2,-25,40,0);
   return {
     hp:clamp(260+scale*175+(bias.hp||0),200,1200,600),
     atk:clamp(48+(fin.margin||3)*4.2+(bias.atk||0),20,150,70),
     def:clamp(45+cap*20+(bias.def||0),20,150,70),
     spd:clamp(137-scale*13+(bias.spd||0),20,150,70),
-    tech:clamp(62+(bias.tech||0),20,150,70),
-    grw:clamp(62+(bias.grw||0),20,150,70)
+    tech:clamp(62+financialTech+(bias.tech||0),20,150,70),
+    grw:clamp(62+financialGrowth+(bias.grw||0),20,150,70)
   };
 }
 function finiteNumber(value,def){
@@ -1577,12 +1598,41 @@ function normalizeBrand(value){
 function cloneJsonData(value){
   return JSON.parse(JSON.stringify(value));
 }
+function normalizeCurrencyCode(value){
+  const code=cleanText(value,3,"JPY").toUpperCase();
+  return /^[A-Z]{3}$/.test(code)?code:"JPY";
+}
 function normalizeFinance(fin){
   const src=fin&&typeof fin==="object"?fin:{};
+  const currency=normalizeCurrencyCode(src.currency||"JPY");
+  const exchangeRateToJPY=currency==="JPY"
+    ?1
+    :Math.max(0,finiteNumber(src.exchangeRateToJPY,0));
+  const capitalLocal=Math.max(0,finiteNumber(
+    src.capitalLocal,
+    src.capital
+  ));
+  const revenueLocal=Math.max(0,finiteNumber(
+    src.revenueLocal,
+    src.revenue
+  ));
+  const toJPY=value=>currency==="JPY"
+    ?value
+    :value*exchangeRateToJPY;
   return {
-    capital:Math.max(0,finiteNumber(src.capital,0)),
-    revenue:Math.max(0,finiteNumber(src.revenue,0)),
+    currency,
+    exchangeRateToJPY,
+    exchangeRateDate:cleanText(
+      src.exchangeRateDate,
+      30,
+      currency==="JPY"?"換算不要":"換算日未設定"
+    ),
+    capitalLocal,
+    revenueLocal,
+    capital:Math.max(0,toJPY(capitalLocal)),
+    revenue:Math.max(0,toJPY(revenueLocal)),
     margin:Math.max(-100,Math.min(100,finiteNumber(src.margin,0))),
+    growth:Math.max(-100,Math.min(300,finiteNumber(src.growth,0))),
     employees:Math.max(0,Math.round(finiteNumber(src.employees,0))),
     period:cleanText(src.period,30,"ユーザー入力"),
     metric:cleanText(src.metric,30,"手入力"),
@@ -1667,14 +1717,20 @@ function normalizeCompanyRecord(input,options){
   options=options||{};
   const raw=input&&typeof input==="object"?cloneJsonData(input):{};
   const fin=normalizeFinance(raw.fin);
+  const country=cleanText(raw.country,30,"日本");
   const attr=COMPANY_ATTRS.includes(raw.attr)?raw.attr:"消費";
   const tier=capitalTier(fin);
   const suppliedStats=raw.st&&typeof raw.st==="object";
-  const st=suppliedStats?normalizeStats(raw.st):deriveStats(fin,raw.bias||{});
+  const statusMode=(raw.statusMode==="finance"||fin.currency!=="JPY")
+    ?"finance"
+    :"manual";
+  const st=statusMode==="finance"
+    ?deriveStats(fin,raw.bias||{})
+    :(suppliedStats?normalizeStats(raw.st):deriveStats(fin,raw.bias||{}));
   const summon=COMPANY_SUMMONS.includes(raw.summon)
     ?raw.summon
     :(tier==="large"?"politician":"jftc");
-  const baseTags=[attr,TIER_LABEL[tier],fin.period];
+  const baseTags=[country,attr,TIER_LABEL[tier],fin.period];
   const extraTags=Array.isArray(raw.tags)?raw.tags:[];
   const tags=[...new Set(baseTags.concat(extraTags.map(tag=>cleanText(tag,18,"")).filter(Boolean)))].slice(0,8);
   const defaultMid={
@@ -1691,6 +1747,8 @@ function normalizeCompanyRecord(input,options){
     schemaVersion:COMPANY_SCHEMA_VERSION,
     id:normalizeCompanyId(raw.id,options.custom?"custom":"company"),
     name:cleanText(raw.name,30,"名称未設定"),
+    country,
+    statusMode,
     short:cleanText(raw.short,4,raw.logo||String(raw.name||"企").slice(0,1)),
     ind:cleanText(raw.ind,24,"その他"),
     logo:cleanText(raw.logo,4,"🏢"),
@@ -1713,7 +1771,8 @@ function normalizeCompanyRecord(input,options){
 function companyToStorageRecord(company){
   return cloneJsonData({
     schemaVersion:COMPANY_SCHEMA_VERSION,
-    id:company.id,name:company.name,short:company.short,ind:company.ind,
+    id:company.id,name:company.name,country:company.country,statusMode:company.statusMode,
+    short:company.short,ind:company.ind,
     logo:company.logo,tick:company.tick,brand:company.brand,desc:company.desc,
     tags:company.tags,attr:company.attr,tier:company.tier,summon:company.summon,
     fin:company.fin,st:company.st,mid:company.mid,big:company.big,custom:true
@@ -2568,8 +2627,10 @@ function setForgePhase(mode){
 function buildForgePrompt(){
   const count=clamp($("forgeCount").value,1,COMPANY_IMPORT_LIMIT,1);
   const keyword=$("forgeKeyword").value.trim();
-  const includeFinance=forgeChecked("forgeIncludeFinance");
+  const regionMode=$("forgeRegion").value;
+  const useForeignSample=regionMode!=="japan";
   const includeStats=forgeChecked("forgeIncludeStats");
+  const includeFinance=forgeChecked("forgeIncludeFinance")||includeStats;
   const includeNarration=forgeChecked("forgeIncludeNarration");
   const includeMoves=forgeChecked("forgeIncludeMoves")||includeNarration;
   const includeClassify=forgeChecked("forgeIncludeClassify");
@@ -2589,6 +2650,7 @@ function buildForgePrompt(){
   const sample={
     id:"sample-company",
     name:"サンプル社",
+    country:useForeignSample?"米国":"日本",
     short:"S",
     ind:"製造",
     logo:"🏢",
@@ -2602,18 +2664,36 @@ function buildForgePrompt(){
     sample.summon="politician";
   }
   if(includeFinance){
-    sample.fin={
-      capital:10,
-      revenue:500,
-      margin:8,
-      employees:3000,
-      period:"2026年3月期",
-      metric:"売上高",
-      source:"公式公開資料名またはAI生成・要確認"
-    };
+    sample.fin=useForeignSample
+      ?{
+        currency:"USD",
+        exchangeRateToJPY:150,
+        exchangeRateDate:"換算基準日を記載",
+        capitalLocal:10,
+        revenueLocal:500,
+        margin:8,
+        growth:6,
+        employees:3000,
+        period:"直近通期",
+        metric:"Revenue",
+        source:"公式年次報告書名と為替レート資料名"
+      }
+      :{
+        currency:"JPY",
+        exchangeRateToJPY:1,
+        exchangeRateDate:"換算不要",
+        capitalLocal:10,
+        revenueLocal:500,
+        margin:8,
+        growth:6,
+        employees:3000,
+        period:"2026年3月期",
+        metric:"売上高",
+        source:"公式公開資料名またはAI生成・要確認"
+      };
   }
   if(includeStats){
-    sample.st={hp:700,atk:80,def:80,spd:70,tech:80,grw:75};
+    sample.statusMode="finance";
   }
   if(includeMoves){
     sample.mid={
@@ -2647,9 +2727,9 @@ function buildForgePrompt(){
   }
 
   const requested=[
-    "基本情報（id / name / short / ind / logo / tick / brand / desc / tags）",
-    includeFinance?"財務スナップショット（fin）":"財務スナップショットは省略",
-    includeStats?"能力値6項目（st）":"能力値は省略し、アプリ側の自動補完を利用",
+    "基本情報（id / name / country / short / ind / logo / tick / brand / desc / tags）",
+    includeFinance?"現地通貨の財務スナップショットと円換算条件（fin）":"財務スナップショットは省略",
+    includeStats?"円換算後の財務から能力値6項目をアプリ側で算出（statusMode=finance、stは出力しない）":"能力値は省略し、アプリ側の自動補完を利用",
     includeMoves?"中技・大技（mid / big）":"中技・大技は省略し、アプリ側の標準技を利用",
     includeNarration?"各技の固有ナレーション":"技固有ナレーションは省略",
     includeClassify?"属性・召喚タイプ（attr / summon）":"属性・召喚タイプは省略し、アプリ側の自動補完を利用"
@@ -2664,6 +2744,7 @@ function buildForgePrompt(){
     "- 業種: "+forgeSelectedText("forgeIndustry"),
     "- 企業規模: "+forgeSelectedText("forgeScale"),
     "- 企業タイプ: "+forgeSelectedText("forgeOrigin"),
+    "- 企業所在地: "+forgeSelectedText("forgeRegion"),
     "- 戦闘スタイル: "+forgeSelectedText("forgeBattleStyle"),
     "- ナレーション方針: "+forgeSelectedText("forgeTone"),
     "- 含めたい企業名・特徴・キーワード: "+(keyword||"指定なし"),
@@ -2686,19 +2767,26 @@ function buildForgePrompt(){
     "8. 各社のid、企業名、技名、戦闘スタイルを重複させないでください。また、追加禁止企業との同一性を企業名、id、tick、証券コード、略称、英語名、旧社名、持株会社名、グループ名、主要ブランド名まで照合してください。1件でも一致または実質同一なら、必ず別企業へ置き換えてください。",
     "9. idは半角小文字英数字とハイフンだけ、brandは#から始まる6桁の16進カラーにしてください。",
     "10. logoは絵文字または短い記号、shortは4文字以内、tickは8文字以内、descは120文字以内にしてください。",
-    "11. 実在企業の場合、企業説明・財務値・出典を事実と推測に分け、確認できない値を捏造しないでください。sourceには公式資料名を優先し、不確かな場合は「AI生成・要確認」と明記してください。",
-    "12. 実在企業への違法行為、政治関係、反社会的関係、品質問題などを事実として創作しないでください。風刺は一般的な会社員あるあると事業特性の範囲に限定してください。",
-    "13. 出力直前に、生成した全企業を追加禁止企業一覧と再照合してください。同一企業、表記ゆれ、略称違い、グループ名違いが1社でもあれば、その企業だけを別の実在企業へ置き換えてください。",
-    "14. 出力直前に、companies配列が指定件数の"+count+"社であり、全社が追加禁止企業とは異なることを確認してください。",
-    "15. 出力直前に全ての文字列値を走査し、http://、https://、www.、ドメイン名、Markdownリンク、バッククォート、コードフェンス、見出し記号、箇条書き記号、引用記号、強調記法、HTMLタグが1件もないことを確認してください。見つかった場合は削除し、公式資料名などのプレーンテキストへ直してください。",
-    "16. 出力直前に、回答全体をJSON.parseで解析できるか自己検証してください。解析できない場合は説明を付けず、JSONを修正してから再出力してください。",
-    "17. 最終回答の先頭文字は {、末尾文字は } にしてください。JSON以外の文字を前後へ付けないでください。",
+    "11. countryには本社所在国を日本語で入れてください。外国企業のfin.currencyはISO 4217の3文字通貨コードにしてください。",
+    "12. 外国企業のcapitalLocalとrevenueLocalは現地通貨の10億通貨単位、exchangeRateToJPYは1通貨単位あたりの円、exchangeRateDateは換算基準日です。capitalとrevenueの円換算値は出力せず、アプリ側に計算させてください。",
+    "13. 円換算レートは、財務諸表の期末日または利用可能な直近基準日の代表レートを使い、sourceに公式年次報告書名と為替レート資料名をプレーンテキストで記載してください。確認できないレートを推測で作らないでください。",
+    "14. 円換算財務から能力値を算出する企業はstatusModeをfinanceとし、stは出力しないでください。外国通貨企業は必ずstatusMode=financeにしてください。",
+    "15. 実在企業の場合、企業説明・財務値・出典を事実と推測に分け、確認できない値を捏造しないでください。sourceには公式資料名を優先し、不確かな場合は「AI生成・要確認」と明記してください。",
+    "16. 実在企業への違法行為、政治関係、反社会的関係、品質問題などを事実として創作しないでください。風刺は一般的な会社員あるあると事業特性の範囲に限定してください。",
+    "17. 出力直前に、生成した全企業を追加禁止企業一覧と再照合してください。同一企業、表記ゆれ、略称違い、グループ名違いが1社でもあれば、その企業だけを別の実在企業へ置き換えてください。",
+    "18. 出力直前に、companies配列が指定件数の"+count+"社であり、全社が追加禁止企業とは異なることを確認してください。",
+    "19. 出力直前に全ての文字列値を走査し、http://、https://、www.、ドメイン名、Markdownリンク、バッククォート、コードフェンス、見出し記号、箇条書き記号、引用記号、強調記法、HTMLタグが1件もないことを確認してください。見つかった場合は削除し、公式資料名などのプレーンテキストへ直してください。",
+    "20. 出力直前に、回答全体をJSON.parseで解析できるか自己検証してください。解析できない場合は説明を付けず、JSONを修正してから再出力してください。",
+    "21. 最終回答の先頭文字は {、末尾文字は } にしてください。JSON以外の文字を前後へ付けないでください。",
     "",
     "【アプリ受入仕様】",
     "- schemaVersion: 2",
+    "- countryは本社所在国。fin.currencyはISO 4217、capitalLocalとrevenueLocalは現地通貨の10億通貨単位、exchangeRateToJPYは1通貨単位あたりの円です。",
+    "- アプリはcapitalLocalとrevenueLocalへexchangeRateToJPYを掛け、円換算後のcapitalとrevenueを10億円単位で内部生成します。",
+    "- statusMode=financeの場合、stを無視して円換算後の財務値からhp/atk/def/spd/tech/grwを自動算出します。",
     "- attrの許容値: "+COMPANY_ATTRS.join(" / "),
-    "- summonの許容値: "+COMPANY_SUMMONS.join(" / ")+"。資本金3億円超の大企業はpolitician、3億円以下はjftcを基本にしてください。",
-    "- stの範囲: hp=200〜1200、atk/def/spd/tech/grw=20〜150。強みと弱みを作り、全能力を高水準にしないでください。",
+    "- summonの許容値: "+COMPANY_SUMMONS.join(" / ")+"。円換算後の資本金3億円超の大企業はpolitician、3億円以下はjftcを基本にしてください。",
+    "- stを直接指定する場合の範囲: hp=200〜1200、atk/def/spd/tech/grw=20〜150。statusMode=financeではstを出力しないでください。",
     "- 中技はcost=40・power=2、大技はcost=100・power=3を基本とし、effectsは各技1〜4個にしてください。",
     "- motionは「パターン_色」。パターン="+MOTION_PATTERNS.join("|")+"、色="+Object.keys(MOTION_PALETTES).join("|")+"。",
     "- narration.toneの許容値: "+Array.from(COMPANY_TONES).join(" / "),
@@ -2856,7 +2944,7 @@ function initForgeUI(){
     "forgeIncludeNarration","forgeIncludeMoves",
     "scr-forge","forgePhase","forgeStepCondition","forgeStepPrompt","forgeStepImport",
     "forgeCount","forgeKeyword","forgeIncludeFinance","forgeIncludeStats",
-    "forgeIncludeClassify","forgeIndustry","forgeScale","forgeOrigin",
+    "forgeIncludeClassify","forgeIndustry","forgeScale","forgeOrigin","forgeRegion",
     "forgeBattleStyle","forgeTone"
   ];
   const missing=requiredIds.filter(id=>!$(id));
@@ -2960,6 +3048,12 @@ $("forgeIncludeNarration").addEventListener("change",e=>{
 });
 $("forgeIncludeMoves").addEventListener("change",e=>{
   if(!e.currentTarget.checked)$("forgeIncludeNarration").checked=false;
+});
+$("forgeIncludeStats").addEventListener("change",e=>{
+  if(e.currentTarget.checked)$("forgeIncludeFinance").checked=true;
+});
+$("forgeIncludeFinance").addEventListener("change",e=>{
+  if(!e.currentTarget.checked)$("forgeIncludeStats").checked=false;
 });
 
   resetForgeImportState("AIが返したJSONを貼り付けてください");
@@ -3248,10 +3342,14 @@ function companyOverall(co){
   return Math.round(values.reduce((a,b)=>a+b,0)/values.length*100);
 }
 function formatCapital(capitalBillion){
-  /* データ内の10億円単位を、JTBのような小資本金でも分かりやすい億円表示へ変換 */
+  /* 正規化後の10億円単位を、JTBのような小資本金でも分かりやすい億円表示へ変換 */
   const oku=Number(capitalBillion||0)*10;
   const rounded=Math.round(oku*1000)/1000;
   return rounded.toLocaleString("ja-JP",{maximumFractionDigits:3})+"億円";
+}
+function formatLocalFinance(value,currency){
+  return Number(value||0).toLocaleString("ja-JP",{maximumFractionDigits:3})+
+    " 十億"+(currency||"JPY");
 }
 function updateSelectFocus(playSound){
   const co=currentSelectCompany();if(!co)return;
@@ -3259,7 +3357,7 @@ function updateSelectFocus(playSound){
   $("selectFocusLogo").textContent=co.logo;
   $("selectFocusLogo").style.background=co.brand||"#274b80";
   $("selectFocusName").textContent=co.name;
-  $("selectFocusMeta").textContent=co.ind+" / "+co.attr+" / 総合 "+companyOverall(co);
+  $("selectFocusMeta").textContent=co.country+" / "+co.ind+" / "+co.attr+" / 総合 "+companyOverall(co);
   $("legendFocus").textContent="◆ 閲覧中: "+co.name;
   drawCompareChart();
   if(playSound)SE.select();
@@ -3428,7 +3526,7 @@ function openDetail(id){
   $("dLogo").className="logo logo-crest";
   $("dLogo").style.background=c.brand||"#344";
   $("dName").textContent=c.name;
-  $("dInd").textContent=c.ind+" / "+c.attr+" / "+TIER_LABEL[c.tier];
+  $("dInd").textContent=c.country+" / "+c.ind+" / "+c.attr+" / "+TIER_LABEL[c.tier];
   $("dDesc").textContent=(c.desc||"")+" ※企業区分は資本金のみで判定するゲーム内基準です。法令上の中小企業判定ではありません。";
   const rows=$("dStats");rows.textContent="";
   [["HP","hp"],["攻撃","atk"],["防御","def"],["速度","spd"],["技術","tech"],["成長","grw"]].forEach(([lb,k])=>{
@@ -3440,10 +3538,19 @@ function openDetail(id){
     r.append(l,b,v);rows.appendChild(r);
   });
   const fin=c.fin||{};
+  const currency=fin.currency||"JPY";
+  const conversionNote=currency==="JPY"
+    ?"通貨 JPY / 円換算不要"
+    :"現地通貨 売上 "+formatLocalFinance(fin.revenueLocal,currency)+
+      " / 資本金 "+formatLocalFinance(fin.capitalLocal,currency)+"\n"+
+      "換算レート 1 "+currency+" = "+Number(fin.exchangeRateToJPY||0).toLocaleString("ja-JP",{maximumFractionDigits:6})+
+      "円 / 基準 "+(fin.exchangeRateDate||"未設定");
   $("dSkillName").textContent="財務スナップショット / 技構成";
   $("dSkillDesc").textContent=
-    (fin.period||"")+"　"+(fin.metric||"売上")+" "+Number(fin.revenue||0).toLocaleString()+"十億円\n"+
-    "資本金 "+formatCapital(fin.capital)+" / 区分 "+TIER_LABEL[c.tier]+" / 利益率指標 "+(fin.margin||0)+"%\n"+
+    (fin.period||"")+"　円換算 "+(fin.metric||"売上")+" "+Number(fin.revenue||0).toLocaleString("ja-JP",{maximumFractionDigits:3})+"十億円\n"+
+    "円換算資本金 "+formatCapital(fin.capital)+" / 区分 "+TIER_LABEL[c.tier]+" / 利益率指標 "+(fin.margin||0)+"% / 成長率 "+(fin.growth||0)+"%\n"+
+    conversionNote+"\n"+
+    "能力値算出 "+(c.statusMode==="finance"?"円換算財務ベース":"手動・指定値ベース")+"\n"+
     "中技: "+c.mid.name+"（SP40）\n大技: "+c.big.name+"（SP100）\n"+
     "召喚: "+SUMMONS[c.summon].name+"（SP60・1回）\n出典メモ: "+(fin.source||"custom");
   $("sheetDetail").classList.add("open");
@@ -4381,6 +4488,8 @@ function clamp(v,min,max,def){v=Number(v);if(!isFinite(v))return def;return Math
     {
       "id": "sample-company",
       "name": "サンプル社",
+      "country": "米国",
+      "statusMode": "finance",
       "ind": "製造",
       "logo": "S",
       "short": "S",
@@ -4389,15 +4498,18 @@ function clamp(v,min,max,def){v=Number(v);if(!isFinite(v))return def;return Math
       "desc": "企業説明",
       "attr": "素材",
       "fin": {
-        "capital": 10,
-        "revenue": 500,
+        "currency": "USD",
+        "exchangeRateToJPY": 150,
+        "exchangeRateDate": "換算基準日",
+        "capitalLocal": 10,
+        "revenueLocal": 500,
         "margin": 8,
+        "growth": 6,
         "employees": 3000,
-        "period": "2026年3月期",
-        "metric": "売上高",
-        "source": "AI生成・要確認"
+        "period": "直近通期",
+        "metric": "Revenue",
+        "source": "公式年次報告書名と為替レート資料名"
       },
-      "st": {"hp": 700, "atk": 80, "def": 80, "spd": 70, "tech": 80, "grw": 75},
       "summon": "politician",
       "mid": {
         "name": "中技名",
@@ -4440,7 +4552,12 @@ function prepareCustomCompanyInput(data){
   raw.tags=Array.isArray(raw.tags)?raw.tags.concat("カスタム"):["カスタム"];
   raw.fin=raw.fin&&typeof raw.fin==="object"
     ?raw.fin
-    :{capital:0,revenue:0,margin:0,employees:0,period:"ユーザー入力",metric:"手入力",source:"custom"};
+    :{currency:"JPY",capital:0,revenue:0,margin:0,employees:0,period:"ユーザー入力",metric:"手入力",source:"custom"};
+  const inputCurrency=normalizeCurrencyCode(raw.fin.currency||"JPY");
+  if(inputCurrency!=="JPY"&&finiteNumber(raw.fin.exchangeRateToJPY,0)<=0){
+    throw new Error("外国通貨の企業には、1通貨単位あたりの円換算レート exchangeRateToJPY が必要です");
+  }
+  if(inputCurrency!=="JPY")raw.statusMode="finance";
   if(!raw.st){
     raw.st={
       hp:raw.hp,atk:raw.atk,def:raw.def,
@@ -4704,7 +4821,8 @@ $("btnCreateSave").addEventListener("click",()=>{
   if(!name){$("fName").focus();$("fName").style.borderColor="var(--bear)";return;}
   $("fName").style.borderColor="";
   SE.select();
-  addCustomCompany({name, ind:$("fInd").value, logo:$("fLogo").value.trim(),
+  addCustomCompany({name, country:$("fCountry").value.trim()||"日本",
+    ind:$("fInd").value, logo:$("fLogo").value.trim(),
     desc:$("fDesc").value.trim(),
     hp:$("fHp").value, atk:$("fAtk").value, def:$("fDef").value,
     spd:$("fSpd").value, tech:$("fTech").value, grw:$("fGrw").value});
