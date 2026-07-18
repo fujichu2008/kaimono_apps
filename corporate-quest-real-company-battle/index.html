@@ -3123,7 +3123,140 @@ function renderMarketPanel(){
 /* ================================================================
    3. 状態 (一元管理・DOMは表示専用)
 ================================================================ */
+const STREAK_STORAGE_KEY="cq_streak_v1";
+function loadBestStreak(){
+  try{
+    const value=Number.parseInt(localStorage.getItem(STREAK_STORAGE_KEY)||"0",10);
+    return Number.isFinite(value)?Math.max(0,value):0;
+  }catch(_){
+    return 0;
+  }
+}
+function saveBestStreak(value){
+  try{
+    localStorage.setItem(STREAK_STORAGE_KEY,String(Math.max(0,Math.floor(value||0))));
+  }catch(_){}
+}
+function ensureStreakUI(){
+  if(!$("cqStreakStyle")){
+    const style=document.createElement("style");
+    style.id="cqStreakStyle";
+    style.textContent=
+      ".cq-best-streak{position:absolute;top:calc(env(safe-area-inset-top,0px) + 12px);right:12px;z-index:18;display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid rgba(255,210,92,.55);border-radius:999px;background:rgba(4,9,20,.82);box-shadow:0 8px 24px rgba(0,0,0,.3);backdrop-filter:blur(8px);pointer-events:none}"+
+      ".cq-best-streak span{font-size:9px;font-weight:900;letter-spacing:.14em;color:#ffd25c}"+
+      ".cq-best-streak strong{font:900 17px monospace;color:#fff}"+
+      ".next-challenger-btn{border-color:rgba(255,210,92,.8)!important;background:linear-gradient(180deg,#8b6318,#4b3107)!important;color:#fff7d6!important;box-shadow:0 8px 24px rgba(120,78,8,.3)!important}"+
+      ".next-challenger-btn:disabled{opacity:.45!important;filter:grayscale(.65)}"+
+      ".next-challenger-btn[hidden]{display:none!important}";
+    document.head.appendChild(style);
+  }
+
+  const createBadge=(screenId,valueId)=>{
+    const screen=$(screenId);
+    if(!screen||$(valueId))return;
+    const badge=document.createElement("div");
+    badge.className="cq-best-streak";
+    const label=document.createElement("span");
+    label.textContent="BEST STREAK";
+    const value=document.createElement("strong");
+    value.id=valueId;
+    value.textContent="0";
+    badge.append(label,value);
+    screen.appendChild(badge);
+  };
+  createBadge("scr-title","titleBestStreak");
+  createBadge("scr-result","resultBestStreak");
+
+  if(!$("btnNextChallenger")){
+    const retry=$("btnRematch");
+    if(retry){
+      const button=document.createElement("button");
+      button.id="btnNextChallenger";
+      button.type="button";
+      button.className=retry.className;
+      button.classList.add("next-challenger-btn");
+      button.textContent="⚔ 次の挑戦者";
+      button.hidden=true;
+      button.addEventListener("click",startNextChallenger);
+      retry.insertAdjacentElement("afterend",button);
+    }
+  }
+}
+function renderStreakUI(){
+  ensureStreakUI();
+  const value=String(Math.max(0,S.bestStreak||0));
+  const titleValue=$("titleBestStreak");
+  const resultValue=$("resultBestStreak");
+  if(titleValue)titleValue.textContent=value;
+  if(resultValue)resultValue.textContent=value;
+}
+function streakRemainingCompanies(){
+  return allCompanies().filter(company=>
+    company.id!==S.playerCoId&&
+    !S.streakFaced.includes(company.id)
+  );
+}
+function updateNextChallengerButton(win){
+  ensureStreakUI();
+  const button=$("btnNextChallenger");
+  if(!button)return;
+  button.hidden=!win;
+  if(!win)return;
+  const remaining=streakRemainingCompanies();
+  button.disabled=remaining.length===0;
+  button.textContent=remaining.length?"⚔ 次の挑戦者":"🏆 全企業制覇";
+}
+function recordStreakWin(){
+  S.streak=Math.max(0,S.streak||0)+1;
+  if(S.streak>S.bestStreak){
+    S.bestStreak=S.streak;
+    saveBestStreak(S.bestStreak);
+  }
+}
+function resetStreak(){
+  S.streak=0;
+  S.streakFaced=[];
+  renderStreakUI();
+  updateNextChallengerButton(false);
+}
+function makeStreakEnemyCompany(company){
+  const bonusRate=Math.max(0,(S.streak||0)-2)*.08;
+  if(!company||bonusRate<=0)return company;
+  const boosted=cloneJsonData(company);
+  boosted.st=Object.assign({},company.st);
+  Object.keys(STAT_MAX).forEach(key=>{
+    const min=key==="hp"?200:20;
+    boosted.st[key]=clamp(
+      Math.round(company.st[key]*(1+bonusRate)),
+      min,
+      STAT_MAX[key],
+      company.st[key]
+    );
+  });
+  return boosted;
+}
+function startNextChallenger(){
+  const battle=S.battle;
+  if(!battle||!battle.over||battle.p.hp<=0)return;
+  const candidates=streakRemainingCompanies();
+  if(!candidates.length){
+    updateNextChallengerButton(true);
+    return;
+  }
+  const next=candidates[Math.floor(Math.random()*candidates.length)];
+  const carry={
+    hp:battle.p.hp,
+    gauge:battle.p.gauge
+  };
+  S.cpuCoId=next.id;
+  SE.select();
+  startBattle({carry});
+}
+
 const S={
+  streak:0,
+  bestStreak:loadBestStreak(),
+  streakFaced:[],
   screen:"title",
   playerCoId:null, cpuCoId:null,
   battle:null,               // {p, e, turn, over}
@@ -5312,6 +5445,8 @@ function initForgeUI(){
   return true;
 }
 initForgeUI();
+ensureStreakUI();
+renderStreakUI();
 
 $("btnSoundToggle").addEventListener("click",e=>{
   audioInit();
@@ -6158,11 +6293,30 @@ function runSummonAlly(owner,foe,ctx,visual){
   }
 }
 
-function startBattle(){
-  const p=findCo(S.playerCoId),c=findCo(S.cpuCoId);
-  if(!p||!c)return;
+function startBattle(options){
+  options=options||{};
+  const p=findCo(S.playerCoId),baseEnemy=findCo(S.cpuCoId);
+  if(!p||!baseEnemy)return;
+  const c=makeStreakEnemyCompany(baseEnemy);
+  const playerFighter=mkFighter(p,"p");
+  const enemyFighter=mkFighter(c,"e");
+
+  if(options.carry){
+    const previousHp=clamp(options.carry.hp,0,playerFighter.maxHp,0);
+    playerFighter.hp=Math.min(
+      playerFighter.maxHp,
+      previousHp+Math.round(playerFighter.maxHp*.3)
+    );
+    playerFighter.gauge=clamp(options.carry.gauge,0,100,0);
+    playerFighter.summonUsed=false;
+  }
+
+  if(!S.streakFaced.includes(baseEnemy.id)){
+    S.streakFaced.push(baseEnemy.id);
+  }
+
   S.battle={
-    p:mkFighter(p,"p"),e:mkFighter(c,"e"),turn:1,over:false,
+    p:playerFighter,e:enemyFighter,turn:1,over:false,
     market:{event:null,history:[],nextTurn:3+Math.floor(Math.random()*2)}
   };
   S.log=[];S.auto=false;S.paused=false;S.inputLock=false;
@@ -6788,7 +6942,9 @@ $("btnExit").addEventListener("click",()=>{
   $("modalConfirm").classList.add("open");
 });
 $("btnConfirmYes").addEventListener("click",()=>{
-  SE.select();S.battle=null;showScreen("select");renderSelect();
+  SE.select();
+  resetStreak();
+  S.battle=null;showScreen("select");renderSelect();
 });
 $("volSlider").addEventListener("input",e=>{
   S.settings.volume=e.target.value/100;S.settings.muted=false;applyVolume();
@@ -7100,7 +7256,11 @@ function cleanupResult3D(){
 function showResult(win){
   const B=S.battle,{p,e}=B;
   const winner=win?p:e,loser=win?e:p;
+  if(win)recordStreakWin();
+  else resetStreak();
   showScreen("result");
+  renderStreakUI();
+  updateNextChallengerButton(win);
   if(win)playVictoryResultBgm();
   else playDefeatResultBgm();
 
@@ -7141,8 +7301,16 @@ function showResult(win){
   initResult3D(win,winner.co,loser.co);
 }
 $("btnRematch").addEventListener("click",()=>{SE.select();startBattle();});
-$("btnReselect").addEventListener("click",()=>{SE.select();S.battle=null;showScreen("select");renderSelect();});
-$("btnResTitle").addEventListener("click",()=>{SE.select();S.battle=null;showScreen("title");});
+$("btnReselect").addEventListener("click",()=>{
+  SE.select();
+  resetStreak();
+  S.battle=null;showScreen("select");renderSelect();
+});
+$("btnResTitle").addEventListener("click",()=>{
+  SE.select();
+  resetStreak();
+  S.battle=null;showScreen("title");
+});
 
 /* ================================================================
    13. 簡易トーナメント (CPU同士の高速シミュレーション)

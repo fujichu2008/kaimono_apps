@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-corporate-quest-real-company-battle-8eb96a52bb6d806b5703";
+const CACHE_NAME = "appstudio-pwa-corporate-quest-real-company-battle-743c9cbac71936e02a6a";
 const CACHE_PREFIX = "appstudio-pwa-corporate-quest-real-company-battle-";
 const PRECACHE_URLS = [
     "./",
