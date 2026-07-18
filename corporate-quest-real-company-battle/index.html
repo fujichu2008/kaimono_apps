@@ -3208,6 +3208,11 @@ function updateNextChallengerButton(win){
   ensureStreakUI();
   const button=$("btnNextChallenger");
   if(!button)return;
+  if(S.tournament&&S.tournament.active){
+    button.hidden=true;
+    button.disabled=true;
+    return;
+  }
   button.hidden=!win;
   if(!win)return;
   const remaining=streakRemainingCompanies();
@@ -3215,6 +3220,7 @@ function updateNextChallengerButton(win){
   button.textContent=remaining.length?"⚔ 次の挑戦者":"🏆 全企業制覇";
 }
 function recordStreakWin(){
+  if(S.tournament&&S.tournament.active)return;
   S.streak=Math.max(0,S.streak||0)+1;
   if(S.streak>S.bestStreak){
     S.bestStreak=S.streak;
@@ -3227,6 +3233,263 @@ function resetStreak(){
   renderStreakUI();
   updateNextChallengerButton(false);
 }
+
+const TOUR_KEY="cq_tour_v1";
+function emptyTournamentState(){
+  return {active:false,playerCoId:null,round:0,bracket:[],results:[],champion:null,carry:null,saved:false};
+}
+function tourRecord(){
+  try{
+    const v=JSON.parse(localStorage.getItem(TOUR_KEY)||"{}");
+    return {wins:Math.max(0,parseInt(v.wins||0,10)||0),companies:Array.isArray(v.companies)?v.companies:[]};
+  }catch(_){return {wins:0,companies:[]};}
+}
+function saveTourWin(id){
+  try{
+    const v=tourRecord();
+    v.wins++;
+    if(id&&!v.companies.includes(id))v.companies.push(id);
+    v.lastCompanyId=id;
+    localStorage.setItem(TOUR_KEY,JSON.stringify(v));
+  }catch(_){}
+}
+function ensureTournamentUI(){
+  const titleValue=$("titleBestStreak");
+  const badge=titleValue&&titleValue.parentElement;
+  if(badge&&!$("titleTourWins")){
+    const label=document.createElement("span");
+    label.textContent="TOUR WINS";
+    label.style.cssText="margin-left:8px;padding-left:9px;border-left:1px solid rgba(255,210,92,.42)";
+    const value=document.createElement("strong");
+    value.id="titleTourWins";
+    badge.append(label,value);
+  }
+  if($("titleTourWins"))$("titleTourWins").textContent=String(tourRecord().wins);
+
+  if(!$("btnTournamentEntry")&&$("btnBattleStart")){
+    const b=document.createElement("button");
+    b.id="btnTournamentEntry";
+    b.type="button";
+    b.className=$("btnBattleStart").className;
+    b.style.cssText="width:100%;min-height:48px;margin-top:10px";
+    b.hidden=true;
+    b.addEventListener("click",confirmTournamentEntry);
+    $("btnBattleStart").insertAdjacentElement("afterend",b);
+  }
+  if(!$("btnTournamentNext")&&$("btnRematch")){
+    const b=document.createElement("button");
+    b.id="btnTournamentNext";
+    b.type="button";
+    b.className=$("btnRematch").className+" next-challenger-btn";
+    b.hidden=true;
+    b.addEventListener("click",continueTournamentFromResult);
+    ($("btnNextChallenger")||$("btnRematch")).insertAdjacentElement("afterend",b);
+  }
+}
+function tournamentSelecting(){
+  return !!(S.tournament&&S.tournament.active&&!S.tournament.playerCoId&&!S.tournament.bracket.length);
+}
+function syncTournamentSelectMode(){
+  ensureTournamentUI();
+  const on=tournamentSelecting();
+  const p=$("slotP"),c=$("slotC");
+  const vs=c&&c.previousElementSibling!==p?c.previousElementSibling:null;
+  if(p)p.style.gridColumn=on?"1 / -1":"";
+  if(c)c.hidden=on;
+  if(vs)vs.hidden=on;
+  if($("btnRandom"))$("btnRandom").hidden=on;
+  if($("btnBattleStart"))$("btnBattleStart").hidden=on;
+  const b=$("btnTournamentEntry");
+  if(b){
+    const co=findCo(S.playerCoId);
+    b.hidden=!on;
+    b.disabled=!co;
+    b.textContent=co?"🏆 "+co.name+"で参戦":"🏆 この企業で参戦";
+  }
+}
+function syncTournamentResultActions(win){
+  ensureTournamentUI();
+  const on=!!(S.tournament&&S.tournament.active);
+  if($("btnRematch"))$("btnRematch").hidden=on;
+  if(on&&$("btnNextChallenger"))$("btnNextChallenger").hidden=true;
+  const b=$("btnTournamentNext");
+  if(!b)return;
+  b.hidden=!(on&&win);
+  if(on&&win)b.textContent=S.tournament.champion===S.tournament.playerCoId
+    ?"🏆 優勝結果を見る"
+    :S.tournament.round===1?"⚔ 準決勝へ":"⚔ 決勝へ";
+}
+function resetTournamentState(){
+  S.tournament=emptyTournamentState();
+  syncTournamentSelectMode();
+  syncTournamentResultActions(false);
+}
+function enterTournamentSelection(){
+  resetTournamentState();
+  resetStreak();
+  S.tournament.active=true;
+  S.battle=null;
+  S.playerCoId=null;
+  S.cpuCoId=null;
+  showScreen("select");
+  renderSelect();
+}
+function seedTournament(playerId){
+  const player=findCo(playerId);
+  const pool=allCompanies().filter(c=>c.id!==playerId);
+  for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];}
+  const seeded=[player].concat(pool.slice(0,7)).filter(Boolean).sort((a,b)=>companyOverall(b)-companyOverall(a));
+  if(seeded.length<8)throw new Error("トーナメントには8社必要です");
+  const others=seeded.filter(c=>c.id!==playerId);
+  const lower=others.filter(c=>companyOverall(c)<=companyOverall(player));
+  const opponent=(lower.length?lower:others).slice().sort((a,b)=>companyOverall(a)-companyOverall(b))[0];
+  const rest=others.filter(c=>c.id!==opponent.id).sort((a,b)=>companyOverall(b)-companyOverall(a));
+  const order=[playerId,opponent.id];
+  while(rest.length){const high=rest.shift(),low=rest.pop();order.push(high.id);if(low)order.push(low.id);}
+  return order.slice(0,8);
+}
+function confirmTournamentEntry(){
+  const co=findCo(S.playerCoId);
+  if(!co)return;
+  try{
+    Object.assign(S.tournament,{playerCoId:co.id,round:0,bracket:seedTournament(co.id),results:[],champion:null,carry:null,saved:false});
+    prepareTournamentRound(0);
+    S.cpuCoId=null;
+    SE.select();
+    showScreen("tour");
+  }catch(err){showAppToast(err&&err.message?err.message:"トーナメントを開始できませんでした","error");}
+}
+function prepareTournamentRound(round){
+  if(!S.tournament.active)return false;
+  if(S.tournament.results[round])return true;
+  let ids=S.tournament.bracket.slice();
+  if(round>0){
+    const prev=S.tournament.results[round-1];
+    if(!prev||prev.some(m=>!m.winner))return false;
+    ids=prev.map(m=>m.winner);
+  }
+  const matches=[];
+  for(let i=0;i<ids.length;i+=2)matches.push({a:ids[i]||null,b:ids[i+1]||null,winner:null});
+  S.tournament.results[round]=matches;
+  const live=S.battle;
+  try{
+    S.battle=null;
+    matches.forEach(m=>{
+      if(m.a===S.tournament.playerCoId||m.b===S.tournament.playerCoId)return;
+      const a=findCo(m.a),b=findCo(m.b);
+      if(a&&b)m.winner=simulateBattle(a,b).id;
+    });
+  }finally{S.battle=live;}
+  return true;
+}
+function tournamentPlayerMatch(){
+  return (S.tournament.results[S.tournament.round]||[]).find(m=>
+    m.a===S.tournament.playerCoId||m.b===S.tournament.playerCoId
+  )||null;
+}
+function startTournamentPlayerMatch(){
+  if(!S.tournament.active||S.tournament.champion||!prepareTournamentRound(S.tournament.round))return;
+  const m=tournamentPlayerMatch();
+  if(!m||m.winner)return;
+  S.playerCoId=S.tournament.playerCoId;
+  S.cpuCoId=m.a===S.playerCoId?m.b:m.a;
+  if(!findCo(S.cpuCoId))return;
+  SE.select();
+  startBattle({tournament:true,carry:S.tournament.round>0?S.tournament.carry:null});
+}
+function recordTournamentBattleResult(win,B){
+  const m=tournamentPlayerMatch();
+  if(!m)return;
+  const opponent=m.a===S.tournament.playerCoId?m.b:m.a;
+  if(!win){
+    m.winner=opponent;
+    S.tournament.champion="eliminated";
+    S.tournament.carry=null;
+    return;
+  }
+  m.winner=S.tournament.playerCoId;
+  S.tournament.carry={hp:B.p.hp,gauge:B.p.gauge};
+  if(S.tournament.round===2){
+    S.tournament.champion=S.tournament.playerCoId;
+    if(!S.tournament.saved){saveTourWin(S.tournament.playerCoId);S.tournament.saved=true;ensureTournamentUI();}
+  }else{
+    S.tournament.round++;
+    prepareTournamentRound(S.tournament.round);
+  }
+}
+function continueTournamentFromResult(){
+  if(!S.tournament.active)return;
+  SE.select();
+  if(S.tournament.champion){
+    S.battle=null;
+    showScreen("tour");
+  }else startTournamentPlayerMatch();
+}
+function tourSide(id,winner){
+  const el=document.createElement("div");
+  el.className="side"+(id&&id===winner?" winner":"");
+  if(id===S.tournament.playerCoId)el.style.cssText="border-color:var(--gold);color:var(--gold);box-shadow:inset 0 0 0 1px rgba(255,210,92,.35)";
+  const n=document.createElement("span");
+  n.className="n";
+  const co=findCo(id);
+  n.textContent=co?co.logo+" "+co.name:"?";
+  el.appendChild(n);
+  return el;
+}
+function renderTournamentScreen(){
+  const body=$("tourBody"),button=$("btnTourRun");
+  if(!body||!button)return;
+  body.textContent="";
+  button.hidden=false;
+  if(!S.tournament.active){
+    button.textContent="🏆 トーナメントに参戦";
+    return;
+  }
+  const rounds=["QUARTER FINAL","SEMI FINAL","FINAL"];
+  for(let r=0;r<3;r++){
+    const block=document.createElement("div");
+    block.className="t-round";
+    const h=document.createElement("h4");
+    h.textContent=rounds[r];
+    block.appendChild(h);
+    const list=S.tournament.results[r]||Array.from({length:r===0?4:r===1?2:1},()=>({a:null,b:null,winner:null}));
+    list.forEach(m=>{
+      const row=document.createElement("div");
+      row.className="t-match";
+      const vs=document.createElement("span");
+      vs.textContent=m.a||m.b?"vs":"?";
+      vs.style.cssText="color:var(--sub);font-size:11px";
+      row.append(tourSide(m.a,m.winner),vs,tourSide(m.b,m.winner));
+      block.appendChild(row);
+    });
+    body.appendChild(block);
+  }
+  if(S.tournament.champion){
+    const win=S.tournament.champion===S.tournament.playerCoId;
+    const co=findCo(S.tournament.playerCoId);
+    const card=document.createElement("div");
+    card.className="t-champ";
+    const icon=document.createElement("div");
+    icon.className="c";
+    icon.textContent=win?"🏆 "+(co?co.logo:""):"敗退";
+    const name=document.createElement("div");
+    name.className="n";
+    name.textContent=co?co.name:"PLAYER";
+    const sub=document.createElement("div");
+    sub.style.cssText="font-size:12px;color:var(--sub)";
+    sub.textContent=win?"優勝 — 8社勝ち抜き戦を制覇":"トーナメント終了";
+    card.append(icon,name,sub);
+    body.appendChild(card);
+    button.textContent=win?"🏆 新しいトーナメント":"🏆 再挑戦する";
+    return;
+  }
+  button.textContent="⚔ "+(S.tournament.round===0?"第1試合開始":S.tournament.round===1?"準決勝開始":"決勝開始");
+}
+function handleTournamentPrimaryAction(){
+  if(!S.tournament.active||S.tournament.champion)enterTournamentSelection();
+  else startTournamentPlayerMatch();
+}
+
 function makeStreakEnemyCompany(company){
   const bonusRate=Math.max(0,(S.streak||0)-2)*.08;
   if(!company||bonusRate<=0)return company;
@@ -3244,6 +3507,7 @@ function makeStreakEnemyCompany(company){
   return boosted;
 }
 function startNextChallenger(){
+  if(S.tournament&&S.tournament.active)return;
   const battle=S.battle;
   if(!battle||!battle.over||battle.p.hp<=0)return;
   const candidates=streakRemainingCompanies();
@@ -3265,6 +3529,7 @@ const S={
   streak:0,
   bestStreak:loadBestStreak(),
   streakFaced:[],
+  tournament:emptyTournamentState(),
   screen:"title",
   playerCoId:null, cpuCoId:null,
   battle:null,               // {p, e, turn, over}
@@ -3979,6 +4244,8 @@ function showScreen(name){
   document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
   $("scr-"+name).classList.add("active");
   document.querySelectorAll(".dmg-pop,.cutin").forEach(n=>n.remove());
+  syncTournamentSelectMode();
+  if(name==="tour")renderTournamentScreen();
 }
 function closeAllOverlays(){
   document.querySelectorAll(".sheet-wrap.open").forEach(n=>n.classList.remove("open"));
@@ -4003,7 +4270,9 @@ $("btnStart").addEventListener("click",()=>{
   audioInit();SE.select();bgmStart();showScreen("select");renderSelect();
 });
 $("btnTour").addEventListener("click",()=>{
-  audioInit();SE.select();showScreen("tour");runTournament();
+  audioInit();
+  SE.select();
+  enterTournamentSelection();
 });
 function forgeSelectedText(id){
   const el=$(id);
@@ -5056,6 +5325,7 @@ function initForgeUI(){
 initForgeUI();
 ensureStreakUI();
 renderStreakUI();
+ensureTournamentUI();
 
 $("btnSoundToggle").addEventListener("click",e=>{
   audioInit();
@@ -5382,6 +5652,12 @@ function selectPointerUp(e){
 function smartAssignCompany(co){
   if(!co)return;
   SE.select();
+  if(tournamentSelecting()){
+    S.playerCoId=co.id;
+    S.cpuCoId=null;
+    renderSlots();
+    return;
+  }
   if(S.playerCoId===co.id)S.playerCoId=null;
   else if(S.cpuCoId===co.id)S.cpuCoId=null;
   else if(!S.playerCoId)S.playerCoId=co.id;
@@ -5543,6 +5819,7 @@ function renderSlots(){
   fillSlot($("slotC"),c,"相手を選択");
   $("btnBattleStart").disabled=!(p&&c);
   drawCompareChart();
+  syncTournamentSelectMode();
 }
 function fillSlot(el,co,hint){
   const role=el.id==="slotP"?"自社":"相手";
@@ -5611,6 +5888,12 @@ function assignFocusedCompany(side){
   /* VS枠タップ: 割当済みなら解除、未割当なら閲覧中の企業を割当 */
   SE.select();
   const co=currentSelectCompany();
+  if(tournamentSelecting()){
+    S.playerCoId=co?co.id:null;
+    S.cpuCoId=null;
+    renderSlots();
+    return;
+  }
   if(side==="p")S.playerCoId=S.playerCoId?null:(co?co.id:null);
   else S.cpuCoId=S.cpuCoId?null:(co?co.id:null);
   renderSlots();
@@ -5670,7 +5953,12 @@ $("btnRandom").addEventListener("click",()=>{
   if(index>=0)selectCompanyAt(index);
   renderSlots();
 });
-$("btnSelBack").addEventListener("click",()=>{SE.select();showScreen("title");});
+$("btnSelBack").addEventListener("click",()=>{
+  SE.select();
+  if(tournamentSelecting())resetTournamentState();
+  showScreen("title");
+  ensureTournamentUI();
+});
 const btnAddCo=$("btnAddCo");
 btnAddCo.textContent="✨ AIフォージ";
 btnAddCo.setAttribute("aria-label","AIフォージを開く");
@@ -6189,21 +6477,27 @@ function startBattle(options){
   options=options||{};
   const p=findCo(S.playerCoId),baseEnemy=findCo(S.cpuCoId);
   if(!p||!baseEnemy)return;
-  const c=makeStreakEnemyCompany(baseEnemy);
+  const c=S.tournament&&S.tournament.active
+    ?baseEnemy
+    :makeStreakEnemyCompany(baseEnemy);
   const playerFighter=mkFighter(p,"p");
   const enemyFighter=mkFighter(c,"e");
 
   if(options.carry){
     const previousHp=clamp(options.carry.hp,0,playerFighter.maxHp,0);
+    const recoveryRatio=options.tournament ? .4 : .3;
     playerFighter.hp=Math.min(
       playerFighter.maxHp,
-      previousHp+Math.round(playerFighter.maxHp*.3)
+      previousHp+Math.round(playerFighter.maxHp*recoveryRatio)
     );
     playerFighter.gauge=clamp(options.carry.gauge,0,100,0);
     playerFighter.summonUsed=false;
   }
 
-  if(!S.streakFaced.includes(baseEnemy.id)){
+  if(
+    !(S.tournament&&S.tournament.active)&&
+    !S.streakFaced.includes(baseEnemy.id)
+  ){
     S.streakFaced.push(baseEnemy.id);
   }
 
@@ -6936,11 +7230,18 @@ $("btnPause").addEventListener("click",e=>{
 });
 $("btnExit").addEventListener("click",()=>{
   $("modalMenu").classList.remove("open");
-  $("confirmMsg").textContent="バトルを終了して企業選択へ戻りますか?";
+  $("confirmMsg").textContent=S.tournament&&S.tournament.active
+    ?"トーナメントを中断して敗退しますか?"
+    :"バトルを終了して企業選択へ戻りますか?";
   $("modalConfirm").classList.add("open");
 });
 $("btnConfirmYes").addEventListener("click",()=>{
   SE.select();
+  const tournamentAbort=!!(S.tournament&&S.tournament.active);
+  if(tournamentAbort){
+    resetTournamentState();
+    showAppToast("トーナメントを中断し敗退しました","error");
+  }
   resetStreak();
   S.battle=null;showScreen("select");renderSelect();
 });
@@ -7254,11 +7555,23 @@ function cleanupResult3D(){
 function showResult(win){
   const B=S.battle,{p,e}=B;
   const winner=win?p:e,loser=win?e:p;
-  if(win)recordStreakWin();
-  else resetStreak();
+  const tournamentMode=!!(S.tournament&&S.tournament.active);
+  if(tournamentMode){
+    recordTournamentBattleResult(win,B);
+  }else if(win){
+    recordStreakWin();
+  }else{
+    resetStreak();
+  }
   showScreen("result");
   renderStreakUI();
-  updateNextChallengerButton(win);
+  ensureTournamentUI();
+  if(tournamentMode){
+    syncTournamentResultActions(win);
+  }else{
+    syncTournamentResultActions(false);
+    updateNextChallengerButton(win);
+  }
   if(win)playVictoryResultBgm();
   else playDefeatResultBgm();
 
@@ -7297,17 +7610,31 @@ function showResult(win){
   $("resRank").textContent=rank;
 
   initResult3D(win,winner.co,loser.co);
+  if(tournamentMode&&!win){
+    setTimer(()=>{
+      S.battle=null;
+      showScreen("tour");
+      renderTournamentScreen();
+    },2200);
+  }
 }
-$("btnRematch").addEventListener("click",()=>{SE.select();startBattle();});
+$("btnRematch").addEventListener("click",()=>{
+  if(S.tournament&&S.tournament.active)return;
+  SE.select();
+  startBattle();
+});
 $("btnReselect").addEventListener("click",()=>{
   SE.select();
+  if(S.tournament&&S.tournament.active)resetTournamentState();
   resetStreak();
   S.battle=null;showScreen("select");renderSelect();
 });
 $("btnResTitle").addEventListener("click",()=>{
   SE.select();
+  if(S.tournament&&S.tournament.active)resetTournamentState();
   resetStreak();
   S.battle=null;showScreen("title");
+  ensureTournamentUI();
 });
 
 /* ================================================================
@@ -7360,7 +7687,7 @@ function simulateBattle(coA,coB){
   if(a.hp===b.hp)return Math.random()<.5?coA:coB;
   return a.hp>b.hp?coA:coB;
 }
-function runTournament(){
+function runTournamentLegacy(){
   const body=$("tourBody");body.textContent="";
   const pool=allCompanies().slice();
   // ランダムに4社選出
@@ -7391,8 +7718,17 @@ function runTournament(){
   const cs=document.createElement("div");cs.style.cssText="font-size:12px;color:var(--sub)";cs.textContent="優勝 — 市場の頂点に立った";
   c.append(ci,cn,cs);body.appendChild(c);
 }
-$("btnTourBack").addEventListener("click",()=>{SE.select();showScreen("title");});
-$("btnTourRun").addEventListener("click",()=>{SE.select();runTournament();});
+$("btnTourBack").addEventListener("click",()=>{
+  SE.select();
+  resetTournamentState();
+  S.battle=null;
+  showScreen("title");
+  ensureTournamentUI();
+});
+$("btnTourRun").addEventListener("click",()=>{
+  SE.select();
+  handleTournamentPrimaryAction();
+});
 
 /* ================================================================
    14. 企業作成 (検証・クランプ・安全表示・保存)
