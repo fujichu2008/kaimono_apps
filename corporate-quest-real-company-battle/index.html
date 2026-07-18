@@ -1143,8 +1143,8 @@ input,select{font-family:inherit;font-size:16px}
         </div>
         <div class="forge-usage">
           <div>「プロンプトをコピー」を押し、ChatGPTなどのAIへ貼り付けます。</div>
-          <div>AIが返した企業名・財務値・出典・技表現を確認し、回答全文またはJSON部分をコピーします。</div>
-          <div>「AIのJSONを取り込む」へ進み、検証後に企業を端末へ追加します。</div>
+          <div>AIが返した企業名・財務値・出典・技表現を確認します。文字列内の引用は半角ダブルクオートではなく「」になっていることも確認してください。</div>
+          <div>回答の先頭が {、末尾が } であることを確認し、「AIのJSONを取り込む」へ進んで検証します。</div>
         </div>
       </div>
     </div>
@@ -1154,7 +1154,7 @@ input,select{font-family:inherit;font-size:16px}
         <div class="forge-panel-head">
           <div>
             <h3>AI生成JSONを取り込む</h3>
-            <p>AIの回答全文またはJSON部分を貼り付けてください。コードフェンスが含まれていても抽出を試みます。</p>
+            <p>JSON本体だけを貼り付けてください。URL、ドメイン名、Markdownリンク、コードフェンス、見出し、箇条書き、強調記法、HTMLタグを含む入力は受け付けません。</p>
           </div>
           <span class="forge-phase">IMPORT</span>
         </div>
@@ -2573,7 +2573,18 @@ function buildForgePrompt(){
   const includeNarration=forgeChecked("forgeIncludeNarration");
   const includeMoves=forgeChecked("forgeIncludeMoves")||includeNarration;
   const includeClassify=forgeChecked("forgeIncludeClassify");
-  const existingNames=allCompanies().map(co=>co.name).join("、")||"なし";
+  const existingCompanies=allCompanies().map(co=>({
+    name:cleanText(co.name,30,""),
+    id:cleanText(co.id,40,""),
+    tick:cleanText(co.tick,8,"")
+  }));
+  const existingNames=existingCompanies
+    .map(co=>co.name)
+    .filter(Boolean)
+    .join("、")||"なし";
+  const existingIdentifiers=existingCompanies
+    .map(co=>[co.name,co.id,co.tick].filter(Boolean).join(" / "))
+    .join("、")||"なし";
 
   const sample={
     id:"sample-company",
@@ -2656,20 +2667,32 @@ function buildForgePrompt(){
     "- 戦闘スタイル: "+forgeSelectedText("forgeBattleStyle"),
     "- ナレーション方針: "+forgeSelectedText("forgeTone"),
     "- 含めたい企業名・特徴・キーワード: "+(keyword||"指定なし"),
-    "- 既存企業名（重複を避ける）: "+existingNames,
+    "- 追加禁止企業: "+existingNames,
+    "- 追加禁止企業の照合情報（企業名 / id / tick）: "+existingIdentifiers,
+    "- 上記の追加禁止企業は、表記ゆれ、略称、英語名、旧社名、持株会社名、グループ名、主要ブランド名への言い換えを含めて生成禁止です。",
+    "- companies配列には追加禁止企業と同一または実質的に同一の企業を1社も含めないでください。該当候補がある場合は、別の実在企業へ置き換えて指定件数を維持してください。",
     "",
     "【生成する項目】",
     requested.map(item=>"- "+item).join("\n"),
     "",
     "【最重要の出力ルール】",
-    "1. 回答は有効なJSONだけにしてください。Markdownコードフェンス、前置き、後書き、コメントは付けないでください。",
+    "1. 回答は有効なJSONだけにしてください。URL、ドメイン名、Markdownコードフェンス、Markdownリンク、Markdown見出し、箇条書き、引用、強調記法、HTMLタグ、前置き、後書き、コメントを一切付けないでください。",
     "2. 最上位は {\"schemaVersion\":2,\"companies\":[...]} とし、companies配列へちょうど"+count+"社を入れてください。",
-    "3. 関数、undefined、NaN、Infinity、末尾カンマ、スマートクオートを使用しないでください。",
-    "4. 各社のid、企業名、技名、戦闘スタイルを重複させず、既存企業と役割が似過ぎないようにしてください。",
-    "5. idは半角小文字英数字とハイフンだけ、brandは#から始まる6桁の16進カラーにしてください。",
-    "6. logoは絵文字または短い記号、shortは4文字以内、tickは8文字以内、descは120文字以内にしてください。",
-    "7. 実在企業の場合、企業説明・財務値・出典を事実と推測に分け、確認できない値を捏造しないでください。sourceには公式資料名を優先し、不確かな場合は「AI生成・要確認」と明記してください。",
-    "8. 実在企業への違法行為、政治関係、反社会的関係、品質問題などを事実として創作しないでください。風刺は一般的な会社員あるあると事業特性の範囲に限定してください。",
+    "3. JSONのキーと文字列の区切りには、半角のダブルクオート U+0022 だけを使用してください。スマートクオート、全角引用符、シングルクオートは使用禁止です。",
+    "4. name、desc、source、技名、技説明、narration.textなどの文字列値の内部には、半角ダブルクオートを一切入れないでください。引用表現が必要な場合は、日本語のかぎ括弧「」または二重かぎ括弧『』を使用してください。",
+    "5. 文字列値の内部に改行、タブ、バックスラッシュを入れないでください。各文字列は1行の通常文にしてください。",
+    "6. 関数、undefined、NaN、Infinity、末尾カンマ、コメントを使用しないでください。",
+    "7. sourceを含む全ての文字列値はプレーンテキストだけにしてください。http://、https://、www.、ドメイン名、Markdown記号、HTMLタグを入れてはいけません。sourceにはURLではなく公式資料名だけを書いてください。",
+    "8. 各社のid、企業名、技名、戦闘スタイルを重複させないでください。また、追加禁止企業との同一性を企業名、id、tick、証券コード、略称、英語名、旧社名、持株会社名、グループ名、主要ブランド名まで照合してください。1件でも一致または実質同一なら、必ず別企業へ置き換えてください。",
+    "9. idは半角小文字英数字とハイフンだけ、brandは#から始まる6桁の16進カラーにしてください。",
+    "10. logoは絵文字または短い記号、shortは4文字以内、tickは8文字以内、descは120文字以内にしてください。",
+    "11. 実在企業の場合、企業説明・財務値・出典を事実と推測に分け、確認できない値を捏造しないでください。sourceには公式資料名を優先し、不確かな場合は「AI生成・要確認」と明記してください。",
+    "12. 実在企業への違法行為、政治関係、反社会的関係、品質問題などを事実として創作しないでください。風刺は一般的な会社員あるあると事業特性の範囲に限定してください。",
+    "13. 出力直前に、生成した全企業を追加禁止企業一覧と再照合してください。同一企業、表記ゆれ、略称違い、グループ名違いが1社でもあれば、その企業だけを別の実在企業へ置き換えてください。",
+    "14. 出力直前に、companies配列が指定件数の"+count+"社であり、全社が追加禁止企業とは異なることを確認してください。",
+    "15. 出力直前に全ての文字列値を走査し、http://、https://、www.、ドメイン名、Markdownリンク、バッククォート、コードフェンス、見出し記号、箇条書き記号、引用記号、強調記法、HTMLタグが1件もないことを確認してください。見つかった場合は削除し、公式資料名などのプレーンテキストへ直してください。",
+    "16. 出力直前に、回答全体をJSON.parseで解析できるか自己検証してください。解析できない場合は説明を付けず、JSONを修正してから再出力してください。",
+    "17. 最終回答の先頭文字は {、末尾文字は } にしてください。JSON以外の文字を前後へ付けないでください。",
     "",
     "【アプリ受入仕様】",
     "- schemaVersion: 2",
@@ -4445,21 +4468,144 @@ function addCustomCompany(data,options){
   saveCustomCompanies();
   return co;
 }
+function findForbiddenCompanyJsonContent(value,path="$"){
+  if(typeof value==="string"){
+    const checks=[
+      {
+        type:"URLまたはドメイン名",
+        pattern:/(?:https?:\/\/|ftp:\/\/|www\.|mailto:|(?:[a-z0-9-]+\.)+(?:com|net|org|jp)(?:[\/?#]|\b))/i
+      },
+      {
+        type:"Markdownリンク",
+        pattern:/!?\[[^\]\r\n]*\]\s*\([^)]+\)/
+      },
+      {
+        type:"Markdownコード",
+        pattern:/```|~~~|`[^`\r\n]*`/
+      },
+      {
+        type:"Markdown見出し",
+        pattern:/(^|\n)\s{0,3}#{1,6}\s+/
+      },
+      {
+        type:"Markdown箇条書き",
+        pattern:/(^|\n)\s{0,3}(?:[-*+]|\d+\.)\s+/
+      },
+      {
+        type:"Markdown引用",
+        pattern:/(^|\n)\s{0,3}>\s?/
+      },
+      {
+        type:"Markdown強調",
+        pattern:/\*\*[^*\r\n]+\*\*|__[^_\r\n]+__/
+      },
+      {
+        type:"Markdown表",
+        pattern:/(^|\n)\s*\|[^\n]*\|\s*(?:\n|$)/
+      },
+      {
+        type:"HTMLタグ",
+        pattern:/<\/?[a-z][^>]*>/i
+      }
+    ];
+    for(const check of checks){
+      const match=value.match(check.pattern);
+      if(match){
+        return {
+          path,
+          type:check.type,
+          match:String(match[0]||"").replace(/\s+/g," ").slice(0,100)
+        };
+      }
+    }
+    return null;
+  }
+  if(Array.isArray(value)){
+    for(let i=0;i<value.length;i++){
+      const hit=findForbiddenCompanyJsonContent(value[i],path+"["+i+"]");
+      if(hit)return hit;
+    }
+    return null;
+  }
+  if(value&&typeof value==="object"){
+    for(const key of Object.keys(value)){
+      const hit=findForbiddenCompanyJsonContent(value[key],path+"."+key);
+      if(hit)return hit;
+    }
+  }
+  return null;
+}
+function formatForbiddenCompanyJsonError(hit){
+  if(!hit)return "URLまたはMarkdown記法が含まれています";
+  return "URLとMarkdown記法は禁止です。"+hit.path+" に "+hit.type+" が含まれています。検出内容: "+hit.match;
+}
+function assertNoForbiddenCompanyJsonContent(value){
+  const hit=findForbiddenCompanyJsonContent(value);
+  if(hit)throw new Error(formatForbiddenCompanyJsonError(hit));
+}
+function diagnoseCompanyJsonError(text,error){
+  const forbidden=findForbiddenCompanyJsonContent(text,"入力全体");
+  if(forbidden)return formatForbiddenCompanyJsonError(forbidden);
+  const smart=text.match(/[“”＂]/);
+  if(smart){
+    return "スマートクオートまたは全角引用符が含まれています。AIに半角ダブルクオートだけで再出力させてください。位置: "+(smart.index+1);
+  }
+  const single=text.match(/(?:^|[,{])\s*'[^']*'\s*:/);
+  if(single){
+    return "キーがシングルクオートで囲まれています。JSONのキーは半角ダブルクオートで囲んでください。";
+  }
+  if(/,\s*[}\]]/.test(text)){
+    return "末尾カンマが含まれています。最後の項目の直後にあるカンマを削除してください。";
+  }
+
+  let inString=false;
+  let escaped=false;
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(inString){
+      if(escaped){
+        escaped=false;
+        continue;
+      }
+      if(ch==="\\"){
+        escaped=true;
+        continue;
+      }
+      if(ch==="\n"||ch==="\r"){
+        return "文字列値の途中に未エスケープの改行があります。説明やナレーションは1行の文字列にしてください。位置: "+(i+1);
+      }
+      if(ch==="\"")inString=false;
+      continue;
+    }
+    if(ch==="\""){
+      inString=true;
+      continue;
+    }
+    if(/[\s{}\[\]:,0-9eE+\-.]/.test(ch))continue;
+    if(/[truefalsnul]/.test(ch))continue;
+    const near=text.slice(Math.max(0,i-12),Math.min(text.length,i+13)).replace(/\s+/g," ");
+    return "文字列値の内部に未エスケープの半角ダブルクオートがある可能性があります。引用には「」を使用してください。位置: "+(i+1)+" / 付近: "+near;
+  }
+  if(inString){
+    return "文字列を閉じる半角ダブルクオートが不足しています。文章内の引用には半角ダブルクオートを使わず「」を使用してください。";
+  }
+  const detail=error&&error.message?String(error.message):"";
+  return "JSON形式が不正です。半角ダブルクオート、末尾カンマ、括弧の対応を確認してください。"+(detail?" 詳細: "+detail:"");
+}
 function parseCompanyJsonPayload(input){
   let parsed;
   if(typeof input==="string"){
-    let text=input.trim();
+    let text=input.replace(/^\uFEFF/,"").trim();
     if(!text)throw new Error("JSONが空です");
 
-    const fence=String.fromCharCode(96).repeat(3);
-    const fenced=text.match(new RegExp(
-      fence+"(?:json)?\\s*([\\s\\S]*?)\\s*"+fence,
-      "i"
-    ));
-    if(fenced)text=fenced[1].trim();
+    const forbiddenRaw=findForbiddenCompanyJsonContent(text,"入力全体");
+    if(forbiddenRaw){
+      throw new Error(formatForbiddenCompanyJsonError(forbiddenRaw));
+    }
 
+    let candidate=text;
     try{
-      parsed=JSON.parse(text);
+      parsed=JSON.parse(candidate);
     }catch(firstError){
       const objectStart=text.indexOf("{");
       const arrayStart=text.indexOf("[");
@@ -4474,15 +4620,17 @@ function parseCompanyJsonPayload(input){
       if(start<0||end<=start){
         throw new Error("JSONを見つけられません。AIの回答からJSON部分をコピーしてください");
       }
+      candidate=text.slice(start,end+1);
       try{
-        parsed=JSON.parse(text.slice(start,end+1));
-      }catch(_){
-        throw new Error("JSON形式が不正です。ダブルクオート、末尾カンマ、括弧の対応を確認してください");
+        parsed=JSON.parse(candidate);
+      }catch(secondError){
+        throw new Error(diagnoseCompanyJsonError(candidate,secondError||firstError));
       }
     }
   }else{
     parsed=cloneJsonData(input);
   }
+  assertNoForbiddenCompanyJsonContent(parsed);
 
   if(!parsed||typeof parsed!=="object"){
     throw new Error("JSONの最上位はオブジェクトまたは配列にしてください");
