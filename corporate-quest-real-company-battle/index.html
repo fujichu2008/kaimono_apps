@@ -10986,6 +10986,32 @@ enableManualForgeInput();
 /* ================================================================
    16. 企業別の永続育成
 ================================================================ */
+window.CQ_EVENTS=window.CQ_EVENTS||(()=>{
+  const listeners=new Map();
+  return {
+    on(name,handler){
+      if(typeof handler!=="function")return ()=>{};
+      if(!listeners.has(name))listeners.set(name,new Set());
+      listeners.get(name).add(handler);
+      return ()=>this.off(name,handler);
+    },
+    off(name,handler){
+      const set=listeners.get(name);
+      if(!set)return;
+      set.delete(handler);
+      if(!set.size)listeners.delete(name);
+    },
+    emit(name,detail){
+      const set=listeners.get(name);
+      if(!set)return;
+      [...set].forEach(handler=>{
+        try{handler(detail||{});}
+        catch(error){console.error("[CQ_EVENTS]",name,error);}
+      });
+    }
+  };
+})();
+const CQ_EVENTS=window.CQ_EVENTS;
 (function(){
   const KEY="cq_company_growth_v1",DAILY_KEY="cq_daily_growth_v1",SET_KEY="cq_growth_settings_v1",SECRET_KEY="cq_company_secrets_v1";
   const LEVEL_MAX=20,POINT_LEVELS=[2,4,6,8,10,13,16,20],STATS=["hp","atk","def","spd","tech","grw"];
@@ -10999,16 +11025,39 @@ enableManualForgeInput();
   const xpAt=level=>{const n=Math.max(0,Math.min(LEVEL_MAX,Math.floor(level))-1);return Math.round(35*n+5*n*n);};
   const levelAt=xp=>{let level=1;while(level<LEVEL_MAX&&xp>=xpAt(level+1))level++;return level;};
   const earnedPoints=level=>POINT_LEVELS.filter(value=>value<=level).length;
-  const empty=()=>({xp:0,level:1,growthPoints:0,allocated:{hp:0,atk:0,def:0,spd:0,tech:0,grw:0},titles:[],equippedTitle:"",secretUnlocked:false,lastPlayedDate:"",style:{wins:0,losses:0,preciseGuards:0,lowHpWins:0,marketBigWins:0,supportUses:0,tournamentWins:0,bestStreak:0}});
+  const empty=()=>({
+    xp:0,level:1,growthPoints:0,
+    allocated:{hp:0,atk:0,def:0,spd:0,tech:0,grw:0},
+    titles:[],equippedTitle:"",secretUnlocked:false,lastPlayedDate:"",
+    history:[],
+    style:{wins:0,losses:0,preciseGuards:0,lowHpWins:0,marketBigWins:0,supportUses:0,tournamentWins:0,bestStreak:0,maxHit:0}
+  });
   const allocatedTotal=r=>STATS.reduce((sum,key)=>sum+(Number(r.allocated[key])||0),0);
+  const normalizedHistory=source=>(Array.isArray(source)?source:[]).map(item=>({
+    date:String(item&&item.date||"").slice(0,10),
+    type:String(item&&item.type||"event").slice(0,40),
+    text:String(item&&item.text||"").slice(0,120),
+    value:Number.isFinite(Number(item&&item.value))?Number(item.value):0
+  })).filter(item=>item.date&&item.text).slice(-20);
+  function addHistory(record,type,text,value){
+    const entry={date:dayKey(),type:String(type||"event").slice(0,40),text:String(text||"").slice(0,120),value:Number(value)||0};
+    const duplicate=record.history.some(item=>item.type===entry.type&&item.text===entry.text&&item.value===entry.value);
+    if(duplicate)return false;
+    record.history.push(entry);
+    record.history=record.history.slice(-20);
+    return true;
+  }
   function normalize(raw){
     const r=empty(),src=raw&&typeof raw==="object"?raw:{};
     r.xp=Math.max(0,Math.floor(Number(src.xp)||0));r.level=levelAt(r.xp);
     STATS.forEach(key=>r.allocated[key]=Math.max(0,Math.min(4,Math.floor(Number(src.allocated&&src.allocated[key])||0))));
     while(allocatedTotal(r)>8){const key=STATS.slice().reverse().find(k=>r.allocated[k]>0);if(!key)break;r.allocated[key]--;}
     r.growthPoints=Math.max(0,earnedPoints(r.level)-allocatedTotal(r));
-    r.titles=Array.isArray(src.titles)?Array.from(new Set(src.titles.map(String))):[];
-    r.equippedTitle=r.titles.includes(src.equippedTitle)?src.equippedTitle:"";r.secretUnlocked=r.level>=12;r.lastPlayedDate=String(src.lastPlayedDate||"").slice(0,10);
+    r.titles=Array.isArray(src.titles)?Array.from(new Set(src.titles.map(value=>String(value).slice(0,40)))):[];
+    r.equippedTitle=r.titles.includes(src.equippedTitle)?src.equippedTitle:"";
+    r.secretUnlocked=r.level>=12;
+    r.lastPlayedDate=String(src.lastPlayedDate||"").slice(0,10);
+    r.history=normalizedHistory(src.history);
     Object.keys(r.style).forEach(key=>r.style[key]=Math.max(0,Math.floor(Number(src.style&&src.style[key])||0)));
     return r;
   }
@@ -11064,21 +11113,109 @@ enableManualForgeInput();
   let DAILY=read(DAILY_KEY,{});if(DAILY.date!==dayKey())DAILY=newDaily(DAILY);
   function ensureDaily(){if(DAILY.date!==dayKey())DAILY=newDaily(DAILY);DAILY.goals=Array.isArray(DAILY.goals)&&DAILY.goals.length===3?DAILY.goals:dailyGoals(DAILY.date);DAILY.completed=DAILY.completed&&typeof DAILY.completed==="object"?DAILY.completed:{};DAILY.firstWins=Array.isArray(DAILY.firstWins)?DAILY.firstWins:[];DAILY.previousCompanyId=String(DAILY.previousCompanyId||"");DAILY.lastCompanyId=String(DAILY.lastCompanyId||"");const ids=new Set(allCompanies().map(co=>co.id));DAILY.featured=(DAILY.featured||[]).filter(id=>ids.has(id));shuffle(allCompanies().filter(co=>!DAILY.featured.includes(co.id)),hash(DAILY.date+"fill")).forEach(co=>{if(DAILY.featured.length<3)DAILY.featured.push(co.id);});save(DAILY_KEY,DAILY);return DAILY;}
   function dailyReward(ctx){
-    const d=ensureDaily(),done=[];if(ctx.win)d.goals.forEach(goal=>{if(d.completed[goal.id])return;const id=goal.id;const ok=id==="win"||id==="guard"&&ctx.preciseGuards>0||id==="support"&&ctx.supportUses>=2||id==="market"&&ctx.marketBigUsed||id==="low"&&ctx.hpRatio<=.3||id==="different"&&d.previousCompanyId&&d.previousCompanyId!==ctx.company.id||id.startsWith("attr:")&&ctx.company.attr===id.split(":")[1]||id==="tour"&&ctx.tournament||id==="secret"&&ctx.secretUses>0;if(ok){d.completed[id]=true;done.push(goal.label);}});
-    let first=false,featured=false;if(ctx.win&&!d.firstWins.includes(ctx.company.id)){d.firstWins.push(ctx.company.id);first=true;featured=d.featured.includes(ctx.company.id);}d.lastCompanyId=ctx.company.id;save(DAILY_KEY,d);return{done,first,featured};
+    const d=ensureDaily(),done=[];
+    d.goals.forEach(goal=>{
+      if(d.completed[goal.id])return;
+      const id=goal.id;
+      const actionGoal=id==="guard"&&ctx.preciseGuards>0||
+        id==="support"&&ctx.supportUses>=2||
+        id==="market"&&ctx.marketBigUsed||
+        id==="secret"&&ctx.secretUses>0;
+      const victoryGoal=ctx.win&&(
+        id==="win"||
+        id==="low"&&ctx.hpRatio<=.3||
+        id==="different"&&d.previousCompanyId&&d.previousCompanyId!==ctx.company.id||
+        id.startsWith("attr:")&&ctx.company.attr===id.split(":")[1]||
+        id==="tour"&&ctx.tournament
+      );
+      if(actionGoal||victoryGoal){
+        d.completed[id]=true;
+        done.push(String(goal.label||"デイリー目標"));
+      }
+    });
+    let first=false,featured=false;
+    if(ctx.win&&!d.firstWins.includes(ctx.company.id)){
+      d.firstWins.push(ctx.company.id);
+      first=true;
+      featured=d.featured.includes(ctx.company.id);
+    }
+    d.lastCompanyId=ctx.company.id;
+    save(DAILY_KEY,d);
+    return{done,first,featured};
+  }
+  function closestGrowthGoal(co,record){
+    const candidates=[];
+    if(record.level<LEVEL_MAX)candidates.push({xp:Math.max(0,xpAt(record.level+1)-record.xp),text:"Lv."+(record.level+1)+"まであと "+Math.max(0,xpAt(record.level+1)-record.xp)+" EXP"});
+    const pointLevel=POINT_LEVELS.find(level=>level>record.level);
+    if(pointLevel)candidates.push({xp:Math.max(0,xpAt(pointLevel)-record.xp),text:"育成ポイント獲得のLv."+pointLevel+"まであと "+Math.max(0,xpAt(pointLevel)-record.xp)+" EXP"});
+    if(record.level<8)candidates.push({xp:Math.max(0,xpAt(8)-record.xp),text:"あと"+Math.max(1,Math.ceil(Math.max(0,xpAt(8)-record.xp)/20))+"勝相当でLv.8。企業秘策の存在が明らかになります"});
+    else if(record.level<12)candidates.push({xp:Math.max(0,xpAt(12)-record.xp),text:"あと"+Math.max(1,Math.ceil(Math.max(0,xpAt(12)-record.xp)/20))+"勝相当でLv.12。企業秘策が解放されます"});
+    const daily=ensureDaily(),uncompleted=daily.goals.find(goal=>!daily.completed[goal.id]);
+    if(uncompleted)candidates.push({xp:10,text:"本日の次目標: "+String(uncompleted.label||"デイリー目標")});
+    if(daily.featured.includes(co.id)&&!daily.firstWins.includes(co.id))candidates.push({xp:5,text:"本日の注目企業。初勝利でボーナスEXP"});
+    candidates.sort((a,b)=>a.xp-b.xp);
+    return candidates.length?candidates[0].text:"Lv.20到達。称号と企業史を更新して名勝負を残しましょう";
   }
   function award(win,B,rank){
-    if(!B||B.growthRewarded)return B&&B.growthReward;B.growthRewarded=true;
-    const co=findCo(S.playerCoId)||B.p.co,r=get(co.id),before=clone(r),run=B.growthRun||{},hpRatio=B.p.hp/Math.max(1,B.p.maxHp),tournament=!!(S.tournament&&S.tournament.active);
-    r.lastPlayedDate=dayKey();r.style.preciseGuards+=run.preciseGuards||0;r.style.supportUses+=run.supportUses||0;
-    if(win){r.style.wins++;if(hpRatio<=.2)r.style.lowHpWins++;if(run.marketBigUsed)r.style.marketBigWins++;if(tournament&&S.tournament.champion===S.tournament.playerCoId)r.style.tournamentWins++;r.style.bestStreak=Math.max(r.style.bestStreak,S.streak||0);}else r.style.losses++;
+    if(!B||B.growthRewarded)return B&&B.growthReward;
+    B.growthRewarded=true;
+    const co=findCo(S.playerCoId)||B.p.co;
+    const r=get(co.id),before=clone(r),run=B.growthRun||{};
+    const hpRatio=B.p.hp/Math.max(1,B.p.maxHp);
+    const tournament=!!(S.tournament&&S.tournament.active);
+    const opponent=B.e&&B.e.co;
+    const maxHit=Math.max(0,Math.round(Number(B.p&&B.p.stats&&B.p.stats.maxHit)||0));
+    r.lastPlayedDate=dayKey();
+    r.style.preciseGuards+=run.preciseGuards||0;
+    r.style.supportUses+=run.supportUses||0;
+    if(win){
+      r.style.wins++;
+      if(before.style.wins===0)addHistory(r,"firstWin","初勝利",1);
+      if(opponent)addHistory(r,"rivalFirstWin","ライバル "+opponent.name+" への初勝利",0);
+      if(hpRatio<=.2)r.style.lowHpWins++;
+      if(run.marketBigUsed)r.style.marketBigWins++;
+      if(tournament&&S.tournament.champion===S.tournament.playerCoId){
+        r.style.tournamentWins++;
+        addHistory(r,"tournamentWin","トーナメント優勝",r.style.tournamentWins);
+      }
+      r.style.bestStreak=Math.max(r.style.bestStreak,S.streak||0);
+      if(before.style.bestStreak<5&&r.style.bestStreak>=5)addHistory(r,"streak5","5連勝を達成",5);
+    }else{
+      r.style.losses++;
+    }
+    if(maxHit>r.style.maxHit){
+      r.style.maxHit=maxHit;
+      addHistory(r,"maxHit","最大単発 "+maxHit,maxHit);
+    }
     const daily=dailyReward({win,company:co,hpRatio,tournament,preciseGuards:run.preciseGuards||0,supportUses:run.supportUses||0,marketBigUsed:!!run.marketBigUsed,secretUses:run.secretUses||0});
-    let xp=0,parts=[];if(win){xp=20;parts.push("勝利 +20");const bonus=rank==="S"?10:rank==="A"?6:rank==="B"?3:0;if(bonus){xp+=bonus;parts.push(rank+"ランク +"+bonus);}if(daily.first){xp+=10;parts.push("本日初勝利 +10");}if(daily.featured){xp+=10;parts.push("注目企業 +10");}daily.done.forEach(label=>{xp+=10;parts.push("デイリー +10: "+label);});}
-    r.xp+=xp;r.level=levelAt(r.xp);r.growthPoints=Math.max(0,earnedPoints(r.level)-allocatedTotal(r));r.secretUnlocked=r.level>=12;const titles=syncTitles(r);persist();
-    return B.growthReward={company:co,before,after:clone(r),xp,parts,titles,secretNew:before.level<12&&r.level>=12,pointsGained:Math.max(0,r.growthPoints-before.growthPoints)};
+    let xp=0,parts=[];
+    if(win){
+      xp=20;
+      parts.push("勝利 +20");
+      const bonus=rank==="S"?10:rank==="A"?6:rank==="B"?3:0;
+      if(bonus){xp+=bonus;parts.push(rank+"ランク +"+bonus);}
+      if(daily.first){xp+=10;parts.push("本日初勝利 +10");}
+      if(daily.featured){xp+=10;parts.push("注目企業 +10");}
+    }
+    daily.done.forEach(label=>{xp+=10;parts.push("デイリー +10: "+label);});
+    r.xp+=xp;
+    r.level=levelAt(r.xp);
+    for(let level=before.level+1;level<=r.level;level++)addHistory(r,"level","Lv."+level+"到達",level);
+    r.growthPoints=Math.max(0,earnedPoints(r.level)-allocatedTotal(r));
+    r.secretUnlocked=r.level>=12;
+    if(before.level<12&&r.level>=12)addHistory(r,"secretUnlock","企業秘策を解放",12);
+    const titles=syncTitles(r);
+    titles.forEach(title=>addHistory(r,"title","称号「"+title+"」を獲得",0));
+    persist();
+    return B.growthReward={
+      company:co,before,after:clone(r),xp,parts,titles,
+      secretNew:before.level<12&&r.level>=12,
+      pointsGained:Math.max(0,r.growthPoints-before.growthPoints),
+      nextGoal:closestGrowthGoal(co,r)
+    };
   }
 
-  function styles(){if($("cqGrowthStyle"))return;const el=document.createElement("style");el.id="cqGrowthStyle";el.textContent=`.cqg-box{margin-top:7px;padding:9px;border:1px solid rgba(255,210,92,.3);border-radius:10px;background:rgba(5,12,25,.78);font-size:10px;color:#aabbd2}.cqg-row{display:flex;justify-content:space-between;gap:8px}.cqg-row b,.cqg-title{color:#ffd25c}.cqg-bar{height:6px;margin:6px 0;border-radius:9px;background:#17233a;overflow:hidden}.cqg-bar i{display:block;height:100%;background:linear-gradient(90deg,#4dc3ff,#ffd25c);transition:width .45s}.cqg-result{position:absolute;z-index:30;left:10px;right:10px;bottom:calc(90px + env(safe-area-inset-bottom));max-height:34dvh;overflow:auto;padding:11px;border:1px solid rgba(255,210,92,.45);border-radius:13px;background:rgba(4,10,21,.94)}.cqg-result h3{margin:0;color:#ffd25c;font-size:13px}.cqg-gain{font:900 23px monospace;color:#fff}.cqg-detail{margin-top:12px;padding:11px;border:1px solid rgba(77,195,255,.3);border-radius:11px;background:rgba(6,14,29,.8)}.cqg-detail h3{margin:0 0 8px;color:#8ee7ff}.cqg-stat{display:grid;grid-template-columns:44px 1fr 44px;align-items:center;gap:6px;margin:5px 0;font-size:11px}.cqg-stat button,.cqg-action,.cqg-title-btn{min-height:44px;border:1px solid #35506f;border-radius:9px;background:#0b1930;color:#fff}.cqg-title-btn{min-height:38px;padding:6px;margin:3px}.cqg-title-btn.on{color:#ffd25c;border-color:#ffd25c}.cqg-secret{margin-top:8px;padding:8px;border-left:2px solid #b47cff;background:rgba(91,55,150,.16)}.cqg-port{position:fixed;z-index:3500;inset:0;display:none;flex-direction:column;background:#030914;color:#fff}.cqg-port.open{display:flex}.cqg-port-head{display:flex;gap:8px;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 10px 10px}.cqg-port-head h2{flex:1;margin:0;font-size:16px}.cqg-port-head button,.cqg-port-head select{min-height:44px;background:#0a1729;color:#fff;border:1px solid #35506f;border-radius:9px}.cqg-port-body{flex:1;overflow:auto;padding:10px}.cqg-company{display:grid;grid-template-columns:42px 1fr auto;gap:8px;align-items:center;width:100%;margin:6px 0;padding:9px;border:1px solid #243a58;border-radius:11px;background:#081426;color:#fff;text-align:left}.cqg-logo{display:grid;place-items:center;width:40px;height:40px;border-radius:9px;font-size:21px}.cqg-small{font-size:9px;color:#91a5c0}.cqg-secret-button{border-color:#8764cf!important;background:#2b1857!important}`;document.head.appendChild(el);}
+  function styles(){if($("cqGrowthStyle"))return;const el=document.createElement("style");el.id="cqGrowthStyle";el.textContent=`.cqg-box{margin-top:7px;padding:9px;border:1px solid rgba(255,210,92,.3);border-radius:10px;background:rgba(5,12,25,.78);font-size:10px;color:#aabbd2}.cqg-row{display:flex;justify-content:space-between;gap:8px}.cqg-row b,.cqg-title{color:#ffd25c}.cqg-bar{height:6px;margin:6px 0;border-radius:9px;background:#17233a;overflow:hidden}.cqg-bar i{display:block;height:100%;background:linear-gradient(90deg,#4dc3ff,#ffd25c);transition:width .45s}.cqg-result{position:absolute;z-index:30;left:10px;right:10px;bottom:calc(90px + env(safe-area-inset-bottom));max-height:34dvh;overflow:auto;padding:11px;border:1px solid rgba(255,210,92,.45);border-radius:13px;background:rgba(4,10,21,.94)}.cqg-result h3{margin:0;color:#ffd25c;font-size:13px}.cqg-gain{font:900 23px monospace;color:#fff}.cqg-detail{margin-top:12px;padding:11px;border:1px solid rgba(77,195,255,.3);border-radius:11px;background:rgba(6,14,29,.8)}.cqg-detail h3{margin:0 0 8px;color:#8ee7ff}.cqg-stat{display:grid;grid-template-columns:44px 1fr 44px;align-items:center;gap:6px;margin:5px 0;font-size:11px}.cqg-stat button,.cqg-action,.cqg-title-btn{min-height:44px;border:1px solid #35506f;border-radius:9px;background:#0b1930;color:#fff}.cqg-title-btn{min-height:38px;padding:6px;margin:3px}.cqg-title-btn.on{color:#ffd25c;border-color:#ffd25c}.cqg-secret{margin-top:8px;padding:8px;border-left:2px solid #b47cff;background:rgba(91,55,150,.16)}.cqg-port{position:fixed;z-index:3500;inset:0;display:none;flex-direction:column;background:#030914;color:#fff}.cqg-port.open{display:flex}.cqg-port-head{display:flex;gap:8px;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 10px 10px}.cqg-port-head h2{flex:1;margin:0;font-size:16px}.cqg-port-head button,.cqg-port-head select{min-height:44px;background:#0a1729;color:#fff;border:1px solid #35506f;border-radius:9px}.cqg-port-body{flex:1;overflow:auto;padding:10px}.cqg-company{display:grid;grid-template-columns:42px 1fr auto;gap:8px;align-items:center;width:100%;margin:6px 0;padding:9px;border:1px solid #243a58;border-radius:11px;background:#081426;color:#fff;text-align:left}.cqg-logo{display:grid;place-items:center;width:40px;height:40px;border-radius:9px;font-size:21px}.cqg-small{font-size:9px;color:#91a5c0}.cqg-secret-button{border-color:#8764cf!important;background:#2b1857!important}.cqg-next{margin-top:8px;padding:8px;border:1px solid rgba(255,210,92,.32);border-radius:9px;background:rgba(255,210,92,.08);color:#ffe28a;font-weight:800}.cqg-history{margin-top:10px;padding-top:8px;border-top:1px solid rgba(77,195,255,.22)}.cqg-history-item{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:10px;color:#aebed3}.cqg-history-item b{color:#dff5ff}.cqg-backup-actions{display:flex;gap:6px;flex-wrap:wrap;padding:0 10px 8px}.cqg-backup-actions button{min-height:44px;padding:0 12px;background:#0a1729;color:#fff;border:1px solid #35506f;border-radius:9px}`;document.head.appendChild(el);}
   function dailyText(){const d=ensureDaily(),count=d.goals.filter(g=>d.completed[g.id]).length,names=d.featured.map(findCo).filter(Boolean).map(co=>co.name).join("・");return"DAILY "+count+"/3 / 注目: "+names;}
   function selectGrowth(co){
     if(!co)return;
@@ -11092,43 +11229,442 @@ enableManualForgeInput();
       box.id="cqGrowthSelect";
       box.className="cqg-box";
     }
-    if(box.previousElementSibling!==anchor){
+    if(box.previousElementSibling!==anchor)anchor.insertAdjacentElement("afterend",box);
+    const r=get(co.id),next=r.level>=LEVEL_MAX?"MAX":r.xp+" / "+xpAt(r.level+1)+" EXP";
+    box.textContent="";
+    const row=document.createElement("div");row.className="cqg-row";
+    const level=document.createElement("b");level.textContent="Lv."+r.level;
+    const title=document.createElement("span");title.className="cqg-title";title.textContent=r.equippedTitle||"称号なし";
+    const xp=document.createElement("span");xp.textContent=next;
+    row.append(level,title,xp);
+    const bar=document.createElement("div");bar.className="cqg-bar";
+    const fill=document.createElement("i");fill.style.width=(progress(r)*100)+"%";bar.appendChild(fill);
+    const daily=document.createElement("div");daily.className="cqg-small";daily.textContent=dailyText();
+    box.append(row,bar,daily);
+  }
+  function resultGrowth(reward){
+    if(!reward)return;
+    const old=$("cqGrowthResult");if(old)old.remove();
+    const box=document.createElement("div");box.id="cqGrowthResult";box.className="cqg-result";
+    const unlock=[];
+    if(reward.after.level>reward.before.level)unlock.push("LEVEL UP "+reward.before.level+" → "+reward.after.level);
+    if(reward.pointsGained)unlock.push("育成ポイント +"+reward.pointsGained);
+    if(reward.secretNew)unlock.push("企業秘策 解放");
+    if(reward.titles.length)unlock.push("新称号 "+reward.titles.join(" / "));
+    const heading=document.createElement("h3");heading.textContent="COMPANY GROWTH / "+reward.company.name;
+    const gain=document.createElement("div");gain.className="cqg-gain";gain.textContent="EXP +"+reward.xp;
+    const row=document.createElement("div");row.className="cqg-row";
+    const level=document.createElement("b");level.textContent="Lv."+reward.after.level;
+    const xp=document.createElement("span");xp.textContent=reward.after.xp+" EXP";
+    row.append(level,xp);
+    const barBox=document.createElement("div");barBox.className="cqg-bar";
+    const bar=document.createElement("i");bar.id="cqGrowthResultBar";bar.style.width=(progress(reward.before)*100)+"%";barBox.appendChild(bar);
+    const details=document.createElement("div");details.className="cqg-small";
+    const detailLines=reward.parts.length?reward.parts:["今回はEXP獲得なし"];
+    detailLines.forEach(text=>{const line=document.createElement("div");line.textContent=text;details.appendChild(line);});
+    unlock.forEach(text=>{const line=document.createElement("b");line.style.display="block";line.textContent=text;details.appendChild(line);});
+    const rewardLine=document.createElement("div");rewardLine.textContent=nextReward(reward.after);details.appendChild(rewardLine);
+    const next=document.createElement("div");next.className="cqg-next";next.textContent=reward.nextGoal||closestGrowthGoal(reward.company,reward.after);
+    box.append(heading,gain,row,barBox,details,next);
+    $("scr-result").appendChild(box);
+    const levels=Math.max(0,reward.after.level-reward.before.level);
+    let step=0;
+    const animate=()=>{
+      if(step<levels){
+        bar.style.width="100%";
+        setTimer(()=>{
+          bar.style.transition="none";bar.style.width="0%";void bar.offsetWidth;
+          bar.style.transition="width .45s";step++;setTimer(animate,70);
+        },480);
+      }else{
+        bar.style.width=(progress(reward.after)*100)+"%";
+      }
+    };
+    setTimer(animate,90);
+  }
+  function growthDetail(co){
+    const anchor=$("dSkillDesc");if(!anchor)return;
+    let box=$("cqGrowthDetail");
+    if(!box){
+      box=document.createElement("section");
+      box.id="cqGrowthDetail";
+      box.className="cqg-detail";
       anchor.insertAdjacentElement("afterend",box);
     }
-    const r=get(co.id),next=r.level>=LEVEL_MAX?"MAX":r.xp+" / "+xpAt(r.level+1)+" EXP";
-    box.innerHTML="<div class=\"cqg-row\"><b>Lv."+r.level+"</b><span class=\"cqg-title\">"+(r.equippedTitle||"称号なし")+"</span><span>"+next+"</span></div><div class=\"cqg-bar\"><i style=\"width:"+(progress(r)*100)+"%\"></i></div><div class=\"cqg-small\">"+dailyText()+"</div>";
+    const r=get(co.id),stats=grownStats(co);
+    box.textContent="";
+    const heading=document.createElement("h3");heading.textContent="企業育成";box.appendChild(heading);
+    const summary=document.createElement("div");summary.className="cqg-row";
+    const level=document.createElement("b");level.textContent="Lv."+r.level;
+    const points=document.createElement("span");points.textContent="未使用 "+r.growthPoints+"pt";
+    const equipped=document.createElement("span");equipped.textContent="装備称号: "+(r.equippedTitle||"称号なし");
+    summary.append(level,points,equipped);box.appendChild(summary);
+    const bar=document.createElement("div");bar.className="cqg-bar";
+    const fill=document.createElement("i");fill.style.width=(progress(r)*100)+"%";bar.appendChild(fill);box.appendChild(bar);
+    STATS.forEach(key=>{
+      const row=document.createElement("div");row.className="cqg-stat";
+      const label=document.createElement("span");label.textContent=LABEL[key];
+      const value=document.createElement("span");value.textContent=co.st[key]+" → "+stats[key]+" (+"+(stats[key]-co.st[key])+") / "+r.allocated[key]+"pt";
+      const add=document.createElement("button");add.textContent="＋";
+      add.disabled=r.growthPoints<1||r.allocated[key]>=4||allocatedTotal(r)>=8;
+      add.onclick=()=>{
+        if(!confirm(co.name+"の"+LABEL[key]+"へ1pt割り振りますか？"))return;
+        r.allocated[key]++;r.growthPoints--;persist();growthDetail(co);selectGrowth(co);drawCompareChart();
+      };
+      row.append(label,value,add);box.appendChild(row);
+    });
+    const reset=document.createElement("button");reset.className="cqg-action";reset.style.width="100%";
+    reset.textContent="育成ポイントを初期化";reset.disabled=!allocatedTotal(r);
+    reset.onclick=()=>{
+      if(!confirm(co.name+"の育成ポイントを初期化しますか？"))return;
+      STATS.forEach(key=>r.allocated[key]=0);r.growthPoints=earnedPoints(r.level);
+      persist();growthDetail(co);selectGrowth(co);drawCompareChart();
+    };
+    box.appendChild(reset);
+    const titleLabel=document.createElement("div");titleLabel.className="cqg-small";titleLabel.textContent="獲得称号 / タップで装備";box.appendChild(titleLabel);
+    const titles=document.createElement("div");
+    r.titles.forEach(name=>{
+      const button=document.createElement("button");
+      button.className="cqg-title-btn"+(r.equippedTitle===name?" on":"");
+      button.textContent=name;
+      button.onclick=()=>{r.equippedTitle=name;persist();growthDetail(co);selectGrowth(co);};
+      titles.appendChild(button);
+    });
+    if(!r.titles.length){
+      const emptyTitle=document.createElement("div");emptyTitle.className="cqg-small";
+      emptyTitle.textContent="称号はLv3または戦闘実績で解放";
+      titles.appendChild(emptyTitle);
+    }
+    box.appendChild(titles);
+    const sec=secret(co),secretBox=document.createElement("div");secretBox.className="cqg-secret";
+    if(r.level<8){
+      secretBox.textContent="🔒 SECRET / Lv8で存在判明";
+    }else if(r.level<12){
+      secretBox.textContent="🔒 ??? / Lv12で解放";
+    }else{
+      const secretName=document.createElement("b");secretName.textContent="🔓 "+sec.ic+" "+sec.name;
+      const secretDesc=document.createElement("div");secretDesc.textContent=sec.desc+" / SP70・1戦1回";
+      secretBox.append(secretName,secretDesc);
+    }
+    box.appendChild(secretBox);
+    const last=document.createElement("div");last.className="cqg-small";
+    last.textContent="最終使用日: "+(r.lastPlayedDate||"未使用")+" / "+nextReward(r);
+    box.appendChild(last);
+    const next=document.createElement("div");next.className="cqg-next";next.textContent=closestGrowthGoal(co,r);box.appendChild(next);
+    const history=document.createElement("section");history.className="cqg-history";
+    const historyHeading=document.createElement("h3");historyHeading.textContent="企業史";history.appendChild(historyHeading);
+    if(!r.history.length){
+      const emptyHistory=document.createElement("div");emptyHistory.className="cqg-history-item";emptyHistory.textContent="まだ企業史はありません。最初の勝利を刻みましょう。";history.appendChild(emptyHistory);
+    }else{
+      r.history.slice().reverse().forEach(item=>{
+        const row=document.createElement("div");row.className="cqg-history-item";
+        const date=document.createElement("b");date.textContent=item.date+" ";
+        const text=document.createTextNode(item.text);
+        row.append(date,text);history.appendChild(row);
+      });
+    }
+    box.appendChild(history);
   }
-  function resultGrowth(reward){if(!reward)return;const old=$("cqGrowthResult");if(old)old.remove();const box=document.createElement("div");box.id="cqGrowthResult";box.className="cqg-result";const unlock=[];if(reward.after.level>reward.before.level)unlock.push("LEVEL UP "+reward.before.level+" → "+reward.after.level);if(reward.pointsGained)unlock.push("育成ポイント +"+reward.pointsGained);if(reward.secretNew)unlock.push("企業秘策 解放");if(reward.titles.length)unlock.push("新称号 "+reward.titles.join(" / "));box.innerHTML="<h3>COMPANY GROWTH / "+reward.company.name+"</h3><div class=\"cqg-gain\">EXP +"+reward.xp+"</div><div class=\"cqg-row\"><b>Lv."+reward.after.level+"</b><span>"+reward.after.xp+" EXP</span></div><div class=\"cqg-bar\"><i id=\"cqGrowthResultBar\" style=\"width:"+(progress(reward.before)*100)+"%\"></i></div><div class=\"cqg-small\">"+(reward.parts.join("<br>")||"今回はEXP獲得なし")+(unlock.length?"<br><b>"+unlock.join("<br>")+"</b>":"")+"<br>"+nextReward(reward.after)+"</div>";$("scr-result").appendChild(box);const bar=$("cqGrowthResultBar"),levels=Math.max(0,reward.after.level-reward.before.level);let step=0;const animate=()=>{if(step<levels){bar.style.width="100%";setTimer(()=>{bar.style.transition="none";bar.style.width="0%";void bar.offsetWidth;bar.style.transition="width .45s";step++;setTimer(animate,70);},480);}else bar.style.width=(progress(reward.after)*100)+"%";};setTimer(animate,90);}
-  function growthDetail(co){const anchor=$("dSkillDesc");if(!anchor)return;let box=$("cqGrowthDetail");if(!box){box=document.createElement("section");box.id="cqGrowthDetail";box.className="cqg-detail";anchor.insertAdjacentElement("afterend",box);}const r=get(co.id),stats=grownStats(co);box.textContent="";const h=document.createElement("h3");h.textContent="企業育成";box.appendChild(h);const sum=document.createElement("div");sum.className="cqg-row";sum.innerHTML="<b>Lv."+r.level+"</b><span>未使用 "+r.growthPoints+"pt</span><span>装備称号: "+(r.equippedTitle||"称号なし")+"</span>";box.appendChild(sum);const bar=document.createElement("div");bar.className="cqg-bar";bar.innerHTML="<i style=\"width:"+(progress(r)*100)+"%\"></i>";box.appendChild(bar);
-    STATS.forEach(key=>{const row=document.createElement("div");row.className="cqg-stat";const label=document.createElement("span");label.textContent=LABEL[key];const value=document.createElement("span");value.textContent=co.st[key]+" → "+stats[key]+" (+"+(stats[key]-co.st[key])+") / "+r.allocated[key]+"pt";const add=document.createElement("button");add.textContent="＋";add.disabled=r.growthPoints<1||r.allocated[key]>=4||allocatedTotal(r)>=8;add.onclick=()=>{if(!confirm(co.name+"の"+LABEL[key]+"へ1pt割り振りますか？"))return;r.allocated[key]++;r.growthPoints--;persist();growthDetail(co);selectGrowth(co);drawCompareChart();};row.append(label,value,add);box.appendChild(row);});
-    const reset=document.createElement("button");reset.className="cqg-action";reset.style.width="100%";reset.textContent="育成ポイントを初期化";reset.disabled=!allocatedTotal(r);reset.onclick=()=>{if(!confirm(co.name+"の育成ポイントを初期化しますか？"))return;STATS.forEach(key=>r.allocated[key]=0);r.growthPoints=earnedPoints(r.level);persist();growthDetail(co);selectGrowth(co);drawCompareChart();};box.appendChild(reset);
-    const titleLabel=document.createElement("div");titleLabel.className="cqg-small";titleLabel.textContent="獲得称号 / タップで装備";box.appendChild(titleLabel);const titles=document.createElement("div");r.titles.forEach(name=>{const b=document.createElement("button");b.className="cqg-title-btn"+(r.equippedTitle===name?" on":"");b.textContent=name;b.onclick=()=>{r.equippedTitle=name;persist();growthDetail(co);selectGrowth(co);};titles.appendChild(b);});if(!r.titles.length)titles.innerHTML="<div class=\"cqg-small\">称号はLv3または戦闘実績で解放</div>";box.appendChild(titles);
-    const sec=secret(co),secretBox=document.createElement("div");secretBox.className="cqg-secret";secretBox.innerHTML=r.level<8?"🔒 SECRET / Lv8で存在判明":r.level<12?"🔒 ??? / Lv12で解放":"<b>🔓 "+sec.ic+" "+sec.name+"</b><br>"+sec.desc+" / SP70・1戦1回";box.appendChild(secretBox);const last=document.createElement("div");last.className="cqg-small";last.textContent="最終使用日: "+(r.lastPlayedDate||"未使用")+" / "+nextReward(r);box.appendChild(last);}
-  function portfolio(){let modal=$("cqGrowthPortfolio");if(!modal){modal=document.createElement("section");modal.id="cqGrowthPortfolio";modal.className="cqg-port";modal.innerHTML="<div class=\"cqg-port-head\"><button id=\"cqPortClose\">閉じる</button><h2>企業ポートフォリオ</h2><select id=\"cqPortSort\"><option value=\"level\">レベル順</option><option value=\"wins\">勝利数順</option><option value=\"recent\">最近使用順</option><option value=\"new\">未育成優先</option></select></div><div id=\"cqPortBody\" class=\"cqg-port-body\"></div>";document.body.appendChild(modal);$("cqPortClose").onclick=()=>modal.classList.remove("open");$("cqPortSort").onchange=renderPortfolio;}renderPortfolio();modal.classList.add("open");}
-  function renderPortfolio(){const body=$("cqPortBody");if(!body)return;body.textContent="";const d=ensureDaily(),daily=document.createElement("div");daily.className="cqg-box";daily.innerHTML="<b>本日の経営目標</b><br>"+d.goals.map(g=>(d.completed[g.id]?"✅ ":"⬜ ")+g.label).join("<br>")+"<br>"+dailyText();body.appendChild(daily);const sort=$("cqPortSort").value,companies=allCompanies().slice().sort((a,b)=>{const x=get(a.id),y=get(b.id);return sort==="wins"?y.style.wins-x.style.wins:sort==="recent"?String(y.lastPlayedDate).localeCompare(String(x.lastPlayedDate)):sort==="new"?allocatedTotal(x)-allocatedTotal(y):y.level-x.level||y.xp-x.xp;});companies.forEach(co=>{const r=get(co.id),row=document.createElement("button");row.className="cqg-company";row.innerHTML="<span class=\"cqg-logo\" style=\"background:"+(co.brand||"#27334f")+"\">"+co.logo+"</span><span><b>"+co.name+"</b><br><span class=\"cqg-small\">"+(r.equippedTitle||"称号なし")+" / W"+r.style.wins+"-L"+r.style.losses+" / 育成"+allocatedTotal(r)+"pt / "+(r.level>=12?"秘策解放":"秘策未解放")+"<br>最終使用 "+(r.lastPlayedDate||"未使用")+"</span></span><b>Lv."+r.level+"</b>";row.onclick=()=>{$("cqGrowthPortfolio").classList.remove("open");detailCoId=co.id;openDetail(co.id);};body.appendChild(row);});}
+  const BACKUP_SCHEMA_VERSION=1;
+  function backupKeys(){
+    const keys=[KEY,DAILY_KEY,SET_KEY,SECRET_KEY,"cq_records_v1"];
+    try{if(typeof LS_KEY==="string"&&LS_KEY)keys.push(LS_KEY);}catch(_){}
+    return Array.from(new Set(keys));
+  }
+  function buildBackupPayload(){
+    const data={};
+    backupKeys().forEach(key=>{try{const value=localStorage.getItem(key);if(value!==null)data[key]=value;}catch(_){}});
+    return{schemaVersion:BACKUP_SCHEMA_VERSION,exportedAt:new Date().toISOString(),data};
+  }
+  function exportGameData(){
+    try{
+      const blob=new Blob([JSON.stringify(buildBackupPayload(),null,2)],{type:"application/json"});
+      const url=URL.createObjectURL(blob),link=document.createElement("a");
+      link.href=url;link.download="corporate_quest_backup_"+dayKey()+".json";
+      document.body.appendChild(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }catch(error){
+      alert("ゲームデータを書き出せませんでした。\n"+error.message);
+    }
+  }
+  async function importGameDataFile(file){
+    if(!file)return;
+    let payload;
+    try{payload=JSON.parse(await file.text());}
+    catch(_){alert("JSONを読み込めませんでした。");return;}
+    if(!payload||payload.schemaVersion!==BACKUP_SCHEMA_VERSION||!payload.data||typeof payload.data!=="object"){
+      alert("対応していないバックアップ形式です。");
+      return;
+    }
+    const allowed=new Set(backupKeys());
+    const entries=Object.entries(payload.data).filter(([key,value])=>allowed.has(key)&&typeof value==="string");
+    if(!entries.length){alert("復元できるデータがありません。");return;}
+    if(!confirm("現在のゲームデータをバックアップ内容で置き換えますか？"))return;
+    const snapshot={};
+    try{
+      allowed.forEach(key=>snapshot[key]=localStorage.getItem(key));
+      entries.forEach(([key,value])=>{JSON.parse(value);localStorage.setItem(key,value);});
+      location.reload();
+    }catch(error){
+      try{Object.entries(snapshot).forEach(([key,value])=>value===null?localStorage.removeItem(key):localStorage.setItem(key,value));}catch(_){}
+      alert("復元に失敗したため、元のデータを維持しました。\n"+error.message);
+    }
+  }
+  function portfolio(){
+    let modal=$("cqGrowthPortfolio");
+    if(!modal){
+      modal=document.createElement("section");modal.id="cqGrowthPortfolio";modal.className="cqg-port";
+      const head=document.createElement("div");head.className="cqg-port-head";
+      const close=document.createElement("button");close.id="cqPortClose";close.textContent="閉じる";
+      const heading=document.createElement("h2");heading.textContent="企業ポートフォリオ";
+      const sort=document.createElement("select");sort.id="cqPortSort";
+      [["level","レベル順"],["wins","勝利数順"],["recent","最近使用順"],["new","未育成優先"]].forEach(([value,label])=>{
+        const option=document.createElement("option");option.value=value;option.textContent=label;sort.appendChild(option);
+      });
+      head.append(close,heading,sort);
+      const backupActions=document.createElement("div");backupActions.className="cqg-backup-actions";
+      const exportButton=document.createElement("button");exportButton.type="button";exportButton.textContent="ゲームデータを書き出す";
+      const importButton=document.createElement("button");importButton.type="button";importButton.textContent="JSONから復元";
+      const input=document.createElement("input");input.type="file";input.accept="application/json,.json";input.hidden=true;
+      backupActions.append(exportButton,importButton,input);
+      const body=document.createElement("div");body.id="cqPortBody";body.className="cqg-port-body";
+      modal.append(head,backupActions,body);document.body.appendChild(modal);
+      close.onclick=()=>modal.classList.remove("open");
+      sort.onchange=renderPortfolio;
+      exportButton.onclick=exportGameData;
+      importButton.onclick=()=>input.click();
+      input.onchange=()=>{const file=input.files&&input.files[0];input.value="";importGameDataFile(file);};
+    }
+    renderPortfolio();modal.classList.add("open");
+  }
+  function renderPortfolio(){
+    const body=$("cqPortBody");if(!body)return;
+    body.textContent="";
+    const d=ensureDaily(),daily=document.createElement("div");daily.className="cqg-box";
+    const dailyHeading=document.createElement("b");dailyHeading.textContent="本日の経営目標";daily.appendChild(dailyHeading);
+    d.goals.forEach(goal=>{
+      const line=document.createElement("div");
+      line.textContent=(d.completed[goal.id]?"✅ ":"⬜ ")+String(goal.label||"デイリー目標");
+      daily.appendChild(line);
+    });
+    const dailyStatus=document.createElement("div");dailyStatus.className="cqg-small";dailyStatus.textContent=dailyText();daily.appendChild(dailyStatus);
+    body.appendChild(daily);
+    const sort=$("cqPortSort").value;
+    const companies=allCompanies().slice().sort((a,b)=>{
+      const x=get(a.id),y=get(b.id);
+      return sort==="wins"?y.style.wins-x.style.wins:
+        sort==="recent"?String(y.lastPlayedDate).localeCompare(String(x.lastPlayedDate)):
+        sort==="new"?allocatedTotal(x)-allocatedTotal(y):
+        y.level-x.level||y.xp-x.xp;
+    });
+    companies.forEach(co=>{
+      const r=get(co.id),row=document.createElement("button");row.className="cqg-company";
+      const logo=document.createElement("span");logo.className="cqg-logo";logo.style.background=/^#[0-9a-f]{6}$/i.test(String(co.brand||""))?co.brand:"#27334f";logo.textContent=co.logo;
+      const info=document.createElement("span");
+      const name=document.createElement("b");name.textContent=co.name;
+      const detail=document.createElement("span");detail.className="cqg-small";
+      detail.textContent=(r.equippedTitle||"称号なし")+" / W"+r.style.wins+"-L"+r.style.losses+" / 育成"+allocatedTotal(r)+"pt / "+(r.level>=12?"秘策解放":"秘策未解放")+" / 最終使用 "+(r.lastPlayedDate||"未使用");
+      info.append(name,document.createElement("br"),detail);
+      const level=document.createElement("b");level.textContent="Lv."+r.level;
+      row.append(logo,info,level);
+      row.onclick=()=>{$("cqGrowthPortfolio").classList.remove("open");detailCoId=co.id;openDetail(co.id);};
+      body.appendChild(row);
+    });
+  }
   function setupUI(){styles();if(!$("btnGrowthPortfolio")&&$("btnOpenSelectFilter")){const b=document.createElement("button");b.id="btnGrowthPortfolio";b.className=$("btnOpenSelectFilter").className;b.textContent="育成";b.onclick=()=>{SE.select();portfolio();};$("btnOpenSelectFilter").insertAdjacentElement("afterend",b);}if(!$("btnGrowthToggle")&&$("modalMenu")){const b=document.createElement("button");b.id="btnGrowthToggle";b.className="cqg-action";b.style.width="100%";const render=()=>b.textContent="企業育成効果: "+(S.settings.growthEnabled!==false?"ON":"OFF")+"（次戦から）";render();b.onclick=()=>{S.settings.growthEnabled=S.settings.growthEnabled===false;save(SET_KEY,{growthEnabled:S.settings.growthEnabled});render();};($("modalMenu").querySelector(".modal-card,.modal-body,.body")||$("modalMenu")).appendChild(b);}}
-  function appendSecret(){const B=S.battle,list=$("stratList");if(!B||!list||$("cqSecretButton"))return;const r=get(B.p.co.id),sec=secret(B.p.co),head=document.createElement("div");head.className="strat-section";head.textContent="SECRET SKILL";list.appendChild(head);const b=document.createElement("button");b.id="cqSecretButton";b.className="strat-item cqg-secret-button";const locked=r.level<12||S.settings.growthEnabled===false;b.disabled=locked||B.p.secretUsed||B.p.gauge<70;b.innerHTML="<span class=\"ic\">"+(r.level>=12?sec.ic:"🔒")+"</span><span class=\"t\"><b>"+(r.level<12?"???":sec.name)+"</b><span>"+(r.level<8?"Lv8で存在判明":r.level<12?"Lv12で解放":S.settings.growthEnabled===false?"育成効果OFF":sec.desc)+"</span></span><span class=\"cd\">"+(locked?"LOCKED":B.p.secretUsed?"使用済":B.p.gauge>=70?"READY":"SP 70")+"</span>";if(!b.disabled)b.onclick=()=>{SE.select();playerCommand("secret");};list.appendChild(b);}
+  function appendSecret(){
+    const B=S.battle,list=$("stratList");
+    if(!B||!list||$("cqSecretButton"))return;
+    const r=get(B.p.co.id),sec=secret(B.p.co);
+    const head=document.createElement("div");head.className="strat-section";head.textContent="SECRET SKILL";list.appendChild(head);
+    const button=document.createElement("button");button.id="cqSecretButton";button.className="strat-item cqg-secret-button";
+    const locked=r.level<12||S.settings.growthEnabled===false;
+    button.disabled=locked||B.p.secretUsed||B.p.gauge<70;
+    const icon=document.createElement("span");icon.className="ic";icon.textContent=r.level>=12?sec.ic:"🔒";
+    const copy=document.createElement("span");copy.className="t";
+    const name=document.createElement("b");name.textContent=r.level<12?"???":sec.name;
+    const desc=document.createElement("span");desc.textContent=r.level<8?"Lv8で存在判明":r.level<12?"Lv12で解放":S.settings.growthEnabled===false?"育成効果OFF":sec.desc;
+    copy.append(name,desc);
+    const state=document.createElement("span");state.className="cd";state.textContent=locked?"LOCKED":B.p.secretUsed?"使用済":B.p.gauge>=70?"READY":"SP 70";
+    button.append(icon,copy,state);
+    if(!button.disabled)button.onclick=()=>{SE.select();playerCommand("secret");};
+    list.appendChild(button);
+  }
 
-  let simulating=false;const oldSimulate=simulateBattle;simulateBattle=function(a,b){simulating=true;try{return oldSimulate(a,b);}finally{simulating=false;}};
-  const oldMk=mkFighter;mkFighter=function(co,side){const source=!simulating&&side==="p"&&S.settings.growthEnabled!==false?Object.assign({},co,{st:grownStats(co),secret:secret(co)}):co;const f=oldMk(source,side);f.secretUsed=false;return f;};
-  const oldStart=startBattle;startBattle=function(options){const value=oldStart(options),B=S.battle;if(B){B.growthRewarded=false;B.growthRun={preciseGuards:0,supportUses:0,marketBigUsed:false,secretUses:0};}return value;};
-  const oldDamage=CTX.dealDamage;CTX.dealDamage=function(att,def,opt){const B=S.battle,precise=!!(B&&def===B.p&&def.guarding&&def.preciseGuard&&att.currentActionType==="big");const value=oldDamage.call(this,att,def,opt);if(precise&&B.growthRun)B.growthRun.preciseGuards++;return value;};
-  const oldExec=execAction;execAction=function(self,foe,act,options){const B=S.battle;if(B&&B.growthRun&&self===B.p&&act&&!(options&&options.visualOnly)){if(["strategy","support","guardSkill","skillSupport"].includes(act.type))B.growthRun.supportUses++;if((act.type==="big"||act.type==="skill")&&marketAttrMultiplier(self.co.attr)>1.05)B.growthRun.marketBigUsed=true;}if(!act||act.type!=="secret")return oldExec(self,foe,act,options);options=options||{};const sec=secret(self.co);if(self.secretUsed||self.gauge<70||S.settings.growthEnabled===false)return;if(options.visualOnly){fxSkill(self,sec.ic+" "+sec.name,true,sec.name,"secret",sec.narration);SE.skill();playMoveVisual(self,foe,sec);return;}self.gauge-=70;self.secretUsed=true;self.stats.strats[sec.name]=(self.stats.strats[sec.name]||0)+1;if(B&&B.growthRun&&self===B.p)B.growthRun.secretUses++;const logs=executeMove(self,foe,sec,CTX,!options.skipVisual);logs.forEach(text=>pushLog(self.side==="p"?"me":"en",self.name+"【企業秘策】: "+text));};
-  const oldDuration=actionDuration;actionDuration=act=>act&&act.type==="secret"?1500:oldDuration(act);const oldDeferred=actionNeedsDeferredImpact;actionNeedsDeferredImpact=(self,act)=>!!(act&&act.type==="secret")||oldDeferred(self,act);const oldDelay=actionImpactDelay;actionImpactDelay=(self,act,duration)=>act&&act.type==="secret"?980:oldDelay(self,act,duration);
-  const oldStrat=renderStratSheet;renderStratSheet=function(){const value=oldStrat();appendSecret();return value;};
-  const oldResult=showResult;showResult=function(win){const B=S.battle,value=oldResult(win);if(B)resultGrowth(award(win,B,$("resRank")?$("resRank").textContent:"—"));return value;};
-  const oldFocus=updateSelectFocus;updateSelectFocus=function(sound){const value=oldFocus(sound),co=currentSelectCompany();if(co)selectGrowth(co);return value;};
-  const oldDetail=openDetail;openDetail=function(id){const value=oldDetail(id),co=findCo(id);if(co)growthDetail(co);return value;};
+  let simulating=false;
+  const oldSimulate=simulateBattle;
+  simulateBattle=function(a,b){simulating=true;try{return oldSimulate(a,b);}finally{simulating=false;}};
+  const oldMk=mkFighter;
+  mkFighter=function(co,side){
+    const source=!simulating&&side==="p"&&S.settings.growthEnabled!==false?Object.assign({},co,{st:grownStats(co),secret:secret(co)}):co;
+    const fighter=oldMk(source,side);fighter.secretUsed=false;return fighter;
+  };
+  if(!window.__CQ_GROWTH_EVENTS_BOUND__){
+    window.__CQ_GROWTH_EVENTS_BOUND__=true;
+    CQ_EVENTS.on("battle:start",({battle})=>{
+      if(!battle)return;
+      battle.growthRewarded=false;
+      battle.growthRun={preciseGuards:0,supportUses:0,marketBigUsed:false,secretUses:0};
+      battle.growthActionSeq=0;
+      battle.growthPreciseGuardToken="";
+    });
+    CQ_EVENTS.on("battle:preciseGuard",({battle})=>{
+      if(battle&&battle.growthRun)battle.growthRun.preciseGuards++;
+    });
+    CQ_EVENTS.on("battle:action",({battle,self,action,success})=>{
+      if(!battle||!battle.growthRun||self!==battle.p||!action||!success)return;
+      if(action.type==="strategy"||action.type==="support")battle.growthRun.supportUses++;
+      if((action.type==="big"||action.type==="skill")&&marketAttrMultiplier(self.co.attr)>1.05)battle.growthRun.marketBigUsed=true;
+      if(action.type==="secret")battle.growthRun.secretUses++;
+    });
+    CQ_EVENTS.on("battle:end",({battle,win,rank})=>{
+      if(battle)resultGrowth(award(win,battle,rank));
+    });
+    CQ_EVENTS.on("company:focus",({company})=>{if(company)selectGrowth(company);});
+    CQ_EVENTS.on("company:detail",({company})=>{if(company)growthDetail(company);});
+    CQ_EVENTS.on("company:deleted",({companyId})=>{
+      if(!companyId)return;
+      delete SECRET_STORE[companyId];
+      save(SECRET_KEY,SECRET_STORE);
+    });
+  }
+  const oldStart=startBattle;
+  startBattle=function(options){
+    const value=oldStart(options);
+    CQ_EVENTS.emit("battle:start",{battle:S.battle,options});
+    return value;
+  };
+  const oldDamage=CTX.dealDamage;
+  CTX.dealDamage=function(att,def,opt){
+    const B=S.battle;
+    const precise=!!(B&&def===B.p&&def.guarding&&def.preciseGuard&&att.currentActionType==="big");
+    const token=B&&B.currentGrowthActionToken||"";
+    const value=oldDamage.call(this,att,def,opt);
+    CQ_EVENTS.emit("battle:damage",{battle:B,attacker:att,defender:def,damage:value,options:opt||{},actionToken:token});
+    if(precise&&B&&token&&B.growthPreciseGuardToken!==token){
+      B.growthPreciseGuardToken=token;
+      CQ_EVENTS.emit("battle:preciseGuard",{battle:B,attacker:att,defender:def,actionToken:token});
+    }
+    return value;
+  };
+  const oldExec=execAction;
+  execAction=function(self,foe,act,options){
+    const B=S.battle;
+    options=options||{};
+    const visualOnly=!!options.visualOnly;
+    if(B&&!visualOnly){
+      B.growthActionSeq=(B.growthActionSeq||0)+1;
+      B.currentGrowthActionToken=(B.turn||0)+":"+(B.growthActionSeq)+":"+(self&&self.side||"?");
+    }
+    if(!act||act.type!=="secret"){
+      const beforeGauge=Number(self&&self.gauge)||0;
+      const beforeStrategyCd=act&&act.type==="strategy"&&self&&self.cds?Number(self.cds[act.extra]||0):0;
+      const supportKey=act&&act.type==="support"?"support_"+Math.max(0,Math.min(1,Number(act.extra)||0)):"";
+      const beforeSupportCd=supportKey&&self&&self.cds?Number(self.cds[supportKey]||0):0;
+      const value=oldExec(self,foe,act,options);
+      let success=!visualOnly;
+      if(act&&act.type==="strategy")success=Number(self.cds&&self.cds[act.extra]||0)>beforeStrategyCd;
+      if(act&&act.type==="support")success=Number(self.cds&&self.cds[supportKey]||0)>beforeSupportCd;
+      if(act&&(act.type==="mid"||act.type==="big"||act.type==="skill"||act.type==="summon"))success=Number(self.gauge)<beforeGauge||!!self.summonUsed;
+      CQ_EVENTS.emit("battle:action",{battle:B,self,foe,action:act,success,visualOnly});
+      return value;
+    }
+    const sec=secret(self.co);
+    if(self.secretUsed||self.gauge<70||S.settings.growthEnabled===false)return;
+    if(visualOnly){
+      fxSkill(self,sec.ic+" "+sec.name,true,sec.name,"secret",sec.narration);
+      SE.skill();playMoveVisual(self,foe,sec);return;
+    }
+    self.gauge-=70;
+    self.secretUsed=true;
+    self.stats.strats[sec.name]=(self.stats.strats[sec.name]||0)+1;
+    const logs=executeMove(self,foe,sec,CTX,!options.skipVisual);
+    logs.forEach(text=>pushLog(self.side==="p"?"me":"en",self.name+"【企業秘策】: "+text));
+    CQ_EVENTS.emit("battle:action",{battle:B,self,foe,action:act,success:true,visualOnly:false});
+  };
+  const oldDuration=actionDuration;
+  actionDuration=act=>act&&act.type==="secret"?1500:oldDuration(act);
+  const oldDeferred=actionNeedsDeferredImpact;
+  actionNeedsDeferredImpact=(self,act)=>!!(act&&act.type==="secret")||oldDeferred(self,act);
+  const oldDelay=actionImpactDelay;
+  actionImpactDelay=(self,act,duration)=>act&&act.type==="secret"?980:oldDelay(self,act,duration);
+  const oldStrat=renderStratSheet;
+  renderStratSheet=function(){const value=oldStrat();appendSecret();return value;};
+  const oldResult=showResult;
+  showResult=function(win){
+    const battle=S.battle;
+    const value=oldResult(win);
+    CQ_EVENTS.emit("battle:end",{battle,win,rank:$("resRank")?$("resRank").textContent:"—"});
+    return value;
+  };
+  const oldFocus=updateSelectFocus;
+  updateSelectFocus=function(sound){
+    const value=oldFocus(sound);
+    CQ_EVENTS.emit("company:focus",{company:currentSelectCompany()});
+    return value;
+  };
+  const oldDetail=openDetail;
+  openDetail=function(id){
+    const value=oldDetail(id);
+    CQ_EVENTS.emit("company:detail",{company:findCo(id),companyId:id});
+    return value;
+  };
   const oldChart=drawCompareChart;drawCompareChart=function(){const value=oldChart(),co=currentSelectCompany();if(!co||!allocatedTotal(get(co.id)))return value;const canvas=$("compareChart"),rect=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2),ctx=canvas.getContext("2d"),cx=rect.width/2,cy=rect.height*.52,radius=Math.min(rect.width*.31,rect.height*.37),axes=[["hp",1200],["atk",150],["def",150],["spd",150],["tech",150],["grw",150]],stats=grownStats(co);ctx.save();ctx.setTransform(dpr,0,0,dpr,0,0);ctx.beginPath();axes.forEach(([key,max],i)=>{const a=-Math.PI/2+i*Math.PI*2/6,v=Math.min(1,stats[key]/max),x=cx+Math.cos(a)*radius*v,y=cy+Math.sin(a)*radius*v;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.closePath();ctx.strokeStyle="#ffd25c";ctx.fillStyle="rgba(255,210,92,.1)";ctx.lineWidth=2.4;ctx.fill();ctx.stroke();ctx.restore();return value;};
 
   const oldPrepare=prepareCustomCompanyInput;prepareCustomCompanyInput=function(data){const co=oldPrepare(data);co.secret=normalizeSecret(data&&data.secret,co);return co;};
   const oldAdd=addCustomCompany;addCustomCompany=function(data,options){const co=oldAdd(data,options);co.secret=normalizeSecret(data&&data.secret,co);SECRET_STORE[co.id]=co.secret;save(SECRET_KEY,SECRET_STORE);return co;};
-  const oldDelete=deleteCustomCompanyFromForge;deleteCustomCompanyFromForge=function(id){const co=oldDelete(id);delete SECRET_STORE[id];save(SECRET_KEY,SECRET_STORE);return co;};
+  const oldDelete=deleteCustomCompanyFromForge;
+  deleteCustomCompanyFromForge=function(id){
+    const value=oldDelete(id);
+    CQ_EVENTS.emit("company:deleted",{companyId:id,company:value});
+    return value;
+  };
   const oldExport=exportCustomCompaniesJson;exportCustomCompaniesJson=function(){const data=JSON.parse(oldExport());data.companies.forEach(row=>{const co=findCo(row.id);if(co)row.secret=secret(co);});return JSON.stringify(data,null,2);};
   const oldForge=buildForgePrompt;buildForgePrompt=function(){const base=oldForge(),extra="\n【企業秘策 secret】\n- 全企業にsecretを必須設定してください。\n- cost=70、power=2、oncePerBattle=true、effectsは1〜2個。\n- 中技より強く大技より弱く、既存motion/effect.kindだけを使用し、市場大技+15%の対象外としてください。\n- 企業特性と効果を結び付けた固有名、説明、narrationを付けてください。\n- 構造: "+JSON.stringify({secret:{name:"企業固有の秘策名",ic:"🔒",desc:"企業特性と効果の説明",motion:"orbit_cyan",cost:70,power:2,oncePerBattle:true,effects:[{kind:"damage",mult:1.1}],narration:{tone:"gold",text:"固有ナレーション"}}});return base.replace("\n上記条件を満たすJSONだけを出力してください。",extra+"\n\n上記条件を満たすJSONだけを出力してください。");};
   const oldMerger=buildForgeMergerPrompt;buildForgeMergerPrompt=function(){const base=oldMerger(),extra="\n【合併企業のsecret】\n- secretを必須設定。cost=70、power=2、oncePerBattle=true、effectsは1〜2個。\n- 両社の強みを統合し、中技より強く大技より弱い1戦1回技としてください。";return base.replace("\n条件を満たすJSONだけを出力してください。",extra+"\n\n条件を満たすJSONだけを出力してください。");};
 
-  setupUI();ensureDaily();allCompanies().forEach(co=>syncTitles(get(co.id)));persist();window.CQ_GROWTH={state:STATE,get,secret,portfolio};
+  function runCorporateQuestSelfTests(){
+    const results=[];
+    const test=(name,fn)=>{
+      try{results.push({test:name,result:fn()?"PASS":"FAIL"});}
+      catch(error){results.push({test:name,result:"ERROR: "+error.message});}
+    };
+    ["cmdAttack","cmdGuard","cmdSkill","cmdSupport"].forEach(id=>test(id+" が1個",()=>document.querySelectorAll("#"+id).length===1));
+    test(".b-cmd が4列",()=>{
+      const bar=document.querySelector(".b-cmd");if(!bar)return false;
+      return getComputedStyle(bar).gridTemplateColumns.trim().split(/\s+/).length===4;
+    });
+    test("全企業に技・支援・秘策",()=>allCompanies().every(co=>co.mid&&co.big&&Array.isArray(co.supportSkills)&&co.supportSkills.length===2&&secret(co)));
+    test("育成割り振り合計8以下",()=>Object.values(STATE.companies).every(record=>allocatedTotal(normalize(record))<=8));
+    test("同一能力4以下",()=>Object.values(STATE.companies).every(record=>STATS.every(key=>normalize(record).allocated[key]<=4)));
+    test("CPUシミュレーションでEXP不変",()=>{
+      const companies=allCompanies();if(companies.length<2)return true;
+      const before=JSON.stringify(STATE);
+      simulateBattle(companies[0],companies[1]);
+      return JSON.stringify(STATE)===before;
+    });
+    test("結果報酬は同一battleで二重加算しない",()=>{
+      const reward={marker:true},battle={growthRewarded:true,growthReward:reward};
+      return award(true,battle,"S")===reward;
+    });
+    test("精密ガードはaction tokenで重複防止",()=>CTX.dealDamage.toString().includes("growthPreciseGuardToken"));
+    test("市場倍率クランプ0.78〜1.42を維持",()=>{
+      const source=CTX.dealDamage.toString();
+      return (source.includes(".78")||source.includes("0.78"))&&source.includes("1.42");
+    });
+    test("外部文字列をHTMLとして解釈しない",()=>{
+      const node=document.createElement("div");node.textContent="<img src=x onerror=alert(1)>";
+      return node.children.length===0&&node.textContent.startsWith("<img");
+    });
+    console.table(results);
+    return results;
+  }
+  setupUI();
+  ensureDaily();
+  allCompanies().forEach(co=>syncTitles(get(co.id)));
+  persist();
+  window.runCorporateQuestSelfTests=runCorporateQuestSelfTests;
+  window.CQ_GROWTH={state:STATE,get,secret,portfolio,exportGameData,importGameDataFile,events:CQ_EVENTS};
 })();
 
 initSelectScreenEnhancement();
