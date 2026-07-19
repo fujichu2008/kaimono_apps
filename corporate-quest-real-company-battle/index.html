@@ -6471,6 +6471,28 @@ function playMoveVisual(self,foe,move){
     playMotion(move.motion,self,foe,motionPower);
   }
 }
+const CQ_STUN_MAX_TURNS=3;
+function fighterBattlePower(f){
+  if(!f)return 1;
+  const hpScore=Math.max(0,Number(f.maxHp||(f.base&&f.base.hp))||0)/8;
+  return hpScore+["atk","def","spd","tech","grw"].reduce((sum,stat)=>{
+    const value=typeof eff==="function"?eff(f,stat):Number(f.base&&f.base[stat])||0;
+    return sum+Math.max(0,Number(value)||0);
+  },0);
+}
+function isJftcMove(move){
+  const jftc=typeof SUMMONS!=="undefined"&&SUMMONS.jftc;
+  if(!jftc||!move)return false;
+  const candidates=[jftc.ultimate].concat(Array.isArray(jftc.moves)?jftc.moves:[]);
+  return candidates.some(candidate=>candidate&&(candidate===move||candidate.name===move.name));
+}
+function jftcStunTurns(self,foe,effect){
+  const requestedCap=Math.floor(Number(effect&&effect.maxTurns)||CQ_STUN_MAX_TURNS);
+  const cap=Math.max(1,Math.min(CQ_STUN_MAX_TURNS,requestedCap));
+  const ratio=fighterBattlePower(self)/Math.max(1,fighterBattlePower(foe));
+  const turns=ratio>=1.5?3:ratio>=1.15?2:1;
+  return Math.min(cap,turns);
+}
 function executeMove(self,foe,move,ctx,visual){
   ctx=ctx||CTX;if(!move)return [];
   const logs=[];let total=0;
@@ -7448,6 +7470,99 @@ function updateATBUI(){
     btn.classList.toggle("atb-ready",canCommand);
   });
 }
+function queueStunRecoveryAction(f){
+  const B=S.battle;
+  if(!B||B.over||S.paused||S.inputLock||f!==B.p||f.stun<=0||Number(f.atb)<100||B.stunRecoveryPending)return;
+  B.stunRecoveryPending=true;
+  setTimeout(()=>{
+    if(S.battle!==B){B.stunRecoveryPending=false;return;}
+    B.stunRecoveryPending=false;
+    if(B.over||S.paused||S.inputLock||B.p.stun<=0||Number(B.p.atb)<100)return;
+    playerCommand("attack");
+  },120);
+}
+if(!window.__CQ_STUN_LIMIT_PATCHED__){
+  window.__CQ_STUN_LIMIT_PATCHED__=true;
+
+  const executeMoveBeforeStunLimit=executeMove;
+  executeMove=function(self,foe,move,ctx,visual){
+    const beforeStun=Math.max(
+      0,
+      Math.min(CQ_STUN_MAX_TURNS,Math.floor(Number(foe&&foe.stun)||0))
+    );
+    const logs=executeMoveBeforeStunLimit.apply(this,arguments);
+    if(!foe||!move||!Array.isArray(move.effects)||!Array.isArray(logs))return logs;
+
+    const effect=move.effects.find(item=>item&&item.kind==="stun");
+    if(!effect)return logs;
+
+    const logIndex=logs.findIndex(text=>
+      /行動不能|営業処分|営業停止/.test(String(text||""))
+    );
+    const afterStun=Math.max(0,Math.floor(Number(foe.stun)||0));
+    if(logIndex<0&&afterStun<=beforeStun)return logs;
+
+    const requestedCap=Math.floor(Number(effect.maxTurns)||CQ_STUN_MAX_TURNS);
+    const cap=Math.max(1,Math.min(CQ_STUN_MAX_TURNS,requestedCap));
+    const turns=isJftcMove(move)
+      ?jftcStunTurns(self,foe,effect)
+      :Math.max(1,Math.min(cap,Math.floor(Number(effect.turns)||1)));
+
+    foe.stun=Math.min(
+      CQ_STUN_MAX_TURNS,
+      Math.max(beforeStun,turns)
+    );
+
+    const message=foe.name+"は営業処分により "+foe.stun+"回行動不能";
+    if(logIndex>=0)logs[logIndex]=message;
+    else logs.push(message);
+    return logs;
+  };
+
+  const execActionBeforeStunRecovery=execAction;
+  execAction=function(self,foe,act,options){
+    if(self&&self.hp>0&&Number(self.stun)>0){
+      const cls=self.side==="p"?"me":"en";
+      const before=Math.max(
+        1,
+        Math.min(CQ_STUN_MAX_TURNS,Math.floor(Number(self.stun)||1))
+      );
+      self.stun=Math.max(0,before-1);
+      pushLog(
+        cls,
+        self.name+"は営業処分への対応で行動できない"+
+        (self.stun>0?"（残り"+self.stun+"回）":"")
+      );
+      playMotion("pillar_red",self,self);
+      if(self.stun===0){
+        pushLog("sys",self.name+"の営業処分が解除され、次回から行動可能");
+      }
+      return;
+    }
+    return execActionBeforeStunRecovery.apply(this,arguments);
+  };
+}
+const renderBattleBeforeStunRecovery=renderBattle;
+renderBattle=function(){
+  const value=renderBattleBeforeStunRecovery.apply(this,arguments);
+  const B=S.battle;
+  if(!B)return value;
+  [B.p,B.e].forEach(fighter=>{
+    if(!fighter||fighter.stun<=0)return;
+    fighter.stun=Math.max(1,Math.min(CQ_STUN_MAX_TURNS,Math.floor(Number(fighter.stun)||1)));
+    const el=fighter.side==="p"?$("pBuffs"):$("eBuffs");
+    if(!el)return;
+    let chip=Array.from(el.children).find(node=>String(node.textContent||"").startsWith("⛔"));
+    if(!chip){
+      chip=document.createElement("span");
+      chip.className="buff dn2";
+      el.appendChild(chip);
+    }
+    chip.textContent="⛔ 営業処分 "+fighter.stun+"回";
+  });
+  queueStunRecoveryAction(B.p);
+  return value;
+};
 function renderBuffs(el,f){
   el.textContent="";
   if(f.guarding){const s=document.createElement("span");s.className="buff gd";s.textContent="🛡 GUARD";el.appendChild(s);}
