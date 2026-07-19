@@ -7752,54 +7752,296 @@ function checkKO(){
 }
 
 /* ================================================================
-   10. CPU判断 (状況を見て選択)
+   10. CPU判断 (戦況評価型ユーティリティAI)
 ================================================================ */
-function cpuChooseSupportSkill(self,foe){
-  let best={index:-1,score:0};
-  companySupportSkills(self.co).forEach((skill,index)=>{
-    if(self.cds["support_"+index]>0)return;
-    let score=0,hpR=self.hp/self.maxHp;
-    (skill.effects||[]).forEach(effect=>{
-      if(effect.kind==="heal"&&hpR<.62)score+=hpR<.35?7:4;
-      if(effect.kind==="regen"&&hpR<.78)score+=hpR<.45?6:3;
-      if(effect.kind==="cleanse"&&(self.buffs.some(b=>b.mult<1)||(self.periodic||[]).some(p=>p.kind==="poison")))score+=7;
-      if(effect.kind==="stun"&&foe.atb>=72)score+=5;
-      if(effect.kind==="atbDrain"&&foe.atb>=58)score+=4;
-      if(effect.kind==="poison"&&!(foe.periodic||[]).some(p=>p.kind==="poison"))score+=3;
-      if(effect.kind==="buff")score+=effect.target==="foe"?(foe.atb>=45?3:1):3;
-      if(effect.kind==="guard"&&foe.atb>=65)score+=4;
-      if(effect.kind==="atbBoost"||effect.kind==="gauge")score+=2;
-    });
-    if(score>best.score)best={index,score};
+const CPU_AI_PERSONALITIES=new Set(["aggressive","defensive","technical","opportunist","balanced"]);
+const CPU_AI_NOISE={easy:24,normal:12,hard:6,executive:2};
+
+function cpuDifficultyName(){
+  const name=String(S&&S.settings&&S.settings.cpuDifficulty||"normal").toLowerCase();
+  return CPU_AI_NOISE[name]===undefined?"normal":name;
+}
+function cpuDifficultyNoise(name){return CPU_AI_NOISE[name]===undefined?12:CPU_AI_NOISE[name];}
+function cpuEffects(move){return move&&Array.isArray(move.effects)?move.effects.filter(Boolean):[];}
+function cpuHas(move,kinds){
+  const set=new Set(Array.isArray(kinds)?kinds:[kinds]);
+  return cpuEffects(move).some(effect=>set.has(effect.kind));
+}
+function cpuMoves(co){return co?[co.mid,co.big].concat(companySupportSkills(co)||[]).filter(Boolean):[];}
+function inferCpuPersonality(self){
+  const co=self&&self.co||{},st=co.st||{},effects=cpuMoves(co).flatMap(cpuEffects);
+  const count=kinds=>effects.filter(effect=>kinds.includes(effect.kind)).length;
+  const scores={
+    aggressive:(Number(st.atk)||0)/150*28+(Number(st.grw)||0)/150*18+count(["damage","multi","riskDamage"])*6,
+    defensive:(Number(st.hp)||0)/1200*25+(Number(st.def)||0)/150*28+count(["heal","regen","guard","cleanse"])*7+(co.tier==="large"?7:0),
+    technical:(Number(st.tech)||0)/150*26+(Number(st.spd)||0)/150*20+count(["stun","atbDrain","atbBoost","dispel","cleanse","poison"])*8,
+    opportunist:(Number(st.grw)||0)/150*24+(Number(st.spd)||0)/150*20+count(["riskDamage","multi"])*9+(co.tier==="sme"?9:0)
+  };
+  const ranked=Object.entries(scores).sort((a,b)=>b[1]-a[1]);
+  return ranked[0][1]-ranked[1][1]<7?"balanced":ranked[0][0];
+}
+function predictOpponentAction(self,foe,context){
+  const weight={attack:32,guard:8,mid:0,big:0,support:8,summon:0};
+  if(foe.gauge>=100)weight.big+=45;else if(foe.gauge>=40)weight.mid+=24;
+  if(context.foeHpRatio<.35)weight.support+=30;
+  if(self.intent&&self.intent.type==="big")weight.guard+=42;
+  if(context.foeMarket>1.05){weight.attack+=12;weight.mid+=12;weight.big+=12;}
+  if(context.selfStunned)weight.attack+=20;
+  if(!foe.summonUsed&&!foe.summon&&foe.gauge>=60)weight.summon+=16;
+  const total=Object.values(weight).reduce((sum,value)=>sum+value,0)||1,result={};
+  Object.keys(weight).forEach(key=>result[key]=weight[key]/total);
+  return result;
+}
+function cpuEstimateRawDamage(att,def,move,market,attribute){
+  const effects=move?cpuEffects(move):[{kind:"damage",mult:1,techScale:.3}];
+  const atk=eff(att,"atk"),tech=eff(att,"tech"),spd=eff(att,"spd"),defense=eff(def,"def");
+  const hit=effect=>{
+    const pierce=Math.max(0,Math.min(.85,Number(effect.pierce)||0));
+    const mult=effect.kind==="riskDamage"
+      ?((Number(effect.low)||.8)+(Number(effect.high)||1.3))/2
+      :(Number(effect.mult)||1);
+    let value=Math.max(8,atk*mult+tech*(Number(effect.techScale)||0)+spd*(Number(effect.spdScale)||0)-defense*.4*(1-pierce));
+    value*=Number(attribute)||1;value*=Number(market)||1;
+    if(def.guarding)value*=.35;
+    return value;
+  };
+  let total=0;
+  effects.forEach(effect=>{
+    if(effect.kind==="damage"||effect.kind==="riskDamage")total+=hit(effect);
+    if(effect.kind==="multi")total+=hit(effect)*Math.max(2,Math.min(5,Math.round(Number(effect.hits)||2)));
   });
-  return best.score>=6||best.score>=3&&Math.random()<.42?best.index:-1;
+  return Math.max(0,Math.round(total));
+}
+function estimateCpuDamage(self,foe,move,context){
+  const ctx=context||buildCpuContext(self,foe);
+  return cpuEstimateRawDamage(self,foe,move,ctx.selfMarket,ctx.attrPower);
+}
+function estimateIncomingThreat(self,foe,context){
+  const type=context.foeIntent&&context.foeIntent.type;
+  const move=type==="big"?foe.co.big:type==="mid"?foe.co.mid:foe.gauge>=100?foe.co.big:foe.gauge>=40?foe.co.mid:null;
+  return cpuEstimateRawDamage(foe,self,move,context.foeMarket,attrMultiplier(foe.co.attr,self.co.attr));
+}
+function buildCpuContext(self,foe){
+  const battle=S&&S.battle&&((S.battle.p===self&&S.battle.e===foe)||(S.battle.e===self&&S.battle.p===foe))?S.battle:null;
+  const selfMarket=battle?marketAttrMultiplier(self.co.attr):1,foeMarket=battle?marketAttrMultiplier(foe.co.attr):1;
+  const nextTurn=Number(battle&&battle.market&&battle.market.nextTurn),turn=Number(battle&&battle.turn)||0;
+  const context={
+    self,foe,battle,turn,
+    mode:battle?(S.tournament&&S.tournament.active?"tournament":S.streak>0?"streak":"normal"):"simulation",
+    difficulty:cpuDifficultyName(),personality:inferCpuPersonality(self),
+    selfHpRatio:self.hp/Math.max(1,self.maxHp),foeHpRatio:foe.hp/Math.max(1,foe.maxHp),
+    selfGauge:Number(self.gauge)||0,foeGauge:Number(foe.gauge)||0,
+    selfAtb:Number(self.atb)||0,foeAtb:Number(foe.atb)||0,
+    selfAtk:eff(self,"atk"),selfDef:eff(self,"def"),selfSpd:eff(self,"spd"),selfTech:eff(self,"tech"),
+    foeAtk:eff(foe,"atk"),foeDef:eff(foe,"def"),foeSpd:eff(foe,"spd"),foeTech:eff(foe,"tech"),
+    attrPower:attrMultiplier(self.co.attr,foe.co.attr),
+    selfMarket,foeMarket,marketDiff:selfMarket-foeMarket,
+    nextMarketIn:Number.isFinite(nextTurn)?Math.max(0,nextTurn-turn):99,
+    selfBuffs:(self.buffs||[]).filter(buff=>Number(buff.mult)>=1),
+    selfDebuffs:(self.buffs||[]).filter(buff=>Number(buff.mult)<1),
+    foeBuffs:(foe.buffs||[]).filter(buff=>Number(buff.mult)>=1),
+    foeDebuffs:(foe.buffs||[]).filter(buff=>Number(buff.mult)<1),
+    selfPeriodic:self.periodic||[],foePeriodic:foe.periodic||[],
+    selfStunned:isStunned(self),foeStunned:isStunned(foe),
+    foeIntent:foe.intent||null,selfSummonUsed:!!self.summonUsed,
+    selfSummonTurns:self.summon?Number(self.summon.turns)||0:0,
+    foeSummon:!!foe.summon,cds:self.cds||{},foeIsLarge:foe.co&&foe.co.tier==="large"
+  };
+  context.hasSelfPoison=context.selfPeriodic.some(effect=>effect.kind==="poison");
+  context.hasFoePoison=context.foePeriodic.some(effect=>effect.kind==="poison");
+  context.prediction=predictOpponentAction(self,foe,context);
+  context.incomingDamage=estimateIncomingThreat(self,foe,context);
+  context.incomingThreatRatio=context.incomingDamage/Math.max(1,self.hp);
+  context.lethalRisk=context.incomingDamage>=self.hp*.92;
+  context.basicDamage=estimateCpuDamage(self,foe,null,context);
+  context.basicKo=context.basicDamage>=foe.hp*1.1;
+  context.basicKoCandidate=context.basicDamage>=foe.hp*.9;
+  context.hasRecoveryCandidate=companySupportSkills(self.co).some((move,index)=>
+    !(context.cds["support_"+index]>0)&&cpuHas(move,["heal","regen","cleanse"])
+  )||!(context.cds.rst>0);
+  return context;
+}
+function buildCpuCandidates(self,foe){
+  const list=[{type:"attack",label:"通常攻撃"},{type:"guard",label:"防御"}];
+  if(!self||!foe||isStunned(self))return [list[0]];
+  if(self.co.mid&&self.gauge>=self.co.mid.cost)list.push({type:"mid",move:self.co.mid,label:"中技 "+self.co.mid.name});
+  if(self.co.big&&self.gauge>=self.co.big.cost)list.push({type:"big",move:self.co.big,label:"大技 "+self.co.big.name});
+  if(!self.summonUsed&&!self.summon&&self.gauge>=60&&SUMMONS[self.co.summon])list.push({type:"summon",label:"召喚"});
+  companySupportSkills(self.co).forEach((move,index)=>{
+    if(!(self.cds["support_"+index]>0))list.push({type:"support",extra:index,move,label:"支援 "+move.name});
+  });
+  STRATEGIES.forEach(strategy=>{
+    if(!(self.cds[strategy.id]>0))list.push({type:"strategy",extra:strategy.id,strategy,label:"戦略 "+strategy.name});
+  });
+  return list.slice(0,20);
+}
+function cpuRow(action,base){return {action:{type:action.type,extra:action.extra},label:action.label||action.type,base,score:base,reasons:[],emergency:false};}
+function cpuAdd(row,value,label){
+  const point=Math.round(value||0);if(!point)return;
+  row.score+=point;row.reasons.push(label+" "+(point>0?"+":"")+point);
+}
+function cpuEffectScore(move,context,row){
+  const self=context.self,missing=Math.max(0,self.maxHp-self.hp);
+  cpuEffects(move).forEach(effect=>{
+    if(effect.kind==="heal"){
+      const amount=Math.max(1,self.maxHp*(Number(effect.ratio)||.06)),useful=Math.min(1,missing/amount);
+      cpuAdd(row,10+(1-context.selfHpRatio)*58,"回復");cpuAdd(row,-(1-useful)*38,"超過回復");
+    }else if(effect.kind==="regen"){
+      cpuAdd(row,context.selfHpRatio<.45?42:context.selfHpRatio<.78?24:-22,"再生");
+      if(context.selfPeriodic.some(item=>item.kind==="regen"))cpuAdd(row,-18,"再生重複");
+    }else if(effect.kind==="cleanse"){
+      const count=context.selfDebuffs.length+(context.hasSelfPoison?1:0);cpuAdd(row,count?48+count*8:-32,count?"弱体解除":"解除対象なし");
+    }else if(effect.kind==="dispel"){
+      cpuAdd(row,context.foeBuffs.length?36+context.foeBuffs.length*8:-24,context.foeBuffs.length?"敵強化解除":"解除対象なし");
+    }else if(effect.kind==="stun"){
+      cpuAdd(row,12+context.foeAtb*.35+(context.foeIntent&&context.foeIntent.type==="big"?30:0)-(context.foeStunned?34:0),"行動不能");
+    }else if(effect.kind==="atbDrain"){
+      cpuAdd(row,8+context.foeAtb*.38+(context.foeIntent&&context.foeIntent.type==="big"?24:0),"敵ATB低下");
+    }else if(effect.kind==="atbBoost"){
+      cpuAdd(row,12+Math.max(0,context.foeAtb-context.selfAtb)*.28,"ATB前進");
+    }else if(effect.kind==="gauge"){
+      const amount=Number(effect.amount)||12;let value=10;
+      [40,60,100].forEach(limit=>{if(context.selfGauge<limit&&context.selfGauge+amount>=limit)value+=16;});
+      cpuAdd(row,value,"SP到達");
+    }else if(effect.kind==="drainGauge"){
+      cpuAdd(row,8+Math.min(30,context.foeGauge*.28),"敵SP低下");
+    }else if(effect.kind==="guard"){
+      cpuAdd(row,context.lethalRisk?62:context.foeIntent&&context.foeIntent.type==="big"?48:14,"防御付与");
+    }else if(effect.kind==="poison"){
+      cpuAdd(row,(context.foeHpRatio>.55?28:12)-(context.hasFoePoison?30:0),"継続損害");
+    }else if(effect.kind==="buff"){
+      const list=effect.target==="foe"?context.foeDebuffs:context.selfBuffs;
+      let value=effect.target==="foe"?22:18;
+      if(list.some(buff=>buff.stat===effect.stat&&Number(buff.turns)>1))value-=20;
+      if(effect.target==="foe"&&context.foeAtb>70)value+=10;
+      if(effect.target!=="foe"&&context.selfHpRatio<.35&&effect.stat==="def")value+=16;
+      cpuAdd(row,value,effect.target==="foe"?"敵弱体":"自社強化");
+    }
+  });
+}
+function scoreCpuAttack(action,context){
+  const row=cpuRow(action,38);
+  if(context.basicKo){cpuAdd(row,98,"確実KO");row.emergency=true;}else if(context.basicKoCandidate)cpuAdd(row,46,"KO圏内");
+  if(context.selfGauge<40)cpuAdd(row,11,"SP蓄積");
+  if(context.foeHpRatio<.25)cpuAdd(row,17,"敵低HP");
+  cpuAdd(row,context.attrPower>1?13:context.attrPower<1?-9:0,"属性");
+  cpuAdd(row,context.selfMarket>1.05?11:context.selfMarket<.95?-9:0,"市場");
+  if(context.foe.guarding)cpuAdd(row,-20,"敵防御");
+  if(context.lethalRisk)cpuAdd(row,-32,"被KO危険");
+  if(context.foeIntent&&context.foeIntent.type==="big")cpuAdd(row,-24,"敵大技");
+  if(context.foeStunned)cpuAdd(row,13,"敵停止");
+  cpuAdd(row,context.personality==="aggressive"?11:context.personality==="defensive"?-5:context.personality==="opportunist"?5:0,"人格");
+  return row;
+}
+function scoreCpuGuard(action,context){
+  const row=cpuRow(action,22);
+  if(context.foeIntent&&context.foeIntent.type==="big"){cpuAdd(row,68,"敵大技");row.emergency=true;}
+  if(context.foeGauge>=100)cpuAdd(row,30,"敵SP100");
+  if(context.lethalRisk){cpuAdd(row,70,"被KO回避");row.emergency=true;}else if(context.incomingThreatRatio>.58)cpuAdd(row,34,"高被害");
+  if(context.selfHpRatio<.35)cpuAdd(row,24,"低HP");
+  if(context.marketDiff<-.08)cpuAdd(row,18,"逆風");
+  cpuAdd(row,context.attrPower<1?14:context.attrPower>1?-6:0,"属性");
+  if(context.nextMarketIn<=1&&context.selfMarket<1)cpuAdd(row,17,"市場待ち");
+  if(context.foeStunned)cpuAdd(row,-48,"敵停止");
+  if(context.basicKoCandidate)cpuAdd(row,-62,"決着可能");
+  if(context.self.guarding||context.self.guardHits>0)cpuAdd(row,-32,"連続防御");
+  cpuAdd(row,context.personality==="defensive"?13:context.personality==="aggressive"?-9:0,"人格");
+  return row;
+}
+function scoreCpuSkill(action,context){
+  const row=cpuRow(action,action.type==="big"?54:44),damage=estimateCpuDamage(context.self,context.foe,action.move,context);
+  if(damage>=context.foe.hp*1.1){cpuAdd(row,100,"確実KO");row.emergency=true;}else if(damage>=context.foe.hp*.9)cpuAdd(row,56,"KO圏内");
+  if(context.foeHpRatio<.3)cpuAdd(row,18,"敵低HP");
+  cpuAdd(row,context.attrPower>1?15:context.attrPower<1?-10:0,"属性");
+  cpuAdd(row,context.selfMarket>1.05?(action.type==="big"?24:15):context.selfMarket<.95?-14:0,"市場");
+  if(context.foe.guarding)cpuAdd(row,-24,"敵防御");
+  if(context.foeStunned)cpuAdd(row,14,"敵停止");
+  if(context.lethalRisk&&context.hasRecoveryCandidate)cpuAdd(row,-18,"回復優先");
+  if(context.nextMarketIn<=1&&context.selfMarket<.96)cpuAdd(row,-13,"市場直前");
+  if(action.type==="big"&&damage>context.foe.hp*1.9)cpuAdd(row,-19,"過剰攻撃");
+  cpuAdd(row,context.personality==="aggressive"?(action.type==="big"?14:10):context.personality==="technical"&&cpuHas(action.move,["stun","atbDrain","dispel","buff"])?12:context.personality==="opportunist"&&(context.marketDiff>.04||context.selfHpRatio<.4)?12:0,"人格");
+  cpuEffectScore(action.move,context,row);
+  return row;
+}
+function scoreCpuSupport(action,context){
+  const row=cpuRow(action,20);cpuEffectScore(action.move,context,row);
+  const damage=estimateCpuDamage(context.self,context.foe,action.move,context);
+  if(damage>=context.foe.hp*1.1&&damage>0){cpuAdd(row,94,"支援KO");row.emergency=true;}else if(damage>0)cpuAdd(row,Math.min(24,damage/context.foe.maxHp*55),"付随攻撃");
+  if(context.personality==="technical")cpuAdd(row,13,"技術型");
+  if(context.personality==="defensive"&&cpuHas(action.move,["heal","regen","guard","cleanse"]))cpuAdd(row,12,"堅実型");
+  if(context.selfHpRatio>.94&&cpuEffects(action.move).every(effect=>["heal","regen"].includes(effect.kind)))cpuAdd(row,-45,"回復不要");
+  return row;
+}
+function scoreCpuStrategy(action,context){
+  const row=cpuRow(action,26),id=action.extra;
+  if(id==="rnd"){
+    if(cpuMoves(context.self.co).some(move=>cpuEffects(move).some(effect=>(Number(effect.techScale)||0)>.25)))cpuAdd(row,22,"技術技");
+    if(context.selfMarket<.96)cpuAdd(row,16,"逆風準備");
+    if(context.turn<=6)cpuAdd(row,13,"序盤");
+    if(context.selfBuffs.some(buff=>buff.stat==="tech"&&Number(buff.turns)>1))cpuAdd(row,-24,"効果重複");
+    if(context.personality==="technical")cpuAdd(row,12,"技術型");
+  }else if(id==="rst"){
+    cpuAdd(row,(1-context.selfHpRatio)*62,"再構築");
+    if(context.selfDebuffs.length||context.hasSelfPoison)cpuAdd(row,38,"状態回復");
+    if(context.selfHpRatio>.86&&!context.selfDebuffs.length&&!context.hasSelfPoison)cpuAdd(row,-36,"不要");
+  }else if(id==="pr"){
+    if(context.foeBuffs.length)cpuAdd(row,18+context.foeBuffs.length*7,"敵強化");
+    if(context.selfDebuffs.length)cpuAdd(row,18+context.selfDebuffs.length*7,"自社弱体");
+    if(!context.foeBuffs.length&&!context.selfDebuffs.length)cpuAdd(row,-18,"効果薄");
+  }else if(id==="inv"){
+    let value=8;[40,60,100].forEach(limit=>{if(context.selfGauge<limit&&context.selfGauge+20>=limit)value+=18;});
+    cpuAdd(row,value,"SP投資");if(context.selfMarket>1.03)cpuAdd(row,12,"追い風");if(context.turn<=10)cpuAdd(row,10,"序盤");if(context.selfGauge>=90)cpuAdd(row,-24,"SP過剰");
+  }
+  if(context.lethalRisk&&id!=="rst")cpuAdd(row,-20,"緊急対応");
+  return row;
+}
+function scoreCpuSummon(action,context){
+  const row=cpuRow(action,38);
+  if(context.turn<=9)cpuAdd(row,20,"共闘時間");
+  if(context.selfHpRatio<.72)cpuAdd(row,12,"劣勢");
+  if(context.foeIsLarge)cpuAdd(row,12,"大企業");
+  if(context.selfHpRatio<context.foeHpRatio-.18)cpuAdd(row,18,"戦況差");
+  if(context.marketDiff<-.08)cpuAdd(row,10,"逆風");
+  if(context.foeHpRatio<.25)cpuAdd(row,-38,"終盤");
+  if(context.basicKoCandidate)cpuAdd(row,-74,"通常KO");
+  if(context.self.co.big&&context.selfGauge>=context.self.co.big.cost&&estimateCpuDamage(context.self,context.foe,context.self.co.big,context)>=context.foe.hp*.9)cpuAdd(row,-72,"大技KO");
+  if(context.selfHpRatio<.2&&context.hasRecoveryCandidate)cpuAdd(row,-24,"回復優先");
+  if(context.personality==="opportunist")cpuAdd(row,14,"機会型");
+  return row;
+}
+function scoreCpuAction(action,context){
+  const row=action.type==="attack"?scoreCpuAttack(action,context):
+    action.type==="guard"?scoreCpuGuard(action,context):
+    action.type==="mid"||action.type==="big"?scoreCpuSkill(action,context):
+    action.type==="support"?scoreCpuSupport(action,context):
+    action.type==="strategy"?scoreCpuStrategy(action,context):
+    action.type==="summon"?scoreCpuSummon(action,context):cpuRow({type:"attack"},20);
+  row.score=Math.max(0,Math.min(200,Math.round(row.score)));return row;
+}
+function selectCpuAction(rows,context){
+  if(!rows||!rows.length)return {type:"attack"};
+  const noise=cpuDifficultyNoise(context&&context.difficulty);
+  const ranked=rows.map(row=>Object.assign({},row,{adjusted:row.score+(Math.random()*2-1)*noise*(row.emergency ? .18 : 1)})).sort((a,b)=>b.adjusted-a.adjusted);
+  let chosen=ranked[0],close=ranked.slice(0,3).filter(row=>ranked[0].adjusted-row.adjusted<=14&&row.score>=ranked[0].score-18);
+  if(!ranked[0].emergency&&close.length>1){
+    const weights=close.map(row=>Math.exp((row.adjusted-ranked[0].adjusted)/7)),total=weights.reduce((sum,value)=>sum+value,0);
+    let pick=Math.random()*total;for(let i=0;i<close.length;i++){pick-=weights[i];if(pick<=0){chosen=close[i];break;}}
+  }
+  if(S&&S.settings&&S.settings.cpuDebug===true){
+    console.groupCollapsed("[CPU AI] "+context.self.name+" / "+context.personality+" / "+context.difficulty);
+    console.table(ranked.map(row=>({action:row.label,base:row.base,score:row.score,adjusted:Math.round(row.adjusted*10)/10,reasons:row.reasons.join(" / "),selected:row===chosen?"YES":""})));
+    console.groupEnd();
+  }
+  return chosen.action.extra===undefined?{type:chosen.action.type}:{type:chosen.action.type,extra:chosen.action.extra};
+}
+function cpuChooseSupportSkill(self,foe){
+  const context=buildCpuContext(self,foe),rows=buildCpuCandidates(self,foe).filter(action=>action.type==="support").map(action=>scoreCpuSupport(action,context)).sort((a,b)=>b.score-a.score);
+  return rows.length&&rows[0].score>=42?Number(rows[0].action.extra):-1;
 }
 function cpuDecide(self,foe){
-  const hpR=self.hp/self.maxHp;
-  const selfMarket=marketAttrMultiplier(self.co.attr);
-  const foeMarket=marketAttrMultiplier(foe.co.attr);
-  const marketAdvantage=selfMarket-foeMarket;
-
-  if(self.stun>0)return {type:"attack"};
-  const supportIndex=cpuChooseSupportSkill(self,foe);
-  if(supportIndex>=0)return {type:"support",extra:supportIndex};
-  if(!self.summonUsed&&self.gauge>=60&&(hpR<.72||foe.co.tier==="large")&&Math.random()<.55)return {type:"summon"};
-  if(hpR<.3&&!(self.cds.rst>0)&&Math.random()<.72)return {type:"strategy",extra:"rst"};
-
-  /* 強い逆風では守備・研究・投資で次の市場変化を待つ */
-  if(marketAdvantage<-.10&&foe.atb>=62&&Math.random()<.46)return {type:"guard"};
-  if(selfMarket<.96&&!(self.cds.rnd>0)&&Math.random()<.34)return {type:"strategy",extra:"rnd"};
-  if(selfMarket<.96&&self.gauge<60&&Math.random()<.25)return {type:"strategy",extra:"inv"};
-
-  /* 追い風ではSPを温存し過ぎず、大技・中技で主導権を取る */
-  if(self.gauge>=100&&Math.random()<(selfMarket>1.04?.92:.72))return {type:"big"};
-  if(self.gauge>=40&&Math.random()<(selfMarket>1.04?.64:.42))return {type:"mid"};
-
-  if(foe.gauge>=90&&Math.random()<.38)return {type:"guard"};
-  if(!(self.cds.rnd>0)&&Math.random()<.18)return {type:"strategy",extra:"rnd"};
-  if(self.gauge>=18&&self.gauge<60&&Math.random()<.18)return {type:"strategy",extra:"inv"};
-  if(Math.random()<(marketAdvantage<0?.18:.08))return {type:"guard"};
-  return {type:"attack"};
+  if(!self||!foe||self.hp<=0)return {type:"attack"};
+  const context=buildCpuContext(self,foe);
+  return selectCpuAction(buildCpuCandidates(self,foe).map(action=>scoreCpuAction(action,context)),context);
 }
 
 /* ================================================================
@@ -12683,6 +12925,26 @@ const CQ_EVENTS=window.CQ_EVENTS;
       const node=document.createElement("div");node.textContent="<img src=x onerror=alert(1)>";
       return node.children.length===0&&node.textContent.startsWith("<img");
     });
+    const cpuPair=()=>{const list=allCompanies();return{self:mkFighter(list[0],"e"),foe:mkFighter(list[1]||list[0],"p")};};
+    const noBattle=fn=>{const old=S.battle;try{S.battle=null;return fn();}finally{S.battle=old;}};
+    test("CPU候補に使用不能な行動が含まれない",()=>{const{self,foe}=cpuPair();self.gauge=0;self.summonUsed=true;companySupportSkills(self.co).forEach((_,i)=>self.cds["support_"+i]=2);STRATEGIES.forEach(s=>self.cds[s.id]=2);return buildCpuCandidates(self,foe).every(a=>["attack","guard"].includes(a.type));});
+    test("SP不足時に中技・大技・召喚を選ばない",()=>{const{self,foe}=cpuPair();self.gauge=0;return buildCpuCandidates(self,foe).every(a=>!["mid","big","summon"].includes(a.type));});
+    test("召喚使用済みなら召喚を候補にしない",()=>{const{self,foe}=cpuPair();self.gauge=100;self.summonUsed=true;return !buildCpuCandidates(self,foe).some(a=>a.type==="summon");});
+    test("CD中の支援・戦略を候補にしない",()=>{const{self,foe}=cpuPair();companySupportSkills(self.co).forEach((_,i)=>self.cds["support_"+i]=2);STRATEGIES.forEach(s=>self.cds[s.id]=2);return !buildCpuCandidates(self,foe).some(a=>a.type==="support"||a.type==="strategy");});
+    test("高HPでは回復専用支援の評価が低い",()=>{const a=cpuPair(),b=cpuPair(),move={type:"support",move:{effects:[{kind:"heal",ratio:.12}]}};a.self.hp=a.self.maxHp*.98;b.self.hp=b.self.maxHp*.2;return scoreCpuSupport(move,buildCpuContext(a.self,a.foe)).score<scoreCpuSupport(move,buildCpuContext(b.self,b.foe)).score;});
+    test("危険HPでは有効な回復評価が上がる",()=>{const{self,foe}=cpuPair(),move={type:"support",move:{effects:[{kind:"heal",ratio:.12}]}};self.hp=self.maxHp*.2;const low=scoreCpuSupport(move,buildCpuContext(self,foe)).score;self.hp=self.maxHp*.9;return low>=scoreCpuSupport(move,buildCpuContext(self,foe)).score+20;});
+    test("敵大技予告中は防御評価が上がる",()=>{const{self,foe}=cpuPair();foe.intent={type:"big"};const high=scoreCpuGuard({type:"guard"},buildCpuContext(self,foe)).score;foe.intent=null;return high>scoreCpuGuard({type:"guard"},buildCpuContext(self,foe)).score;});
+    test("属性有利時は攻撃スコアが上がる",()=>{const{self,foe}=cpuPair(),c=buildCpuContext(self,foe);return scoreCpuAttack({type:"attack"},Object.assign({},c,{attrPower:1.3})).score>scoreCpuAttack({type:"attack"},Object.assign({},c,{attrPower:.8})).score;});
+    test("属性不利時は防御スコアが上がる",()=>{const{self,foe}=cpuPair(),c=buildCpuContext(self,foe);return scoreCpuGuard({type:"guard"},Object.assign({},c,{attrPower:.8})).score>scoreCpuGuard({type:"guard"},Object.assign({},c,{attrPower:1.3})).score;});
+    test("市場追い風時は大技評価が上がる",()=>{const{self,foe}=cpuPair(),c=buildCpuContext(self,foe),a={type:"big",move:self.co.big};return scoreCpuSkill(a,Object.assign({},c,{selfMarket:1.1,marketDiff:.1})).score>scoreCpuSkill(a,Object.assign({},c,{selfMarket:.9,marketDiff:-.1})).score;});
+    test("KO可能行動は通常行動より高評価",()=>{const{self,foe}=cpuPair();foe.hp=1;const c=buildCpuContext(self,foe);return scoreCpuSkill({type:"big",move:self.co.big},c).score>=150;});
+    test("CPU判断処理は戦闘状態を変更しない",()=>{const{self,foe}=cpuPair(),before=JSON.stringify([self.hp,self.gauge,self.atb,self.buffs,self.periodic,self.cds,foe.hp,foe.gauge,foe.atb]);const c=buildCpuContext(self,foe);buildCpuCandidates(self,foe).forEach(a=>scoreCpuAction(a,c));return before===JSON.stringify([self.hp,self.gauge,self.atb,self.buffs,self.periodic,self.cds,foe.hp,foe.gauge,foe.atb]);});
+    test("S.battleなしのsimulateBattleでエラーなし",()=>noBattle(()=>{const list=allCompanies();return !!simulateBattle(list[0],list[1]);}));
+    test("候補なしでは通常攻撃へフォールバック",()=>selectCpuAction([],{difficulty:"normal"}).type==="attack");
+    test("全企業で有効なAI人格を返す",()=>allCompanies().every(co=>CPU_AI_PERSONALITIES.has(inferCpuPersonality({co}))));
+    test("easyよりexecutiveの判断誤差が小さい",()=>cpuDifficultyNoise("executive")<cpuDifficultyNoise("easy"));
+    test("cpuDecideは既存action形式を返す",()=>noBattle(()=>{const{self,foe}=cpuPair(),a=cpuDecide(self,foe);return a&&typeof a.type==="string"&&Object.keys(a).every(k=>k==="type"||k==="extra");}));
+    test("AI評価中にexecuteMoveを呼ばない",()=>![buildCpuContext,buildCpuCandidates,estimateCpuDamage,estimateIncomingThreat,scoreCpuAction,scoreCpuAttack,scoreCpuGuard,scoreCpuSkill,scoreCpuSupport,scoreCpuStrategy,scoreCpuSummon,selectCpuAction].some(fn=>fn.toString().includes("executeMove(")));
     console.table(results);
     return results;
   }
