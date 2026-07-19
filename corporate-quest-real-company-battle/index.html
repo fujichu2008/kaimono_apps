@@ -8062,12 +8062,53 @@ function scoreCpuSkill(action,context){
   return row;
 }
 function scoreCpuSupport(action,context){
-  const row=cpuRow(action,20);cpuEffectScore(action.move,context,row);
+  const row=cpuRow(action,12);
+  const effects=cpuEffects(action.move);
+  cpuEffectScore(action.move,context,row);
   const damage=estimateCpuDamage(context.self,context.foe,action.move,context);
-  if(damage>=context.foe.hp*1.1&&damage>0){cpuAdd(row,94,"支援KO");row.emergency=true;}else if(damage>0)cpuAdd(row,Math.min(24,damage/context.foe.maxHp*55),"付随攻撃");
-  if(context.personality==="technical")cpuAdd(row,13,"技術型");
-  if(context.personality==="defensive"&&cpuHas(action.move,["heal","regen","guard","cleanse"]))cpuAdd(row,12,"堅実型");
-  if(context.selfHpRatio>.94&&cpuEffects(action.move).every(effect=>["heal","regen"].includes(effect.kind)))cpuAdd(row,-45,"回復不要");
+  if(damage>=context.foe.hp*1.1&&damage>0){
+    cpuAdd(row,94,"支援KO");
+    row.emergency=true;
+  }else if(damage>0){
+    cpuAdd(row,Math.min(24,damage/context.foe.maxHp*55),"付随攻撃");
+  }
+
+  const hasRecovery=effects.some(effect=>["heal","regen","cleanse","guard"].includes(effect.kind));
+  const hasControl=effects.some(effect=>["stun","poison","atbDrain","drainGauge","dispel"].includes(effect.kind));
+  const recoveryNeeded=
+    context.selfHpRatio<.65||
+    context.lethalRisk||
+    context.selfDebuffs.length>0||
+    context.hasSelfPoison;
+  const controlNeeded=
+    context.foeAtb>=70||
+    context.foeGauge>=80||
+    !!context.foeIntent||
+    context.foeBuffs.length>0;
+  const setupNeeded=effects.some(effect=>
+    effect.kind==="gauge"&&context.selfGauge<60||
+    effect.kind==="atbBoost"&&context.foeAtb>=70||
+    effect.kind==="buff"&&(context.selfHpRatio<.55||context.marketDiff<0)
+  );
+
+  if(context.personality==="technical"&&hasControl)cpuAdd(row,8,"技術型");
+  if(context.personality==="defensive"&&hasRecovery&&recoveryNeeded)cpuAdd(row,9,"堅実型");
+  if(!recoveryNeeded&&!controlNeeded&&!setupNeeded&&damage<=0)cpuAdd(row,-22,"支援急度低");
+  if(context.selfHpRatio>.78&&hasRecovery&&!context.selfDebuffs.length&&!context.hasSelfPoison)cpuAdd(row,-18,"回復優先度低");
+  if(context.basicKoCandidate&&damage<=0)cpuAdd(row,-38,"攻撃で決着可能");
+  if(context.selfMarket>1.05&&context.selfGauge>=40&&damage<=0)cpuAdd(row,-14,"追い風攻撃機会");
+
+  const useCount=Math.max(0,Number(
+    context.self&&
+    context.self.stats&&
+    context.self.stats.strats&&
+    context.self.stats.strats[action.move&&action.move.name]
+  )||0);
+  if(useCount>0)cpuAdd(row,-Math.min(24,useCount*7),"支援連投");
+
+  if(context.selfHpRatio>.94&&effects.length&&effects.every(effect=>["heal","regen"].includes(effect.kind))){
+    cpuAdd(row,-45,"回復不要");
+  }
   return row;
 }
 function scoreCpuStrategy(action,context){
@@ -8127,7 +8168,21 @@ function scoreCpuAction(action,context){
 function selectCpuAction(rows,context){
   if(!rows||!rows.length)return {type:"attack"};
   const noise=cpuDifficultyNoise(context&&context.difficulty);
-  const ranked=rows.map(row=>Object.assign({},row,{adjusted:row.score+(Math.random()*2-1)*noise*(row.emergency ? .18 : 1)})).sort((a,b)=>b.adjusted-a.adjusted);
+  const combatPreference=row=>{
+    if(row.emergency)return 0;
+    const type=row.action&&row.action.type;
+    if(type==="attack")return 7;
+    if(type==="mid"||type==="big")return 5;
+    if(type==="support")return -4;
+    if(type==="strategy")return -3;
+    return 0;
+  };
+  const ranked=rows.map(row=>Object.assign({},row,{
+    adjusted:
+      row.score+
+      combatPreference(row)+
+      (Math.random()*2-1)*noise*(row.emergency ? .18 : 1)
+  })).sort((a,b)=>b.adjusted-a.adjusted);
   let chosen=ranked[0],close=ranked.slice(0,3).filter(row=>ranked[0].adjusted-row.adjusted<=14&&row.score>=ranked[0].score-18);
   if(!ranked[0].emergency&&close.length>1){
     const weights=close.map(row=>Math.exp((row.adjusted-ranked[0].adjusted)/7)),total=weights.reduce((sum,value)=>sum+value,0);
