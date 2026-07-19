@@ -7752,6 +7752,60 @@ function checkKO(){
 }
 
 /* ================================================================
+   9.9 事業再生の再生疲労
+   - 1回目から反動が発生し、乱発するほど回復効率・基礎能力・ATBが急落する。
+   - STRATEGIES本体を再定義せず、既存rstのfxを1回だけラップする。
+================================================================ */
+const BUSINESS_RESTRUCTURE_STAT_KEYS=["atk","def","spd","tech","grw"];
+function businessRestructureBalance(uses){
+  if(uses<=1)return {heal:1,stat:.94,atb:8};
+  if(uses===2)return {heal:.68,stat:.82,atb:16};
+  if(uses===3)return {heal:.38,stat:.65,atb:24};
+  return {heal:.18,stat:.50,atb:30};
+}
+function installBusinessRestructureFatigue(){
+  if(window.__CQ_BUSINESS_RESTRUCTURE_FATIGUE__)return;
+  const strategy=STRATEGIES.find(item=>item&&item.id==="rst");
+  if(!strategy||typeof strategy.fx!=="function")return;
+  const originalFx=strategy.fx;
+  strategy.desc="HPを再生する代わりに再生疲労を負う。使用回数に応じて回復効率、基礎能力、ATBが急激に低下する。";
+  strategy.fx=function(self,foe,ctx){
+    const beforeHp=Math.max(0,Number(self&&self.hp)||0);
+    const originalLogs=originalFx(self,foe,ctx);
+    if(!self||!self.base)return Array.isArray(originalLogs)?originalLogs:[];
+    self.restructureUses=Math.max(0,Math.floor(Number(self.restructureUses)||0))+1;
+    if(!self.restructureOriginalBase){
+      self.restructureOriginalBase={};
+      BUSINESS_RESTRUCTURE_STAT_KEYS.forEach(stat=>{
+        self.restructureOriginalBase[stat]=Math.max(1,Number(self.base[stat])||1);
+      });
+    }
+    const balance=businessRestructureBalance(self.restructureUses);
+    const healed=Math.max(0,(Number(self.hp)||0)-beforeHp);
+    const effectiveHeal=Math.max(0,Math.round(healed*balance.heal));
+    self.hp=Math.min(Number(self.maxHp)||beforeHp+effectiveHeal,beforeHp+effectiveHeal);
+    BUSINESS_RESTRUCTURE_STAT_KEYS.forEach(stat=>{
+      self.base[stat]=Math.max(1,Math.round(self.restructureOriginalBase[stat]*balance.stat));
+    });
+    self.atb=Math.max(0,(Number(self.atb)||0)-balance.atb);
+    const messages=(Array.isArray(originalLogs)?originalLogs:[]).filter(message=>{
+      const text=String(message);
+      return !(text.includes("HP")&&text.includes("回復"));
+    });
+    messages.push(
+      "事業再生 "+self.restructureUses+"回目: 実回復 "+effectiveHeal+
+      " / 基礎能力 "+Math.round(balance.stat*100)+"% / ATB-"+balance.atb
+    );
+    if(self.restructureUses>=3){
+      messages.push("再生疲労が限界域に達し、経営基盤が急激に弱体化");
+    }
+    return messages;
+  };
+  window.__CQ_BUSINESS_RESTRUCTURE_FATIGUE__=true;
+}
+installBusinessRestructureFatigue();
+
+/* ================================================================
    10. CPU判断 (戦況評価型ユーティリティAI)
 ================================================================ */
 const CPU_AI_PERSONALITIES=new Set(["aggressive","defensive","technical","opportunist","balanced"]);
@@ -7981,9 +8035,17 @@ function scoreCpuStrategy(action,context){
     if(context.selfBuffs.some(buff=>buff.stat==="tech"&&Number(buff.turns)>1))cpuAdd(row,-24,"効果重複");
     if(context.personality==="technical")cpuAdd(row,12,"技術型");
   }else if(id==="rst"){
-    cpuAdd(row,(1-context.selfHpRatio)*62,"再構築");
+    const uses=Math.max(0,Math.floor(Number(context.self.restructureUses)||0));
+    const nextBalance=businessRestructureBalance(uses+1);
+    cpuAdd(row,(1-context.selfHpRatio)*62*nextBalance.heal,"再構築");
     if(context.selfDebuffs.length||context.hasSelfPoison)cpuAdd(row,38,"状態回復");
     if(context.selfHpRatio>.86&&!context.selfDebuffs.length&&!context.hasSelfPoison)cpuAdd(row,-36,"不要");
+    if(uses===1)cpuAdd(row,-30,"再生疲労Lv.1");
+    else if(uses===2)cpuAdd(row,-70,"再生疲労Lv.2");
+    else if(uses>=3)cpuAdd(row,-110,"再生限界");
+    if(context.lethalRisk&&context.selfHpRatio<.18){
+      cpuAdd(row,uses>=3?24:46,"緊急再生");
+    }
   }else if(id==="pr"){
     if(context.foeBuffs.length)cpuAdd(row,18+context.foeBuffs.length*7,"敵強化");
     if(context.selfDebuffs.length)cpuAdd(row,18+context.selfDebuffs.length*7,"自社弱体");
