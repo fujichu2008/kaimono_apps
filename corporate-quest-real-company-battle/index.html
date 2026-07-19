@@ -2686,6 +2686,236 @@ const DEFAULT_EXPANSION_20=[
 ];
 COMPANIES.push(...DEFAULT_EXPANSION_20.map(company=>makeRealCompany(company)));
 
+/* ================================================================
+   2.1 各社固有の支援戦術
+   - 各社2種。SP不要だがATB行動を1回消費し、再使用は4〜6行動後。
+   - 回復は最大12%、継続回復・毒は最大4%×3回、停止は最大35%・1回。
+   - motionは既存の共通モーションだけを利用する。
+================================================================ */
+const SUPPORT_EFFECT_KINDS=new Set([
+  "heal","regen","poison","buff","stun","cleanse","guard",
+  "gauge","atbBoost","atbDrain"
+]);
+function supportNumber(value,min,max,fallback){
+  const number=Number(value);
+  return Number.isFinite(number)?Math.max(min,Math.min(max,number)):fallback;
+}
+function normalizeSupportEffect(effect){
+  let raw=effect;
+  if(Array.isArray(effect)){
+    const kind=String(effect[0]||"");
+    if(kind==="heal")raw={kind,ratio:effect[1]};
+    else if(kind==="regen"||kind==="poison")raw={kind,ratio:effect[1],turns:effect[2],label:effect[3]};
+    else if(kind==="buff")raw={kind,target:effect[1],stat:effect[2],mult:effect[3],turns:effect[4],label:effect[5]};
+    else if(kind==="stun")raw={kind,chance:effect[1],largeChance:effect[2],turns:1};
+    else if(kind==="atbDrain"||kind==="atbBoost"||kind==="gauge")raw={kind,amount:effect[1]};
+    else raw={kind};
+  }
+  if(!raw||typeof raw!=="object")return null;
+  const kind=String(raw.kind||"");
+  if(!SUPPORT_EFFECT_KINDS.has(kind))return null;
+  if(kind==="heal")return {kind,target:"self",ratio:supportNumber(raw.ratio,.03,.12,.08)};
+  if(kind==="regen"||kind==="poison")return {
+    kind,target:kind==="poison"?"foe":"self",
+    ratio:supportNumber(raw.ratio,.015,.04,.03),
+    turns:clamp(raw.turns,2,3,3),
+    label:cleanText(raw.label,24,kind==="poison"?"継続損傷":"継続回復")
+  };
+  if(kind==="buff"){
+    const target=raw.target==="foe"?"foe":"self";
+    const stat=["atk","def","spd","tech","grw"].includes(raw.stat)?raw.stat:"def";
+    return {
+      kind,target,stat,
+      mult:target==="foe"
+        ?supportNumber(raw.mult,.80,.95,.88)
+        :supportNumber(raw.mult,1.08,1.20,1.15),
+      turns:clamp(raw.turns,2,3,2),
+      label:cleanText(raw.label,24,target==="foe"?"能力低下":"能力上昇")
+    };
+  }
+  if(kind==="stun")return {
+    kind,chance:supportNumber(raw.chance,.15,.35,.25),
+    largeChance:supportNumber(raw.largeChance,.12,.30,.20),turns:1
+  };
+  if(kind==="atbDrain")return {kind,target:"foe",amount:clamp(raw.amount,8,30,16)};
+  if(kind==="atbBoost")return {kind,target:"self",amount:clamp(raw.amount,8,24,16)};
+  if(kind==="gauge")return {kind,target:"self",amount:clamp(raw.amount,5,18,10)};
+  return {kind,target:"self"};
+}
+function supportPalette(co){
+  return co.attr==="金融"?"green":co.attr==="素材"?"gold":
+    co.attr==="消費"?"red":co.attr==="インフラ"?"cyan":"violet";
+}
+function defaultCompanySupportRows(co){
+  const palette=supportPalette(co);
+  return [
+    [co.name+" 事業継続プロトコル","🛠️","運用資源を再配置し、HP回復と防御上昇を得る。","orbit_"+palette,4,[["heal",.08],["buff","self","def",1.14,2,"事業継続"]]],
+    [co.name+" オペレーション制御","⏱️","業務ノウハウで相手の速度とATBを低下させる。","wave_"+palette,4,[["buff","foe","spd",.88,2,"運用遅延"],["atbDrain",16]]]
+  ];
+}
+function normalizeSupportSkill(raw,index,co){
+  const fallback=defaultCompanySupportRows(co)[index];
+  const source=Array.isArray(raw)?{
+    name:raw[0],ic:raw[1],desc:raw[2],motion:raw[3],cooldown:raw[4],effects:raw[5]
+  }:(raw&&typeof raw==="object"?raw:{});
+  const motion=cleanText(source.motion,40,fallback[3]);
+  const effects=(Array.isArray(source.effects)?source.effects:[])
+    .map(normalizeSupportEffect).filter(Boolean).slice(0,2);
+  const fallbackEffects=fallback[5].map(normalizeSupportEffect).filter(Boolean);
+  const narration=source.narration&&typeof source.narration==="object"
+    ?{tone:COMPANY_TONES.has(source.narration.tone)?source.narration.tone:"serious",text:cleanText(source.narration.text,240,source.desc||fallback[2])}
+    :{tone:"serious",text:cleanText(source.desc,240,fallback[2])};
+  return {
+    id:"support-"+(index+1),
+    name:cleanText(source.name,32,fallback[0]),
+    ic:cleanText(source.ic,8,fallback[1]),
+    desc:cleanText(source.desc,120,fallback[2]),
+    motion:MOTIONS[motion]?motion:fallback[3],
+    cooldown:clamp(source.cooldown,4,6,fallback[4]),
+    cost:0,power:1,
+    effects:effects.length?effects:fallbackEffects,
+    narration
+  };
+}
+function attachCompanySupportSkills(company,rawSupport){
+  if(!company)return company;
+  const source=Array.isArray(rawSupport)&&rawSupport.length
+    ?rawSupport
+    :(BUILTIN_SUPPORT_ROWS[company.id]||defaultCompanySupportRows(company));
+  company.supportSkills=[0,1].map(index=>normalizeSupportSkill(source[index],index,company));
+  return company;
+}
+function companySupportSkills(company){
+  if(!company)return [];
+  if(!Array.isArray(company.supportSkills)||company.supportSkills.length!==2){
+    attachCompanySupportSkills(company,company.supportSkills);
+  }
+  return company.supportSkills;
+}
+const BUILTIN_SUPPORT_ROWS={};
+Object.assign(BUILTIN_SUPPORT_ROWS,{
+  toyota:[
+    ["アンドン緊急停止","🚨","異常工程を止め、相手を一時停止・減速させる。","wave_cyan",5,[["stun",.30,.24],["buff","foe","spd",.88,2,"工程停止"]]],
+    ["ジャストインタイム補給","🚚","必要資源を届け、HP回復とリジェネを得る。","orbit_green",4,[["heal",.09],["regen",.03,3,"JIT回復"]]]
+  ],
+  ntt:[
+    ["冗長ルート切替","🔀","迂回回線で防御と継続回復を得る。","orbit_cyan",4,[["buff","self","def",1.16,3,"冗長化"],["regen",.03,3,"回線復旧"]]],
+    ["トラフィックシェーピング","📡","相手の帯域を絞り、速度とATBを下げる。","wave_violet",4,[["buff","foe","spd",.85,2,"帯域制限"],["atbDrain",18]]]
+  ],
+  mufg:[
+    ["流動性バックアップライン","🏦","緊急融資枠でHP回復とリジェネを得る。","orbit_green",4,[["heal",.10],["regen",.03,3,"流動性供給"]]],
+    ["統合リスクヘッジ","🛡️","弱体を解除し、防御力を高める。","orbit_green",4,[["cleanse"],["buff","self","def",1.18,3,"リスクヘッジ"]]]
+  ],
+  nipponsteel:[
+    ["予防保全シャットダウン","🔧","短時間停止でHPと防御を立て直す。","orbit_gold",4,[["heal",.08],["buff","self","def",1.17,3,"予防保全"]]],
+    ["高熱疲労","🌡️","継続損傷と設備スローを与える。","pillar_gold",5,[["poison",.032,3,"高熱疲労"],["buff","foe","spd",.88,2,"熱負荷"]]]
+  ],
+  sony:[
+    ["ファームウェア・リカバリー","🧩","弱体を解除し、技術力を再起動する。","orbit_violet",4,[["cleanse"],["buff","self","tech",1.18,3,"再調整"]]],
+    ["フォーカスロック","🎯","一時停止の可能性とATB後退を与える。","beam_violet",5,[["stun",.28,.22],["atbDrain",18]]]
+  ],
+  softbankg:[
+    ["ポートフォリオ再配分","🔄","弱体を解除し、HPを立て直す。","orbit_violet",4,[["cleanse"],["heal",.10]]],
+    ["ハイパーグロース・モード","🚀","攻撃力と速度を短時間高める。","tornado_violet",5,[["buff","self","atk",1.18,2,"成長集中"],["buff","self","spd",1.13,2,"意思決定加速"]]]
+  ],
+  jtb:[
+    ["旅程リカバリー・デスク","🧳","代替手配でHP回復とリジェネを得る。","orbit_red",4,[["heal",.09],["regen",.03,3,"代替手配"]]],
+    ["混雑分散オペレーション","🗺️","相手の速度とATBを下げる。","wave_red",4,[["buff","foe","spd",.83,2,"混雑誘導"],["atbDrain",18]]]
+  ],
+  iris:[
+    ["即断カイゼン会議","💡","速度を高め、SPも補給する。","thrust_gold",4,[["buff","self","spd",1.18,3,"即断即決"],["gauge",10]]],
+    ["在庫バッファ展開","📦","防御上昇と継続回復を得る。","orbit_gold",4,[["buff","self","def",1.16,3,"在庫防壁"],["regen",.03,3,"補充継続"]]]
+  ]
+});
+Object.assign(BUILTIN_SUPPORT_ROWS,{
+  google:[
+    ["SREオートヒール","🛠️","障害を自動復旧し、HP回復とリジェネを得る。","orbit_violet",4,[["heal",.08],["regen",.04,3,"自動復旧"]]],
+    ["レートリミット","⏱️","相手の速度とATBを制限する。","beam_violet",4,[["buff","foe","spd",.84,2,"要求制限"],["atbDrain",20]]]
+  ],
+  microsoft:[
+    ["Patch Tuesday","🪟","弱体を除去し、防御力を高める。","orbit_cyan",4,[["cleanse"],["buff","self","def",1.16,3,"更新適用"]]],
+    ["Azureオートスケール","☁️","技術力と速度を高める。","pillar_cyan",4,[["buff","self","tech",1.18,3,"計算資源増強"],["buff","self","spd",1.12,2,"自動拡張"]]]
+  ],
+  gmopepabo:[
+    ["スナップショット復元","💾","HPを回復し、弱体を解除する。","orbit_violet",4,[["heal",.09],["cleanse"]]],
+    ["アクセス急増バースト","📈","速度とATBを一気に高める。","thrust_violet",4,[["buff","self","spd",1.18,2,"アクセス加速"],["atbBoost",18]]]
+  ],
+  uuum:[
+    ["コメント・モデレーション","🧹","弱体を除去し、防御力を高める。","orbit_violet",4,[["cleanse"],["buff","self","def",1.15,3,"モデレーション"]]],
+    ["トレンド横取り","📱","相手の攻撃力とATBを下げる。","tornado_violet",4,[["buff","foe","atk",.86,2,"話題分散"],["atbDrain",16]]]
+  ],
+  apple:[
+    ["クローズド・エコシステム","🔒","防御上昇とリジェネを得る。","orbit_red",4,[["buff","self","def",1.18,3,"囲い込み防壁"],["regen",.03,3,"サービス継続"]]],
+    ["Neural Engine Boost","🧠","技術力と速度を高める。","beam_red",4,[["buff","self","tech",1.18,3,"端末AI強化"],["buff","self","spd",1.12,2,"処理高速化"]]]
+  ],
+  amazon:[
+    ["Prime緊急配送","🚚","HPを回復し、ATBを前進させる。","thrust_red",4,[["heal",.09],["atbBoost",16]]],
+    ["キュー・スロットリング","📦","相手の速度とATBを低下させる。","wave_red",4,[["buff","foe","spd",.84,2,"待ち行列"],["atbDrain",20]]]
+  ],
+  foodlife:[
+    ["鮮度ローテーション","🐟","HP回復とリジェネを得る。","orbit_red",4,[["heal",.08],["regen",.03,3,"鮮度維持"]]],
+    ["レーン渋滞","🍣","相手を減速し、一時停止させることがある。","tornado_red",5,[["buff","foe","spd",.82,2,"レーン渋滞"],["stun",.25,.20]]]
+  ],
+  rizap:[
+    ["chocoZAPクイックケア","🏪","短時間でHPを大きく回復する。","orbit_red",4,[["heal",.12]]],
+    ["結果にコミット","🏋️","攻撃力を高め、リジェネを得る。","thrust_red",4,[["buff","self","atk",1.18,3,"コミット"],["regen",.03,3,"ボディメイク"]]]
+  ]
+});
+Object.assign(BUILTIN_SUPPORT_ROWS,{
+  siemens:[
+    ["予知保全プログラム","🧰","HP回復と防御上昇を得る。","orbit_cyan",4,[["heal",.08],["buff","self","def",1.17,3,"予知保全"]]],
+    ["セーフティ・インターロック","⛔","一時停止の可能性と攻撃低下を与える。","pillar_cyan",5,[["stun",.30,.24],["buff","foe","atk",.88,2,"安全停止"]]]
+  ],
+  maersk:[
+    ["緊急リルート","🧭","弱体を解除し、速度を高める。","wave_cyan",4,[["cleanse"],["buff","self","spd",1.15,3,"航路再設定"]]],
+    ["港湾滞留","⚓","相手の速度とATBを大きく落とす。","wave_cyan",4,[["buff","foe","spd",.80,2,"港湾滞留"],["atbDrain",22]]]
+  ],
+  solaseed:[
+    ["ターンアラウンド整備","🔧","HPを回復し、弱体を解除する。","orbit_cyan",4,[["heal",.08],["cleanse"]]],
+    ["ひなた色テールウインド","☀️","速度とATBを一気に高める。","thrust_cyan",4,[["buff","self","spd",1.20,2,"追い風"],["atbBoost",18]]]
+  ],
+  willer:[
+    ["予備車両ディスパッチ","🚌","HP回復とリジェネを得る。","orbit_cyan",4,[["heal",.08],["regen",.03,3,"代替輸送"]]],
+    ["MaaS遅延制御","📲","相手の速度とATBを下げる。","wave_cyan",4,[["buff","foe","spd",.83,2,"乗継遅延"],["atbDrain",18]]]
+  ],
+  exxonmobil:[
+    ["戦略備蓄タンク","🛢️","HPを回復し、防御力を高める。","orbit_gold",4,[["heal",.10],["buff","self","def",1.17,3,"戦略備蓄"]]],
+    ["重質残渣コーティング","☣️","継続損傷と攻撃低下を与える。","pillar_gold",5,[["poison",.035,3,"粘性損耗"],["buff","foe","atk",.90,2,"出力低下"]]]
+  ],
+  basf:[
+    ["触媒最適化","⚗️","技術力と速度を高める。","orbit_gold",4,[["buff","self","tech",1.18,3,"触媒反応"],["buff","self","spd",1.12,2,"反応加速"]]],
+    ["反応阻害剤","🧪","継続損傷と防御低下を与える。","tornado_gold",5,[["poison",.03,3,"反応阻害"],["buff","foe","def",.88,2,"表面劣化"]]]
+  ],
+  musashipaint:[
+    ["高耐候コーティング","🛡️","多層塗膜で防御力を高める。","orbit_gold",4,[["buff","self","def",1.20,3,"保護塗膜"]]],
+    ["溶剤ミスト","🌫️","継続損傷と攻撃低下を与える。","wave_gold",5,[["poison",.025,3,"溶剤ばく露"],["buff","foe","atk",.85,2,"視界不良"]]]
+  ],
+  nihonrikagaku:[
+    ["キットパス・ケア","🖍️","弱体を解除し、HPを回復する。","orbit_gold",4,[["cleanse"],["heal",.10]]],
+    ["ダストレス・フィールド","🧑‍🏫","防御を高め、相手の攻撃を鈍らせる。","wave_gold",4,[["buff","self","def",1.15,3,"粉じん抑制"],["buff","foe","atk",.88,2,"視界低下"]]]
+  ]
+});
+Object.assign(BUILTIN_SUPPORT_ROWS,{
+  jpmorgan:[
+    ["流動性バックストップ","💵","HP回復とリジェネを得る。","orbit_green",4,[["heal",.10],["regen",.03,3,"資金供給"]]],
+    ["全社ストレステスト","📊","弱体を解除し、防御力を高める。","orbit_green",4,[["cleanse"],["buff","self","def",1.18,3,"耐性確認"]]]
+  ],
+  visa:[
+    ["不正取引ブロック","🔐","一時停止の可能性と攻撃低下を与える。","beam_green",5,[["stun",.28,.22],["buff","foe","atk",.88,2,"取引拒否"]]],
+    ["即時オーソリ承認","⚡","速度とATBを高める。","thrust_green",4,[["buff","self","spd",1.18,2,"即時認証"],["atbBoost",20]]]
+  ],
+  finatext:[
+    ["APIロールバック","↩️","弱体を解除し、HPを回復する。","orbit_green",4,[["cleanse"],["heal",.08]]],
+    ["弾力的台帳","📚","技術力とリジェネを得る。","orbit_green",4,[["buff","self","tech",1.18,3,"台帳拡張"],["regen",.03,3,"自動整合"]]]
+  ],
+  robotpayment:[
+    ["リトライキュー","🔁","リジェネとATB前進を得る。","orbit_green",4,[["regen",.04,3,"自動再試行"],["atbBoost",14]]],
+    ["督促ロック","🧾","相手を減速し、一時停止させることがある。","beam_green",5,[["buff","foe","spd",.84,2,"督促対応"],["stun",.28,.22]]]
+  ]
+});
+
+COMPANIES.forEach(company=>attachCompanySupportSkills(company,BUILTIN_SUPPORT_ROWS[company.id]));
+
 /* 企業固有技ナレーション
    - 中技(mid)・大技(big)ごとに独立した候補を持つ。
    - 実在企業への事実断定ではなく、事業特性と会社員あるあるを使ったゲーム内風刺。
@@ -3629,8 +3859,10 @@ function loadCustomCompanies(){
     :(parsed&&Array.isArray(parsed.companies)?parsed.companies:[]);
   const seen=new Set();
   return source.map(item=>{
-    try{return normalizeCompanyRecord(item,{custom:true});}
-    catch(_){return null;}
+    try{
+      const company=normalizeCompanyRecord(item,{custom:true});
+      return attachCompanySupportSkills(company,item.supportSkills);
+    }catch(_){return null;}
   }).filter(co=>{
     if(!co||seen.has(co.id))return false;
     seen.add(co.id);
@@ -3640,7 +3872,11 @@ function loadCustomCompanies(){
 function saveCustomCompanies(){
   const payload={
     schemaVersion:COMPANY_SCHEMA_VERSION,
-    companies:customCompanies.map(companyToStorageRecord)
+    companies:customCompanies.map(company=>{
+      const record=companyToStorageRecord(company);
+      record.supportSkills=cloneJsonData(companySupportSkills(company));
+      return record;
+    })
   };
   try{
     localStorage.setItem(LS_KEY,JSON.stringify(payload));
@@ -4326,7 +4562,11 @@ function buildForgePrompt(){
     tick:"SMP",
     brand:"#4dc3ff",
     desc:"企業の事業特性を簡潔に説明",
-    tags:["製造","技術型"]
+    tags:["製造","技術型"],
+    supportSkills:[
+      {name:"企業固有の回復スキル名",ic:"🩹",desc:"事業特性を使って回復する説明",motion:"orbit_green",cooldown:5,effects:[{kind:"heal",ratio:.09}],narration:{tone:"serious",text:"企業特性と回復効果を結ぶ固有ナレーション"}},
+      {name:"企業固有の状態制御スキル名",ic:"⏩",desc:"事業特性を使って状態異常または能力強化を行う説明",motion:"wave_cyan",cooldown:5,effects:[{kind:"buff",target:"foe",stat:"spd",mult:.84,turns:2,label:"固有スロー"}],narration:{tone:"serious",text:"企業特性と状態制御効果を結ぶ固有ナレーション"}}
+    ]
   };
   if(includeClassify){
     sample.attr="素材";
@@ -4397,6 +4637,7 @@ function buildForgePrompt(){
 
   const requested=[
     "基本情報（id / name / country / short / ind / logo / tick / brand / desc / tags）",
+    "各社固有の支援戦術を必ず2つ（supportSkills）。回復・リジェネ・状態異常・能力強化から企業特性に合う2種類",
     includeFinance?"現地通貨の財務スナップショットと円換算条件（fin）":"財務スナップショットは省略",
     includeStats?"円換算後の財務から能力値6項目をアプリ側で算出（statusMode=finance、stは出力しない）":"能力値は省略し、アプリ側の自動補完を利用",
     includeMoves?"中技・大技（mid / big）":"中技・大技は省略し、アプリ側の標準技を利用",
@@ -4440,6 +4681,9 @@ function buildForgePrompt(){
     "12. 外国企業のcapitalLocalとrevenueLocalは現地通貨の10億通貨単位、exchangeRateToJPYは1通貨単位あたりの円、exchangeRateDateは換算基準日です。capitalとrevenueの円換算値は出力せず、アプリ側に計算させてください。",
     "13. 円換算レートは、財務諸表の期末日または利用可能な直近基準日の代表レートを使い、sourceに公式年次報告書名と為替レート資料名をプレーンテキストで記載してください。確認できないレートを推測で作らないでください。",
     "14. 円換算財務から能力値を算出する企業はstatusModeをfinanceとし、stは出力しないでください。外国通貨企業は必ずstatusMode=financeにしてください。",
+    "14-1. supportSkillsは各社ちょうど2つ必須です。企業ごとに固有名を付け、heal・regen・poison・stun・atbDrain・atbBoost・gauge・cleanse・buff・guardから異なる役割を組み合わせてください。",
+    "14-2. healはratio 0.03〜0.12、regenとpoisonはratio 0.015〜0.04かつturns 2〜3、stunはturns 1かつchance 0.15〜0.35、cooldownは4〜6にしてください。直接大ダメージを与える支援技は禁止です。",
+    "14-3. supportSkillsのmotionは既存の共通motionから選び、costは0、powerは1としてください。SP不要の代わりに1行動と再使用待ちを使います。",
     "15. 実在企業の場合、企業説明・財務値・出典を事実と推測に分け、確認できない値を捏造しないでください。sourceには公式資料名を優先し、不確かな場合は「AI生成・要確認」と明記してください。",
     "16. 実在企業への違法行為、政治関係、反社会的関係、品質問題などを事実として創作しないでください。風刺は一般的な会社員あるあると事業特性の範囲に限定してください。",
     "17. 出力直前に、生成した全企業を追加禁止企業一覧と再照合してください。同一企業、表記ゆれ、略称違い、グループ名違いが1社でもあれば、その企業だけを別の実在企業へ置き換えてください。",
@@ -4460,7 +4704,9 @@ function buildForgePrompt(){
     "- 中技はcost=40・power=2、大技はcost=100・power=3を基本とし、effectsは各技1〜4個にしてください。",
     "- motionは「パターン_色」。パターン="+MOTION_PATTERNS.join("|")+"、色="+Object.keys(MOTION_PALETTES).join("|")+"。",
     "- narration.toneの許容値: "+Array.from(COMPANY_TONES).join(" / "),
-    "- effect.kindの許容値: "+Array.from(COMPANY_EFFECT_KINDS).join(" / "),
+    "- 通常技effect.kindの許容値: "+Array.from(COMPANY_EFFECT_KINDS).join(" / "),
+    "- supportSkills専用effect.kind: heal / regen / poison / stun / atbDrain / atbBoost / gauge / cleanse / buff / guard。",
+    "- supportSkillsは必ず2つ。name / ic / desc / motion / cooldown / effects / narrationを持たせてください。",
     "- effectで使える主な値: target=self|foe、stat=atk|def|spd|tech|grw、mult、flat、techScale、spdScale、pierce、ratio、amount、chance、largeChance、turns、hits、low、high、vsLarge、vsAttr、vsAttrMult、label。",
     "- damageはmultを中心に設計し、multiはhitsとmult、buffはtarget/stat/mult/turns/labelを必ず持たせてください。",
     "- narration.textは240文字以内。技の名前を言い換えるだけでなく、企業の事業構造とゲーム効果がつながる説明にしてください。",
@@ -4809,6 +5055,10 @@ function buildForgeMergerPrompt(){
       brand:"#7f6cff",
       desc:companyA.name+"と"+companyB.name+"の事業特性を統合した、ゲーム内だけに存在する架空企業。",
       tags:["架空合併","AI合併",companyA.name,companyB.name],
+      supportSkills:[
+        {name:"統合回復スキル名",ic:"🩹",desc:"両社の強みを使う回復支援戦術",motion:"orbit_green",cooldown:5,effects:[{kind:"heal",ratio:.10}],narration:{tone:"serious",text:"両社の強みと回復効果を結ぶ説明"}},
+        {name:"統合状態制御スキル名",ic:"🔗",desc:"両社の強みを使う状態制御支援戦術",motion:"wave_violet",cooldown:5,effects:[{kind:"buff",target:"foe",stat:"spd",mult:.84,turns:2,label:"統合スロー"}],narration:{tone:"gold",text:"両社の強みと状態制御効果を結ぶ説明"}}
+      ],
       attr:companyA.attr,
       summon:mergedCapital>.3?"politician":"jftc",
       fin:{
@@ -4902,6 +5152,8 @@ function buildForgeMergerPrompt(){
     "- finはJPYとし、capitalLocal、revenueLocal、margin、growth、employeesには上記のゲーム内統合基準値を使用してください。",
     "- fin.periodはゲーム内仮想統合値、fin.metricは仮想連結売上高、fin.sourceはAI生成・架空合併企業にしてください。",
     "- tagsには架空合併、AI合併、両方の元企業名を入れてください。",
+    "- supportSkillsをちょうど2つ作り、両社の事業特性を組み合わせた固有名・説明・ナレーションを付けてください。",
+    "- supportSkillsのcooldownは4〜6、healは最大12%、regenとpoisonは1回4%以下・2〜3ターン、stunは1ターン・成功率35%以下にしてください。",
     "- attrは"+COMPANY_ATTRS.join(" / ")+"から、統合後の主力事業に最適な1つを選んでください。",
     "- summonは"+COMPANY_SUMMONS.join(" / ")+"から選び、仮想資本金3億円超ならpolitician、3億円以下ならjftcを基本にしてください。",
     "- 中技はcost=40・power=2、大技はcost=100・power=3にしてください。",
@@ -5936,6 +6188,7 @@ function openDetail(id){
     conversionNote+"\n"+
     "能力値算出 "+(c.statusMode==="finance"?"円換算財務ベース":"手動・指定値ベース")+"\n"+
     "中技: "+c.mid.name+"（SP40）\n大技: "+c.big.name+"（SP100）\n"+
+    "支援戦術: "+companySupportSkills(c).map(skill=>skill.name).join(" / ")+"（SP不要・再使用待ちあり）\n"+
     "召喚: "+SUMMONS[c.summon].name+"（SP60・1回）\n出典メモ: "+(fin.source||"custom");
   $("sheetDetail").classList.add("open");
 }
@@ -5985,6 +6238,7 @@ function mkFighter(co,side){
     guardHits:0,preciseGuard:false,currentActionType:null,
     atb:0,readyAt:0,intent:null,
     stun:0,summon:null,summonUsed:false,
+    periodic:[],
     cds:{},
     stats:{dealt:0,maxHit:0,strats:{},guards:0,summons:0}};
 }
@@ -6009,6 +6263,30 @@ function addBuff(f,stat,mult,turns,label,meta){
   f.buffs.push(buff);
   glSyncProtestFx(f);
   return buff;
+}
+function addPeriodic(f,kind,ratio,turns,label){
+  if(!Array.isArray(f.periodic))f.periodic=[];
+  f.periodic=f.periodic.filter(effect=>effect.kind!==kind);
+  f.periodic.push({kind,ratio:Math.max(.01,Math.min(.04,finiteNumber(ratio,.03))),turns:clamp(turns,1,3,3),label:cleanText(label,24,kind==="regen"?"リジェネ":"継続損傷")});
+}
+function tickPeriodic(f,visual){
+  if(!f||!Array.isArray(f.periodic)||!f.periodic.length)return;
+  const messages=[];
+  f.periodic.forEach(effect=>{
+    if(effect.kind==="regen"){
+      const before=f.hp,amount=Math.max(1,Math.round(f.maxHp*effect.ratio));
+      f.hp=Math.min(f.maxHp,f.hp+amount);
+      if(f.hp>before)messages.push(effect.label+" HP+"+(f.hp-before));
+    }else if(effect.kind==="poison"){
+      const damage=Math.max(1,Math.round(f.maxHp*effect.ratio));
+      f.hp=Math.max(0,f.hp-damage);
+      messages.push(effect.label+" "+damage+"ダメージ");
+      if(visual!==false){fxHit(f,damage,false,1);arenaFlash("#8b5cf6");}
+    }
+    effect.turns--;
+  });
+  f.periodic=f.periodic.filter(effect=>effect.turns>0);
+  if(visual!==false)messages.forEach(message=>pushLog(f.side==="p"?"me":"en",f.name+": "+message));
 }
 function eff(f,stat){
   let v=f.base[stat];
@@ -6195,6 +6473,8 @@ function executeMove(self,foe,move,ctx,visual){
     else if(e.kind==="riskDamage"){const mult=e.low+Math.random()*(e.high-e.low);const d=ctx.dealDamage(self,foe,{mult});total+=d;}
     else if(e.kind==="multi"){for(let i=0;i<e.hits;i++)total+=ctx.dealDamage(self,foe,{mult:e.mult});}
     else if(e.kind==="heal"){const h=ctx.heal(self,e.ratio);logs.push("HP "+h+"回復");}
+    else if(e.kind==="regen"){addPeriodic(target,"regen",e.ratio,e.turns,e.label);logs.push(target.name+"に"+e.label+" "+e.turns+"T");}
+    else if(e.kind==="poison"){addPeriodic(target,"poison",e.ratio,e.turns,e.label);logs.push(target.name+"に"+e.label+" "+e.turns+"T");}
     else if(e.kind==="gauge"){self.gauge=Math.min(100,self.gauge+e.amount);logs.push("SP+"+e.amount);}
     else if(e.kind==="drainGauge"){foe.gauge=Math.max(0,foe.gauge-e.amount);logs.push(foe.name+" SP-"+e.amount);}
     else if(e.kind==="atbDrain"){
@@ -6207,8 +6487,10 @@ function executeMove(self,foe,move,ctx,visual){
     }
     else if(e.kind==="cleanse"){
       const before=self.buffs.length;
+      const periodicBefore=Array.isArray(self.periodic)?self.periodic.length:0;
       self.buffs=self.buffs.filter(b=>b.mult>=1);
-      if(before!==self.buffs.length)logs.push("弱体効果を解除");
+      if(Array.isArray(self.periodic))self.periodic=self.periodic.filter(effect=>effect.kind!=="poison");
+      if(before!==self.buffs.length||periodicBefore!==(self.periodic||[]).length)logs.push("弱体効果を解除");
     }
     else if(e.kind==="dispel"){
       const before=target.buffs.length;
@@ -6533,6 +6815,7 @@ function actionDuration(act){
   if(act.type==="guard")return 500;
   if(act.type==="attack")return 850;
   if(act.type==="strategy")return 900;
+  if(act.type==="support")return 1100;
   if(act.type==="mid")return 1150;
   if(act.type==="big"||act.type==="skill")return 2400;
   if(act.type==="summon")return 2350;
@@ -6540,12 +6823,13 @@ function actionDuration(act){
 }
 function actionNeedsDeferredImpact(self,act){
   if(!self||!act||self.stun>0)return false;
-  return ["attack","strategy","mid","big","skill"].includes(act.type);
+  return ["attack","strategy","support","mid","big","skill"].includes(act.type);
 }
 function actionImpactDelay(self,act,duration){
   const type=act&&act.type;
   let delay=90;
   if(type==="attack"||type==="strategy")delay=560;
+  else if(type==="support")delay=720;
   else if(type==="mid")delay=800;
   else if(type==="big"||type==="skill"){
     /* 収録企業の固有大技は約2.3秒、カスタム企業の汎用大技は約1.1秒で着地する */
@@ -6626,7 +6910,9 @@ function finishATBAction(self){
   const B=S.battle;
   if(!B||B.over)return;
   self.currentActionType=null;
+  tickPeriodic(self,true);
   tickBuffs(self);
+  if(self.hp<=0){renderBattle();checkKO();return;}
   Object.keys(self.cds).forEach(k=>{if(self.cds[k]>0)self.cds[k]--;});
   B.turn++;
   advanceMarketCycle(B,true);
@@ -6697,6 +6983,16 @@ function execAction(self,foe,act,options){
     self.cds[st.id]=st.cd;self.stats.strats[st.name]=(self.stats.strats[st.name]||0)+1;
     st.fx(self,foe,CTX).forEach(m=>pushLog(cls,m));return;
   }
+  if(act.type==="support"){
+    const index=clamp(act.extra,0,1,0),move=companySupportSkills(self.co)[index],cdKey="support_"+index;
+    if(!move||self.cds[cdKey]>0)return;
+    if(visualOnly){fxSkill(self,move.ic+" "+move.name,false,move.name,"support",move.narration);playMoveVisual(self,foe,move);SE.skill();return;}
+    self.cds[cdKey]=move.cooldown+1;
+    self.stats.strats[move.name]=(self.stats.strats[move.name]||0)+1;
+    if(!skipVisual){fxSkill(self,move.ic+" "+move.name,false,move.name,"support",move.narration);SE.skill();}
+    executeMove(self,foe,move,CTX,!skipVisual).forEach(message=>pushLog(cls,self.name+": "+message));
+    return;
+  }
   if(act.type==="summon"){
     if(deploySummon(self)){
       const ally=SUMMONS[self.co.summon];
@@ -6744,6 +7040,26 @@ function checkKO(){
 /* ================================================================
    10. CPU判断 (状況を見て選択)
 ================================================================ */
+function cpuChooseSupportSkill(self,foe){
+  let best={index:-1,score:0};
+  companySupportSkills(self.co).forEach((skill,index)=>{
+    if(self.cds["support_"+index]>0)return;
+    let score=0,hpR=self.hp/self.maxHp;
+    (skill.effects||[]).forEach(effect=>{
+      if(effect.kind==="heal"&&hpR<.62)score+=hpR<.35?7:4;
+      if(effect.kind==="regen"&&hpR<.78)score+=hpR<.45?6:3;
+      if(effect.kind==="cleanse"&&(self.buffs.some(b=>b.mult<1)||(self.periodic||[]).some(p=>p.kind==="poison")))score+=7;
+      if(effect.kind==="stun"&&foe.atb>=72)score+=5;
+      if(effect.kind==="atbDrain"&&foe.atb>=58)score+=4;
+      if(effect.kind==="poison"&&!(foe.periodic||[]).some(p=>p.kind==="poison"))score+=3;
+      if(effect.kind==="buff")score+=effect.target==="foe"?(foe.atb>=45?3:1):3;
+      if(effect.kind==="guard"&&foe.atb>=65)score+=4;
+      if(effect.kind==="atbBoost"||effect.kind==="gauge")score+=2;
+    });
+    if(score>best.score)best={index,score};
+  });
+  return best.score>=6||best.score>=3&&Math.random()<.42?best.index:-1;
+}
 function cpuDecide(self,foe){
   const hpR=self.hp/self.maxHp;
   const selfMarket=marketAttrMultiplier(self.co.attr);
@@ -6751,6 +7067,8 @@ function cpuDecide(self,foe){
   const marketAdvantage=selfMarket-foeMarket;
 
   if(self.stun>0)return {type:"attack"};
+  const supportIndex=cpuChooseSupportSkill(self,foe);
+  if(supportIndex>=0)return {type:"support",extra:supportIndex};
   if(!self.summonUsed&&self.gauge>=60&&(hpR<.72||foe.co.tier==="large")&&Math.random()<.55)return {type:"summon"};
   if(hpR<.3&&!(self.cds.rst>0)&&Math.random()<.72)return {type:"strategy",extra:"rst"};
 
@@ -6853,6 +7171,11 @@ function renderBuffs(el,f){
     s.textContent=b.effectId==="protest"
       ?"☁ デモ隊 ATK-22% "+b.turns+"T"
       :b.label+"("+b.turns+")";
+    el.appendChild(s);
+  });
+  (f.periodic||[]).forEach(effect=>{
+    const s=document.createElement("span");s.className="buff "+(effect.kind==="regen"?"up":"dn2");
+    s.textContent=(effect.kind==="regen"?"♻ ":"☠ ")+effect.label+"("+effect.turns+")";
     el.appendChild(s);
   });
 }
@@ -7156,14 +7479,45 @@ function narrateBattle(kind,data){
 }
 
 /* ---------- コマンドUI ---------- */
+function setStrategySheetTitle(text){
+  const title=$("sheetStrat")&&$("sheetStrat").querySelector("h3");
+  if(title)title.textContent=text;
+}
+function renderSupportSheet(){
+  const B=S.battle;if(!B)return;
+  const p=B.p,list=$("stratList");list.textContent="";setStrategySheetTitle("支援戦術");
+  const note=document.createElement("div");note.className="market-strategy-note";
+  note.innerHTML="<b>RECOVERY / CONTROL / GUARD</b><span>基本防御と各社2つの固有支援スキル。SP不要ですが、1行動と再使用待ちを使います。</span>";
+  list.appendChild(note);
+  const guard=document.createElement("button");guard.className="strat-item";
+  guard.innerHTML="<span class=ic>🛡️</span><span class=t><b>リスクコントロール</b><span>次の攻撃を65%軽減しSP+20。敵大技を読めば精密防御。</span></span><span class=cd>READY</span>";
+  guard.addEventListener("click",()=>{SE.select();playerCommand("guard");});list.appendChild(guard);
+  const section=document.createElement("div");section.className="strat-section";section.textContent="COMPANY SUPPORT SKILLS";list.appendChild(section);
+  companySupportSkills(p.co).forEach((move,index)=>{
+    const remaining=Math.max(0,p.cds["support_"+index]||0),button=document.createElement("button");
+    button.className="strat-item "+(index===0?"mid":"big");button.disabled=remaining>0;
+    const icon=document.createElement("span");icon.className="ic";icon.textContent=move.ic;
+    const copy=document.createElement("span");copy.className="t";
+    const name=document.createElement("b");name.textContent=move.name;
+    const desc=document.createElement("span");desc.textContent=move.desc;copy.append(name,desc);
+    const state=document.createElement("span");state.className="cd";state.textContent=remaining?"CD "+remaining:"READY";
+    button.append(icon,copy,state);button.addEventListener("click",()=>{SE.select();playerCommand("support",index);});list.appendChild(button);
+  });
+}
 $("cmdAttack").addEventListener("click",()=>playerCommand("attack"));
-$("cmdGuard").addEventListener("click",()=>playerCommand("guard"));
+$("cmdGuard").textContent="🛡 支援戦術";
+$("cmdGuard").setAttribute("aria-label","基本防御と各社固有の回復・状態異常・強化スキル");
+$("cmdGuard").addEventListener("click",()=>{
+  const B=S.battle;if(!B||B.over||S.inputLock||S.paused||B.p.atb<100)return;
+  SE.select();renderSupportSheet();$("sheetStrat").classList.add("open");
+});
 $("cmdStrategy").addEventListener("click",()=>{
   const B=S.battle;
   if(!B||B.over||S.inputLock||S.paused||B.p.atb<100)return;
   SE.select();renderStratSheet();$("sheetStrat").classList.add("open");
 });
 function renderStratSheet(){
+  setStrategySheetTitle("経営戦略");
   const B=S.battle,p=B.p,list=$("stratList");list.textContent="";
   const market=B.market&&B.market.event;
   if(market){
@@ -7672,6 +8026,11 @@ function simulateBattle(coA,coB){
           s.bound=false;
         }
       }else if(act.type==="attack")silent.dealDamage(s,f,{mult:1});
+      else if(act.type==="support"){
+        const index=clamp(act.extra,0,1,0),move=companySupportSkills(s.co)[index],cdKey="support_"+index;
+        if(move&&!(s.cds[cdKey]>0)){s.cds[cdKey]=move.cooldown+1;executeMove(s,f,move,silent,false);}
+        else silent.dealDamage(s,f,{mult:1});
+      }
       else if((act.type==="mid"||act.type==="big")&&s.gauge>=s.co[act.type].cost){
         s.gauge-=s.co[act.type].cost;executeMove(s,f,s.co[act.type],silent,false);
       }else if(act.type==="summon"&&!s.summonUsed&&s.gauge>=60){
@@ -7680,6 +8039,7 @@ function simulateBattle(coA,coB){
         if(st&&!(s.cds[st.id]>0)){s.cds[st.id]=st.cd;try{st.fx(s,f,silent);}catch(_){}}}
     });
     runSummonAlly(a,b,silent,false);runSummonAlly(b,a,silent,false);
+    tickPeriodic(a,false);tickPeriodic(b,false);
     tickBuffs(a);tickBuffs(b);
     Object.keys(a.cds).forEach(k=>a.cds[k]>0&&a.cds[k]--);
     Object.keys(b.cds).forEach(k=>b.cds[k]>0&&b.cds[k]--);
@@ -7818,7 +8178,8 @@ function prepareCustomCompanyInput(data){
       spd:raw.spd,tech:raw.tech,grw:raw.grw
     };
   }
-  return normalizeCompanyRecord(raw,{custom:true});
+  const company=normalizeCompanyRecord(raw,{custom:true});
+  return attachCompanySupportSkills(company,raw.supportSkills);
 }
 function addCustomCompany(data,options){
   options=options||{};
@@ -8208,7 +8569,11 @@ function importCompaniesFromJson(input,options){
 function exportCustomCompaniesJson(){
   return JSON.stringify({
     schemaVersion:COMPANY_SCHEMA_VERSION,
-    companies:customCompanies.map(companyToStorageRecord)
+    companies:customCompanies.map(company=>{
+      const record=companyToStorageRecord(company);
+      record.supportSkills=cloneJsonData(companySupportSkills(company));
+      return record;
+    })
   },null,2);
 }
 $("btnCreateSave").addEventListener("click",()=>{
