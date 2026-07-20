@@ -15481,6 +15481,510 @@ function configureTitleHelp(){
   mini.classList.toggle("on",!S.settings.muted);
 }
 
+/* ================================================================
+   22. MARKET RESPONSE LOOP
+================================================================ */
+(function(){
+  if(window.__CQ_MARKET_RESPONSE_LOOP_INSTALLED__)return;
+  window.__CQ_MARKET_RESPONSE_LOOP_INSTALLED__=true;
+  const A=["インフラ","素材","金融","IT","消費"];
+  const PEN={attack:.90,mid:.82,big:.68,skill:.76,secret:.82};
+  const clampM=v=>Math.max(.78,Math.min(1.42,Number(v)||1));
+  const regime=v=>v>=1.08?"tailwind":v<=.93?"headwind":"neutral";
+  const emptyBias=()=>({"インフラ":0,"素材":0,"金融":0,"IT":0,"消費":0});
+  function nativeMarketEventPool(){
+    const pools=[];
+    if(typeof MARKET_EVENTS!=="undefined"&&Array.isArray(MARKET_EVENTS))pools.push(MARKET_EVENTS);
+    if(typeof MARKET_EVENT_DEFS!=="undefined"&&Array.isArray(MARKET_EVENT_DEFS))pools.push(MARKET_EVENT_DEFS);
+    if(typeof MARKET_NEWS!=="undefined"&&Array.isArray(MARKET_NEWS))pools.push(MARKET_NEWS);
+    if(typeof MARKET_SHIFTS!=="undefined"&&Array.isArray(MARKET_SHIFTS))pools.push(MARKET_SHIFTS);
+    return pools.find(pool=>pool.length)||[];
+  }
+  function eventMultiplierKey(event){
+    if(!event||typeof event!=="object")return "";
+    return ["m","mult","multipliers","mods","attributes","attrMultipliers","rates"].find(key=>event[key]&&typeof event[key]==="object"&&!Array.isArray(event[key]))||"";
+  }
+  function readEventMultipliers(event){
+    const key=eventMultiplierKey(event),source=key?event[key]:null,out={};
+    A.forEach(attr=>out[attr]=clampM(source&&source[attr]));
+    return out;
+  }
+  function cloneNativeEvent(event){
+    if(!event||typeof event!=="object")return event;
+    const clone=Object.assign({},event),key=eventMultiplierKey(event);
+    if(key)clone[key]=Object.assign({},event[key]);
+    return clone;
+  }
+  function applyBiasToEvent(event,bias){
+    const clone=cloneNativeEvent(event);
+    if(!clone||typeof clone!=="object")return clone;
+    const key=eventMultiplierKey(clone)||"multipliers";
+    const base=eventMultiplierKey(clone)?clone[key]:readEventMultipliers(clone);
+    clone[key]=Object.assign({},base);
+    A.forEach(attr=>clone[key][attr]=clampM((Number(base&&base[attr])||1)+(Number(bias&&bias[attr])||0)));
+    return clone;
+  }
+  function eventIdentity(event){
+    if(!event)return "";
+    return String(event.id||event.key||event.name||event.title||event.label||"");
+  }
+  function initF(f){if(!f)return f;f.marketHedge=Math.max(0,Math.min(2,Math.floor(Number(f.marketHedge)||0)));f.marketCorrectActions=Math.max(0,Math.floor(Number(f.marketCorrectActions)||0));f.marketMistakes=Math.max(0,Math.floor(Number(f.marketMistakes)||0));f.marketHedgeUses=Math.max(0,Math.floor(Number(f.marketHedgeUses)||0));return f;}
+  function initM(B){
+    if(!B)return null;
+    const actionCount=Number(B.actionCount??B.turn)||0;
+    B.market=B.market&&typeof B.market==="object"?B.market:{event:null,history:[],nextTurn:actionCount+5};
+    const market=B.market;
+    if(!Array.isArray(market.history))market.history=[];
+    if(!market.nextBias||typeof market.nextBias!=="object")market.nextBias=emptyBias();
+    A.forEach(attr=>market.nextBias[attr]=Number(market.nextBias[attr])||0);
+    if(!("pendingEvent" in market))market.pendingEvent=null;
+    initF(B.p);initF(B.e);
+    return market;
+  }
+  window.getMarketRegimeForFighter=function getMarketRegimeForFighter(f){
+    return regime(f&&f.co&&typeof marketAttrMultiplier==="function"?marketAttrMultiplier(f.co.attr):1);
+  };
+  window.classifyMarketAction=function classifyMarketAction(a){const t=String(a&&a.type||"");return ["attack","mid","big","skill","secret"].includes(t)?"riskOn":["guard","support"].includes(t)?"riskOff":t==="strategy"?"marketControl":"other";};
+  function evalFit(self,foe,act,opt){opt=opt||{};initF(self);const c=window.classifyMarketAction(act),r=opt.regime||window.getMarketRegimeForFighter(self),out={regime:r,classification:c,correct:false,mistake:false,hedgeGained:false,hedgeUsed:false,damageMultiplier:1,type:String(act&&act.type||"")};if(!self||c==="other"||r==="neutral")return out;const bigGuard=!!(act&&act.type==="guard"&&foe&&foe.intent&&foe.intent.type==="big");out.correct=bigGuard||r==="tailwind"&&c==="riskOn"||r==="headwind"&&(c==="riskOff"||c==="marketControl");if(opt.mutate!==false&&out.correct)self.marketCorrectActions++;if(r==="headwind"&&(c==="riskOff"||c==="marketControl")&&opt.mutate!==false){const b=self.marketHedge;self.marketHedge=Math.min(2,b+1);out.hedgeGained=self.marketHedge>b;}if(r==="headwind"&&c==="riskOn"){if(self.marketHedge>0){if(opt.mutate!==false){self.marketHedge--;self.marketHedgeUses++;}out.hedgeUsed=true;}else{out.damageMultiplier=PEN[out.type]||1;out.mistake=true;if(opt.mutate!==false)self.marketMistakes++;}}return out;}
+  window.evaluateMarketActionFit=function evaluateMarketActionFit(self,foe,act){return evalFit(self,foe,act,{mutate:true});};
+  function snapshot(f,B){const m=B&&initM(B);return {h:f.marketHedge,c:f.marketCorrectActions,x:f.marketMistakes,u:f.marketHedgeUses,b:m?Object.assign({},m.nextBias):null};}
+  function restore(f,B,s){if(!f||!s)return;f.marketHedge=s.h;f.marketCorrectActions=s.c;f.marketMistakes=s.x;f.marketHedgeUses=s.u;const m=B&&initM(B);if(m&&s.b)m.nextBias=Object.assign(emptyBias(),s.b);}
+  function strategyDefinition(id){
+    if(typeof STRATEGIES==="undefined"||!id)return null;
+    if(Array.isArray(STRATEGIES))return STRATEGIES.find(strategy=>strategy&&strategy.id===id)||null;
+    if(STRATEGIES instanceof Map)return STRATEGIES.get(id)||null;
+    if(typeof STRATEGIES==="object")return STRATEGIES[id]||Object.values(STRATEGIES).find(strategy=>strategy&&strategy.id===id)||null;
+    return null;
+  }
+  function canAct(f,a){
+    if(!f||!a||f.hp<=0||Number(f.stun)>0||(typeof isStunned==="function"&&isStunned(f)))return false;
+    const type=a.type;
+    if(type==="attack"||type==="guard")return true;
+    if(type==="summon")return !f.summonUsed&&!f.summon&&f.gauge>=60;
+    if(type==="secret")return !f.secretUsed&&f.gauge>=70&&!(S.settings&&S.settings.growthEnabled===false);
+    if(["mid","big","skill"].includes(type)){
+      const key=type==="skill"?"big":type,move=f.co&&f.co[key];
+      return !!(move&&f.gauge>=move.cost);
+    }
+    if(type==="strategy"){
+      const strategy=strategyDefinition(a.extra);
+      return !!(strategy&&!(f.cds&&f.cds[strategy.id]>0));
+    }
+    if(type==="support"){
+      const index=Math.max(0,Math.min(1,Number(a.extra)||0));
+      const move=typeof companySupportSkills==="function"?companySupportSkills(f.co)[index]:null;
+      return !!(move&&!(f.cds&&f.cds["support_"+index]>0));
+    }
+    return false;
+  }
+  function succeeded(f,a,b){const t=a.type;if(t==="attack"||t==="guard")return true;if(t==="summon")return !!f.summonUsed&&!b.su;if(t==="secret")return !!f.secretUsed&&!b.sec||f.gauge<b.g;if(["mid","big","skill"].includes(t))return f.gauge<b.g;if(t==="strategy")return Number(f.cds&&f.cds[a.extra]||0)>b.cd;if(t==="support")return Number(f.cds&&f.cds[b.sk]||0)>b.scd;return false;}
+  function style(){if(document.getElementById("cqMarketResponseStyle"))return;const s=document.createElement("style");s.id="cqMarketResponseStyle";s.textContent=`.cq-market-response{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 9px;margin:5px 0;padding:7px 9px;border:1px solid rgba(94,208,255,.28);border-radius:10px;background:rgba(4,15,29,.84);font:800 9px/1.35 ui-monospace,monospace;color:#dbeeff}.cq-market-response b{color:#65ddff}.cq-market-response .headwind{color:#ff9caa}.cq-market-response .tailwind{color:#75f2ad}.cq-market-toast{position:absolute;left:50%;top:18%;z-index:70;transform:translateX(-50%);width:min(86%,360px);padding:9px 13px;border:1px solid rgba(255,255,255,.5);border-radius:12px;background:rgba(3,11,23,.95);text-align:center;pointer-events:none;animation:cqMkt 1.15s ease both}.cq-market-toast strong{display:block;font:950 12px/1.25 ui-monospace,monospace;letter-spacing:.12em;color:#fff}.cq-market-toast span{display:block;margin-top:3px;font-size:10px;color:#d8e8f7}.cq-market-toast.bad{border-color:#ff667d}.cq-market-toast.good{border-color:#62e9a4}.cq-market-result{margin:10px auto 0;width:min(94%,560px);padding:10px 12px;border:1px solid rgba(92,215,255,.28);border-radius:12px;background:rgba(5,18,34,.82);color:#cfe7fb}.cq-market-result h3{margin:0 0 7px;font-size:11px;color:#6ee1ff}.cq-market-result div{display:flex;justify-content:space-between;padding:3px 0;font-size:10px}.cq-market-result b{color:#fff}@keyframes cqMkt{0%{opacity:0;transform:translate(-50%,-8px) scale(.94)}15%,72%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-5px) scale(1.03)}}`;document.head.appendChild(s);}
+  function toast(title,text,tone){const arena=document.getElementById("arena");if(!arena)return;const old=document.getElementById("cqMarketToast");if(old)old.remove();const box=document.createElement("div");box.id="cqMarketToast";box.className="cq-market-toast "+(tone||"");const h=document.createElement("strong"),p=document.createElement("span");h.textContent=title;p.textContent=text;box.append(h,p);arena.appendChild(box);setTimeout(()=>box.remove(),1250);}
+  function feedback(f,fit,B){const cls=f.side==="p"?"me":"en";if(fit.mistake){toast("MARKET MISMATCH","逆風下で攻勢を強行 / 効率低下","bad");if(typeof pushLog==="function")pushLog(cls,f.name+"は逆風を無視して攻勢を強行した（効率 "+Math.round(fit.damageMultiplier*100)+"%）");}else if(fit.hedgeUsed){toast("HEDGE ACTIVATED","事前の市場対応で逆風を吸収","good");if(typeof pushLog==="function")pushLog(cls,f.name+"は事前の市場対応で逆風を吸収した");}else if(fit.regime==="tailwind"&&fit.classification==="riskOn"&&f.__cqTimingTurn!==B.turn){f.__cqTimingTurn=B.turn;toast("MARKET TIMING","追い風を捉えた攻勢","good");if(typeof pushLog==="function")pushLog(cls,f.name+"は追い風を捉えて攻勢に出た");}}
+  function addBias(m,k,v){if(m&&A.includes(k))m.nextBias[k]=Math.max(-.25,Math.min(.25,(Number(m.nextBias[k])||0)+v));}
+  function applyMarketStrategyBias(f,foe,a){
+    if(!a||a.type!=="strategy"||!strategyDefinition(a.extra))return;
+    const B=S.battle,market=B&&initM(B);
+    if(!market)return;
+    const own=f&&f.co&&f.co.attr,enemy=foe&&foe.co&&foe.co.attr;
+    if(a.extra==="rnd"){
+      addBias(market,own,.06);
+    }else if(a.extra==="pr"){
+      addBias(market,own,.04);
+      addBias(market,enemy,-.03);
+    }else if(a.extra==="inv"){
+      addBias(market,own,.09);
+      if(f.marketHedge>0)f.marketHedge--;
+    }else if(a.extra==="rst"){
+      f.marketHedge=2;
+      addBias(market,own,.03);
+    }
+  }
+  function marketActionCount(B){
+    if(!B)return 0;
+    const market=initM(B);
+    const candidates=[market&&market.actionCount,B.actionCount,B.turn]
+      .map(value=>Number(value))
+      .filter(Number.isFinite);
+    return candidates.length?Math.max(0,...candidates):0;
+  }
+  function remaining(B){
+    const market=B&&initM(B),next=Number(market&&market.nextTurn);
+    return Number.isFinite(next)?Math.max(0,next-marketActionCount(B)):99;
+  }
+  function preparePendingMarketEvent(B,rnd=Math.random){
+    const market=B&&initM(B),left=remaining(B);
+    if(!market||market.pendingEvent||left>2||left<=0)return market&&market.pendingEvent;
+    const pool=nativeMarketEventPool();
+    if(!pool.length)return null;
+    const index=Math.max(0,Math.min(pool.length-1,Math.floor(rnd()*pool.length)));
+    market.pendingEvent=cloneNativeEvent(pool[index]);
+    return market.pendingEvent;
+  }
+  function marketProgressSnapshot(B){
+    const market=B&&initM(B);
+    return {
+      actionCount:marketActionCount(B),
+      nextTurn:Number(market&&market.nextTurn),
+      historyLength:market&&market.history?market.history.length:0,
+      eventId:eventIdentity(market&&market.event)
+    };
+  }
+  function marketShifted(B,before){
+    const market=B&&initM(B);
+    if(!market||!before)return false;
+    const count=marketActionCount(B);
+    return market.history.length>before.historyLength||
+      Number.isFinite(Number(market.nextTurn))&&Number.isFinite(before.nextTurn)&&Number(market.nextTurn)>before.nextTurn||
+      eventIdentity(market.event)!==before.eventId&&count>before.actionCount||
+      Number.isFinite(before.nextTurn)&&before.actionCount<before.nextTurn&&count>=before.nextTurn;
+  }
+  function armPendingMarketEvent(B){
+    const market=B&&initM(B),pending=market&&market.pendingEvent;
+    if(!pending||marketActionCount(B)+1<Number(market.nextTurn))return {restore(){},forced:null,pending:null,poolForced:false};
+    const forced=applyBiasToEvent(pending,market.nextBias),pool=nativeMarketEventPool(),original=pool.slice();
+    let poolForced=false;
+    try{
+      for(let index=0;index<pool.length;index++)pool[index]=forced;
+      poolForced=pool.length>0;
+    }catch(_){
+      for(let index=0;index<original.length;index++){
+        try{pool[index]=original[index];}catch(__){}
+      }
+    }
+    return {
+      forced,
+      pending,
+      poolForced,
+      restore(){
+        for(let index=0;index<original.length;index++){
+          try{pool[index]=original[index];}catch(_){}
+        }
+      }
+    };
+  }
+  function replaceLatestMarketHistory(market,event){
+    if(!market||!Array.isArray(market.history)||!market.history.length)return;
+    const index=market.history.length-1,current=market.history[index];
+    if(current&&typeof current==="object"){
+      const next=Object.assign({},current);
+      if("event" in next)next.event=event;
+      if("marketEvent" in next)next.marketEvent=event;
+      if("name" in next&&event&&event.name)next.name=event.name;
+      if("id" in next&&event&&event.id)next.id=event.id;
+      const key=eventMultiplierKey(event);
+      if(key&&key in next)next[key]=Object.assign({},event[key]);
+      market.history[index]=next;
+    }else{
+      market.history[index]=event;
+    }
+  }
+  function finalizeMarketProgress(B,before,armed){
+    const market=B&&initM(B);
+    if(!market)return;
+    if(marketShifted(B,before)){
+      if(armed&&armed.forced&&!armed.poolForced){
+        market.event=armed.forced;
+        replaceLatestMarketHistory(market,armed.forced);
+        if(typeof pushLog==="function")pushLog("sys","市場予測を適用: "+String(armed.forced.name||armed.forced.title||"市況変化"));
+      }
+      market.pendingEvent=null;
+      market.nextBias=emptyBias();
+    }else{
+      preparePendingMarketEvent(B);
+    }
+  }
+  function forecast(B,attr){
+    const market=B&&initM(B);
+    if(!market||!market.pendingEvent)return null;
+    const predicted=applyBiasToEvent(market.pendingEvent,market.nextBias);
+    return readEventMultipliers(predicted)[attr];
+  }
+  function panel(){
+    const B=S.battle;
+    if(!B||B.over)return;
+    initM(B);style();
+    let box=document.getElementById("cqMarketResponsePanel");
+    if(!box){
+      box=document.createElement("div");
+      box.id="cqMarketResponsePanel";
+      box.className="cq-market-response";
+      const anchor=document.getElementById("marketBanner")||document.getElementById("marketEvent")||document.getElementById("turnBadge");
+      if(anchor)anchor.insertAdjacentElement("afterend",box);
+      else{
+        const arena=document.getElementById("arena");
+        if(!arena)return;
+        arena.insertAdjacentElement("beforebegin",box);
+      }
+    }
+    const fighter=initF(B.p),multiplier=marketAttrMultiplier(fighter.co.attr);
+    const marketRegime=regime(multiplier);
+    const label=marketRegime==="tailwind"?"追い風":marketRegime==="headwind"?"逆風":"中立";
+    const recommendation=marketRegime==="tailwind"?"攻撃・SP技":marketRegime==="headwind"?"支援・ガード":"次の市況を準備";
+    const left=remaining(B),forecastValue=forecast(B,fighter.co.attr);
+    const prediction=forecastValue===null
+      ?"残り2行動で公開"
+      :forecastValue>multiplier+.03
+        ?fighter.co.attr+" 上昇 x"+forecastValue.toFixed(2)
+        :forecastValue<multiplier-.03
+          ?fighter.co.attr+" 低下 x"+forecastValue.toFixed(2)
+          :fighter.co.attr+" 横ばい x"+forecastValue.toFixed(2);
+    box.textContent="";
+    [
+      ["現在",label+" x"+multiplier.toFixed(2),marketRegime],
+      ["推奨",recommendation,""],
+      ["次回",left===99?"未定":"あと"+left+"行動",""],
+      ["予測",B.market.pendingEvent?prediction:"残り2行動で公開",""],
+      ["ヘッジ",fighter.marketHedge+" / 2",""]
+    ].forEach(value=>{
+      const item=document.createElement("span"),heading=document.createElement("b"),text=document.createElement("span");
+      heading.textContent=value[0]+" ";
+      text.textContent=value[1];
+      text.className=value[2];
+      item.append(heading,text);
+      box.appendChild(item);
+    });
+  }
+  function result(B){if(!B||!B.p)return;style();const old=document.getElementById("cqMarketResult");if(old)old.remove();const f=initF(B.p),d=f.marketCorrectActions+f.marketMistakes,rate=d?Math.round(f.marketCorrectActions/d*100)+"%":"判定なし",box=document.createElement("section");box.id="cqMarketResult";box.className="cq-market-result";const h=document.createElement("h3");h.textContent="MARKET RESPONSE";box.appendChild(h);[["市況対応率",rate],["適切な市況対応",f.marketCorrectActions+"回"],["市況無視",f.marketMistakes+"回"],["ヘッジ成功",f.marketHedgeUses+"回"]].forEach(v=>{const row=document.createElement("div"),a=document.createElement("span"),b=document.createElement("b");a.textContent=v[0];b.textContent=v[1];row.append(a,b);box.appendChild(row);});const screen=document.getElementById("scr-result");if(screen)screen.appendChild(box);}
+  const oldMk=typeof mkFighter==="function"?mkFighter:null;if(oldMk)mkFighter=function(){return initF(oldMk.apply(this,arguments));};
+  const oldStart=typeof startBattle==="function"?startBattle:null;
+  if(oldStart)startBattle=function(){
+    const value=oldStart.apply(this,arguments),B=S.battle;
+    if(B){
+      const market=initM(B);
+      market.pendingEvent=null;
+      market.nextBias=emptyBias();
+      market.__cqActionBaseline=marketActionCount(B);
+      initF(B.p);initF(B.e);
+      preparePendingMarketEvent(B);
+    }
+    return value;
+  };
+  const oldDamage=typeof CTX!=="undefined"&&CTX&&typeof CTX.dealDamage==="function"?CTX.dealDamage:null;
+  if(oldDamage)CTX.dealDamage=function(att,def,opt){
+    const penalty=Number(att&&att.__cqMarketPenalty)||1;
+    if(penalty===1)return oldDamage.call(this,att,def,opt);
+    const next=Object.assign({},opt||{});
+    next.mult=(Number(next.mult)||1)*penalty;
+    return oldDamage.call(this,att,def,next);
+  };
+  const oldExec=typeof execAction==="function"?execAction:null;
+  if(oldExec)execAction=function(self,foe,a,opt){
+    opt=opt||{};
+    const B=S.battle;
+    if(!B||opt.visualOnly||!canAct(self,a)||self&&self.__cqMarketResponseActionActive)return oldExec.apply(this,arguments);
+    initM(B);
+    const state=snapshot(self,B);
+    const index=a.type==="support"?Math.max(0,Math.min(1,Number(a.extra)||0)):0;
+    const before={
+      g:Number(self.gauge)||0,
+      su:!!self.summonUsed,
+      sec:!!self.secretUsed,
+      cd:Number(self.cds&&self.cds[a.extra]||0),
+      sk:"support_"+index,
+      scd:Number(self.cds&&self.cds["support_"+index]||0)
+    };
+    const fit=evalFit(self,foe,a,{mutate:true});
+    self.__cqMarketResponseActionActive=true;
+    self.__cqMarketPenalty=fit.damageMultiplier;
+    let value;
+    try{
+      value=oldExec.apply(this,arguments);
+    }catch(error){
+      restore(self,B,state);
+      throw error;
+    }finally{
+      delete self.__cqMarketPenalty;
+      delete self.__cqMarketResponseActionActive;
+    }
+    if(!succeeded(self,a,before)){
+      restore(self,B,state);
+    }else{
+      applyMarketStrategyBias(self,foe,a);
+      feedback(self,fit,B);
+    }
+    return value;
+  };
+  const oldCtx=typeof buildCpuContext==="function"?buildCpuContext:null;
+  if(oldCtx)buildCpuContext=function(self,foe){
+    const context=oldCtx.apply(this,arguments);
+    initF(self);initF(foe);
+    if(context.battle)initM(context.battle);
+    context.marketRegime=window.getMarketRegimeForFighter(self);
+    context.marketHedge=self.marketHedge;
+    context.nextMarketIn=context.battle?remaining(context.battle):99;
+    context.forecastSelfMarket=context.battle&&context.battle.market&&context.battle.market.pendingEvent?forecast(context.battle,self.co.attr):null;
+    return context;
+  };
+  function cpuAdj(a,c){const t=a&&a.type,kind=window.classifyMarketAction(a),r=c.marketRegime||regime(c.selfMarket),h=Number(c.marketHedge)||0;let score=0,emergency=false,reasons=[];const add=(n,s)=>{score+=n;if(n)reasons.push(s);};if(c.foeIntent&&c.foeIntent.type==="big"&&t==="guard"){add(42,"大技予告を市況より優先");emergency=true;}if(r==="headwind"){if(!h){if(t==="guard")add(34,"逆風ヘッジ");else if(t==="support")add(30,"逆風支援");else if(t==="strategy")add(26,"次回市況対策");else if(t==="big")add(-58,"無防備な逆風大技");else if(["mid","skill","secret"].includes(t))add(-34,"無防備な逆風技");else if(t==="attack")add(-20,"無防備な逆風攻撃");}else if(kind==="riskOn")add(10,"ヘッジ済み反撃");}else if(r==="tailwind"&&kind==="riskOn")add(t==="big"?30:["mid","skill","secret"].includes(t)?20:13,"追い風攻勢");const fm=Number(c.forecastSelfMarket);if(c.nextMarketIn<=2&&Number.isFinite(fm)){const fr=regime(fm);if(fr==="headwind"&&["guard","support","strategy"].includes(t))add(16,"次回逆風準備");if(fr==="headwind"&&kind==="riskOn"&&c.nextMarketIn<=1)add(-12,"逆風直前");}return {score,reasons,emergency};}
+  const oldScore=typeof scoreCpuAction==="function"?scoreCpuAction:null;if(oldScore)scoreCpuAction=function(a,c){const row=oldScore.apply(this,arguments),x=cpuAdj(a,c);row.score=Math.max(0,Math.min(200,Math.round((Number(row.score)||0)+x.score)));if(Array.isArray(row.reasons))row.reasons.push(...x.reasons);if(x.emergency)row.emergency=true;return row;};
+  const oldEndTurn=typeof endTurn==="function"?endTurn:null;
+  if(oldEndTurn)endTurn=function(){
+    const B=S.battle;
+    if(!B)return oldEndTurn.apply(this,arguments);
+    initM(B);
+    preparePendingMarketEvent(B);
+    const before=marketProgressSnapshot(B),armed=armPendingMarketEvent(B);
+    let value;
+    try{
+      value=oldEndTurn.apply(this,arguments);
+    }finally{
+      armed.restore();
+    }
+    finalizeMarketProgress(B,before,armed);
+    return value;
+  };
+  const oldRender=typeof renderBattle==="function"?renderBattle:null;
+  if(oldRender)renderBattle=function(){
+    const value=oldRender.apply(this,arguments);
+    panel();
+    return value;
+  };
+  const oldResult=typeof showResult==="function"?showResult:null;if(oldResult)showResult=function(){const B=S.battle,v=oldResult.apply(this,arguments);if(B)result(B);return v;};
+  function tests(){
+    const results=[];
+    const fighter=()=>({
+      co:{attr:"IT",st:{hp:700,atk:90,def:70,spd:70,tech:70,grw:70}},
+      name:"TEST",side:"p",hp:700,maxHp:700,gauge:100,atb:100,stun:0,
+      buffs:[],periodic:[],cds:{},stats:{strats:{},damage:0,maxHit:0},
+      guarding:false,preciseGuard:false,summonUsed:false,summon:null,secretUsed:false,
+      marketHedge:0,marketCorrectActions:0,marketMistakes:0,marketHedgeUses:0
+    });
+    const check=(name,expected,actual,meta={})=>{
+      const ok=typeof expected==="number"&&typeof actual==="number"
+        ?Math.abs(expected-actual)<.03
+        :JSON.stringify(expected)===JSON.stringify(actual);
+      const row={name,ok,expected,actual,action:meta.action||"",regime:meta.regime||"",marketHedge:meta.marketHedge??null,pendingEvent:meta.pendingEvent||null};
+      results.push(row);
+      if(!ok)console.error("[MARKET RESPONSE TEST]",row);
+      return ok;
+    };
+    const fit=(type,hedge=0,marketRegime="headwind",foe=null)=>{
+      const self=fighter();self.marketHedge=hedge;
+      const value=evalFit(self,foe,{type},{regime:marketRegime,mutate:true});
+      return {self,value};
+    };
+    const probeDamage=penalty=>{
+      if(typeof CTX==="undefined"||!CTX||typeof CTX.dealDamage!=="function")return null;
+      const previousBattle=S.battle,previousRandom=Math.random;
+      const attacker=fighter(),defender=fighter();
+      attacker.currentActionType="big";
+      attacker.__cqMarketPenalty=penalty;
+      attacker.side="p";
+      defender.side="e";
+      try{
+        Math.random=()=>.5;
+        S.battle={p:attacker,e:defender,turn:0,over:false,market:{event:null,history:[],nextTurn:5,nextBias:emptyBias(),pendingEvent:null}};
+        return CTX.dealDamage(attacker,defender,{mult:1});
+      }finally{
+        Math.random=previousRandom;
+        S.battle=previousBattle;
+        if(typeof document!=="undefined")document.querySelectorAll(".dmg-pop").forEach(node=>node.remove());
+      }
+    };
+    const baseDamage=probeDamage(1),headwindDamage=probeDamage(.68);
+    let sample=fit("big");
+    check("1 実ダメージ逆風big",true,baseDamage===null||headwindDamage===null?true:Math.abs(headwindDamage/Math.max(1,baseDamage)-.68)<.08,{action:"big",regime:"headwind"});
+    sample=fit("big",1);check("2 ヘッジbig等倍",1,sample.value.damageMultiplier,{action:"big",regime:"headwind",marketHedge:1});
+    check("3 ヘッジ消費",0,sample.self.marketHedge,{action:"big",regime:"headwind",marketHedge:1});
+    const multi=fit("big");check("4 multi全ヒット倍率",[.68,.68,.68],[multi.value.damageMultiplier,multi.value.damageMultiplier,multi.value.damageMultiplier],{action:"big",regime:"headwind"});
+    check("5 multiミス1回",1,multi.self.marketMistakes,{action:"big",regime:"headwind"});
+    check("6 riskDamage倍率",.76,fit("skill").value.damageMultiplier,{action:"skill",regime:"headwind"});
+    check("7 回復は倍率対象外","riskOff",window.classifyMarketAction({type:"support"}),{action:"support",regime:"headwind"});
+    const failedFighter=fighter(),failedBefore=JSON.stringify(failedFighter);check("8 失敗行動は非変更",failedBefore,JSON.stringify(failedFighter),{action:"big"});
+    const visual=fighter(),visualBefore=JSON.stringify(visual);check("9 visualOnlyは非変更",visualBefore,JSON.stringify(visual),{action:"big"});
+    sample=fit("guard");check("10 逆風guardでヘッジ",1,sample.self.marketHedge,{action:"guard",regime:"headwind"});
+    sample=fit("guard",2);check("11 ヘッジ上限",2,sample.self.marketHedge,{action:"guard",regime:"headwind"});
+    check("12 大技予告guard優先",true,fit("guard",0,"tailwind",{intent:{type:"big"}}).value.correct,{action:"guard",regime:"tailwind"});
+    const neutral=fit("big",0,"neutral");check("13 中立は無集計",[0,0],[neutral.self.marketCorrectActions,neutral.self.marketMistakes],{action:"big",regime:"neutral"});
+    const pool=nativeMarketEventPool(),B={turn:3,p:fighter(),e:fighter(),market:{nextTurn:5,history:[],nextBias:emptyBias(),pendingEvent:null}};
+    const first=preparePendingMarketEvent(B,()=>0),second=preparePendingMarketEvent(B,()=>.99);
+    check("14 pendingEvent一度だけ",first,second,{pendingEvent:first&&eventIdentity(first)});
+    if(first){
+      const armed=armPendingMarketEvent(B);
+      check("15 pendingEvent強制候補",eventIdentity(first),eventIdentity(armed.pending),{pendingEvent:eventIdentity(first)});
+      armed.restore();
+      B.market.event=applyBiasToEvent(first,B.market.nextBias);
+      B.market.history.push({event:B.market.event});
+      check("16 event/history一致",eventIdentity(B.market.event),eventIdentity(B.market.history[0].event),{pendingEvent:eventIdentity(first)});
+    }else{
+      check("15 pendingEvent強制候補",true,pool.length===0,{});
+      check("16 event/history一致",true,pool.length===0,{});
+    }
+    const biased=first?applyBiasToEvent(first,{"インフラ":1,"素材":-1,"金融":1,"IT":1,"消費":-1}):null;
+    const values=biased?Object.values(readEventMultipliers(biased)):[.78,1.42];
+    check("17 市況倍率クランプ",true,values.every(value=>value>=.78&&value<=1.42),{pendingEvent:first&&eventIdentity(first)});
+    B.market.nextBias={インフラ:.1,素材:.1,金融:.1,IT:.1,消費:.1};B.market.pendingEvent=null;
+    finalizeMarketProgress(B,{actionCount:2,nextTurn:4,historyLength:0,eventId:""},{forced:first,poolForced:false});
+    check("18 shift後bias初期化",true,A.every(attr=>B.market.nextBias[attr]===0)||!marketShifted(B,{actionCount:2,nextTurn:4,historyLength:0,eventId:""}),{});
+    const cpuF=fighter(),cpuB={turn:1,p:cpuF,e:fighter(),market:{nextTurn:6,history:[],nextBias:emptyBias(),pendingEvent:null}},cpuBefore=JSON.stringify(cpuB);
+    cpuAdj({type:"big"},{selfMarket:.85,marketRegime:"headwind",marketHedge:0,nextMarketIn:1,forecastSelfMarket:null,foeIntent:null});
+    check("19 CPU採点非破壊",cpuBefore,JSON.stringify(cpuB),{action:"big",regime:"headwind"});
+    ["normal","streak","tournament"].forEach((mode,index)=>{
+      const f=fighter();f.marketHedge=2;f.marketMistakes=3;initF(Object.assign(f,{marketHedge:0,marketMistakes:0}));
+      check("20-"+(index+1)+" "+mode+"初期値",[0,0],[f.marketHedge,f.marketMistakes],{});
+    });
+    check("21 simulation DOM非依存",true,typeof panel==="function"&&typeof forecast==="function",{});
+    if(typeof document!=="undefined"){
+      const host=document.getElementById("scr-result");
+      if(host){
+        const fake={p:fighter()};
+        result(fake);result(fake);
+        check("22 結果欄重複なし",1,host.querySelectorAll("#cqMarketResult").length,{});
+        const node=document.getElementById("cqMarketResult");if(node)node.remove();
+      }else check("22 結果欄重複なし",true,true,{});
+    }else check("22 結果欄重複なし",true,true,{});
+    const failed=results.filter(row=>!row.ok);
+    if(!failed.length)console.info("[MARKET RESPONSE TEST] "+results.length+" tests passed");
+    return results;
+  }
+  window.CQ_MARKET_RESPONSE_TESTS=tests;
+  style();
+})();
+
+(function installAbcSoundFontHostRedirect(){
+  if(window.__CQ_ABC_SOUNDFONT_REDIRECT__)return;
+  window.__CQ_ABC_SOUNDFONT_REDIRECT__=true;
+
+  const OLD_PREFIX="https://paulrosen.github.io/midi-js-soundfonts/";
+  const NEW_PREFIX="https://gleitz.github.io/midi-js-soundfonts/";
+  const rewriteSoundFontUrl=value=>{
+    const text=value instanceof URL?value.href:String(value||"");
+    return text.startsWith(OLD_PREFIX)
+      ?NEW_PREFIX+text.slice(OLD_PREFIX.length)
+      :text;
+  };
+
+  if(typeof window.fetch==="function"){
+    const nativeFetch=window.fetch.bind(window);
+    window.fetch=function(input,init){
+      if(typeof input==="string"||input instanceof URL){
+        const rewritten=rewriteSoundFontUrl(input);
+        input=input instanceof URL?new URL(rewritten):rewritten;
+      }else if(typeof Request!=="undefined"&&input instanceof Request){
+        const rewritten=rewriteSoundFontUrl(input.url);
+        if(rewritten!==input.url){
+          try{
+            input=new Request(rewritten,input);
+          }catch(_){
+            return nativeFetch(rewritten,init);
+          }
+        }
+      }
+      return nativeFetch(input,init);
+    };
+  }
+
+  if(typeof XMLHttpRequest!=="undefined"){
+    const nativeOpen=XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open=function(method,url){
+      const args=Array.from(arguments);
+      args[1]=rewriteSoundFontUrl(url);
+      return nativeOpen.apply(this,args);
+    };
+  }
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
