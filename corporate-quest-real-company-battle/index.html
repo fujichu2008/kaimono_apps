@@ -7511,6 +7511,26 @@ function runSummonAlly(owner,foe,ctx,visual){
   }
 }
 
+const BATTLE_RESOURCE_BALANCE=Object.freeze({
+  attackSpGain:14,
+  damageTakenSpGain:4,
+  guardSpGain:6,
+  preciseGuardSpGain:10,
+  preciseGuardAtbGain:12,
+  guardDamageMultiplier:.45,
+  preciseGuardDamageMultiplier:.28
+});
+function gainBattleGauge(fighter,amount){
+  if(!fighter)return 0;
+  const before=Math.max(0,Math.min(100,Number(fighter.gauge)||0));
+  const next=Math.max(0,Math.min(100,before+(Number(amount)||0)));
+  fighter.gauge=next;
+  return next-before;
+}
+function marketCycleInterval(){
+  return 5+Math.floor(Math.random()*3);
+}
+
 function startBattle(options){
   options=options||{};
   const p=findCo(S.playerCoId),baseEnemy=findCo(S.cpuCoId);
@@ -7541,7 +7561,7 @@ function startBattle(options){
 
   S.battle={
     p:playerFighter,e:enemyFighter,turn:1,over:false,
-    market:{event:null,history:[],nextTurn:3+Math.floor(Math.random()*2)}
+    market:{event:null,history:[],nextTurn:1+marketCycleInterval()}
   };
   S.log=[];S.auto=false;S.paused=false;S.inputLock=false;
   $("btnAuto").textContent="🤖 AUTO: OFF";
@@ -7673,7 +7693,15 @@ function finishATBAction(self){
   if(self.hp<=0){renderBattle();checkKO();return;}
   Object.keys(self.cds).forEach(k=>{if(self.cds[k]>0)self.cds[k]--;});
   B.turn++;
+  const marketShouldAdvance=!!(
+    B.market&&
+    Number.isFinite(Number(B.market.nextTurn))&&
+    B.turn>=Number(B.market.nextTurn)
+  );
   advanceMarketCycle(B,true);
+  if(marketShouldAdvance&&B.market){
+    B.market.nextTurn=B.turn+marketCycleInterval();
+  }
   S.inputLock=false;
   renderBattle();
   updateATBUI();
@@ -7691,9 +7719,26 @@ function applyGuard(f){
     foe.intent.type==="big"&&
     foe.atb>=85
   );
-  f.guardBonus=true;f.gauge=Math.min(100,f.gauge+20);
+  f.guardBonus=true;
+  gainBattleGauge(
+    f,
+    f.preciseGuard
+      ?BATTLE_RESOURCE_BALANCE.preciseGuardSpGain
+      :BATTLE_RESOURCE_BALANCE.guardSpGain
+  );
+  if(f.preciseGuard){
+    f.atb=Math.min(
+      100,
+      Math.max(0,Number(f.atb)||0)+BATTLE_RESOURCE_BALANCE.preciseGuardAtbGain
+    );
+  }
   f.stats.guards++;fxGuard(f);
-  pushLog(f.side==="p"?"me":"en",f.name+"は防御態勢。次の攻撃が強化される");
+  pushLog(
+    f.side==="p"?"me":"en",
+    f.preciseGuard
+      ?f.name+"は精密防御。被害72%軽減 / ATB+12 / SP+10。次の攻撃が強化される"
+      :f.name+"は防御態勢。被害55%軽減 / SP+6。次の攻撃が強化される"
+  );
   narrateBattle("guard",{actor:f});
   SE.guard();
 }
@@ -7901,7 +7946,11 @@ function cpuEstimateRawDamage(att,def,move,market,attribute){
       :(Number(effect.mult)||1);
     let value=Math.max(8,atk*mult+tech*(Number(effect.techScale)||0)+spd*(Number(effect.spdScale)||0)-defense*.4*(1-pierce));
     value*=Number(attribute)||1;value*=Number(market)||1;
-    if(def.guarding)value*=.35;
+    if(def.guarding){
+      value*=def.preciseGuard
+        ?BATTLE_RESOURCE_BALANCE.preciseGuardDamageMultiplier
+        :BATTLE_RESOURCE_BALANCE.guardDamageMultiplier;
+    }
     return value;
   };
   let total=0;
@@ -7952,6 +8001,7 @@ function buildCpuContext(self,foe){
   context.incomingDamage=estimateIncomingThreat(self,foe,context);
   context.incomingThreatRatio=context.incomingDamage/Math.max(1,self.hp);
   context.lethalRisk=context.incomingDamage>=self.hp*.92;
+  context.lastStand=context.selfHpRatio<=.3;
   context.basicDamage=estimateCpuDamage(self,foe,null,context);
   context.basicKo=context.basicDamage>=foe.hp*1.1;
   context.basicKoCandidate=context.basicDamage>=foe.hp*.9;
@@ -8047,44 +8097,64 @@ function cpuEffectScore(move,context,row){
 }
 function scoreCpuAttack(action,context){
   const row=cpuRow(action,38);
+  if(context.lastStand){cpuAdd(row,44,"背水攻勢");row.emergency=true;}
   if(context.basicKo){cpuAdd(row,98,"確実KO");row.emergency=true;}else if(context.basicKoCandidate)cpuAdd(row,46,"KO圏内");
   if(context.selfGauge<40)cpuAdd(row,11,"SP蓄積");
   if(context.foeHpRatio<.25)cpuAdd(row,17,"敵低HP");
   cpuAdd(row,context.attrPower>1?13:context.attrPower<1?-9:0,"属性");
   cpuAdd(row,context.selfMarket>1.05?11:context.selfMarket<.95?-9:0,"市場");
   if(context.foe.guarding)cpuAdd(row,-20,"敵防御");
-  if(context.lethalRisk)cpuAdd(row,-32,"被KO危険");
-  if(context.foeIntent&&context.foeIntent.type==="big")cpuAdd(row,-24,"敵大技");
+  if(context.lethalRisk&&!context.lastStand)cpuAdd(row,-32,"被KO危険");
+  if(context.foeIntent&&context.foeIntent.type==="big"&&!context.lastStand)cpuAdd(row,-24,"敵大技");
   if(context.foeStunned)cpuAdd(row,13,"敵停止");
   cpuAdd(row,context.personality==="aggressive"?11:context.personality==="defensive"?-5:context.personality==="opportunist"?5:0,"人格");
   return row;
 }
 function scoreCpuGuard(action,context){
-  const row=cpuRow(action,22);
-  if(context.foeIntent&&context.foeIntent.type==="big"){cpuAdd(row,68,"敵大技");row.emergency=true;}
-  if(context.foeGauge>=100)cpuAdd(row,30,"敵SP100");
-  if(context.lethalRisk){cpuAdd(row,70,"被KO回避");row.emergency=true;}else if(context.incomingThreatRatio>.58)cpuAdd(row,34,"高被害");
-  if(context.selfHpRatio<.35)cpuAdd(row,24,"低HP");
-  if(context.marketDiff<-.08)cpuAdd(row,18,"逆風");
-  cpuAdd(row,context.attrPower<1?14:context.attrPower>1?-6:0,"属性");
-  if(context.nextMarketIn<=1&&context.selfMarket<1)cpuAdd(row,17,"市場待ち");
-  if(context.foeStunned)cpuAdd(row,-48,"敵停止");
-  if(context.basicKoCandidate)cpuAdd(row,-62,"決着可能");
-  if(context.self.guarding||context.self.guardHits>0)cpuAdd(row,-32,"連続防御");
-  cpuAdd(row,context.personality==="defensive"?13:context.personality==="aggressive"?-9:0,"人格");
+  const row=cpuRow(action,20);
+  if(context.lastStand){
+    row.score=0;
+    row.reasons.push("背水攻勢 防御放棄");
+    row.emergency=false;
+    return row;
+  }
+  if(context.foeIntent&&context.foeIntent.type==="big"){
+    cpuAdd(row,52,"敵大技");
+    if(context.lethalRisk)row.emergency=true;
+  }
+  if(context.foeGauge>=100)cpuAdd(row,20,"敵SP100");
+  if(context.lethalRisk){
+    cpuAdd(row,72,"被KO回避");
+    row.emergency=true;
+  }else if(context.incomingThreatRatio>.58){
+    cpuAdd(row,28,"高被害");
+  }
+  if(context.selfHpRatio<.35)cpuAdd(row,18,"低HP");
+  if(context.marketDiff<-.08)cpuAdd(row,14,"逆風");
+  cpuAdd(row,context.attrPower<1?12:context.attrPower>1?-8:0,"属性");
+  if(context.nextMarketIn<=1&&context.selfMarket<1)cpuAdd(row,10,"市場待ち");
+  if(context.foeStunned)cpuAdd(row,-52,"敵停止");
+  if(context.basicKoCandidate)cpuAdd(row,-70,"決着可能");
+  if(context.self.guarding||context.self.guardHits>0)cpuAdd(row,-34,"連続防御");
+  cpuAdd(row,context.personality==="defensive"?10:context.personality==="aggressive"?-10:0,"人格");
   return row;
 }
 function scoreCpuSkill(action,context){
   const row=cpuRow(action,action.type==="big"?54:44),damage=estimateCpuDamage(context.self,context.foe,action.move,context);
+  if(context.lastStand){
+    cpuAdd(row,action.type==="big"?68:52,"背水必殺");
+    cpuAdd(row,Math.min(48,damage/Math.max(1,context.foe.maxHp)*100),"与ダメージ優先");
+    row.emergency=true;
+  }
   if(damage>=context.foe.hp*1.1){cpuAdd(row,100,"確実KO");row.emergency=true;}else if(damage>=context.foe.hp*.9)cpuAdd(row,56,"KO圏内");
   if(context.foeHpRatio<.3)cpuAdd(row,18,"敵低HP");
   cpuAdd(row,context.attrPower>1?15:context.attrPower<1?-10:0,"属性");
   cpuAdd(row,context.selfMarket>1.05?(action.type==="big"?24:15):context.selfMarket<.95?-14:0,"市場");
   if(context.foe.guarding)cpuAdd(row,-24,"敵防御");
   if(context.foeStunned)cpuAdd(row,14,"敵停止");
-  if(context.lethalRisk&&context.hasRecoveryCandidate)cpuAdd(row,-18,"回復優先");
-  if(context.nextMarketIn<=1&&context.selfMarket<.96)cpuAdd(row,-13,"市場直前");
-  if(action.type==="big"&&damage>context.foe.hp*1.9)cpuAdd(row,-19,"過剰攻撃");
+  if(context.lethalRisk&&context.hasRecoveryCandidate&&!context.lastStand)cpuAdd(row,-18,"回復優先");
+  if(context.nextMarketIn<=1&&context.selfMarket<.96&&!context.lastStand)cpuAdd(row,-13,"市場直前");
+  if(action.type==="big"&&damage>context.foe.hp*1.9&&!context.lastStand)cpuAdd(row,-19,"過剰攻撃");
   cpuAdd(row,context.personality==="aggressive"?(action.type==="big"?14:10):context.personality==="technical"&&cpuHas(action.move,["stun","atbDrain","dispel","buff"])?12:context.personality==="opportunist"&&(context.marketDiff>.04||context.selfHpRatio<.4)?12:0,"人格");
   cpuEffectScore(action.move,context,row);
   return row;
@@ -8172,6 +8242,10 @@ function scoreCpuStrategy(action,context){
 }
 function scoreCpuSummon(action,context){
   const row=cpuRow(action,38);
+  if(context.lastStand){
+    cpuAdd(row,40,"背水召喚");
+    row.emergency=true;
+  }
   if(context.turn<=9)cpuAdd(row,20,"共闘時間");
   if(context.selfHpRatio<.72)cpuAdd(row,12,"劣勢");
   if(context.foeIsLarge)cpuAdd(row,12,"大企業");
@@ -8180,7 +8254,7 @@ function scoreCpuSummon(action,context){
   if(context.foeHpRatio<.25)cpuAdd(row,-38,"終盤");
   if(context.basicKoCandidate)cpuAdd(row,-74,"通常KO");
   if(context.self.co.big&&context.selfGauge>=context.self.co.big.cost&&estimateCpuDamage(context.self,context.foe,context.self.co.big,context)>=context.foe.hp*.9)cpuAdd(row,-72,"大技KO");
-  if(context.selfHpRatio<.2&&context.hasRecoveryCandidate)cpuAdd(row,-24,"回復優先");
+  if(context.selfHpRatio<.2&&context.hasRecoveryCandidate&&!context.lastStand)cpuAdd(row,-24,"回復優先");
   if(context.personality==="opportunist")cpuAdd(row,14,"機会型");
   return row;
 }
@@ -8230,7 +8304,15 @@ function cpuChooseSupportSkill(self,foe){
 function cpuDecide(self,foe){
   if(!self||!foe||self.hp<=0)return {type:"attack"};
   const context=buildCpuContext(self,foe);
-  return selectCpuAction(buildCpuCandidates(self,foe).map(action=>scoreCpuAction(action,context)),context);
+  const candidates=buildCpuCandidates(self,foe);
+  if(context.lastStand){
+    const offensive=candidates.filter(action=>
+      action.type==="attack"||action.type==="mid"||action.type==="big"||action.type==="summon"
+    );
+    const lastStandActions=offensive.length?offensive:[{type:"attack",label:"通常攻撃"}];
+    return selectCpuAction(lastStandActions.map(action=>scoreCpuAction(action,context)),context);
+  }
+  return selectCpuAction(candidates.map(action=>scoreCpuAction(action,context)),context);
 }
 
 /* ================================================================
@@ -8837,7 +8919,7 @@ function renderSupportSheet(){
   note.innerHTML="<b>RECOVERY / CONTROL / GUARD</b><span>基本防御と各社2つの固有支援スキル。SP不要ですが、1行動と再使用待ちを使います。</span>";
   list.appendChild(note);
   const guard=document.createElement("button");guard.className="strat-item";
-  guard.innerHTML="<span class=ic>🛡️</span><span class=t><b>リスクコントロール</b><span>次の攻撃を65%軽減しSP+20。敵大技を読めば精密防御。</span></span><span class=cd>READY</span>";
+  guard.innerHTML="<span class=ic>🛡️</span><span class=t><b>リスクコントロール</b><span>次の攻撃を55%軽減しSP+6。敵大技を読めば72%軽減・ATB+12・SP+10の精密防御。</span></span><span class=cd>READY</span>";
   guard.addEventListener("click",()=>{SE.select();playerCommand("guard");});list.appendChild(guard);
   const section=document.createElement("div");section.className="strat-section";section.textContent="COMPANY SUPPORT SKILLS";list.appendChild(section);
   companySupportSkills(p.co).forEach((move,index)=>{
@@ -8954,7 +9036,7 @@ function configureBattleCommandBar(){
   const staleSupport=$("cmdSupport");
   if(staleSupport)staleSupport.remove();
   const attack=replaceBattleCommandButton(currentAttack,"cmdAttack","⚔️","攻撃","通常攻撃を実行");
-  const guard=replaceBattleCommandButton(currentGuard,"cmdGuard","🛡️","防御","ガードを即時実行。大技予告中は精密ガード");
+  const guard=replaceBattleCommandButton(currentGuard,"cmdGuard","🛡️","防御","55%軽減・SP+6。大技予告中は72%軽減・ATB+12・SP+10の精密ガード");
   const skill=replaceBattleCommandButton(currentSkill,"cmdSkill","💥","特技","中技・大技・秘策・召喚を開く");
   if(!attack||!guard||!skill)return;
   const support=skill.cloneNode(true);
@@ -9458,27 +9540,67 @@ $("btnResTitle").addEventListener("click",()=>{
 ================================================================ */
 function simulateBattle(coA,coB){
   const a=mkFighter(coA,"p"),b=mkFighter(coB,"e");
-  const silent={ dealDamage:(x,y,o)=>{ // 演出なし版
+  const silent={
+    actionToken:"",
+    currentActionType:"",
+    attackerGaugeToken:"",
+    defenderGaugeToken:"",
+    dealDamage(x,y,o){ // 演出なし版
       o=o||{};
       const atk=eff(x,"atk")*(o.mult||1);
       const tech=eff(x,"tech")*(o.techScale!==undefined?o.techScale:.3);
       const spd=o.spdScale?eff(x,"spd")*o.spdScale:0;
       let defv=eff(y,"def")*.4;if(o.pierce)defv*=(1-o.pierce);
       let d=Math.max(8,Math.round((atk+tech+spd)*(0.9+Math.random()*0.2)-defv));
-      if(y.guarding)d=Math.max(4,Math.round(d*0.35));
+      if(y.guarding){
+        d=Math.max(
+          4,
+          Math.round(d*BATTLE_RESOURCE_BALANCE.guardDamageMultiplier)
+        );
+      }
       y.hp=Math.max(0,y.hp-d);
-      x.gauge=Math.min(100,x.gauge+12);y.gauge=Math.min(100,y.gauge+16);
-      return d;},
-    hurt:(f,n)=>{f.hp=Math.max(0,f.hp-n);},
-    heal:(f,r)=>{const h=Math.round(f.maxHp*r);f.hp=Math.min(f.maxHp,f.hp+h);return h;}};
+      const token=this.actionToken||String(x.side||"?");
+      if(
+        this.currentActionType==="attack"&&
+        this.attackerGaugeToken!==token
+      ){
+        gainBattleGauge(x,BATTLE_RESOURCE_BALANCE.attackSpGain);
+        this.attackerGaugeToken=token;
+      }
+      const defenderToken=token+":"+String(y.side||"?");
+      if(
+        !y.guarding&&
+        y.hp>0&&
+        this.defenderGaugeToken!==defenderToken
+      ){
+        gainBattleGauge(y,BATTLE_RESOURCE_BALANCE.damageTakenSpGain);
+        this.defenderGaugeToken=defenderToken;
+      }
+      return d;
+    },
+    hurt(f,n){f.hp=Math.max(0,f.hp-n);},
+    heal(f,r){
+      const h=Math.round(f.maxHp*r);
+      f.hp=Math.min(f.maxHp,f.hp+h);
+      return h;
+    }
+  };
   for(let t=0;t<40&&a.hp>0&&b.hp>0;t++){
     a.guarding=false;b.guarding=false;
     const aAct=cpuDecide(a,b),bAct=cpuDecide(b,a);
-    if(aAct.type==="guard"){a.guarding=true;a.gauge=Math.min(100,a.gauge+20);}
-    if(bAct.type==="guard"){b.guarding=true;b.gauge=Math.min(100,b.gauge+20);}
+    if(aAct.type==="guard"){
+      a.guarding=true;
+      gainBattleGauge(a,BATTLE_RESOURCE_BALANCE.guardSpGain);
+    }
+    if(bAct.type==="guard"){
+      b.guarding=true;
+      gainBattleGauge(b,BATTLE_RESOURCE_BALANCE.guardSpGain);
+    }
     const order=eff(a,"spd")>=eff(b,"spd")?[[a,b,aAct],[b,a,bAct]]:[[b,a,bAct],[a,b,aAct]];
     order.forEach(([s,f,act])=>{
       if(s.hp<=0||f.hp<=0)return;
+      silent.actionToken=t+":"+String(s.side||"?");
+      silent.currentActionType=act&&act.type||"";
       if(isStunned(s)){
         s.stun=Math.max(0,(Number(s.stun)||0)-1);
         s.stunRecovery=0;
@@ -9500,7 +9622,12 @@ function simulateBattle(coA,coB){
       }else if(act.type==="strategy"){const st=STRATEGIES.find(x=>x.id===act.extra);
         if(st&&!(s.cds[st.id]>0)){s.cds[st.id]=st.cd;try{st.fx(s,f,silent);}catch(_){}}}
     });
-    runSummonAlly(a,b,silent,false);runSummonAlly(b,a,silent,false);
+    silent.actionToken=t+":summon:"+String(a.side||"?");
+    silent.currentActionType="summon";
+    runSummonAlly(a,b,silent,false);
+    silent.actionToken=t+":summon:"+String(b.side||"?");
+    silent.currentActionType="summon";
+    runSummonAlly(b,a,silent,false);
     tickPeriodic(a,false);tickPeriodic(b,false);
     tickBuffs(a);tickBuffs(b);
     Object.keys(a.cds).forEach(k=>a.cds[k]>0&&a.cds[k]--);
@@ -12759,10 +12886,28 @@ function initCompareSwipeSelection(){
   if(!host||host.dataset.cqCompareSwipeBound==="1")return;
   host.dataset.cqCompareSwipeBound="1";
 
+  const SWITCH_DISTANCE=48;
   let pointerId=null;
   let startX=0;
   let startY=0;
+  let stepAnchorX=0;
+  let gestureMode="";
+  let switched=false;
   let suppressClickUntil=0;
+
+  const finishSwipe=event=>{
+    if(pointerId===null)return;
+    if(event&&event.pointerId!==undefined&&event.pointerId!==pointerId)return;
+    try{
+      if(host.hasPointerCapture&&host.hasPointerCapture(pointerId)){
+        host.releasePointerCapture(pointerId);
+      }
+    }catch(_){}
+    pointerId=null;
+    gestureMode="";
+    if(switched)suppressClickUntil=performance.now()+350;
+    switched=false;
+  };
 
   host.addEventListener("pointerdown",event=>{
     if(event.pointerType==="mouse"&&event.button!==0)return;
@@ -12770,28 +12915,42 @@ function initCompareSwipeSelection(){
     pointerId=event.pointerId;
     startX=event.clientX;
     startY=event.clientY;
+    stepAnchorX=event.clientX;
+    gestureMode="";
+    switched=false;
+    try{host.setPointerCapture(pointerId);}catch(_){}
   },{passive:true});
 
-  host.addEventListener("pointerup",event=>{
+  host.addEventListener("pointermove",event=>{
     if(pointerId===null||event.pointerId!==pointerId)return;
-    const dx=event.clientX-startX;
-    const dy=event.clientY-startY;
-    pointerId=null;
+    const totalX=event.clientX-startX;
+    const totalY=event.clientY-startY;
 
-    if(Math.abs(dx)<42)return;
-    if(Math.abs(dx)<=Math.abs(dy)*1.25)return;
-
-    const moved=moveSelectCarouselBySwipe(dx<0?1:-1);
-    if(moved){
-      suppressClickUntil=performance.now()+350;
-      if(event.cancelable)event.preventDefault();
-      SE.select();
+    if(!gestureMode){
+      if(Math.abs(totalX)<8&&Math.abs(totalY)<8)return;
+      gestureMode=Math.abs(totalX)>Math.abs(totalY)*1.15?"horizontal":"vertical";
     }
-  });
+    if(gestureMode!=="horizontal")return;
 
-  host.addEventListener("pointercancel",()=>{
-    pointerId=null;
-  });
+    if(event.cancelable)event.preventDefault();
+    let deltaX=event.clientX-stepAnchorX;
+    let movedThisEvent=false;
+    let safety=0;
+    while(Math.abs(deltaX)>=SWITCH_DISTANCE&&safety<6){
+      const direction=deltaX<0?1:-1;
+      if(!moveSelectCarouselBySwipe(direction))break;
+      switched=true;
+      movedThisEvent=true;
+      stepAnchorX+=deltaX<0?-SWITCH_DISTANCE:SWITCH_DISTANCE;
+      deltaX=event.clientX-stepAnchorX;
+      safety++;
+    }
+    if(movedThisEvent)SE.select();
+  },{passive:false});
+
+  host.addEventListener("pointerup",finishSwipe);
+  host.addEventListener("pointercancel",finishSwipe);
+  host.addEventListener("lostpointercapture",finishSwipe);
 
   host.addEventListener("click",event=>{
     if(performance.now()>suppressClickUntil)return;
@@ -13057,7 +13216,7 @@ function tutorialPageHtml(index){
   if(index===1){
     return '<div class="cq-tutorial-kicker">PAGE 2 / 3</div><h2>精密ガード</h2>'+
       '<p>敵ATBが85%以上になると、次の行動インテントが表示されます。大技チャージを確認してから支援戦術内のGUARDを選ぶと、通常ガードより強力な精密ガードになります。</p>'+
-      '<div class="cq-tutorial-callout"><b>READ GUARD!</b>被ダメージ80%減 / 自分のATB+25 / SP+20</div>';
+      '<div class="cq-tutorial-callout"><b>READ GUARD!</b>被ダメージ72%減 / 自分のATB+12 / SP+10</div>';
   }
   return '<div class="cq-tutorial-kicker">PAGE 3 / 3</div><h2>市場変化とSP大技</h2>'+
     '<p>市場イベントは数行動ごとに変化し、属性ごとに追い風・逆風を与えます。追い風の間にSPを使うか、逆風をGUARDや回復で耐えるかが勝負です。</p>'+
@@ -13723,15 +13882,123 @@ const CQ_EVENTS=window.CQ_EVENTS;
   const oldDamage=CTX.dealDamage;
   CTX.dealDamage=function(att,def,opt){
     const B=S.battle;
-    const precise=!!(B&&def===B.p&&def.guarding&&def.preciseGuard&&att.currentActionType==="big");
+    const guarded=!!(def&&def.guarding);
+    const precise=!!(
+      guarded&&
+      def.preciseGuard&&
+      att&&
+      att.currentActionType==="big"
+    );
+    const preciseEvent=!!(
+      B&&
+      def===B.p&&
+      guarded&&
+      def.preciseGuard&&
+      att&&
+      att.currentActionType==="big"
+    );
     const token=B&&B.currentGrowthActionToken||"";
+    const beforeAttGauge=Math.max(0,Math.min(100,Number(att&&att.gauge)||0));
+    const beforeDefGauge=Math.max(0,Math.min(100,Number(def&&def.gauge)||0));
+    const beforeDefAtb=Math.max(0,Math.min(100,Number(def&&def.atb)||0));
     const value=oldDamage.call(this,att,def,opt);
-    CQ_EVENTS.emit("battle:damage",{battle:B,attacker:att,defender:def,damage:value,options:opt||{},actionToken:token});
-    if(precise&&B&&token&&B.growthPreciseGuardToken!==token){
-      B.growthPreciseGuardToken=token;
-      CQ_EVENTS.emit("battle:preciseGuard",{battle:B,attacker:att,defender:def,actionToken:token});
+    const oldGuardMultiplier=precise?.2:guarded?.35:1;
+    const newGuardMultiplier=precise
+      ?BATTLE_RESOURCE_BALANCE.preciseGuardDamageMultiplier
+      :guarded
+        ?BATTLE_RESOURCE_BALANCE.guardDamageMultiplier
+        :1;
+    let adjustedDamage=value;
+
+    if(guarded&&oldGuardMultiplier>0){
+      adjustedDamage=Math.max(
+        4,
+        Math.round(value/oldGuardMultiplier*newGuardMultiplier)
+      );
+      const additionalDamage=Math.max(0,adjustedDamage-value);
+      if(additionalDamage>0){
+        def.hp=Math.max(0,(Number(def.hp)||0)-additionalDamage);
+        if(att&&att.stats){
+          att.stats.dealt=Math.max(
+            0,
+            (Number(att.stats.dealt)||0)+additionalDamage
+          );
+          att.stats.maxHit=Math.max(
+            Number(att.stats.maxHit)||0,
+            adjustedDamage
+          );
+        }
+        const damagePop=Array.from(document.querySelectorAll(".dmg-pop")).pop();
+        if(damagePop){
+          damagePop.textContent=String(damagePop.textContent||"").replace(
+            /\d+/,
+            String(adjustedDamage)
+          );
+        }
+      }
     }
-    return value;
+
+    const actionKey=token
+      ?token+":"+String(att&&att.currentActionType||"damage")
+      :(
+        String(B&&B.turn||0)+":"+
+        String(att&&att.side||"?")+":"+
+        String(att&&att.currentActionType||"damage")
+      );
+    let attackerGain=0;
+    if(
+      att&&
+      att.currentActionType==="attack"&&
+      (!B||B.cqAttackSpToken!==actionKey)
+    ){
+      attackerGain=BATTLE_RESOURCE_BALANCE.attackSpGain;
+      if(B)B.cqAttackSpToken=actionKey;
+    }
+
+    const defenderKey=actionKey+":"+String(def&&def.side||"?");
+    let defenderGain=0;
+    if(
+      !guarded&&
+      def&&
+      def.hp>0&&
+      (!B||B.cqDamageSpToken!==defenderKey)
+    ){
+      defenderGain=BATTLE_RESOURCE_BALANCE.damageTakenSpGain;
+      if(B)B.cqDamageSpToken=defenderKey;
+    }
+
+    if(att){
+      att.gauge=Math.max(
+        0,
+        Math.min(100,beforeAttGauge+attackerGain)
+      );
+    }
+    if(def){
+      def.gauge=Math.max(
+        0,
+        Math.min(100,beforeDefGauge+defenderGain)
+      );
+      if(guarded)def.atb=beforeDefAtb;
+    }
+
+    CQ_EVENTS.emit("battle:damage",{
+      battle:B,
+      attacker:att,
+      defender:def,
+      damage:adjustedDamage,
+      options:opt||{},
+      actionToken:token
+    });
+    if(preciseEvent&&B&&token&&B.growthPreciseGuardToken!==token){
+      B.growthPreciseGuardToken=token;
+      CQ_EVENTS.emit("battle:preciseGuard",{
+        battle:B,
+        attacker:att,
+        defender:def,
+        actionToken:token
+      });
+    }
+    return adjustedDamage;
   };
   const oldExec=execAction;
   execAction=function(self,foe,act,options){
@@ -13835,7 +14102,9 @@ const CQ_EVENTS=window.CQ_EVENTS;
     });
     test("精密ガードはaction tokenで重複防止",()=>CTX.dealDamage.toString().includes("growthPreciseGuardToken"));
     test("市場倍率クランプ0.78〜1.42を維持",()=>{
-      const source=CTX.dealDamage.toString();
+      const source=[CTX.dealDamage,oldDamage]
+        .map(fn=>fn.toString())
+        .join("\n");
       return (source.includes(".78")||source.includes("0.78"))&&source.includes("1.42");
     });
     test("外部文字列をHTMLとして解釈しない",()=>{
@@ -13862,6 +14131,26 @@ const CQ_EVENTS=window.CQ_EVENTS;
     test("easyよりexecutiveの判断誤差が小さい",()=>cpuDifficultyNoise("executive")<cpuDifficultyNoise("easy"));
     test("cpuDecideは既存action形式を返す",()=>noBattle(()=>{const{self,foe}=cpuPair(),a=cpuDecide(self,foe);return a&&typeof a.type==="string"&&Object.keys(a).every(k=>k==="type"||k==="extra");}));
     test("AI評価中にexecuteMoveを呼ばない",()=>![buildCpuContext,buildCpuCandidates,estimateCpuDamage,estimateIncomingThreat,scoreCpuAction,scoreCpuAttack,scoreCpuGuard,scoreCpuSkill,scoreCpuSupport,scoreCpuStrategy,scoreCpuSummon,selectCpuAction].some(fn=>fn.toString().includes("executeMove(")));
+    test("通常ガード倍率は0.45",()=>BATTLE_RESOURCE_BALANCE.guardDamageMultiplier===.45);
+    test("精密ガード倍率は0.28",()=>BATTLE_RESOURCE_BALANCE.preciseGuardDamageMultiplier===.28);
+    test("精密ガードは通常ガードより軽減が大きい",()=>BATTLE_RESOURCE_BALANCE.preciseGuardDamageMultiplier<BATTLE_RESOURCE_BALANCE.guardDamageMultiplier);
+    test("通常攻撃側SP獲得は14",()=>BATTLE_RESOURCE_BALANCE.attackSpGain===14);
+    test("被弾側SP獲得は4",()=>BATTLE_RESOURCE_BALANCE.damageTakenSpGain===4);
+    test("通常ガードSP獲得は6",()=>BATTLE_RESOURCE_BALANCE.guardSpGain===6);
+    test("精密ガードSP獲得は10",()=>BATTLE_RESOURCE_BALANCE.preciseGuardSpGain===10);
+    test("精密ガードATB獲得は12",()=>BATTLE_RESOURCE_BALANCE.preciseGuardAtbGain===12);
+    test("精密ガードSPは通常ガード分と二重加算しない",()=>BATTLE_RESOURCE_BALANCE.preciseGuardSpGain===10&&BATTLE_RESOURCE_BALANCE.preciseGuardSpGain!==BATTLE_RESOURCE_BALANCE.guardSpGain+BATTLE_RESOURCE_BALANCE.preciseGuardSpGain);
+    test("支援行動だけでは通常攻撃SPを得ない",()=>{const source=CTX.dealDamage.toString();return source.includes('currentActionType==="attack"')&&!source.includes('currentActionType==="support"');});
+    test("gauge効果を持つ支援技は固有SPを適用する",()=>{const{self,foe}=cpuPair();self.gauge=0;executeMove(self,foe,{name:"TEST SUPPORT",cost:0,power:1,effects:[{kind:"gauge",amount:17}]},{dealDamage(){return 0;},hurt(){},heal(){return 0;}},false);return self.gauge===17;});
+    test("SP上限は100",()=>{const fighter={gauge:98};gainBattleGauge(fighter,20);return fighter.gauge===100;});
+    test("SP下限は0",()=>{const fighter={gauge:2};gainBattleGauge(fighter,-20);return fighter.gauge===0;});
+    test("プレイヤーとCPUでSP規則を分岐しない",()=>!CTX.dealDamage.toString().includes('side==="p"')&&!CTX.dealDamage.toString().includes('side==="e"'));
+    test("市場変化間隔は必ず5〜7行動",()=>Array.from({length:200},marketCycleInterval).every(value=>value>=5&&value<=7));
+    test("市場倍率クランプ0.78〜1.42を維持",()=>{const source=[CTX.dealDamage,oldDamage].map(fn=>fn.toString()).join("\n");return (source.includes(".78")||source.includes("0.78"))&&source.includes("1.42");});
+    test("visualOnlyでは戦闘資源を確定しない",()=>{const source=execAction.toString();return source.includes("visualOnly")&&source.includes("if(visualOnly)");});
+    test("simulateBattleで育成EXPとlocalStorageが変化しない",()=>{const companies=allCompanies();if(companies.length<2)return true;const beforeState=JSON.stringify(STATE),beforeStorage=localStorage.getItem(KEY);simulateBattle(companies[0],companies[1]);return JSON.stringify(STATE)===beforeState&&localStorage.getItem(KEY)===beforeStorage;});
+    test("敵大技かつ被KO危険時はCPUガード評価が上がる",()=>{const{self,foe}=cpuPair(),base=buildCpuContext(self,foe),safe=scoreCpuGuard({type:"guard"},Object.assign({},base,{foeIntent:null,lethalRisk:false,incomingThreatRatio:.2})).score,danger=scoreCpuGuard({type:"guard"},Object.assign({},base,{foeIntent:{type:"big"},lethalRisk:true,incomingThreatRatio:1.1})).score;return danger>safe;});
+    test("敵をKO可能なら攻撃系評価がガード以上",()=>{const{self,foe}=cpuPair();foe.hp=1;const context=buildCpuContext(self,foe),attack=scoreCpuAttack({type:"attack"},context).score,skill=self.co.big&&self.gauge>=self.co.big.cost?scoreCpuSkill({type:"big",move:self.co.big},context).score:0,guard=scoreCpuGuard({type:"guard"},context).score;return Math.max(attack,skill)>=guard;});
     console.table(results);
     return results;
   }
@@ -14124,40 +14413,55 @@ function cqMusicBoxPlaybackActive(){
   return !!CQ_HELP_MUSIC.synth;
 }
 function cqStopTitleLoopBgm(){
-  const stopNames=[
-    "titleBgmStop","stopTitleBgm","titleMusicStop","stopTitleMusic"
-  ];
-  stopNames.forEach(name=>{
+  const resolve=name=>{
+    try{return eval(name);}
+    catch(_){return window[name];}
+  };
+  const stopTarget=target=>{
+    if(!target||typeof target==="string"||typeof target==="function")return;
+    [target,target.synth,target.player,target.source,target.audio].filter(Boolean).forEach(node=>{
+      ["stop","pause","destroy","disconnect"].some(method=>{
+        if(typeof node[method]!=="function")return false;
+        try{node[method]();}catch(_){}
+        return true;
+      });
+    });
+    [
+      "loopTimer","loopTimeout","loopInterval","timer","timeoutId",
+      "intervalId","restartTimer","nextTimer","raf","rafId"
+    ].forEach(key=>{
+      const id=target[key];
+      if(!id)return;
+      try{clearTimeout(id);}catch(_){}
+      try{clearInterval(id);}catch(_){}
+      try{cancelAnimationFrame(id);}catch(_){}
+      try{target[key]=0;}catch(_){}
+    });
+    try{if("loop" in target)target.loop=false;}catch(_){}
+    try{if("playing" in target)target.playing=false;}catch(_){}
     try{
-      const stop=window[name];
-      if(typeof stop==="function")stop();
+      if("isPlaying" in target&&typeof target.isPlaying!=="function"){
+        target.isPlaying=false;
+      }
+    }catch(_){}
+  };
+
+  [
+    "titleBgmStop","stopTitleBgm","titleMusicStop","stopTitleMusic"
+  ].forEach(name=>{
+    try{
+      const stop=resolve(name);
+      if(typeof stop==="function"&&!stop.__cqTitleLoopRemoved)stop();
     }catch(_){}
   });
 
   [
-    "CQ_TITLE_BGM","TITLE_BGM","titleBgm","titleBGM","titleMusic"
+    "CQ_TITLE_BGM","TITLE_BGM","TITLE_BGM_PLAYER","titleBgm",
+    "titleBGM","titleMusic","titleBgmPlayer","titleBgmController",
+    "titleMusicPlayer","titleMusicController"
   ].forEach(name=>{
-    try{
-      const controller=window[name];
-      if(!controller||typeof controller==="string"||typeof controller==="function")return;
-      ["stop","pause","destroy"].some(method=>{
-        if(typeof controller[method]!=="function")return false;
-        controller[method]();
-        return true;
-      });
-      ["loopTimer","timer","timeoutId","intervalId","raf"].forEach(key=>{
-        const id=controller[key];
-        if(!id)return;
-        clearTimeout(id);
-        clearInterval(id);
-        cancelAnimationFrame(id);
-        controller[key]=0;
-      });
-      if("playing" in controller)controller.playing=false;
-      if("isPlaying" in controller&&typeof controller.isPlaying!=="function"){
-        controller.isPlaying=false;
-      }
-    }catch(_){}
+    try{stopTarget(resolve(name));}
+    catch(_){}
   });
 }
 function cqInstallTitleMusicLoopGuard(){
@@ -14167,22 +14471,17 @@ function cqInstallTitleMusicLoopGuard(){
   ];
   const blocked=function(){
     cqStopTitleLoopBgm();
+    return false;
   };
   blocked.__cqLegacyTitleBgmBlocked=true;
+  blocked.__cqTitleLoopRemoved=true;
+  window.__CQ_BLOCKED_TITLE_LOOP_START__=blocked;
 
   names.forEach(name=>{
-    try{
-      const original=window[name];
-      if(typeof original==="function"&&!original.__cqLegacyTitleBgmBlocked){
-        blocked["original_"+name]=original;
-      }
-      window[name]=blocked;
-    }catch(_){}
-
-    try{
-      window.__CQ_BLOCKED_TITLE_LOOP_START__=blocked;
-      eval(name+"=window.__CQ_BLOCKED_TITLE_LOOP_START__");
-    }catch(_){}
+    try{window[name]=blocked;}
+    catch(_){}
+    try{eval(name+"=window.__CQ_BLOCKED_TITLE_LOOP_START__");}
+    catch(_){}
   });
 
   if(typeof showScreen==="function"&&!showScreen.__cqTitleLoopBlocked){
@@ -14191,7 +14490,7 @@ function cqInstallTitleMusicLoopGuard(){
       const value=originalShowScreen.apply(this,arguments);
       if(name==="title"){
         cqStopTitleLoopBgm();
-        [0,120,500,1200].forEach(delay=>{
+        [0,100,400,1000,2000].forEach(delay=>{
           setTimeout(cqStopTitleLoopBgm,delay);
         });
       }
@@ -14200,10 +14499,21 @@ function cqInstallTitleMusicLoopGuard(){
     showScreen.__cqTitleLoopBlocked=true;
   }
 
+  if(window.__CQ_TITLE_LOOP_GUARD_TIMER__){
+    clearInterval(window.__CQ_TITLE_LOOP_GUARD_TIMER__);
+  }
+  window.__CQ_TITLE_LOOP_GUARD_TIMER__=setInterval(()=>{
+    const titleScreen=$("scr-title");
+    const titleActive=
+      (typeof S!=="undefined"&&S&&S.screen==="title")||
+      !!(titleScreen&&titleScreen.classList.contains("active"));
+    if(titleActive)cqStopTitleLoopBgm();
+  },400);
+
   cqStopTitleLoopBgm();
 }
 function cqResumeTitleBgm(){
-  /* タイトルへ戻ってもTITLE LOOP BGMだけは再開しない */
+  /* タイトル画面ではループ音楽を再開しない */
   cqStopTitleLoopBgm();
 }
 cqInstallTitleMusicLoopGuard();
@@ -14737,7 +15047,7 @@ function ensureTitleHelpPage(){
             <thead><tr><th>コマンド</th><th>主な効果</th><th>使いどころ</th></tr></thead>
             <tbody>
               <tr><td>攻撃</td><td>安定したダメージとSP獲得</td><td>迷ったときの基本行動です。</td></tr>
-              <tr><td>防御</td><td>次の攻撃を65パーセント軽減しSPを獲得</td><td>敵の大技予告中なら精密ガードとなり、80パーセント軽減とATB前進が発生します。</td></tr>
+              <tr><td>防御</td><td>次の攻撃を55パーセント軽減しSPを6獲得</td><td>敵の大技予告中なら精密ガードとなり、72パーセント軽減、ATBプラス12、SPプラス10が発生します。</td></tr>
               <tr><td>特技</td><td>中技SP40、大技SP100、召喚SP60、秘策SP70</td><td>追い風や属性有利の瞬間へ集中させます。</td></tr>
               <tr><td>支援</td><td>回復、強化、弱体解除、共通戦略</td><td>SP不要ですが1行動とクールダウンを使います。</td></tr>
             </tbody>
@@ -14751,7 +15061,7 @@ function ensureTitleHelpPage(){
         <div class="cq-help-grid">
           <div class="cq-help-rule"><b>ATB</b><span>速度が高い企業ほど早く満タンになります。100になるまでコマンドは選べません。</span></div>
           <div class="cq-help-rule"><b>敵インテント</b><span>敵ATBが高まると次の行動予告が表示されます。大技表示を見てから防御するのが基本です。</span></div>
-          <div class="cq-help-rule"><b>市場イベント</b><span>数行動ごとに追い風と逆風が変化します。追い風中の大技には15パーセントの市場ボーナスがあります。</span></div>
+          <div class="cq-help-rule"><b>市場イベント</b><span>5〜7行動ごとに追い風と逆風が変化します。追い風中の大技には15パーセントの市場ボーナスがあります。</span></div>
           <div class="cq-help-rule"><b>召喚</b><span>原則1戦1回、3ターン共闘します。早めに呼ぶほど行動回数を確保できます。</span></div>
           <div class="cq-help-rule"><b>行動不能</b><span>営業処分などを受けるとATBが停止し、表示された残り回数がゼロになるまで行動できません。</span></div>
           <div class="cq-help-rule"><b>企業育成</b><span>勝利とデイリー目標でEXPを獲得します。育成ポイントは合計8、同じ能力には最大4までです。</span></div>
