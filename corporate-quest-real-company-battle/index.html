@@ -10183,12 +10183,28 @@ $("btnCreateBack").addEventListener("click",()=>{SE.select();showScreen("select"
 /* ================================================================
    15. リサイズ・回転対応 (dvh+flexで自動追従。演出位置のみ再描画)
 ================================================================ */
+const ENEMY_INTENT_PREVIEW_ATB=65;
+function prepareEnemyIntentEarly(){
+  const B=S.battle;
+  if(
+    !B||B.over||S.paused||S.inputLock||
+    !B.p||!B.e||B.e.hp<=0||B.e.intent||
+    isStunned(B.e)||Number(B.e.atb)<ENEMY_INTENT_PREVIEW_ATB
+  )return;
+  const action=cpuDecide(B.e,B.p);
+  if(action&&typeof action.type==="string"){
+    B.e.intent=action.extra===undefined
+      ?{type:action.type}
+      :{type:action.type,extra:action.extra};
+  }
+}
 baseAtbRateForStun=atbRate;
 atbRate=function(f){
   return isStunned(f)?0:baseAtbRateForStun(f);
 };
 const updateATBUIWithoutStun=updateATBUI;
 updateATBUI=function(){
+  prepareEnemyIntentEarly();
   const result=updateATBUIWithoutStun();
   renderStunUi();
   return result;
@@ -10468,8 +10484,43 @@ function GLLoop(){
   GL.skyBeams.forEach(b=>{b.rotation.y=t*b.userData.speed+b.userData.offset;});
   GL.drones.forEach(d=>{const u=d.userData;u.a+=dt*u.speed;d.position.set(Math.cos(u.a)*u.r,u.h+Math.sin(t*.85+u.a)*.55,Math.sin(u.a)*u.r);});
   for(let i=GL.tweens.length-1;i>=0;i--){
-    const tw=GL.tweens[i],p=Math.min(1,(performance.now()-tw.start)/tw.dur);
-    tw.fn(p);if(p>=1){GL.tweens.splice(i,1);if(tw.done)tw.done();}
+    const tw=GL.tweens[i];
+    if(!tw){
+      GL.tweens.splice(i,1);
+      continue;
+    }
+    const duration=Math.max(1,Number(tw.dur)||1);
+    const p=Math.min(1,Math.max(0,(performance.now()-Number(tw.start||0))/duration));
+    try{
+      if(typeof tw.fn!=="function"){
+        throw new TypeError("Tween更新関数がありません");
+      }
+      tw.fn(p);
+      if(p>=1){
+        GL.tweens.splice(i,1);
+        if(typeof tw.done==="function")tw.done();
+      }
+    }catch(error){
+      GL.tweens.splice(i,1);
+      const detail=error&&error.stack
+        ?error.stack
+        :error&&error.message
+          ?error.message
+          :String(error);
+      console.error("[GL Tween Error]",detail);
+      try{
+        if(typeof tw.done==="function")tw.done();
+      }catch(doneError){
+        console.error(
+          "[GL Tween Cleanup Error]",
+          doneError&&doneError.stack
+            ?doneError.stack
+            :doneError&&doneError.message
+              ?doneError.message
+              :String(doneError)
+        );
+      }
+    }
   }
   if(GL.intro.active){
     GL.intro.t+=dt;
@@ -10674,6 +10725,275 @@ function fxBeam(from,to,color,radius,life){
   return m;
 }
 const UNIQUE_BIG_FX={
+ byd(ap,dp){/* ブレードバッテリーが中国龍となり、うねりながら相手へ襲いかかる */
+  const T=THREE,segments=22;
+  const green=0x21d06f,gold=0xffd45c,red=0xd62929;
+  const travel=dp.clone().sub(ap);
+  const direction=travel.clone().normalize();
+  const side=new T.Vector3(-direction.z,0,direction.x);
+  if(side.lengthSq()<.001)side.set(1,0,0);
+  side.normalize();
+
+  fxSprite("龍","#ffe8a3",ap.clone().add(V3(0,4.8,0)),2.8,2050,(m,p)=>{
+    const q=1-Math.pow(1-p,3);
+    const center=ap.clone().lerp(dp,q);
+    const coil=Math.sin(q*Math.PI*5.5)*(1-q)*2.7;
+    center.addScaledVector(side,coil);
+    center.y+=2.25+Math.sin(Math.PI*q)*3.2;
+    m.position.copy(center);
+    m.scale.setScalar(2.8*(.62+q*.58));
+    m.rotation.z=Math.sin(q*Math.PI*6)*.18;
+  },"900 118px");
+
+  for(let i=0;i<segments;i++){
+    const phase=i*.48;
+    const startAngle=i/segments*Math.PI*2;
+    const start=ap.clone().add(V3(
+      Math.cos(startAngle)*(2.2+(i%3)*.18),
+      1.0+(i%5)*.34,
+      Math.sin(startAngle)*(2.2+(i%3)*.18)
+    ));
+    setTimer(()=>{
+      const blade=simpleFx(
+        new T.BoxGeometry(.76,.16,.28),
+        i%5===0?red:(i%2?green:gold),
+        start,
+        2200,
+        (o,p)=>{
+          const q=1-Math.pow(1-p,3);
+          const center=ap.clone().lerp(dp,q);
+          const wave=Math.sin(q*Math.PI*5.5-phase)*(1-q)*2.65+
+            Math.sin(q*Math.PI*2+phase)*.34;
+          center.addScaledVector(side,wave);
+          center.y+=1.25+Math.sin(Math.PI*q)*(3.0+i*.025)+Math.cos(q*10-phase)*.16;
+          o.position.copy(center);
+          o.rotation.y=Math.atan2(direction.x,direction.z)+Math.sin(q*8-phase)*.38;
+          o.rotation.z=Math.sin(q*12-phase)*.62;
+          o.rotation.x=Math.cos(q*9-phase)*.24;
+          const taper=1-Math.max(0,i-segments*.68)/(segments*.45);
+          o.scale.setScalar((.72+Math.sin(Math.PI*q)*.38)*Math.max(.55,taper));
+        }
+      );
+      if(blade&&blade.material){
+        blade.material.transparent=true;
+        blade.material.opacity=.94;
+        blade.material.depthWrite=false;
+        blade.material.blending=T.AdditiveBlending;
+        blade.material.needsUpdate=true;
+      }
+    },i*34);
+  }
+
+  for(let i=0;i<6;i++){
+    setTimer(()=>{
+      const angle=i/6*Math.PI*2;
+      const cloudPos=ap.clone().lerp(dp,.22+i*.09).add(V3(
+        Math.cos(angle)*1.8,
+        1.1+i*.48,
+        Math.sin(angle)*1.4
+      ));
+      const ring=simpleFx(
+        new T.TorusGeometry(.5+i*.08,.055,8,44),
+        i%2?gold:red,
+        cloudPos,
+        1250,
+        (o,p)=>{
+          o.rotation.x=Math.PI/2;
+          o.rotation.z=p*(i%2?6:-6);
+          o.scale.setScalar(.45+p*2.4);
+        }
+      );
+      if(ring&&ring.material){
+        ring.material.depthWrite=false;
+        ring.material.blending=T.AdditiveBlending;
+      }
+    },420+i*145);
+  }
+
+  for(let i=0;i<8;i++){
+    setTimer(()=>{
+      motionArc(
+        ap.clone().add(V3((Math.random()-.5)*1.8,2.1+Math.random()*2.4,(Math.random()-.5)*1.8)),
+        dp.clone().add(V3((Math.random()-.5)*1.2,1.0+Math.random()*1.6,(Math.random()-.5)*1.2)),
+        i%3===0?red:(i%2?green:gold),
+        760,
+        .8+i*.12
+      );
+    },720+i*105);
+  }
+
+  setTimer(()=>{
+    fxSprite("龍吟","#fff1b8",dp.clone().add(V3(0,4.2,.4)),2.25,850,(m,p)=>{
+      m.scale.setScalar(2.25*(.55+p*.8));
+      m.position.y=dp.y+4.2+p*.65;
+    },"900 62px");
+    fxBeam(ap.clone().add(V3(0,3.1,0)),dp.clone().add(V3(0,1.3,0)),gold,.42,920);
+    motionParticles(dp.clone().add(V3(0,1.2,0)),red,58,4.8,1200,2.3);
+    motionParticles(dp.clone().add(V3(0,1.4,0)),gold,42,4.0,1100,2.0);
+    arenaFlash("#ffd45c");
+    setTimer(()=>arenaFlash("#d62929"),110);
+    camShake(1.75);
+  },1500);
+ },
+ tesla(ap,dp){/* スーパーチャージャー網が起動し、自律走行車群が包囲する */
+  const T=THREE;
+  for(let i=0;i<8;i++){
+    const angle=i/8*Math.PI*2;
+    const position=V3(
+      dp.x+Math.cos(angle)*3.65,
+      1.25,
+      dp.z+Math.sin(angle)*3.65
+    );
+    setTimer(()=>{
+      const charger=simpleFx(
+        new T.BoxGeometry(.34,2.2,.42),
+        i%2?0xf3f6fa:0xe82127,
+        position,
+        2200,
+        (o,p)=>{
+          o.position.y=-.9+Math.min(1,p*2.4)*2.15;
+          o.rotation.y=-angle;
+          o.scale.y=.35+Math.min(1,p*2.1)*.65;
+        }
+      );
+      if(charger&&charger.material){
+        charger.material.metalness=.62;
+        charger.material.roughness=.24;
+      }
+    },i*85);
+  }
+  const coil=simpleFx(
+    new T.TorusKnotGeometry(1.15,.09,96,12),
+    0xe82127,
+    ap.clone().add(V3(0,3.6,0)),
+    2350,
+    (o,p)=>{
+      o.rotation.x=p*7;
+      o.rotation.y=p*11;
+      o.scale.setScalar(.25+Math.min(1,p*1.8)*1.1);
+    }
+  );
+  if(coil&&coil.material){
+    coil.material.depthWrite=false;
+    coil.material.blending=T.AdditiveBlending;
+  }
+  fxSprite("SUPERCHARGED","#ffffff",ap.clone().add(V3(0,5.25,0)),3.7,1850,(m,p)=>{
+    m.scale.setScalar(3.7*(.68+p*.4));
+  },"900 33px");
+  for(let i=0;i<10;i++){
+    setTimer(()=>{
+      const from=V3(
+        dp.x+Math.cos(i/10*Math.PI*2)*6.6,
+        .65+(i%2)*.28,
+        dp.z+Math.sin(i/10*Math.PI*2)*5.4
+      );
+      fxSprite("🚘",null,from,.9,1200,(m,p)=>{
+        const q=1-Math.pow(1-p,3);
+        const angle=i/10*Math.PI*2+p*1.7;
+        const radius=6.6-q*5.5;
+        m.position.set(
+          dp.x+Math.cos(angle)*radius,
+          .65+Math.sin(p*Math.PI)*.5,
+          dp.z+Math.sin(angle)*radius
+        );
+        m.rotation.z=Math.sin(angle)*.12;
+      });
+    },520+i*72);
+  }
+  for(let i=0;i<7;i++){
+    setTimer(()=>{
+      motionArc(
+        ap.clone().add(V3((Math.random()-.5)*1.5,3.6+(Math.random()-.5)*1.1,(Math.random()-.5)*1.5)),
+        dp.clone().add(V3((Math.random()-.5)*1.3,1.1+Math.random()*1.5,(Math.random()-.5)*1.1)),
+        i%2?0xe82127:0xe8f7ff,
+        720,
+        1.05+i*.12
+      );
+    },850+i*110);
+  }
+  setTimer(()=>{
+    fxBeam(ap.clone().add(V3(0,3.6,0)),dp.clone().add(V3(0,1.2,0)),0xffffff,.46,1050);
+    fxBeam(ap.clone().add(V3(0,3.6,0)),dp.clone().add(V3(0,1.2,0)),0xe82127,.18,1050);
+    arenaFlash("#ffffff");
+    camShake(1.5);
+  },1450);
+ },
+ volkswagen(ap,dp){/* MQBプラットフォームから量産車が組み上がり一斉出庫 */
+  const T=THREE;
+  fxSprite("MQB","#dff5ff",ap.clone().add(V3(0,4.8,0)),2.8,2100,(m,p)=>{
+    m.scale.setScalar(2.8*(.65+p*.52));
+    m.rotation.z=Math.sin(p*5)*.05;
+  },"900 72px");
+  for(let row=0;row<3;row++){
+    for(let column=0;column<4;column++){
+      const index=row*4+column;
+      const start=V3(
+        ap.x+(column-1.5)*1.05,
+        5.8+row*.6,
+        ap.z+(row-1)*.75
+      );
+      const end=V3(
+        dp.x+(column-1.5)*.66,
+        .38+row*.35,
+        dp.z+(row-1)*.62
+      );
+      setTimer(()=>{
+        const platform=simpleFx(
+          new T.BoxGeometry(1.25,.16,.62),
+          index%3===0?0x36a8e0:index%3===1?0xf0f3f6:0x163b65,
+          start,
+          1700,
+          (o,p)=>{
+            const q=1-Math.pow(1-p,3);
+            o.position.lerpVectors(start,end,q);
+            o.rotation.y=p*Math.PI*2;
+            o.scale.setScalar(.48+q*.72);
+          }
+        );
+        if(platform&&platform.material){
+          platform.material.metalness=.72;
+          platform.material.roughness=.26;
+        }
+      },index*70);
+    }
+  }
+  for(let i=0;i<6;i++){
+    fxSprite("⚙️",null,ap.clone(),1.05,2200,(m,p)=>{
+      const angle=i/6*Math.PI*2+p*5*(i%2?1:-1);
+      const radius=2.4-p*.8;
+      m.position.set(
+        ap.x+Math.cos(angle)*radius,
+        1.2+(i%3)*.85+Math.sin(p*6+i)*.18,
+        ap.z+Math.sin(angle)*radius
+      );
+      m.rotation.z=p*9*(i%2?1:-1);
+    });
+  }
+  for(let i=0;i<9;i++){
+    setTimer(()=>{
+      const from=V3(ap.x-6.2,.55+(i%3)*.18,ap.z+(i%3-1)*1.0);
+      const to=V3(dp.x+1.2,.55+(i%3)*.18,dp.z+(i%3-1)*.72);
+      fxSprite(i%3===0?"🚗":i%3===1?"🚙":"🚐",null,from,.92,1150,(m,p)=>{
+        const q=1-Math.pow(1-p,3);
+        m.position.lerpVectors(from,to,q);
+        m.position.y+=Math.sin(Math.PI*p)*.3;
+      });
+    },720+i*90);
+  }
+  setTimer(()=>{
+    for(let i=0;i<4;i++){
+      motionArc(
+        ap.clone().add(V3((i-1.5)*.55,2.3+i*.3,0)),
+        dp.clone().add(V3((i-1.5)*.42,1.0+i*.25,0)),
+        i%2?0x36a8e0:0xeaf7ff,
+        820,
+        .6+i*.16
+      );
+    }
+    arenaFlash("#66c9f4");
+    camShake(1.35);
+  },1450);
+ },
  toyota(ap,dp){/* 量産車が全周から包囲突撃 */
   for(let i=0;i<12;i++){
     const a0=i/12*Math.PI*2;
@@ -13215,7 +13535,7 @@ function tutorialPageHtml(index){
   }
   if(index===1){
     return '<div class="cq-tutorial-kicker">PAGE 2 / 3</div><h2>精密ガード</h2>'+
-      '<p>敵ATBが85%以上になると、次の行動インテントが表示されます。大技チャージを確認してから支援戦術内のGUARDを選ぶと、通常ガードより強力な精密ガードになります。</p>'+
+      '<p>敵ATBが65%以上になると、次の行動インテントが表示されます。大技チャージを早めに確認してから支援戦術内のGUARDを選ぶと、通常ガードより強力な精密ガードになります。</p>'+
       '<div class="cq-tutorial-callout"><b>READ GUARD!</b>被ダメージ72%減 / 自分のATB+12 / SP+10</div>';
   }
   return '<div class="cq-tutorial-kicker">PAGE 3 / 3</div><h2>市場変化とSP大技</h2>'+
