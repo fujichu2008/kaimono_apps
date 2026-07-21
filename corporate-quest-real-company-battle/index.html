@@ -21104,6 +21104,522 @@ function configureTitleHelp(){
   };
 })();
 
+(function installAlternatingCompanySelectionAndCompareInertia(){
+  if(window.__CQ_ALTERNATING_COMPANY_SELECTION_INSTALLED__)return;
+  window.__CQ_ALTERNATING_COMPANY_SELECTION_INSTALLED__=true;
+
+  const STATE={
+    nextSide:"p",
+    internalSlotClick:false,
+    internalCompanyClick:false,
+    internalFocusMove:false,
+    compareHost:null,
+    inertiaRaf:0
+  };
+  const CARD_SELECTOR=[
+    "[data-company-id]","[data-company]","[data-co-id]",
+    ".company-card",".select-company-card",".select-card",
+    ".company-item",".select-item",".carousel-card",".co-card"
+  ].join(",");
+  const PLAYER_SELECTORS=[
+    "#playerSlot","#selectPlayerSlot","#selectedPlayer","#selectPlayer",
+    "#playerCompany","#myCompany","#pSlot","#slotP","#slotPlayer",
+    ".player-slot",".select-player-slot",".my-company-slot",".slot-player",
+    "[data-side='p']","[data-side='player']","[data-target='player']",
+    "[data-select-side='p']","[data-select-side='player']"
+  ];
+  const ENEMY_SELECTORS=[
+    "#enemySlot","#selectEnemySlot","#selectedEnemy","#selectEnemy",
+    "#enemyCompany","#opponentCompany","#eSlot","#slotE","#slotEnemy",
+    ".enemy-slot",".select-enemy-slot",".opponent-company-slot",".slot-enemy",
+    "[data-side='e']","[data-side='enemy']","[data-target='enemy']",
+    "[data-select-side='e']","[data-select-side='enemy']"
+  ];
+
+  function screen(){return document.getElementById("scr-select");}
+  function companies(){return typeof allCompanies==="function"?allCompanies():[];}
+  function flip(side){return side==="p"?"e":"p";}
+  function visible(node){
+    if(!node||!node.isConnected||node.hidden)return false;
+    const style=window.getComputedStyle?getComputedStyle(node):null;
+    return !style||(style.display!=="none"&&style.visibility!=="hidden"&&Number(style.opacity)!==0);
+  }
+  function setNextSide(side){
+    if(side!=="p"&&side!=="e")return;
+    STATE.nextSide=side;
+    const root=screen();
+    if(root)root.dataset.cqNextAssignSide=side;
+    const player=findSideSlot("p"),enemy=findSideSlot("e");
+    [player,enemy].forEach(node=>node&&node.classList.remove("cq-next-company-target"));
+    const target=side==="p"?player:enemy;
+    if(target)target.classList.add("cq-next-company-target");
+  }
+  function installStyle(){
+    if(document.getElementById("cqAlternatingCompanySelectionStyle"))return;
+    const style=document.createElement("style");
+    style.id="cqAlternatingCompanySelectionStyle";
+    style.textContent=`
+#scr-select .cq-next-company-target{
+  outline:2px solid rgba(92,220,255,.78)!important;
+  outline-offset:2px!important;
+  box-shadow:0 0 0 3px rgba(92,220,255,.12),0 0 20px rgba(92,220,255,.22)!important;
+}
+#scr-select[data-cq-next-assign-side="e"] .cq-next-company-target{
+  outline-color:rgba(255,102,125,.82)!important;
+  box-shadow:0 0 0 3px rgba(255,102,125,.12),0 0 20px rgba(255,102,125,.22)!important;
+}
+#scr-select .cq-compare-inertia-surface{
+  touch-action:none!important;
+  -webkit-user-select:none;
+  user-select:none;
+  cursor:grab;
+}
+#scr-select .cq-compare-inertia-surface.cq-dragging{cursor:grabbing}
+`;
+    document.head.appendChild(style);
+  }
+  function firstVisible(selectors){
+    const root=screen();
+    if(!root)return null;
+    for(const selector of selectors){
+      const node=root.querySelector(selector);
+      if(node&&visible(node))return node;
+    }
+    return null;
+  }
+  function slotIdentity(node){
+    if(!node)return "";
+    const className=typeof node.className==="string"?node.className:"";
+    const text=String(node.getAttribute&&node.getAttribute("aria-label")||node.textContent||"").trim().slice(0,100);
+    return ((node.id||"")+" "+className+" "+text).toLowerCase();
+  }
+  function heuristicSideSlot(side){
+    const root=screen();
+    if(!root)return null;
+    const nodes=Array.from(root.querySelectorAll(
+      "button,[role='button'],.slot,.select-slot,.company-slot,.versus-slot,.vs-slot,.side-card"
+    )).filter(node=>visible(node)&&!node.closest(CARD_SELECTOR)&&!node.closest("#compareChart"));
+    const pattern=side==="p"
+      ?/(^|\s|[-_])(player|your|you|my|self|p)(\s|[-_]|$)|自機|自分|味方|あなた/
+      :/(^|\s|[-_])(enemy|cpu|rival|opponent|foe|e)(\s|[-_]|$)|敵機|敵|相手/;
+    return nodes.find(node=>pattern.test(slotIdentity(node)))||null;
+  }
+  function findSideSlot(side){
+    return firstVisible(side==="p"?PLAYER_SELECTORS:ENEMY_SELECTORS)||heuristicSideSlot(side);
+  }
+  function sideFromTarget(target){
+    if(!target||!target.closest)return "";
+    const player=findSideSlot("p"),enemy=findSideSlot("e");
+    if(player&&(target===player||player.contains(target)))return "p";
+    if(enemy&&(target===enemy||enemy.contains(target)))return "e";
+    return "";
+  }
+  function activateSide(side){
+    const slot=findSideSlot(side);
+    if(!slot)return false;
+    STATE.internalSlotClick=true;
+    try{
+      slot.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));
+    }finally{
+      STATE.internalSlotClick=false;
+    }
+    return true;
+  }
+  function dataCompanyId(node){
+    if(!node)return "";
+    const data=node.dataset||{};
+    return String(
+      data.companyId||data.company||data.coId||data.companyKey||data.id||""
+    ).trim();
+  }
+  function companyFromCard(card){
+    if(!card)return null;
+    const list=companies();
+    let id=dataCompanyId(card);
+    if(!id){
+      const child=card.querySelector&&card.querySelector("[data-company-id],[data-company],[data-co-id]");
+      id=dataCompanyId(child);
+    }
+    if(id){
+      const found=list.find(company=>String(company.id)===id);
+      if(found)return found;
+    }
+    const text=String(card.textContent||"").replace(/\s+/g," ").trim();
+    const byName=list.find(company=>company&&company.name&&text.includes(company.name));
+    if(byName)return byName;
+    if(card.matches&&card.matches(".active,.selected,.center,.focused,.is-active,[aria-selected='true']")){
+      try{return typeof currentSelectCompany==="function"?currentSelectCompany():null;}
+      catch(_){return null;}
+    }
+    return null;
+  }
+  function cardFromTarget(target){
+    const root=screen();
+    if(!root||!target||!target.closest)return null;
+    let card=target.closest(CARD_SELECTOR);
+    if(card&&root.contains(card)&&companyFromCard(card))return card;
+    const button=target.closest("button,[role='button']");
+    if(button&&root.contains(button)&&companyFromCard(button))return button;
+    return null;
+  }
+  function allCompanyCards(){
+    const root=screen();
+    if(!root)return [];
+    const nodes=Array.from(root.querySelectorAll(CARD_SELECTOR));
+    root.querySelectorAll("button,[role='button']").forEach(node=>{
+      if(companyFromCard(node)&&!nodes.includes(node))nodes.push(node);
+    });
+    return nodes.filter(node=>visible(node)&&companyFromCard(node));
+  }
+  function centeredCard(){
+    const cards=allCompanyCards();
+    let current=null;
+    try{current=typeof currentSelectCompany==="function"?currentSelectCompany():null;}catch(_){}
+    if(current){
+      const match=cards.find(card=>{
+        const company=companyFromCard(card);
+        return company&&company.id===current.id;
+      });
+      if(match)return match;
+    }
+    return cards.find(card=>card.matches&&card.matches(
+      ".active,.selected,.center,.focused,.is-active,[aria-selected='true']"
+    ))||cards[0]||null;
+  }
+  function refreshSelectionSlots(){
+    let refreshed=false;
+    [
+      "renderSelectSlots","updateSelectSlots","refreshSelectSlots",
+      "renderSelectedCompanies","updateSelectedCompanies",
+      "renderSelectVersus","updateSelectVersus","renderVersus"
+    ].forEach(name=>{
+      const fn=window[name];
+      if(typeof fn!=="function")return;
+      try{fn();refreshed=true;}catch(_){}
+    });
+    return refreshed;
+  }
+  function forceCompanyToSide(side,company){
+    if(!company||!company.id||typeof S!=="object"||!S)return;
+    const id=company.id;
+    if(side==="p"){
+      S.playerCoId=id;
+      if("selectedPlayerCoId" in S)S.selectedPlayerCoId=id;
+      if("playerCompanyId" in S)S.playerCompanyId=id;
+    }else{
+      S.enemyCoId=id;
+      if("cpuCoId" in S)S.cpuCoId=id;
+      if("opponentCoId" in S)S.opponentCoId=id;
+      if("selectedEnemyCoId" in S)S.selectedEnemyCoId=id;
+      if("enemyCompanyId" in S)S.enemyCompanyId=id;
+    }
+    if(!refreshSelectionSlots()&&typeof renderSelect==="function"){
+      try{renderSelect();}catch(_){}
+    }
+  }
+  function storedCompanyId(side){
+    if(typeof S!=="object"||!S)return "";
+    if(side==="p")return String(S.playerCoId||S.selectedPlayerCoId||S.playerCompanyId||"");
+    return String(S.enemyCoId||S.cpuCoId||S.opponentCoId||S.selectedEnemyCoId||S.enemyCompanyId||"");
+  }
+  function completeAssignment(side,company){
+    const selected=company||(()=>{
+      try{return typeof currentSelectCompany==="function"?currentSelectCompany():null;}
+      catch(_){return null;}
+    })();
+    if(selected&&storedCompanyId(side)!==String(selected.id))forceCompanyToSide(side,selected);
+    setNextSide(flip(side));
+  }
+  function assignCenteredCompany(){
+    const side=STATE.nextSide;
+    activateSide(side);
+    const card=centeredCard();
+    const company=card?companyFromCard(card):(()=>{
+      try{return typeof currentSelectCompany==="function"?currentSelectCompany():null;}
+      catch(_){return null;}
+    })();
+    if(card){
+      STATE.internalCompanyClick=true;
+      try{card.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}
+      finally{STATE.internalCompanyClick=false;}
+    }
+    queueMicrotask(()=>completeAssignment(side,company));
+  }
+  function findCompanyScroller(){
+    const root=screen();
+    if(!root)return null;
+    const compare=document.getElementById("compareChart");
+    const candidates=Array.from(root.querySelectorAll("*"))
+      .filter(node=>{
+        if(!visible(node)||node===compare||(compare&&node.contains(compare)))return false;
+        if(node.clientWidth<120||node.scrollWidth<=node.clientWidth+24)return false;
+        const style=window.getComputedStyle?getComputedStyle(node):null;
+        const overflow=style?style.overflowX:"";
+        return overflow==="auto"||overflow==="scroll"||node.querySelector(CARD_SELECTOR);
+      })
+      .map(node=>{
+        const style=window.getComputedStyle?getComputedStyle(node):null;
+        const overflow=style?style.overflowX:"";
+        let score=node.scrollWidth-node.clientWidth;
+        if(overflow==="auto"||overflow==="scroll")score+=500;
+        if(node.querySelector(CARD_SELECTOR))score+=300;
+        if(node.id==="selectStage"||/carousel|company|select-list|rail|track/i.test(String(node.id||"")+" "+String(node.className||"")))score+=220;
+        return {node,score};
+      })
+      .sort((a,b)=>b.score-a.score);
+    return candidates.length?candidates[0].node:null;
+  }
+  function directionButton(direction){
+    const root=screen();
+    if(!root)return null;
+    const selectors=direction>0
+      ?["#selectNext","#btnSelectNext",".select-next",".carousel-next","[data-dir='next']","[data-select-step='1']"]
+      :["#selectPrev","#btnSelectPrev",".select-prev",".carousel-prev","[data-dir='prev']","[data-select-step='-1']"];
+    return firstVisible(selectors);
+  }
+  function focusByStep(direction){
+    const button=directionButton(direction);
+    if(button){
+      STATE.internalFocusMove=true;
+      try{button.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}
+      finally{STATE.internalFocusMove=false;}
+      return true;
+    }
+    const cards=allCompanyCards();
+    if(cards.length<2)return false;
+    const current=centeredCard();
+    let index=Math.max(0,cards.indexOf(current));
+    index=(index+direction+cards.length)%cards.length;
+    const target=cards[index];
+    const saved={
+      player:typeof S==="object"&&S?S.playerCoId:undefined,
+      enemy:typeof S==="object"&&S?S.enemyCoId:undefined,
+      cpu:typeof S==="object"&&S?S.cpuCoId:undefined
+    };
+    STATE.internalFocusMove=true;
+    try{target.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}
+    finally{
+      STATE.internalFocusMove=false;
+      if(typeof S==="object"&&S){
+        if(saved.player!==undefined)S.playerCoId=saved.player;
+        if(saved.enemy!==undefined)S.enemyCoId=saved.enemy;
+        if(saved.cpu!==undefined)S.cpuCoId=saved.cpu;
+      }
+    }
+    return true;
+  }
+  function snapScroller(scroller){
+    if(!scroller)return;
+    const cards=Array.from(scroller.querySelectorAll(CARD_SELECTOR)).filter(visible);
+    if(!cards.length)return;
+    const center=scroller.getBoundingClientRect().left+scroller.clientWidth/2;
+    const nearest=cards.reduce((best,card)=>{
+      const rect=card.getBoundingClientRect();
+      const distance=Math.abs(rect.left+rect.width/2-center);
+      return !best||distance<best.distance?{card,distance}:best;
+    },null);
+    if(!nearest)return;
+    const rect=nearest.card.getBoundingClientRect();
+    const host=scroller.getBoundingClientRect();
+    const left=scroller.scrollLeft+(rect.left+rect.width/2)-(host.left+host.width/2);
+    if(typeof scroller.scrollTo==="function")scroller.scrollTo({left,behavior:"smooth"});
+    else scroller.scrollLeft=left;
+  }
+  function bindCompareSurface(){
+    const chart=document.getElementById("compareChart");
+    if(!chart)return;
+    const host=chart.closest(
+      ".select-status-card,.select-stat-card,.status-card,.stats-card,"+
+      ".select-compare,.compare-card,.compare-panel,.status-panel"
+    )||chart.parentElement||chart;
+    if(!host||host.dataset.cqAlternatingCompareBound==="1")return;
+    host.dataset.cqAlternatingCompareBound="1";
+    host.classList.add("cq-compare-inertia-surface");
+    STATE.compareHost=host;
+
+    const drag={
+      active:false,pointerId:null,startX:0,lastX:0,lastTime:0,
+      totalX:0,velocity:0,stepCarry:0,scroller:null
+    };
+    const interactive=target=>target&&target.closest&&target.closest("button,a,input,select,textarea,[role='button']");
+    const stopInertia=()=>{
+      if(STATE.inertiaRaf){cancelAnimationFrame(STATE.inertiaRaf);STATE.inertiaRaf=0;}
+    };
+    const applyDistance=distance=>{
+      if(drag.scroller){
+        drag.scroller.scrollLeft+=distance;
+        return;
+      }
+      drag.stepCarry+=distance;
+      const threshold=Math.max(44,Math.min(72,host.clientWidth*.12));
+      while(Math.abs(drag.stepCarry)>=threshold){
+        const direction=drag.stepCarry>0?1:-1;
+        if(!focusByStep(direction))break;
+        drag.stepCarry-=direction*threshold;
+      }
+    };
+    const finish=event=>{
+      if(!drag.active||event.pointerId!==drag.pointerId)return;
+      drag.active=false;
+      host.classList.remove("cq-dragging");
+      try{host.releasePointerCapture(event.pointerId);}catch(_){}
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const tap=Math.abs(drag.totalX)<9&&performance.now()-drag.lastTime<500;
+      if(tap){
+        assignCenteredCompany();
+        return;
+      }
+      let velocity=drag.velocity;
+      let previous=performance.now();
+      const scroller=drag.scroller;
+      const coast=now=>{
+        const elapsed=Math.min(34,Math.max(1,now-previous));
+        previous=now;
+        applyDistance(velocity*elapsed);
+        velocity*=Math.pow(.91,elapsed/16.67);
+        if(Math.abs(velocity)>.018){
+          STATE.inertiaRaf=requestAnimationFrame(coast);
+        }else{
+          STATE.inertiaRaf=0;
+          if(scroller)snapScroller(scroller);
+        }
+      };
+      if(Math.abs(velocity)>.025)STATE.inertiaRaf=requestAnimationFrame(coast);
+      else if(scroller)snapScroller(scroller);
+    };
+
+    host.addEventListener("pointerdown",event=>{
+      if(event.button!==undefined&&event.button!==0)return;
+      if(interactive(event.target))return;
+      stopInertia();
+      drag.active=true;
+      drag.pointerId=event.pointerId;
+      drag.startX=drag.lastX=event.clientX;
+      drag.lastTime=performance.now();
+      drag.totalX=0;
+      drag.velocity=0;
+      drag.stepCarry=0;
+      drag.scroller=findCompanyScroller();
+      host.classList.add("cq-dragging");
+      try{host.setPointerCapture(event.pointerId);}catch(_){}
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },true);
+    host.addEventListener("pointermove",event=>{
+      if(!drag.active||event.pointerId!==drag.pointerId)return;
+      const now=performance.now();
+      const dx=event.clientX-drag.lastX;
+      const dt=Math.max(4,now-drag.lastTime);
+      drag.totalX=event.clientX-drag.startX;
+      const scrollDistance=-dx;
+      const instant=scrollDistance/dt;
+      drag.velocity=drag.velocity*.72+instant*.28;
+      applyDistance(scrollDistance);
+      drag.lastX=event.clientX;
+      drag.lastTime=now;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },true);
+    host.addEventListener("pointerup",finish,true);
+    host.addEventListener("pointercancel",finish,true);
+    host.addEventListener("click",event=>{
+      if(interactive(event.target))return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },true);
+  }
+  function bindScreen(){
+    const root=screen();
+    if(!root||root.dataset.cqAlternatingSelectionBound==="1")return;
+    root.dataset.cqAlternatingSelectionBound="1";
+    root.addEventListener("click",event=>{
+      if(STATE.internalSlotClick||STATE.internalCompanyClick||STATE.internalFocusMove)return;
+      const compare=STATE.compareHost;
+      if(compare&&(event.target===compare||compare.contains(event.target)))return;
+      const side=sideFromTarget(event.target);
+      if(side){
+        setNextSide(side);
+        return;
+      }
+      let card=cardFromTarget(event.target);
+      let tappedCompany=card?companyFromCard(card):null;
+
+      if(!tappedCompany){
+        const scroller=findCompanyScroller();
+        const stage=event.target.closest&&event.target.closest(
+          "#selectStage,#companyCarousel,#selectCarousel,.select-stage,.company-carousel,.select-carousel,.company-rail,.select-rail"
+        );
+        const insideScroller=!!(
+          scroller&&
+          (event.target===scroller||scroller.contains(event.target))
+        );
+        if(!stage&&!insideScroller)return;
+
+        card=centeredCard();
+        tappedCompany=card?companyFromCard(card):null;
+        if(!tappedCompany){
+          try{
+            tappedCompany=typeof currentSelectCompany==="function"
+              ?currentSelectCompany()
+              :null;
+          }catch(_){}
+        }
+      }
+
+      if(!tappedCompany||!tappedCompany.id)return;
+
+      const assignSide=STATE.nextSide;
+      const nextSide=flip(assignSide);
+      const tappedCompanyId=String(tappedCompany.id);
+      const assignmentToken=(Number(STATE.assignmentToken)||0)+1;
+      STATE.assignmentToken=assignmentToken;
+
+      activateSide(assignSide);
+
+      const verifyAssignment=()=>{
+        if(STATE.assignmentToken!==assignmentToken)return;
+        const fixedCompany=companies().find(
+          company=>String(company.id)===tappedCompanyId
+        )||tappedCompany;
+        if(storedCompanyId(assignSide)!==tappedCompanyId){
+          forceCompanyToSide(assignSide,fixedCompany);
+        }
+        setNextSide(nextSide);
+      };
+
+      queueMicrotask(()=>{
+        if(STATE.assignmentToken!==assignmentToken)return;
+        const fixedCompany=companies().find(
+          company=>String(company.id)===tappedCompanyId
+        )||tappedCompany;
+        forceCompanyToSide(assignSide,fixedCompany);
+        setNextSide(nextSide);
+        requestAnimationFrame(verifyAssignment);
+        setTimeout(verifyAssignment,80);
+      });
+    },true);
+  }
+  function boot(){
+    installStyle();
+    bindScreen();
+    bindCompareSurface();
+    setNextSide(STATE.nextSide);
+    const root=screen();
+    if(root&&typeof MutationObserver==="function"){
+      const observer=new MutationObserver(()=>{
+        bindScreen();
+        bindCompareSurface();
+        setNextSide(STATE.nextSide);
+      });
+      observer.observe(root,{childList:true,subtree:true});
+    }
+  }
+
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot,{once:true});
+  else boot();
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
