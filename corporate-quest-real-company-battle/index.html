@@ -21620,6 +21620,734 @@ function configureTitleHelp(){
   else boot();
 })();
 
+/* ================================================================
+   戦闘画面 3Dスワイプカメラ
+   - 非操作領域のドラッグで戦場を周回
+   - 非操作領域の短いタップで標準視点へ復帰
+================================================================ */
+(function installBattleSwipeOrbitCamera(){
+  if(window.__CQ_BATTLE_SWIPE_ORBIT_CAMERA_INSTALLED__)return;
+  window.__CQ_BATTLE_SWIPE_ORBIT_CAMERA_INSTALLED__=true;
+
+  const CAMERA_STATE={
+    battle:null,
+    pointerId:null,
+    pointerDown:false,
+    dragging:false,
+    customView:false,
+    resetting:false,
+    startX:0,
+    startY:0,
+    lastX:0,
+    lastY:0,
+    lastTime:0,
+    downTime:0,
+    totalDistance:0,
+    theta:0,
+    phi:Math.PI/2,
+    radius:10,
+    desiredTheta:0,
+    desiredPhi:Math.PI/2,
+    velocityTheta:0,
+    velocityPhi:0,
+    basePosition:null,
+    baseQuaternion:null,
+    baseUp:null,
+    baseTarget:null,
+    resetFromPosition:null,
+    resetFromQuaternion:null,
+    resetStartedAt:0,
+    suppressClickUntil:0,
+    raf:0
+  };
+
+  function installBattleCameraStyle(){
+    if(document.getElementById("cqBattleSwipeOrbitStyle"))return;
+    const style=document.createElement("style");
+    style.id="cqBattleSwipeOrbitStyle";
+    style.textContent=`
+#scr-battle #arena,
+#scr-battle #arena canvas{
+  touch-action:none!important;
+}
+#scr-battle.cq-camera-orbiting #arena{
+  cursor:grabbing;
+}
+#scr-battle.cq-camera-custom-view::after{
+  content:"3D VIEW  •  TAP BACKGROUND TO RESET";
+  position:absolute;
+  z-index:55;
+  left:50%;
+  top:calc(8px + env(safe-area-inset-top,0px));
+  transform:translateX(-50%);
+  max-width:78%;
+  padding:5px 10px;
+  border:1px solid rgba(109,222,255,.42);
+  border-radius:999px;
+  background:rgba(3,12,25,.72);
+  color:#bdefff;
+  font:900 8px/1 ui-monospace,monospace;
+  letter-spacing:.1em;
+  white-space:nowrap;
+  pointer-events:none;
+  opacity:.78;
+}
+`;
+    document.head.appendChild(style);
+  }
+
+  function battleScreen(){
+    return document.getElementById("scr-battle");
+  }
+
+  function battleCamera(){
+    if(typeof GL!=="object"||!GL)return null;
+    return GL.camera||GL.cam||null;
+  }
+
+  function battleIsActive(){
+    const screen=battleScreen();
+    if(!screen)return false;
+    if(typeof S==="object"&&S&&S.screen==="battle")return true;
+    return screen.classList.contains("active")||
+      screen.getAttribute("aria-hidden")==="false";
+  }
+
+  function isBattleControl(target){
+    if(!target||!target.closest)return false;
+    return !!target.closest([
+      "button","a","input","select","textarea","label",
+      "[role='button']","[contenteditable='true']","[onclick]",
+      ".cmd",".command",".command-btn",".action-btn",".skill-btn",
+      ".battle-actions",".battle-controls",".command-panel",
+      ".command-sheet",".strat-sheet",".support-sheet",".skill-sheet",
+      ".sheet",".drawer",".modal",".dialog",".menu",
+      ".strat-item",".support-item",".skill-item",
+      "#battleMenu","#modalMenu","#modalConfirm","#stratList"
+    ].join(","));
+  }
+
+  function currentBattleTarget(){
+    const T=window.THREE;
+    if(!T)return null;
+    const fallback=new T.Vector3(0,1.05,0);
+    const battle=typeof S==="object"&&S?S.battle:null;
+    if(!battle)return fallback;
+
+    const points=[];
+    [battle.p,battle.e].forEach(fighter=>{
+      if(!fighter)return;
+      try{
+        if(typeof fighterWorldPosition==="function"){
+          const point=fighterWorldPosition(fighter);
+          if(point&&typeof point.clone==="function")points.push(point.clone());
+        }
+      }catch(_){}
+    });
+
+    if(!points.length)return fallback;
+    const target=points.reduce(
+      (sum,point)=>sum.add(point),
+      new T.Vector3()
+    ).multiplyScalar(1/points.length);
+    target.y+=1.05;
+    return target;
+  }
+
+  function updateScreenState(){
+    const screen=battleScreen();
+    if(!screen)return;
+    screen.classList.toggle(
+      "cq-camera-custom-view",
+      CAMERA_STATE.customView||CAMERA_STATE.resetting
+    );
+    screen.classList.toggle(
+      "cq-camera-orbiting",
+      CAMERA_STATE.dragging
+    );
+  }
+
+  function restoreDroneOccluders(){
+    const records=Array.isArray(CAMERA_STATE.occludedObjects)
+      ?CAMERA_STATE.occludedObjects
+      :[];
+    records.forEach(record=>{
+      if(!record||!record.object)return;
+      record.object.visible=record.visible;
+    });
+    CAMERA_STATE.occludedObjects=[];
+  }
+
+  function restoreCameraWorldPose(camera,worldMatrix){
+    if(!camera||!worldMatrix||!window.THREE)return;
+    const T=THREE;
+    const localMatrix=worldMatrix.clone();
+    if(camera.parent){
+      camera.parent.updateMatrixWorld(true);
+      const parentInverse=new T.Matrix4()
+        .copy(camera.parent.matrixWorld)
+        .invert();
+      localMatrix.premultiply(parentInverse);
+    }
+    localMatrix.decompose(
+      camera.position,
+      camera.quaternion,
+      camera.scale
+    );
+    camera.updateMatrix();
+    camera.updateMatrixWorld(true);
+  }
+
+  function applyStageRotation(angle){
+    if(
+      typeof GL!=="object"||
+      !GL||
+      !GL.scene||
+      !window.THREE||
+      !CAMERA_STATE.sceneBaseMatrix||
+      !CAMERA_STATE.stagePivot
+    )return;
+
+    const T=THREE;
+    const scene=GL.scene;
+    const camera=battleCamera();
+    let cameraWorldMatrix=null;
+
+    if(camera){
+      camera.updateMatrixWorld(true);
+      cameraWorldMatrix=camera.matrixWorld.clone();
+    }
+
+    const pivot=CAMERA_STATE.stagePivot;
+    const stageRotation=new T.Matrix4()
+      .makeTranslation(pivot.x,pivot.y,pivot.z)
+      .multiply(new T.Matrix4().makeRotationY(angle))
+      .multiply(new T.Matrix4().makeTranslation(
+        -pivot.x,
+        -pivot.y,
+        -pivot.z
+      ))
+      .multiply(CAMERA_STATE.sceneBaseMatrix);
+
+    stageRotation.decompose(
+      scene.position,
+      scene.quaternion,
+      scene.scale
+    );
+    scene.updateMatrix();
+    scene.updateMatrixWorld(true);
+
+    if(camera&&cameraWorldMatrix){
+      restoreCameraWorldPose(camera,cameraWorldMatrix);
+    }
+  }
+
+  function restoreStageRotation(){
+    if(
+      typeof GL!=="object"||
+      !GL||
+      !GL.scene||
+      !CAMERA_STATE.sceneBaseMatrix
+    )return;
+
+    const scene=GL.scene;
+    const camera=battleCamera();
+    let cameraWorldMatrix=null;
+
+    if(camera){
+      camera.updateMatrixWorld(true);
+      cameraWorldMatrix=camera.matrixWorld.clone();
+    }
+
+    CAMERA_STATE.sceneBaseMatrix.decompose(
+      scene.position,
+      scene.quaternion,
+      scene.scale
+    );
+    scene.matrixAutoUpdate=CAMERA_STATE.sceneMatrixAutoUpdate!==false;
+    scene.updateMatrix();
+    scene.updateMatrixWorld(true);
+
+    if(camera&&cameraWorldMatrix){
+      restoreCameraWorldPose(camera,cameraWorldMatrix);
+    }
+  }
+
+  function clearCameraState(){
+    restoreDroneOccluders();
+    restoreStageRotation();
+    CAMERA_STATE.pointerId=null;
+    CAMERA_STATE.pointerDown=false;
+    CAMERA_STATE.dragging=false;
+    CAMERA_STATE.customView=false;
+    CAMERA_STATE.resetting=false;
+    CAMERA_STATE.velocityTheta=0;
+    CAMERA_STATE.velocityPhi=0;
+    CAMERA_STATE.theta=0;
+    CAMERA_STATE.desiredTheta=0;
+    CAMERA_STATE.basePosition=null;
+    CAMERA_STATE.baseQuaternion=null;
+    CAMERA_STATE.baseUp=null;
+    CAMERA_STATE.baseTarget=null;
+    CAMERA_STATE.resetFromPosition=null;
+    CAMERA_STATE.resetFromQuaternion=null;
+    CAMERA_STATE.resetFromTheta=0;
+    CAMERA_STATE.sceneBaseMatrix=null;
+    CAMERA_STATE.sceneMatrixAutoUpdate=true;
+    CAMERA_STATE.stagePivot=null;
+    CAMERA_STATE.droneHeight=0;
+    CAMERA_STATE.droneWorldY=null;
+    CAMERA_STATE.focusWorldY=null;
+    CAMERA_STATE.occludedObjects=[];
+    updateScreenState();
+  }
+
+  function captureDefaultCamera(){
+    const camera=battleCamera();
+    const target=currentBattleTarget();
+    const scene=typeof GL==="object"&&GL?GL.scene:null;
+    const T=window.THREE;
+    if(!camera||!target||!scene||!T)return false;
+
+    restoreDroneOccluders();
+    restoreStageRotation();
+
+    camera.updateMatrixWorld(true);
+    if(scene.matrixAutoUpdate)scene.updateMatrix();
+    scene.updateMatrixWorld(true);
+
+    CAMERA_STATE.basePosition=camera.position.clone();
+    CAMERA_STATE.baseQuaternion=camera.quaternion.clone();
+    CAMERA_STATE.baseUp=camera.up.clone();
+    CAMERA_STATE.baseTarget=target.clone();
+    CAMERA_STATE.sceneBaseMatrix=scene.matrix.clone();
+    CAMERA_STATE.sceneMatrixAutoUpdate=scene.matrixAutoUpdate;
+    CAMERA_STATE.stagePivot=new T.Vector3(
+      target.x,
+      0,
+      target.z
+    );
+    CAMERA_STATE.theta=0;
+    CAMERA_STATE.phi=Math.PI/2;
+    CAMERA_STATE.desiredTheta=0;
+    CAMERA_STATE.desiredPhi=Math.PI/2;
+    CAMERA_STATE.velocityTheta=0;
+    CAMERA_STATE.velocityPhi=0;
+    return true;
+  }
+
+  function beginCameraReset(){
+    restoreDroneOccluders();
+    if(
+      !CAMERA_STATE.sceneBaseMatrix||
+      !CAMERA_STATE.stagePivot
+    ){
+      clearCameraState();
+      return;
+    }
+    CAMERA_STATE.dragging=false;
+    CAMERA_STATE.pointerDown=false;
+    CAMERA_STATE.velocityTheta=0;
+    CAMERA_STATE.velocityPhi=0;
+    CAMERA_STATE.resetFromTheta=Math.atan2(
+      Math.sin(CAMERA_STATE.theta),
+      Math.cos(CAMERA_STATE.theta)
+    );
+    CAMERA_STATE.resetStartedAt=performance.now();
+    CAMERA_STATE.resetting=true;
+    CAMERA_STATE.customView=false;
+    updateScreenState();
+  }
+
+  function isChildOf(object,parent){
+    let current=object;
+    while(current){
+      if(current===parent)return true;
+      current=current.parent;
+    }
+    return false;
+  }
+
+  function fighterSceneObjects(){
+    const battle=typeof S==="object"&&S?S.battle:null;
+    if(!battle||typeof fighter3D!=="function")return [];
+    const objects=[];
+    [battle.p,battle.e].forEach(fighter=>{
+      if(!fighter)return;
+      try{
+        const object=fighter3D(fighter);
+        if(object)objects.push(object);
+      }catch(_){}
+    });
+    return objects;
+  }
+
+  function isDroneForegroundBuilding(object){
+    if(!object||!object.geometry||!object.visible)return false;
+
+    const actorObjects=fighterSceneObjects();
+    if(actorObjects.some(actor=>isChildOf(object,actor)))return false;
+
+    let current=object;
+    let identity="";
+    while(current){
+      identity+=(" "+String(current.name||"")+" "+
+        String(current.userData&&(
+          current.userData.type||
+          current.userData.kind||
+          current.userData.role||
+          current.userData.id||""
+        )||""));
+      current=current.parent;
+    }
+    identity=identity.toLowerCase();
+
+    if(/fighter|character|actor|summon|vehicle|effect|particle|beam|sprite|damage|weapon|skill|motion|arena|stadium|stage|ground|floor|road|light|shadow/.test(identity)){
+      return false;
+    }
+    if(/building|bldg|city|skyline|tower|office|hotel|warehouse|billboard|neon|background|scenery/.test(identity)){
+      return true;
+    }
+
+    const materials=Array.isArray(object.material)
+      ?object.material
+      :[object.material];
+    if(materials.some(material=>material&&(
+      material.transparent&&Number(material.opacity)<.72
+    )))return false;
+
+    const geometry=object.geometry;
+    if(!geometry.boundingBox&&typeof geometry.computeBoundingBox==="function"){
+      geometry.computeBoundingBox();
+    }
+    if(!geometry.boundingBox)return false;
+
+    const T=window.THREE;
+    const size=new T.Vector3();
+    const scale=new T.Vector3(1,1,1);
+    geometry.boundingBox.getSize(size);
+    if(typeof object.getWorldScale==="function")object.getWorldScale(scale);
+    size.set(
+      Math.abs(size.x*scale.x),
+      Math.abs(size.y*scale.y),
+      Math.abs(size.z*scale.z)
+    );
+
+    return size.y>2.4&&
+      Math.max(size.x,size.z)>.55&&
+      size.y>Math.min(size.x,size.z)*1.35;
+  }
+
+  function updateDroneOcclusion(camera,focus){
+    restoreDroneOccluders();
+    if(
+      !camera||
+      !focus||
+      typeof GL!=="object"||
+      !GL||
+      !GL.scene||
+      !window.THREE
+    )return;
+
+    const T=THREE;
+    const raycaster=new T.Raycaster();
+    const hidden=new Set();
+    const focusPoints=[
+      focus.clone(),
+      focus.clone().add(new T.Vector3(-.85,.2,0)),
+      focus.clone().add(new T.Vector3(.85,.2,0)),
+      focus.clone().add(new T.Vector3(0,.75,0)),
+      focus.clone().add(new T.Vector3(0,-.5,0))
+    ];
+
+    focusPoints.forEach(point=>{
+      const direction=point.clone().sub(camera.position);
+      const targetDistance=direction.length();
+      if(targetDistance<=1)return;
+      direction.normalize();
+      raycaster.set(camera.position,direction);
+      raycaster.near=.35;
+      raycaster.far=Math.max(.5,targetDistance-1.1);
+
+      const intersections=raycaster.intersectObjects(
+        GL.scene.children,
+        true
+      );
+      intersections.forEach(intersection=>{
+        const object=intersection.object;
+        if(
+          hidden.size>=10||
+          hidden.has(object)||
+          !isDroneForegroundBuilding(object)
+        )return;
+        hidden.add(object);
+        CAMERA_STATE.occludedObjects.push({
+          object,
+          visible:object.visible
+        });
+        object.visible=false;
+      });
+    });
+  }
+
+  function applyOrbitCamera(delta){
+    const camera=battleCamera();
+    const focus=currentBattleTarget();
+    if(
+      !camera||
+      !focus||
+      !CAMERA_STATE.sceneBaseMatrix||
+      !CAMERA_STATE.stagePivot
+    )return;
+
+    if(!CAMERA_STATE.dragging){
+      CAMERA_STATE.desiredTheta+=CAMERA_STATE.velocityTheta*delta;
+      CAMERA_STATE.velocityTheta*=Math.pow(.9,delta/16.67);
+      if(Math.abs(CAMERA_STATE.velocityTheta)<.000002){
+        CAMERA_STATE.velocityTheta=0;
+      }
+    }
+
+    CAMERA_STATE.desiredPhi=Math.PI/2;
+    CAMERA_STATE.phi=Math.PI/2;
+    CAMERA_STATE.velocityPhi=0;
+
+    const smooth=1-Math.pow(.001,delta/1000);
+    CAMERA_STATE.theta+=
+      (CAMERA_STATE.desiredTheta-CAMERA_STATE.theta)*smooth;
+
+    applyStageRotation(CAMERA_STATE.theta);
+
+    focus.y+=.15;
+    updateDroneOcclusion(camera,focus);
+  }
+
+  function applyCameraReset(now){
+    if(
+      !CAMERA_STATE.sceneBaseMatrix||
+      !CAMERA_STATE.stagePivot
+    ){
+      clearCameraState();
+      return;
+    }
+
+    const duration=460;
+    const raw=Math.max(
+      0,
+      Math.min(1,(now-CAMERA_STATE.resetStartedAt)/duration)
+    );
+    const eased=1-Math.pow(1-raw,3);
+    const angle=CAMERA_STATE.resetFromTheta*(1-eased);
+
+    CAMERA_STATE.theta=angle;
+    CAMERA_STATE.desiredTheta=angle;
+    applyStageRotation(angle);
+
+    const camera=battleCamera();
+    const focus=currentBattleTarget();
+    if(camera&&focus){
+      focus.y+=.15;
+      updateDroneOcclusion(camera,focus);
+    }
+
+    if(raw>=1){
+      restoreDroneOccluders();
+      restoreStageRotation();
+      clearCameraState();
+    }
+  }
+
+  let previousFrame=performance.now();
+  function cameraFrame(now){
+    const delta=Math.min(40,Math.max(1,now-previousFrame));
+    previousFrame=now;
+
+    const battle=typeof S==="object"&&S?S.battle:null;
+    if(CAMERA_STATE.battle!==battle){
+      CAMERA_STATE.battle=battle;
+      clearCameraState();
+    }
+
+    if(!battleIsActive()){
+      if(
+        CAMERA_STATE.customView||
+        CAMERA_STATE.dragging||
+        CAMERA_STATE.resetting
+      ){
+        clearCameraState();
+      }
+    }else if(CAMERA_STATE.resetting){
+      applyCameraReset(now);
+    }else if(CAMERA_STATE.customView){
+      applyOrbitCamera(delta);
+    }
+
+    CAMERA_STATE.raf=requestAnimationFrame(cameraFrame);
+  }
+
+  function bindBattleCameraInput(){
+    const screen=battleScreen();
+    if(!screen||screen.dataset.cqBattleOrbitBound==="1")return;
+    screen.dataset.cqBattleOrbitBound="1";
+
+    screen.addEventListener("pointerdown",event=>{
+      if(!battleIsActive())return;
+      if(event.button!==undefined&&event.button!==0)return;
+      if(isBattleControl(event.target))return;
+
+      CAMERA_STATE.pointerId=event.pointerId;
+      CAMERA_STATE.pointerDown=true;
+      CAMERA_STATE.dragging=false;
+      CAMERA_STATE.startX=CAMERA_STATE.lastX=event.clientX;
+      CAMERA_STATE.startY=CAMERA_STATE.lastY=event.clientY;
+      CAMERA_STATE.lastTime=performance.now();
+      CAMERA_STATE.downTime=CAMERA_STATE.lastTime;
+      CAMERA_STATE.totalDistance=0;
+      CAMERA_STATE.velocityTheta=0;
+      CAMERA_STATE.velocityPhi=0;
+
+      if(
+        !CAMERA_STATE.customView&&
+        !CAMERA_STATE.resetting&&
+        !CAMERA_STATE.basePosition
+      ){
+        captureDefaultCamera();
+      }
+
+      try{screen.setPointerCapture(event.pointerId);}catch(_){}
+    },{capture:true,passive:false});
+
+    screen.addEventListener("pointermove",event=>{
+      if(
+        !CAMERA_STATE.pointerDown||
+        event.pointerId!==CAMERA_STATE.pointerId
+      )return;
+
+      const now=performance.now();
+      const dx=event.clientX-CAMERA_STATE.lastX;
+      const dy=event.clientY-CAMERA_STATE.lastY;
+      const totalX=event.clientX-CAMERA_STATE.startX;
+      const totalY=event.clientY-CAMERA_STATE.startY;
+      const distance=Math.hypot(totalX,totalY);
+      const elapsed=Math.max(4,now-CAMERA_STATE.lastTime);
+      CAMERA_STATE.totalDistance=Math.max(
+        CAMERA_STATE.totalDistance,
+        distance
+      );
+
+      const horizontalIntent=
+        Math.abs(totalX)>=8&&
+        Math.abs(totalX)>=Math.abs(totalY)*.8;
+
+      if(!CAMERA_STATE.dragging&&horizontalIntent){
+        if(!CAMERA_STATE.basePosition&&!captureDefaultCamera())return;
+        CAMERA_STATE.dragging=true;
+        CAMERA_STATE.customView=true;
+        CAMERA_STATE.resetting=false;
+        updateScreenState();
+      }
+
+      if(CAMERA_STATE.dragging){
+        const thetaDelta=-dx*.0072;
+        CAMERA_STATE.desiredTheta+=thetaDelta;
+        CAMERA_STATE.desiredPhi=Math.PI/2;
+        CAMERA_STATE.phi=Math.PI/2;
+        CAMERA_STATE.velocityTheta=
+          CAMERA_STATE.velocityTheta*.62+
+          thetaDelta/elapsed*.38;
+        CAMERA_STATE.velocityPhi=0;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+
+      CAMERA_STATE.lastX=event.clientX;
+      CAMERA_STATE.lastY=event.clientY;
+      CAMERA_STATE.lastTime=now;
+    },{capture:true,passive:false});
+
+    const finishPointer=event=>{
+      if(
+        !CAMERA_STATE.pointerDown||
+        event.pointerId!==CAMERA_STATE.pointerId
+      )return;
+
+      const wasDragging=CAMERA_STATE.dragging;
+      const elapsed=performance.now()-CAMERA_STATE.downTime;
+      CAMERA_STATE.pointerDown=false;
+      CAMERA_STATE.dragging=false;
+      CAMERA_STATE.pointerId=null;
+      updateScreenState();
+
+      try{screen.releasePointerCapture(event.pointerId);}catch(_){}
+
+      if(wasDragging){
+        CAMERA_STATE.suppressClickUntil=performance.now()+420;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+
+      if(
+        CAMERA_STATE.totalDistance<8&&
+        elapsed<520&&
+        !isBattleControl(event.target)
+      ){
+        if(CAMERA_STATE.customView||CAMERA_STATE.resetting){
+          beginCameraReset();
+          CAMERA_STATE.suppressClickUntil=performance.now()+320;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }
+    };
+
+    screen.addEventListener("pointerup",finishPointer,{
+      capture:true,
+      passive:false
+    });
+    screen.addEventListener("pointercancel",finishPointer,{
+      capture:true,
+      passive:false
+    });
+
+    screen.addEventListener("click",event=>{
+      if(performance.now()>CAMERA_STATE.suppressClickUntil)return;
+      if(isBattleControl(event.target))return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },true);
+  }
+
+  function bootBattleOrbitCamera(){
+    installBattleCameraStyle();
+    bindBattleCameraInput();
+    if(!CAMERA_STATE.raf){
+      previousFrame=performance.now();
+      CAMERA_STATE.raf=requestAnimationFrame(cameraFrame);
+    }
+    if(typeof MutationObserver==="function"){
+      const observer=new MutationObserver(()=>bindBattleCameraInput());
+      observer.observe(document.body,{childList:true,subtree:true});
+    }
+  }
+
+  if(document.readyState==="loading"){
+    document.addEventListener(
+      "DOMContentLoaded",
+      bootBattleOrbitCamera,
+      {once:true}
+    );
+  }else{
+    bootBattleOrbitCamera();
+  }
+
+  window.CQ_BATTLE_ORBIT_CAMERA={
+    reset:beginCameraReset,
+    clear:clearCameraState,
+    state:CAMERA_STATE
+  };
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
