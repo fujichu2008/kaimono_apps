@@ -24964,6 +24964,424 @@ function configureTitleHelp(){
   };
 })();
 
+/* ================================================================
+   CPU AI 大技準備計画
+   - 中技の連発を避け、SP100へ向けた準備ターンを作る
+   - 市場、相手HP、生存リスクから計画開始と中断を判断する
+================================================================ */
+(function installCpuBigMovePlanningLayer(){
+  if(window.__CQ_CPU_BIG_MOVE_PLANNING_INSTALLED__)return;
+  window.__CQ_CPU_BIG_MOVE_PLANNING_INSTALLED__=true;
+
+  const BIG_PLAN_MEMORY=new WeakMap();
+
+  function bigPlanFor(fighter){
+    if(!fighter)return {
+      active:false,
+      startedTurn:0,
+      lastGauge:0,
+      stalledTurns:0,
+      reason:""
+    };
+    let plan=BIG_PLAN_MEMORY.get(fighter);
+    if(!plan){
+      plan={
+        active:false,
+        startedTurn:0,
+        lastGauge:Number(fighter.gauge)||0,
+        stalledTurns:0,
+        reason:""
+      };
+      BIG_PLAN_MEMORY.set(fighter,plan);
+    }
+    return plan;
+  }
+
+  function clearBigPlan(fighter){
+    if(!fighter)return;
+    const plan=bigPlanFor(fighter);
+    plan.active=false;
+    plan.startedTurn=0;
+    plan.lastGauge=Number(fighter.gauge)||0;
+    plan.stalledTurns=0;
+    plan.reason="";
+  }
+
+  function bigPlanThreshold(context){
+    if(!context)return 64;
+    if(context.personality==="aggressive")return 52;
+    if(context.personality==="opportunist")return 55;
+    if(context.personality==="technical")return 60;
+    if(context.personality==="defensive")return 70;
+    return 62;
+  }
+
+  function validForecast(context){
+    const value=Number(context&&context.forecastSelfMarket);
+    return Number.isFinite(value)?value:null;
+  }
+
+  function shouldStartBigPlan(context){
+    if(
+      !context||
+      !context.self||
+      !context.self.co||
+      !context.self.co.big
+    )return false;
+
+    const cost=Math.max(
+      1,
+      Number(context.self.co.big.cost)||100
+    );
+    const gauge=Number(context.selfGauge)||0;
+    const threshold=bigPlanThreshold(context);
+    const forecast=validForecast(context);
+    const forecastFavorable=forecast!==null&&forecast>=1.04;
+    const currentFavorable=context.selfMarket>=1.03||context.marketDiff>=.05;
+    const enoughBattleRemaining=context.foeHpRatio>.38;
+
+    if(gauge<threshold||gauge>=cost)return false;
+    if(context.basicKoCandidate||context.foeHpRatio<.24)return false;
+    if(context.lethalRisk||context.selfHpRatio<.22)return false;
+    if(!enoughBattleRemaining)return false;
+
+    if(
+      context.selfMarket<=.92&&
+      !forecastFavorable&&
+      Number(context.marketHedge)<=0
+    )return false;
+
+    return currentFavorable||
+      forecastFavorable||
+      context.foeHpRatio>.62||
+      context.selfHpRatio<context.foeHpRatio-.12;
+  }
+
+  function updateBigPlanContext(context){
+    if(!context||!context.self)return context;
+
+    const fighter=context.self;
+    const plan=bigPlanFor(fighter);
+    const big=fighter.co&&fighter.co.big;
+    const gauge=Number(context.selfGauge)||0;
+    const cost=Math.max(1,Number(big&&big.cost)||100);
+    const turn=Number(context.turn)||0;
+
+    if(!big||fighter.hp<=0){
+      clearBigPlan(fighter);
+    }else if(plan.active){
+      if(gauge>plan.lastGauge){
+        plan.stalledTurns=0;
+      }else if(gauge<cost){
+        plan.stalledTurns++;
+      }
+
+      const age=Math.max(0,turn-plan.startedTurn);
+      const severeDanger=context.lethalRisk||context.selfHpRatio<.2;
+      const easyFinish=context.basicKoCandidate||context.foeHpRatio<.2;
+      const noProgress=plan.stalledTurns>=4&&gauge<cost*.72;
+      const planTooLong=age>=6&&gauge<cost;
+
+      if(severeDanger||easyFinish||noProgress||planTooLong){
+        clearBigPlan(fighter);
+      }
+    }
+
+    if(!plan.active&&shouldStartBigPlan(context)){
+      plan.active=true;
+      plan.startedTurn=turn;
+      plan.lastGauge=gauge;
+      plan.stalledTurns=0;
+      plan.reason=validForecast(context)!==null&&
+        validForecast(context)>=1.04
+          ?"次回市場を見据えた大技準備"
+          :context.selfMarket>=1.03
+            ?"追い風中の大技準備"
+            :"戦況を見た大技準備";
+    }
+
+    plan.lastGauge=gauge;
+
+    context.aiBigPlanActive=!!plan.active;
+    context.aiBigPlanStartedTurn=plan.startedTurn;
+    context.aiBigPlanAge=plan.active
+      ?Math.max(0,turn-plan.startedTurn)
+      :0;
+    context.aiBigPlanCost=cost;
+    context.aiBigPlanNeed=Math.max(0,cost-gauge);
+    context.aiBigPlanReady=!!(
+      plan.active&&
+      gauge>=cost
+    );
+    context.aiBigPlanReason=plan.reason;
+    context.aiBigPlanStalledTurns=plan.stalledTurns;
+
+    return context;
+  }
+
+  if(
+    typeof buildCpuContext==="function"&&
+    !buildCpuContext.__cqBigMovePlanningContextInstalled
+  ){
+    const previousBuildCpuContext=buildCpuContext;
+    buildCpuContext=function(self,foe){
+      const context=previousBuildCpuContext.apply(this,arguments);
+      return updateBigPlanContext(context);
+    };
+    buildCpuContext.__cqBigMovePlanningContextInstalled=true;
+  }
+
+  if(
+    typeof execAction==="function"&&
+    !execAction.__cqBigMovePlanningExecutionInstalled
+  ){
+    const previousExecAction=execAction;
+    execAction=function(self,foe,action,options){
+      const beforeGauge=Number(self&&self.gauge)||0;
+      const value=previousExecAction.apply(this,arguments);
+      const visualOnly=!!(options&&options.visualOnly);
+
+      if(
+        !visualOnly&&
+        self&&
+        action&&
+        (action.type==="big"||action.type==="skill")&&
+        Number(self.gauge)<beforeGauge
+      ){
+        clearBigPlan(self);
+      }
+
+      return value;
+    };
+    execAction.__cqBigMovePlanningExecutionInstalled=true;
+  }
+
+  if(
+    typeof scoreCpuAttack==="function"&&
+    !scoreCpuAttack.__cqBigMovePlanningInstalled
+  ){
+    const previousScoreCpuAttack=scoreCpuAttack;
+    scoreCpuAttack=function(action,context){
+      const row=previousScoreCpuAttack.apply(this,arguments);
+      if(!context||!context.aiBigPlanActive||context.aiBigPlanReady){
+        return row;
+      }
+
+      const need=Number(context.aiBigPlanNeed)||0;
+      let bonus=18;
+      if(need<=20)bonus=36;
+      else if(need<=40)bonus=30;
+      else if(need<=55)bonus=24;
+
+      if(context.foe.guarding)bonus+=8;
+      if(context.selfMarket>=1.04)bonus+=6;
+      if(context.lethalRisk)bonus-=24;
+
+      cpuAdd(row,bonus,"大技SP準備");
+      return row;
+    };
+    scoreCpuAttack.__cqBigMovePlanningInstalled=true;
+  }
+
+  if(
+    typeof scoreCpuSkill==="function"&&
+    !scoreCpuSkill.__cqBigMovePlanningInstalled
+  ){
+    const previousScoreCpuSkill=scoreCpuSkill;
+    scoreCpuSkill=function(action,context){
+      const row=previousScoreCpuSkill.apply(this,arguments);
+      if(!action||!context||!context.aiBigPlanActive)return row;
+
+      const damage=typeof estimateCpuDamage==="function"
+        ?estimateCpuDamage(
+            context.self,
+            context.foe,
+            action.move,
+            context
+          )
+        :0;
+      const decisive=!!row.emergency||
+        damage>=context.foe.hp*.9;
+
+      if(action.type==="mid"&&!context.aiBigPlanReady&&!decisive){
+        let penalty=-34;
+        if(context.aiBigPlanNeed<=20)penalty=-68;
+        else if(context.aiBigPlanNeed<=40)penalty=-56;
+        else if(context.aiBigPlanNeed<=55)penalty=-44;
+
+        if(context.aiBigPlanAge>=4)penalty+=18;
+        if(context.selfMarket<=.92)penalty+=10;
+        if(context.foeHpRatio<.32)penalty+=16;
+
+        cpuAdd(row,penalty,"大技までSP温存");
+      }
+
+      if(action.type==="big"&&context.aiBigPlanReady){
+        cpuAdd(row,48,"大技準備完了");
+
+        if(context.selfMarket>=1.08){
+          cpuAdd(row,20,"追い風で計画実行");
+        }else if(context.selfMarket>=1.03){
+          cpuAdd(row,12,"市場好機で計画実行");
+        }
+
+        const forecast=validForecast(context);
+        if(
+          forecast!==null&&
+          context.nextMarketIn<=2&&
+          forecast<context.selfMarket-.06
+        ){
+          cpuAdd(row,22,"市場悪化前に実行");
+        }
+
+        if(context.foe.guarding&&!decisive){
+          cpuAdd(row,-18,"敵防御中");
+        }
+      }
+
+      return row;
+    };
+    scoreCpuSkill.__cqBigMovePlanningInstalled=true;
+  }
+
+  if(
+    typeof scoreCpuSupport==="function"&&
+    !scoreCpuSupport.__cqBigMovePlanningInstalled
+  ){
+    const previousScoreCpuSupport=scoreCpuSupport;
+    scoreCpuSupport=function(action,context){
+      const row=previousScoreCpuSupport.apply(this,arguments);
+      if(
+        !context||
+        !context.aiBigPlanActive||
+        context.aiBigPlanReady||
+        row.emergency
+      )return row;
+
+      const urgentRecovery=context.selfHpRatio<.38&&
+        typeof cpuHas==="function"&&
+        cpuHas(action.move,["heal","regen","cleanse","guard"]);
+
+      if(!urgentRecovery){
+        cpuAdd(row,-22,"大技準備を優先");
+      }
+      return row;
+    };
+    scoreCpuSupport.__cqBigMovePlanningInstalled=true;
+  }
+
+  if(
+    typeof scoreCpuStrategy==="function"&&
+    !scoreCpuStrategy.__cqBigMovePlanningInstalled
+  ){
+    const previousScoreCpuStrategy=scoreCpuStrategy;
+    scoreCpuStrategy=function(action,context){
+      const row=previousScoreCpuStrategy.apply(this,arguments);
+      if(
+        !action||
+        !context||
+        !context.aiBigPlanActive||
+        context.aiBigPlanReady
+      )return row;
+
+      if(action.extra==="inv"){
+        const reachesBig=
+          context.selfGauge< context.aiBigPlanCost&&
+          context.selfGauge+20>=context.aiBigPlanCost;
+
+        cpuAdd(
+          row,
+          reachesBig?52:24,
+          reachesBig?"投資で大技到達":"大技SP投資"
+        );
+      }else if(
+        action.extra!=="rst"||
+        context.selfHpRatio>=.38
+      ){
+        cpuAdd(row,-16,"大技準備を優先");
+      }
+
+      return row;
+    };
+    scoreCpuStrategy.__cqBigMovePlanningInstalled=true;
+  }
+
+  if(
+    typeof scoreCpuSummon==="function"&&
+    !scoreCpuSummon.__cqBigMovePlanningInstalled
+  ){
+    const previousScoreCpuSummon=scoreCpuSummon;
+    scoreCpuSummon=function(action,context){
+      const row=previousScoreCpuSummon.apply(this,arguments);
+      if(
+        context&&
+        context.aiBigPlanActive&&
+        !context.aiBigPlanReady
+      ){
+        cpuAdd(row,-26,"大技SP温存");
+      }
+      return row;
+    };
+    scoreCpuSummon.__cqBigMovePlanningInstalled=true;
+  }
+
+  function bigPlanActionFromRow(row){
+    if(!row||!row.action)return {type:"attack"};
+    return row.action.extra===undefined
+      ?{type:row.action.type}
+      :{type:row.action.type,extra:row.action.extra};
+  }
+
+  if(
+    typeof selectCpuAction==="function"&&
+    !selectCpuAction.__cqBigMovePlanningInstalled
+  ){
+    const previousSelectCpuAction=selectCpuAction;
+    selectCpuAction=function(rows,context){
+      if(
+        !Array.isArray(rows)||
+        !rows.length||
+        !context||
+        !context.aiBigPlanActive
+      ){
+        return previousSelectCpuAction.apply(this,arguments);
+      }
+
+      const ranked=rows.slice().sort((a,b)=>b.score-a.score);
+      const best=ranked[0];
+      const big=ranked.find(
+        row=>row.action&&row.action.type==="big"
+      );
+
+      if(context.aiBigPlanReady&&big){
+        const emergencyAlternative=ranked.find(row=>
+          row!==big&&
+          row.emergency&&
+          row.score>big.score+22
+        );
+
+        if(
+          !emergencyAlternative&&
+          big.score>=best.score-14
+        ){
+          return bigPlanActionFromRow(big);
+        }
+      }
+
+      return previousSelectCpuAction.call(this,rows,context);
+    };
+    selectCpuAction.__cqBigMovePlanningInstalled=true;
+  }
+
+  window.CQ_CPU_BIG_MOVE_PLANNING={
+    memory:BIG_PLAN_MEMORY,
+    clear:clearBigPlan,
+    get:function(fighter){
+      return fighter?bigPlanFor(fighter):null;
+    }
+  };
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
