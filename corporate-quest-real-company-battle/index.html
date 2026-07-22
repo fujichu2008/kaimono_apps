@@ -21272,16 +21272,56 @@ function configureTitleHelp(){
     return nodes.filter(node=>visible(node)&&companyFromCard(node));
   }
   function centeredCard(){
-    const cards=allCompanyCards();
+    const cards=allCompanyCards().filter(card=>{
+      const rect=card.getBoundingClientRect();
+      return rect.width>0&&rect.height>0;
+    });
+    if(!cards.length)return null;
+
+    const root=screen();
+    const scroller=findCompanyScroller();
+    const stage=root&&root.querySelector(
+      "#selectStage,#companyCarousel,#selectCarousel,.select-stage,.company-carousel,.select-carousel,.company-rail,.select-rail"
+    );
+    const host=visible(scroller)
+      ?scroller
+      :visible(stage)
+        ?stage
+        :root;
+
+    if(host){
+      const hostRect=host.getBoundingClientRect();
+      const centerX=hostRect.left+hostRect.width/2;
+      const intersecting=cards.filter(card=>{
+        const rect=card.getBoundingClientRect();
+        return rect.right>=hostRect.left&&rect.left<=hostRect.right;
+      });
+      const candidates=intersecting.length?intersecting:cards;
+      const nearest=candidates.reduce((best,card)=>{
+        const rect=card.getBoundingClientRect();
+        const cardCenter=rect.left+rect.width/2;
+        const distance=Math.abs(cardCenter-centerX);
+        return !best||distance<best.distance
+          ?{card,distance}
+          :best;
+      },null);
+      if(nearest)return nearest.card;
+    }
+
     let current=null;
-    try{current=typeof currentSelectCompany==="function"?currentSelectCompany():null;}catch(_){}
+    try{
+      current=typeof currentSelectCompany==="function"
+        ?currentSelectCompany()
+        :null;
+    }catch(_){}
     if(current){
       const match=cards.find(card=>{
         const company=companyFromCard(card);
-        return company&&company.id===current.id;
+        return company&&String(company.id)===String(current.id);
       });
       if(match)return match;
     }
+
     return cards.find(card=>card.matches&&card.matches(
       ".active,.selected,.center,.focused,.is-active,[aria-selected='true']"
     ))||cards[0]||null;
@@ -21299,28 +21339,53 @@ function configureTitleHelp(){
     });
     return refreshed;
   }
-  function forceCompanyToSide(side,company){
-    if(!company||!company.id||typeof S!=="object"||!S)return;
-    const id=company.id;
-    if(side==="p"){
-      S.playerCoId=id;
-      if("selectedPlayerCoId" in S)S.selectedPlayerCoId=id;
-      if("playerCompanyId" in S)S.playerCompanyId=id;
-    }else{
-      S.enemyCoId=id;
-      if("cpuCoId" in S)S.cpuCoId=id;
-      if("opponentCoId" in S)S.opponentCoId=id;
-      if("selectedEnemyCoId" in S)S.selectedEnemyCoId=id;
-      if("enemyCompanyId" in S)S.enemyCompanyId=id;
+  function forceCompanyToSide(side,company,centerCard){
+    if(
+      (side!=="p"&&side!=="e")||
+      !company||
+      !company.id
+    )return false;
+
+    const companyId=String(company.id);
+    const card=centerCard||allCompanyCards().find(node=>{
+      const cardCompany=companyFromCard(node);
+      return cardCompany&&String(cardCompany.id)===companyId;
+    });
+    if(!card)return false;
+
+    if(!activateSide(side))return false;
+
+    STATE.internalCompanyClick=true;
+    try{
+      card.dispatchEvent(new MouseEvent("click",{
+        bubbles:true,
+        cancelable:true,
+        view:window
+      }));
+    }finally{
+      STATE.internalCompanyClick=false;
     }
-    if(!refreshSelectionSlots()&&typeof renderSelect==="function"){
-      try{renderSelect();}catch(_){}
-    }
+
+    return true;
   }
   function storedCompanyId(side){
     if(typeof S!=="object"||!S)return "";
-    if(side==="p")return String(S.playerCoId||S.selectedPlayerCoId||S.playerCompanyId||"");
-    return String(S.enemyCoId||S.cpuCoId||S.opponentCoId||S.selectedEnemyCoId||S.enemyCompanyId||"");
+    if(side==="p"){
+      return String(
+        S.playerCoId||
+        S.selectedPlayerCoId||
+        S.playerCompanyId||
+        ""
+      );
+    }
+    return String(
+      S.enemyCoId||
+      S.cpuCoId||
+      S.opponentCoId||
+      S.selectedEnemyCoId||
+      S.enemyCompanyId||
+      ""
+    );
   }
   function completeAssignment(side,company){
     const selected=company||(()=>{
@@ -21332,18 +21397,18 @@ function configureTitleHelp(){
   }
   function assignCenteredCompany(){
     const side=STATE.nextSide;
-    activateSide(side);
     const card=centeredCard();
-    const company=card?companyFromCard(card):(()=>{
-      try{return typeof currentSelectCompany==="function"?currentSelectCompany():null;}
-      catch(_){return null;}
-    })();
-    if(card){
-      STATE.internalCompanyClick=true;
-      try{card.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}
-      finally{STATE.internalCompanyClick=false;}
-    }
-    queueMicrotask(()=>completeAssignment(side,company));
+    const company=card?companyFromCard(card):null;
+    if(!card||!company||!company.id)return false;
+
+    const fixedCompany=companies().find(item=>
+      item&&String(item.id)===String(company.id)
+    )||company;
+
+    if(!forceCompanyToSide(side,fixedCompany,card))return false;
+
+    setNextSide(flip(side));
+    return true;
   }
   function findCompanyScroller(){
     const root=screen();
@@ -21534,70 +21599,48 @@ function configureTitleHelp(){
     if(!root||root.dataset.cqAlternatingSelectionBound==="1")return;
     root.dataset.cqAlternatingSelectionBound="1";
     root.addEventListener("click",event=>{
-      if(STATE.internalSlotClick||STATE.internalCompanyClick||STATE.internalFocusMove)return;
+      if(
+        STATE.internalSlotClick||
+        STATE.internalCompanyClick||
+        STATE.internalFocusMove
+      )return;
+
       const compare=STATE.compareHost;
-      if(compare&&(event.target===compare||compare.contains(event.target)))return;
-      const side=sideFromTarget(event.target);
-      if(side){
-        setNextSide(side);
-        return;
-      }
-      let card=cardFromTarget(event.target);
-      let tappedCompany=card?companyFromCard(card):null;
+      if(
+        compare&&
+        (event.target===compare||compare.contains(event.target))
+      )return;
 
-      if(!tappedCompany){
-        const scroller=findCompanyScroller();
-        const stage=event.target.closest&&event.target.closest(
+      const card=cardFromTarget(event.target);
+      const scroller=findCompanyScroller();
+      const stage=event.target&&event.target.closest
+        ?event.target.closest(
           "#selectStage,#companyCarousel,#selectCarousel,.select-stage,.company-carousel,.select-carousel,.company-rail,.select-rail"
-        );
-        const insideScroller=!!(
-          scroller&&
-          (event.target===scroller||scroller.contains(event.target))
-        );
-        if(!stage&&!insideScroller)return;
+        )
+        :null;
+      const insideScroller=!!(
+        scroller&&
+        (event.target===scroller||scroller.contains(event.target))
+      );
 
-        card=centeredCard();
-        tappedCompany=card?companyFromCard(card):null;
-        if(!tappedCompany){
-          try{
-            tappedCompany=typeof currentSelectCompany==="function"
-              ?currentSelectCompany()
-              :null;
-          }catch(_){}
-        }
-      }
+      if(!card&&!stage&&!insideScroller)return;
 
-      if(!tappedCompany||!tappedCompany.id)return;
+      const interactive=event.target&&event.target.closest
+        ?event.target.closest(
+          "button,a,input,select,textarea,label,[role='button']"
+        )
+        :null;
+      if(interactive&&!card)return;
 
-      const assignSide=STATE.nextSide;
-      const nextSide=flip(assignSide);
-      const tappedCompanyId=String(tappedCompany.id);
-      const assignmentToken=(Number(STATE.assignmentToken)||0)+1;
-      STATE.assignmentToken=assignmentToken;
+      const centerCard=centeredCard();
+      const centerCompany=centerCard
+        ?companyFromCard(centerCard)
+        :null;
+      if(!centerCompany||!centerCompany.id)return;
 
-      activateSide(assignSide);
-
-      const verifyAssignment=()=>{
-        if(STATE.assignmentToken!==assignmentToken)return;
-        const fixedCompany=companies().find(
-          company=>String(company.id)===tappedCompanyId
-        )||tappedCompany;
-        if(storedCompanyId(assignSide)!==tappedCompanyId){
-          forceCompanyToSide(assignSide,fixedCompany);
-        }
-        setNextSide(nextSide);
-      };
-
-      queueMicrotask(()=>{
-        if(STATE.assignmentToken!==assignmentToken)return;
-        const fixedCompany=companies().find(
-          company=>String(company.id)===tappedCompanyId
-        )||tappedCompany;
-        forceCompanyToSide(assignSide,fixedCompany);
-        setNextSide(nextSide);
-        requestAnimationFrame(verifyAssignment);
-        setTimeout(verifyAssignment,80);
-      });
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      assignCenteredCompany(centerCompany);
     },true);
   }
   function boot(){
