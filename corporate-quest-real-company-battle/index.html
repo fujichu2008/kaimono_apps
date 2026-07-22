@@ -21366,6 +21366,75 @@ function configureTitleHelp(){
       STATE.internalCompanyClick=false;
     }
 
+    if(typeof S==="object"&&S){
+      if(side==="p"){
+        S.playerCoId=companyId;
+        if("selectedPlayerCoId" in S)S.selectedPlayerCoId=companyId;
+        if("playerCompanyId" in S)S.playerCompanyId=companyId;
+      }else{
+        S.enemyCoId=companyId;
+        if("cpuCoId" in S)S.cpuCoId=companyId;
+        if("opponentCoId" in S)S.opponentCoId=companyId;
+        if("selectedEnemyCoId" in S)S.selectedEnemyCoId=companyId;
+        if("enemyCompanyId" in S)S.enemyCompanyId=companyId;
+      }
+    }
+
+    const syncConfirmedSelection=()=>{
+      refreshSelectionSlots();
+
+      const playerId=storedCompanyId("p");
+      const enemyId=storedCompanyId("e");
+      const companyList=companies();
+      const playerReady=!!playerId&&companyList.some(item=>
+        item&&String(item.id)===playerId
+      );
+      const enemyReady=!!enemyId&&companyList.some(item=>
+        item&&String(item.id)===enemyId
+      );
+      if(!playerReady||!enemyReady)return;
+
+      [
+        "updateBattleStartButton",
+        "syncBattleStartButton",
+        "refreshBattleStartButton",
+        "updateStartButtonState",
+        "updateSelectStartButton"
+      ].forEach(name=>{
+        let update=null;
+        try{update=window[name]||eval(name);}catch(_){}
+        if(typeof update!=="function")return;
+        try{update();}catch(_){}
+      });
+
+      const root=screen()||document;
+      let startButton=root.querySelector(
+        "#btnBattleStart,#btnStartBattle,#btnStartMatch,#btnStart,"+
+        "#battleStart,#startBattle,.battle-start,.btn-battle-start,"+
+        "[data-action='start-battle'],[data-action='battle-start']"
+      );
+      if(!startButton){
+        startButton=Array.from(root.querySelectorAll("button")).find(button=>
+          /バトル開始|対戦開始|BATTLE\s*START|START\s*BATTLE/i.test(
+            String(button.textContent||"").trim()
+          )
+        )||null;
+      }
+      if(!startButton)return;
+
+      startButton.disabled=false;
+      startButton.removeAttribute("disabled");
+      startButton.setAttribute("aria-disabled","false");
+      startButton.classList.remove("disabled","is-disabled","off");
+    };
+
+    syncConfirmedSelection();
+    if(typeof requestAnimationFrame==="function"){
+      requestAnimationFrame(syncConfirmedSelection);
+      requestAnimationFrame(()=>requestAnimationFrame(syncConfirmedSelection));
+    }
+    setTimeout(syncConfirmedSelection,120);
+
     return true;
   }
   function storedCompanyId(side){
@@ -21781,6 +21850,579 @@ function configureTitleHelp(){
 
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot,{once:true});
   else boot();
+
+})();
+
+/* ================================================================
+   企業選択の確定状態を一本化
+   - 画面を開くたびに自機選択から開始
+   - 自機 → 敵機 → 自機の順で交互に割り当て
+   - 両方確定後は開始ボタンの活性状態を維持
+================================================================ */
+(function installDeterministicCompanySelectionFlow(){
+  if(window.__CQ_DETERMINISTIC_COMPANY_SELECTION_FLOW_INSTALLED__)return;
+  window.__CQ_DETERMINISTIC_COMPANY_SELECTION_FLOW_INSTALLED__=true;
+
+  const FLOW={
+    nextSide:"p",
+    playerId:"",
+    enemyId:"",
+    internal:false,
+    resetting:false,
+    wasOpen:false,
+    syncQueued:false,
+    visualSide:"",
+    visualTarget:null
+  };
+  const CARD_SELECTOR=[
+    "[data-company-id]","[data-company]","[data-co-id]",
+    ".company-card",".select-company-card",".select-card",
+    ".company-item",".select-item",".carousel-card",".co-card"
+  ].join(",");
+  const STAGE_SELECTOR=[
+    "#selectStage","#companyCarousel","#selectCarousel",
+    ".select-stage",".company-carousel",".select-carousel",
+    ".company-rail",".select-rail"
+  ].join(",");
+  const PLAYER_SELECTORS=[
+    "#playerSlot","#selectPlayerSlot","#selectedPlayer","#selectPlayer",
+    "#playerCompany","#myCompany","#pSlot","#slotP","#slotPlayer",
+    ".player-slot",".select-player-slot",".my-company-slot",".slot-player",
+    "[data-side='p']","[data-side='player']","[data-target='player']",
+    "[data-select-side='p']","[data-select-side='player']"
+  ];
+  const ENEMY_SELECTORS=[
+    "#enemySlot","#selectEnemySlot","#selectedEnemy","#selectEnemy",
+    "#enemyCompany","#opponentCompany","#eSlot","#slotE","#slotEnemy",
+    ".enemy-slot",".select-enemy-slot",".opponent-company-slot",".slot-enemy",
+    "[data-side='e']","[data-side='enemy']","[data-target='enemy']",
+    "[data-select-side='e']","[data-select-side='enemy']"
+  ];
+
+  function selectScreen(){
+    return document.getElementById("scr-select");
+  }
+
+  function selectionScreenIsOpen(){
+    const root=selectScreen();
+    if(!root||root.hidden||root.getAttribute("aria-hidden")==="true")return false;
+    if(typeof S==="object"&&S&&S.screen==="select")return true;
+    return root.classList.contains("active")||
+      root.classList.contains("open")||
+      root.getAttribute("aria-hidden")==="false";
+  }
+
+  function companyList(){
+    return typeof allCompanies==="function"
+      ?allCompanies()
+      :typeof COMPANIES!=="undefined"&&Array.isArray(COMPANIES)
+        ?COMPANIES
+        :[];
+  }
+
+  function companyById(id){
+    const key=String(id||"");
+    return companyList().find(company=>
+      company&&String(company.id)===key
+    )||null;
+  }
+
+  function firstVisible(selectors){
+    const root=selectScreen();
+    if(!root)return null;
+    for(const selector of selectors){
+      const node=root.querySelector(selector);
+      if(!node||node.hidden)continue;
+      const style=window.getComputedStyle?getComputedStyle(node):null;
+      if(
+        !style||
+        (
+          style.display!=="none"&&
+          style.visibility!=="hidden"&&
+          Number(style.opacity)!==0
+        )
+      )return node;
+    }
+    return null;
+  }
+
+  function sideSlot(side){
+    return firstVisible(side==="p"?PLAYER_SELECTORS:ENEMY_SELECTORS);
+  }
+
+  function startButton(){
+    const root=selectScreen();
+    if(!root)return null;
+    const direct=root.querySelector(
+      "#btnBattleStart,#btnStartBattle,#btnStartMatch,#btnStart,"+
+      "#battleStart,#startBattle,.battle-start,.btn-battle-start,"+
+      "[data-action='start-battle'],[data-action='battle-start']"
+    );
+    if(direct)return direct;
+    return Array.from(root.querySelectorAll("button")).find(button=>
+      /バトル開始|対戦開始|BATTLE\s*START|START\s*BATTLE/i.test(
+        String(button.textContent||"").trim()
+      )
+    )||null;
+  }
+
+  function writeSelectionToState(){
+    if(typeof S!=="object"||!S)return;
+
+    S.playerCoId=FLOW.playerId;
+    S.enemyCoId=FLOW.enemyId;
+
+    [
+      "selectedPlayerCoId",
+      "playerCompanyId",
+      "selectedPlayerId",
+      "playerId"
+    ].forEach(key=>S[key]=FLOW.playerId);
+
+    [
+      "cpuCoId",
+      "opponentCoId",
+      "selectedEnemyCoId",
+      "enemyCompanyId",
+      "selectedEnemyId",
+      "enemyId"
+    ].forEach(key=>S[key]=FLOW.enemyId);
+
+    if("playerCo" in S)S.playerCo=companyById(FLOW.playerId);
+    if("playerCompany" in S)S.playerCompany=companyById(FLOW.playerId);
+    if("enemyCo" in S)S.enemyCo=companyById(FLOW.enemyId);
+    if("enemyCompany" in S)S.enemyCompany=companyById(FLOW.enemyId);
+  }
+
+  function callSelectionUpdater(name){
+    let updater=null;
+    try{
+      updater=window[name];
+      if(typeof updater!=="function")updater=eval(name);
+    }catch(_){}
+    if(typeof updater!=="function")return false;
+    try{
+      updater();
+      return true;
+    }catch(_){
+      return false;
+    }
+  }
+
+  function refreshSelectionUi(){
+    [
+      "renderSelect",
+      "renderSelectSlots",
+      "updateSelectSlots",
+      "refreshSelectSlots",
+      "renderSelectedCompanies",
+      "updateSelectedCompanies",
+      "renderSelectVersus",
+      "updateSelectVersus",
+      "renderVersus",
+      "updateBattleStartButton",
+      "syncBattleStartButton",
+      "refreshBattleStartButton",
+      "updateStartButtonState",
+      "updateSelectStartButton"
+    ].forEach(callSelectionUpdater);
+  }
+
+  function activateNextSideSlot(){
+    const root=selectScreen();
+    if(!root)return;
+
+    const player=sideSlot("p");
+    const enemy=sideSlot("e");
+    const target=FLOW.nextSide==="p"?player:enemy;
+    const other=FLOW.nextSide==="p"?enemy:player;
+
+    if(root.dataset.cqDeterministicNextSide!==FLOW.nextSide){
+      root.dataset.cqDeterministicNextSide=FLOW.nextSide;
+    }
+
+    if(other){
+      if(other.classList.contains("cq-next-company-target")){
+        other.classList.remove("cq-next-company-target");
+      }
+      if(other.classList.contains("cq-deterministic-company-target")){
+        other.classList.remove("cq-deterministic-company-target");
+      }
+      if(other.hasAttribute("data-cq-deterministic-target")){
+        other.removeAttribute("data-cq-deterministic-target");
+      }
+    }
+
+    if(!target)return;
+
+    if(target.classList.contains("cq-next-company-target")){
+      target.classList.remove("cq-next-company-target");
+    }
+    if(!target.classList.contains("cq-deterministic-company-target")){
+      target.classList.add("cq-deterministic-company-target");
+    }
+    if(target.getAttribute("data-cq-deterministic-target")!=="true"){
+      target.setAttribute("data-cq-deterministic-target","true");
+    }
+
+    if(
+      FLOW.visualSide===FLOW.nextSide&&
+      FLOW.visualTarget===target
+    )return;
+
+    FLOW.visualSide=FLOW.nextSide;
+    FLOW.visualTarget=target;
+    FLOW.internal=true;
+    try{
+      target.dispatchEvent(new MouseEvent("click",{
+        bubbles:true,
+        cancelable:true,
+        view:window
+      }));
+    }catch(_){
+    }finally{
+      FLOW.internal=false;
+    }
+  }
+
+  function setButtonReady(button,ready){
+    if(!button)return;
+    if(ready){
+      if(button.disabled)button.disabled=false;
+      if(button.hasAttribute("disabled")){
+        button.removeAttribute("disabled");
+      }
+      if(button.getAttribute("aria-disabled")!=="false"){
+        button.setAttribute("aria-disabled","false");
+      }
+      [
+        "disabled",
+        "is-disabled",
+        "off",
+        "inactive",
+        "not-ready"
+      ].forEach(name=>{
+        if(button.classList.contains(name)){
+          button.classList.remove(name);
+        }
+      });
+      if(button.style.pointerEvents){
+        button.style.removeProperty("pointer-events");
+      }
+      if(button.style.opacity){
+        button.style.removeProperty("opacity");
+      }
+      if(button.tabIndex<0)button.tabIndex=0;
+    }else{
+      if(!button.disabled)button.disabled=true;
+      if(!button.hasAttribute("disabled")){
+        button.setAttribute("disabled","");
+      }
+      if(button.getAttribute("aria-disabled")!=="true"){
+        button.setAttribute("aria-disabled","true");
+      }
+      if(!button.classList.contains("is-disabled")){
+        button.classList.add("is-disabled");
+      }
+    }
+  }
+
+  function bothCompaniesReady(){
+    return !!(
+      FLOW.playerId&&
+      FLOW.enemyId&&
+      companyById(FLOW.playerId)&&
+      companyById(FLOW.enemyId)
+    );
+  }
+
+  function synchronizeSelectionState(){
+    if(!selectionScreenIsOpen())return;
+    writeSelectionToState();
+    activateNextSideSlot();
+    setButtonReady(startButton(),bothCompaniesReady());
+  }
+
+  function queueSelectionSync(){
+    if(FLOW.syncQueued)return;
+    FLOW.syncQueued=true;
+    const run=()=>{
+      FLOW.syncQueued=false;
+      synchronizeSelectionState();
+    };
+    if(typeof requestAnimationFrame==="function"){
+      requestAnimationFrame(run);
+    }else{
+      setTimeout(run,0);
+    }
+  }
+
+  function scheduleSelectionSync(){
+    synchronizeSelectionState();
+    if(typeof requestAnimationFrame==="function"){
+      requestAnimationFrame(synchronizeSelectionState);
+      requestAnimationFrame(()=>
+        requestAnimationFrame(synchronizeSelectionState)
+      );
+    }
+    [40,120,280,600].forEach(delay=>
+      setTimeout(synchronizeSelectionState,delay)
+    );
+  }
+
+  function resetSelectionFlow(){
+    if(FLOW.resetting)return;
+    FLOW.resetting=true;
+    try{
+      FLOW.nextSide="p";
+      FLOW.playerId="";
+      FLOW.enemyId="";
+      FLOW.visualSide="";
+      FLOW.visualTarget=null;
+      writeSelectionToState();
+      refreshSelectionUi();
+      activateNextSideSlot();
+      setButtonReady(startButton(),false);
+      scheduleSelectionSync();
+    }finally{
+      FLOW.resetting=false;
+    }
+  }
+
+  function assignCompany(company){
+    if(!company||!company.id)return false;
+
+    const id=String(company.id);
+    if(FLOW.nextSide==="p"){
+      FLOW.playerId=id;
+      FLOW.nextSide="e";
+    }else{
+      FLOW.enemyId=id;
+      FLOW.nextSide="p";
+    }
+
+    writeSelectionToState();
+    refreshSelectionUi();
+    scheduleSelectionSync();
+    return true;
+  }
+
+  function dataCompanyId(node){
+    if(!node)return "";
+    const data=node.dataset||{};
+    return String(
+      data.companyId||
+      data.company||
+      data.coId||
+      data.companyKey||
+      ""
+    ).trim();
+  }
+
+  function companyFromCard(card){
+    if(!card)return null;
+
+    let id=dataCompanyId(card);
+    if(!id&&card.querySelector){
+      id=dataCompanyId(
+        card.querySelector(
+          "[data-company-id],[data-company],[data-co-id]"
+        )
+      );
+    }
+    if(id){
+      const company=companyById(id);
+      if(company)return company;
+    }
+
+    const text=String(card.textContent||"")
+      .replace(/\s+/g," ")
+      .trim();
+    return companyList().find(company=>
+      company&&company.name&&text.includes(company.name)
+    )||null;
+  }
+
+  function centeredCompany(){
+    try{
+      if(typeof currentSelectCompany==="function"){
+        const current=currentSelectCompany();
+        if(current&&current.id)return current;
+      }
+    }catch(_){}
+
+    const root=selectScreen();
+    if(!root)return null;
+
+    const cards=Array.from(root.querySelectorAll(CARD_SELECTOR))
+      .filter(card=>companyFromCard(card))
+      .filter(card=>{
+        const rect=card.getBoundingClientRect();
+        return rect.width>0&&rect.height>0;
+      });
+    if(!cards.length)return null;
+
+    const stage=root.querySelector(STAGE_SELECTOR)||root;
+    const stageRect=stage.getBoundingClientRect();
+    const centerX=stageRect.left+stageRect.width/2;
+    const nearest=cards.reduce((best,card)=>{
+      const rect=card.getBoundingClientRect();
+      const distance=Math.abs(
+        rect.left+rect.width/2-centerX
+      );
+      return !best||distance<best.distance
+        ?{card,distance}
+        :best;
+    },null);
+    return nearest?companyFromCard(nearest.card):null;
+  }
+
+  function companyFromTap(target){
+    const root=selectScreen();
+    if(!root||!target||!target.closest)return null;
+
+    const card=target.closest(CARD_SELECTOR);
+    if(card&&root.contains(card)){
+      const company=companyFromCard(card);
+      if(company)return company;
+    }
+
+    const stage=target.closest(STAGE_SELECTOR);
+    return stage&&root.contains(stage)
+      ?centeredCompany()
+      :null;
+  }
+
+  function targetIsSideSlot(target){
+    const player=sideSlot("p");
+    const enemy=sideSlot("e");
+    return !!(
+      player&&(target===player||player.contains(target))||
+      enemy&&(target===enemy||enemy.contains(target))
+    );
+  }
+
+  function installSelectionStyle(){
+    if(document.getElementById("cqDeterministicCompanySelectionStyle"))return;
+    const style=document.createElement("style");
+    style.id="cqDeterministicCompanySelectionStyle";
+    style.textContent=`
+#scr-select .cq-deterministic-company-target{
+  outline:2px solid rgba(92,220,255,.88)!important;
+  outline-offset:2px!important;
+  box-shadow:
+    0 0 0 3px rgba(92,220,255,.14),
+    0 0 22px rgba(92,220,255,.28)!important;
+}
+#scr-select[data-cq-deterministic-next-side="e"]
+.cq-deterministic-company-target{
+  outline-color:rgba(255,102,125,.9)!important;
+  box-shadow:
+    0 0 0 3px rgba(255,102,125,.14),
+    0 0 22px rgba(255,102,125,.28)!important;
+}
+`;
+    document.head.appendChild(style);
+  }
+
+  document.addEventListener("click",event=>{
+    if(
+      FLOW.internal||
+      !selectionScreenIsOpen()||
+      !event.target||
+      targetIsSideSlot(event.target)
+    )return;
+
+    const button=startButton();
+    if(
+      button&&
+      (event.target===button||button.contains(event.target))
+    )return;
+
+    const company=companyFromTap(event.target);
+    if(!company)return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    assignCompany(company);
+  },true);
+
+  if(
+    typeof showScreen==="function"&&
+    !showScreen.__cqDeterministicCompanySelectionInstalled
+  ){
+    const previousShowScreen=showScreen;
+    showScreen=function(name){
+      const value=previousShowScreen.apply(this,arguments);
+      if(name==="select"){
+        resetSelectionFlow();
+      }
+      return value;
+    };
+    showScreen.__cqDeterministicCompanySelectionInstalled=true;
+  }
+
+  function bootDeterministicSelection(){
+    installSelectionStyle();
+
+    const root=selectScreen();
+    if(!root)return;
+
+    FLOW.wasOpen=selectionScreenIsOpen();
+    if(FLOW.wasOpen)resetSelectionFlow();
+
+    if(typeof MutationObserver==="function"){
+      const observer=new MutationObserver(records=>{
+        const open=selectionScreenIsOpen();
+        if(open&&!FLOW.wasOpen){
+          resetSelectionFlow();
+        }
+        FLOW.wasOpen=open;
+
+        if(!open)return;
+        const relevant=records.some(record=>
+          record.type==="childList"||
+          (
+            record.type==="attributes"&&
+            ["disabled","aria-disabled","class"].includes(
+              record.attributeName
+            )
+          )
+        );
+        if(relevant)queueSelectionSync();
+      });
+      observer.observe(root,{
+        childList:true,
+        subtree:true,
+        attributes:true,
+        attributeFilter:[
+          "disabled",
+          "aria-disabled",
+          "class",
+          "aria-hidden"
+        ]
+      });
+    }
+
+    window.addEventListener("pageshow",queueSelectionSync);
+  }
+
+  if(document.readyState==="loading"){
+    document.addEventListener(
+      "DOMContentLoaded",
+      bootDeterministicSelection,
+      {once:true}
+    );
+  }else{
+    bootDeterministicSelection();
+  }
+
+  window.CQ_DETERMINISTIC_COMPANY_SELECTION={
+    reset:resetSelectionFlow,
+    assign:assignCompany,
+    sync:synchronizeSelectionState,
+    state:FLOW
+  };
 })();
 
 /* ================================================================
