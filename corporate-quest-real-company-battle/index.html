@@ -21493,18 +21493,71 @@ function configureTitleHelp(){
   function bindCompareSurface(){
     const chart=document.getElementById("compareChart");
     if(!chart)return;
-    const host=chart.closest(
+
+    const root=screen();
+    const comment=document.getElementById("selectCompanyComment");
+    const namedHost=chart.closest(
       ".select-status-card,.select-stat-card,.status-card,.stats-card,"+
-      ".select-compare,.compare-card,.compare-panel,.status-panel"
-    )||chart.parentElement||chart;
+      ".select-compare,.compare-card,.compare-panel,.status-panel,"+
+      ".ability-compare,.ability-panel,.company-status,.company-stats"
+    );
+
+    let sharedHost=null;
+    if(
+      root&&
+      comment&&
+      root.contains(chart)&&
+      root.contains(comment)
+    ){
+      let node=chart.parentElement;
+      while(node&&node!==root){
+        if(node.contains(comment)){
+          sharedHost=node;
+          break;
+        }
+        node=node.parentElement;
+      }
+    }
+
+    if(sharedHost&&root){
+      const sharedRect=sharedHost.getBoundingClientRect();
+      const rootRect=root.getBoundingClientRect();
+      const containsCompanyStage=!!sharedHost.querySelector(
+        "#selectStage,#companyCarousel,#selectCarousel,"+
+        ".select-stage,.company-carousel,.select-carousel,"+
+        ".company-rail,.select-rail"
+      );
+      if(
+        containsCompanyStage||
+        !sharedRect.width||
+        !sharedRect.height||
+        sharedRect.height>rootRect.height*.72
+      ){
+        sharedHost=null;
+      }
+    }
+
+    const host=sharedHost||namedHost||chart.parentElement||chart;
     if(!host||host.dataset.cqAlternatingCompareBound==="1")return;
     host.dataset.cqAlternatingCompareBound="1";
     host.classList.add("cq-compare-inertia-surface");
     STATE.compareHost=host;
 
     const drag={
-      active:false,pointerId:null,startX:0,lastX:0,lastTime:0,
-      totalX:0,velocity:0,stepCarry:0,scroller:null
+      active:false,
+      dragging:false,
+      pointerId:null,
+      startX:0,
+      startY:0,
+      lastX:0,
+      lastY:0,
+      lastTime:0,
+      downTime:0,
+      totalX:0,
+      totalY:0,
+      velocity:0,
+      stepCarry:0,
+      scroller:null
     };
     const interactive=target=>target&&target.closest&&target.closest("button,a,input,select,textarea,[role='button']");
     const stopInertia=()=>{
@@ -21525,16 +21578,20 @@ function configureTitleHelp(){
     };
     const finish=event=>{
       if(!drag.active||event.pointerId!==drag.pointerId)return;
+
+      const wasDragging=drag.dragging;
       drag.active=false;
+      drag.dragging=false;
+      drag.pointerId=null;
       host.classList.remove("cq-dragging");
       try{host.releasePointerCapture(event.pointerId);}catch(_){}
+
+      if(!wasDragging||event.type==="pointercancel")return;
+
+      STATE.compareSuppressClickUntil=performance.now()+450;
       event.preventDefault();
       event.stopImmediatePropagation();
-      const tap=Math.abs(drag.totalX)<9&&performance.now()-drag.lastTime<500;
-      if(tap){
-        assignCenteredCompany();
-        return;
-      }
+
       let velocity=drag.velocity;
       let previous=performance.now();
       const scroller=drag.scroller;
@@ -21550,46 +21607,109 @@ function configureTitleHelp(){
           if(scroller)snapScroller(scroller);
         }
       };
-      if(Math.abs(velocity)>.025)STATE.inertiaRaf=requestAnimationFrame(coast);
-      else if(scroller)snapScroller(scroller);
+      if(Math.abs(velocity)>.025){
+        STATE.inertiaRaf=requestAnimationFrame(coast);
+      }else if(scroller){
+        snapScroller(scroller);
+      }
     };
 
     host.addEventListener("pointerdown",event=>{
       if(event.button!==undefined&&event.button!==0)return;
+      if(
+        STATE.internalSlotClick||
+        STATE.internalCompanyClick||
+        STATE.internalFocusMove
+      )return;
       if(interactive(event.target))return;
+
+      const playerSlot=findSideSlot("p");
+      const enemySlot=findSideSlot("e");
+      if(
+        playerSlot&&
+        (event.target===playerSlot||playerSlot.contains(event.target))
+      )return;
+      if(
+        enemySlot&&
+        (event.target===enemySlot||enemySlot.contains(event.target))
+      )return;
+      if(cardFromTarget(event.target))return;
+
       stopInertia();
+      const now=performance.now();
       drag.active=true;
+      drag.dragging=false;
       drag.pointerId=event.pointerId;
       drag.startX=drag.lastX=event.clientX;
-      drag.lastTime=performance.now();
+      drag.startY=drag.lastY=event.clientY;
+      drag.lastTime=now;
+      drag.downTime=now;
       drag.totalX=0;
+      drag.totalY=0;
       drag.velocity=0;
       drag.stepCarry=0;
       drag.scroller=findCompanyScroller();
-      host.classList.add("cq-dragging");
+
       try{host.setPointerCapture(event.pointerId);}catch(_){}
-      event.preventDefault();
-      event.stopImmediatePropagation();
     },true);
     host.addEventListener("pointermove",event=>{
       if(!drag.active||event.pointerId!==drag.pointerId)return;
+
       const now=performance.now();
       const dx=event.clientX-drag.lastX;
       const dt=Math.max(4,now-drag.lastTime);
       drag.totalX=event.clientX-drag.startX;
+      drag.totalY=event.clientY-drag.startY;
+
+      if(!drag.dragging){
+        const horizontalDistance=Math.abs(drag.totalX);
+        const verticalDistance=Math.abs(drag.totalY);
+        if(
+          horizontalDistance<9||
+          horizontalDistance<verticalDistance*.8
+        ){
+          drag.lastX=event.clientX;
+          drag.lastY=event.clientY;
+          drag.lastTime=now;
+          return;
+        }
+        drag.dragging=true;
+        host.classList.add("cq-dragging");
+      }
+
       const scrollDistance=-dx;
       const instant=scrollDistance/dt;
       drag.velocity=drag.velocity*.72+instant*.28;
       applyDistance(scrollDistance);
       drag.lastX=event.clientX;
+      drag.lastY=event.clientY;
       drag.lastTime=now;
+
       event.preventDefault();
       event.stopImmediatePropagation();
     },true);
     host.addEventListener("pointerup",finish,true);
     host.addEventListener("pointercancel",finish,true);
     host.addEventListener("click",event=>{
+      if(
+        STATE.internalSlotClick||
+        STATE.internalCompanyClick||
+        STATE.internalFocusMove
+      )return;
       if(interactive(event.target))return;
+
+      const playerSlot=findSideSlot("p");
+      const enemySlot=findSideSlot("e");
+      if(
+        playerSlot&&
+        (event.target===playerSlot||playerSlot.contains(event.target))
+      )return;
+      if(
+        enemySlot&&
+        (event.target===enemySlot||enemySlot.contains(event.target))
+      )return;
+      if(cardFromTarget(event.target))return;
+
       event.preventDefault();
       event.stopImmediatePropagation();
     },true);
