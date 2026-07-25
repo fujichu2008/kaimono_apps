@@ -3907,8 +3907,9 @@ body #display.answer-flash-danger{
       updateStatsView();
       refreshTrend&&refreshTrend();
       drawSrsForecast&&drawSrsForecast();
-      setTimeout(()=>{ renderBiotope&&renderBiotope() }, 0);
-      try{ renderSky && renderSky(); }catch(_){ }
+      setTimeout(()=>{
+        try{ renderBiotopeScene() }catch(_){ }
+      },0);
   } else {
     if(window._bioTimer){clearInterval(window._bioTimer); window._bioTimer=null}
     if(window._bioEventTimer){clearInterval(window._bioEventTimer); window._bioEventTimer=null}
@@ -5664,11 +5665,7 @@ function getBadge(stage){
       }
     }
     function initGrowthEmoji(){
-      let st = parseInt(localStorage.getItem('biotope_stage_current')||'0',10)||0;
-      if(!st){
-        try{ st = applyDegrade(bestStageRaw()); }catch(_){ st = 1 }
-      }
-      applyGrowthEmoji(st, false);
+      applyGrowthEmoji(currentStage(),false);
     }
     const statsLevel=$('#statsLevel'), statsMode=$('#statsMode');
     const voiceSelect=$('#voiceSelect');
@@ -5676,6 +5673,8 @@ function getBadge(stage){
     const worstList=$('#worstList'), weakEmpty=$('#weakEmpty'), weakMeta=$('#weakMeta');
     const periodSel=$('#periodSelect'), trendSvg=$('#trendSvg'), trendMeta=$('#trendMeta');
     const MIGRATION_V5_KEY='dejitan_migrated_v5';
+    const MIGRATION_V5_STAGING_KEY='dejitan_word_stats_migration_v5_staging';
+    const MIGRATION_V5_JOURNAL_KEY='dejitan_migration_v5_journal';
 
     function levelIdBandStart(level){
       const lv=String(level||'');
@@ -5823,18 +5822,29 @@ function getBadge(stage){
       return out;
     }
 
-    function migrateStatsV5(map,collidingIds,duplicateIdRemap){
-      if(localStorage.getItem(MIGRATION_V5_KEY)==='1') return map;
-      const migrated={...(map||{})};
+    function migrateStatsV5(map,collidingIds,duplicateIdRemap,alreadyMigrated){
+      const source=(map&&typeof map==='object'&&!Array.isArray(map))?map:{};
+      if(alreadyMigrated) return {map:source,changed:false};
+      const migrated={...source};
+      let changed=false;
       for(const [from,to] of Object.entries(duplicateIdRemap||{})){
         if(!migrated[from]) continue;
         migrated[to]=mergeStatV5(migrated[to],migrated[from]);
         delete migrated[from];
+        changed=true;
       }
-      delete migrated['0'];
-      for(const id of (collidingIds||[])){ delete migrated[String(id)]; }
-      try{localStorage.setItem(MIGRATION_V5_KEY,'1')}catch(_){}
-      return migrated;
+      if(Object.prototype.hasOwnProperty.call(migrated,'0')){
+        delete migrated['0'];
+        changed=true;
+      }
+      for(const id of (collidingIds||[])){
+        const key=String(id);
+        if(Object.prototype.hasOwnProperty.call(migrated,key)){
+          delete migrated[key];
+          changed=true;
+        }
+      }
+      return {map:migrated,changed};
     }
 
     let WORDS=[];
@@ -5926,22 +5936,290 @@ function getBadge(stage){
       for(const key of MODE_KEYS) ensureModeStat(st,key);
       return st.by;
     }
-    function loadMap(){
-      try{let base={}; const raw=localStorage.getItem(STORAGE_KEY); if(raw) base=JSON.parse(raw);
-        for(const k of LEGACY_KEYS){const v=localStorage.getItem(k); if(!v) continue;
-          const obj=JSON.parse(v); for(const id in obj){
-            const cur=base[id]||{shown:0,got:0,streak:0,gstreak:0,last:emptySeen(),by:emptyBy(),lastSeen:emptySeen()};
-            const add=obj[id]||{}; base[id]={shown:(cur.shown|0)+(add.shown|0),got:(cur.got|0)+(add.got|0),streak:Math.max(cur.streak|0,add.streak|0),gstreak:cur.gstreak|0,last:(cur.last||emptySeen()),by:(cur.by||emptyBy()),lastSeen:(cur.lastSeen||emptySeen())}
-          } localStorage.removeItem(k) }
-        for(const id in base){
-          const it=base[id];
-          if(!it.last) it.last=emptySeen();
-          if(!it.lastSeen) it.lastSeen=emptySeen();
-          if(typeof it.streak!=='number') it.streak=0;
-          if(typeof it.gstreak!=='number') it.gstreak=0;
-          ensureAllModeStats(it);
+    function isStatsRecord(value){
+      return !!value&&typeof value==='object'&&!Array.isArray(value);
+    }
+
+    function parseStatsRecordText(raw,label){
+      if(typeof raw!=='string'||raw===''){
+        throw new Error((label||'学習データ')+'がありません。');
+      }
+      const parsed=JSON.parse(raw);
+      if(!isStatsRecord(parsed)){
+        throw new Error((label||'学習データ')+'がオブジェクト形式ではありません。');
+      }
+      return parsed;
+    }
+
+    function normalizeLoadedStatsMap(source){
+      const base=isStatsRecord(source)?source:{};
+      for(const id in base){
+        const it=base[id];
+        if(!it||typeof it!=='object'||Array.isArray(it)){
+          delete base[id];
+          continue;
         }
-        return base }catch(e){return {}}
+        if(!it.last) it.last=emptySeen();
+        if(!it.lastSeen) it.lastSeen=emptySeen();
+        if(typeof it.streak!=='number') it.streak=0;
+        if(typeof it.gstreak!=='number') it.gstreak=0;
+        ensureAllModeStats(it);
+      }
+      return base;
+    }
+
+    function readLegacyEntries(storage,parseValues){
+      const entries=[];
+      for(const key of LEGACY_KEYS){
+        const value=storage.getItem(key);
+        if(value==null) continue;
+        if(parseValues){
+          const parsed=parseStatsRecordText(value,'旧学習データ '+key);
+          entries.push({key,value,parsed});
+        }else{
+          entries.push({key,value});
+        }
+      }
+      return entries;
+    }
+
+    function mergeLegacyEntries(base,entries){
+      const merged=isStatsRecord(base)?base:{};
+      for(const entry of (entries||[])){
+        const obj=entry.parsed;
+        if(!isStatsRecord(obj)) continue;
+        for(const id in obj){
+          const cur=merged[id]||{shown:0,got:0,streak:0,gstreak:0,last:emptySeen(),by:emptyBy(),lastSeen:emptySeen()};
+          const add=obj[id]||{};
+          merged[id]={
+            shown:(cur.shown|0)+(add.shown|0),
+            got:(cur.got|0)+(add.got|0),
+            streak:Math.max(cur.streak|0,add.streak|0),
+            gstreak:cur.gstreak|0,
+            last:(cur.last||emptySeen()),
+            by:(cur.by||emptyBy()),
+            lastSeen:(cur.lastSeen||emptySeen())
+          };
+        }
+      }
+      return merged;
+    }
+
+    const MIGRATION_JOURNAL_MAX_AGE_MS=30*24*60*60*1000;
+
+    function hashMigrationText(value){
+      const text=String(value==null?'':value);
+      let hash=2166136261>>>0;
+      for(let i=0;i<text.length;i++){
+        hash^=text.charCodeAt(i);
+        hash=Math.imul(hash,16777619)>>>0;
+      }
+      return ('00000000'+hash.toString(16)).slice(-8);
+    }
+
+    function createMigrationOwner(){
+      return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+    }
+
+    function createLegacySnapshot(entries){
+      return (entries||[]).map(entry=>{
+        const value=String(entry&&entry.value!=null?entry.value:'');
+        return {
+          key:String(entry&&entry.key||''),
+          hash:hashMigrationText(value),
+          length:value.length
+        };
+      }).filter(entry=>entry.key);
+    }
+
+    function isValidLegacySnapshot(snapshot){
+      return Array.isArray(snapshot)&&snapshot.every(entry=>
+        entry&&
+        typeof entry.key==='string'&&
+        entry.key.length>0&&
+        typeof entry.hash==='string'&&
+        Number.isInteger(entry.length)&&
+        entry.length>=0
+      );
+    }
+
+    function readPreparedMigrationState(storage){
+      const journalRaw=storage.getItem(MIGRATION_V5_JOURNAL_KEY);
+      if(journalRaw==null) return {prepared:false};
+      try{
+        const journal=JSON.parse(journalRaw);
+        if(
+          !journal||
+          journal.version!==5||
+          typeof journal.owner!=='string'||
+          !journal.owner||
+          !Number.isFinite(Number(journal.createdAt))||
+          !isValidLegacySnapshot(journal.legacySnapshot)
+        ){
+          throw new Error('移行ジャーナルの形式が不正です。');
+        }
+        if(journal.phase==='conflict'){
+          return {
+            prepared:false,
+            conflict:true,
+            journal,
+            owner:journal.owner,
+            stale:Math.max(0,Date.now()-Number(journal.createdAt))>
+              MIGRATION_JOURNAL_MAX_AGE_MS
+          };
+        }
+        if(
+          journal.phase!=='prepared'||
+          typeof journal.payloadHash!=='string'||
+          !Number.isInteger(journal.payloadLength)||
+          journal.payloadLength<0
+        ){
+          throw new Error('移行ジャーナルの形式が不正です。');
+        }
+        const serialized=storage.getItem(MIGRATION_V5_STAGING_KEY);
+        if(typeof serialized!=='string'){
+          throw new Error('移行ステージングデータがありません。');
+        }
+        if(
+          serialized.length!==journal.payloadLength||
+          hashMigrationText(serialized)!==journal.payloadHash
+        ){
+          throw new Error('移行ステージングデータとジャーナルが一致しません。');
+        }
+        const map=parseStatsRecordText(serialized,'移行ステージングデータ');
+        const age=Math.max(0,Date.now()-Number(journal.createdAt));
+        return {
+          prepared:true,
+          serialized,
+          map,
+          journal,
+          owner:journal.owner,
+          stale:age>MIGRATION_JOURNAL_MAX_AGE_MS
+        };
+      }catch(error){
+        return {prepared:false,invalid:true,error};
+      }
+    }
+
+    function discardMigrationArtifacts(storage){
+      let firstError=null;
+      for(const key of [MIGRATION_V5_STAGING_KEY,MIGRATION_V5_JOURNAL_KEY]){
+        try{storage.removeItem(key)}catch(error){if(!firstError) firstError=error}
+      }
+      return firstError;
+    }
+
+    function loadMap(storage){
+      const store=storage||localStorage;
+      const result={
+        map:{},
+        legacyEntries:[],
+        alreadyMigrated:false,
+        resumePrepared:false,
+        blocked:false
+      };
+
+      const prepared=readPreparedMigrationState(store);
+      const migrationFlag=store.getItem(MIGRATION_V5_KEY)==='1';
+      const currentRaw=store.getItem(STORAGE_KEY);
+      let currentMap={};
+      let currentValid=false;
+      if(currentRaw!=null){
+        try{
+          currentMap=parseStatsRecordText(currentRaw,'現在の学習データ');
+          currentValid=true;
+        }catch(error){
+          result.currentDataError=error;
+        }
+      }
+
+      if(prepared.prepared){
+        result.map=normalizeLoadedStatsMap(prepared.map);
+        result.resumePrepared=true;
+        result.preparedSerialized=prepared.serialized;
+        result.preparedOwner=prepared.owner;
+        result.preparedJournal=prepared.journal;
+        result.preparedStale=prepared.stale;
+        return result;
+      }
+
+      if(prepared.conflict){
+        result.migrationConflict=prepared.journal;
+        if(migrationFlag&&currentValid){
+          result.map=normalizeLoadedStatsMap(currentMap);
+          result.alreadyMigrated=true;
+          return result;
+        }
+        result.map=currentValid?normalizeLoadedStatsMap(currentMap):{};
+        result.blocked=true;
+        return result;
+      }
+
+      if(prepared.invalid){
+        result.migrationArtifactError=prepared.error;
+        if(migrationFlag&&currentValid){
+          const discardError=discardMigrationArtifacts(store);
+          if(discardError) result.migrationArtifactDiscardError=discardError;
+          result.map=normalizeLoadedStatsMap(currentMap);
+          result.alreadyMigrated=true;
+          return result;
+        }
+        // ハッシュ不一致などでpreparedの正当性を確認できない場合は、
+        // 統合済みか未統合かを推測せず、旧キーと現行データを保持して停止する。
+        result.map=currentValid?normalizeLoadedStatsMap(currentMap):{};
+        result.blocked=true;
+        return result;
+      }
+
+      // preparedジャーナルのないステージングは確定前の孤立データなので使用しない。
+      try{
+        if(store.getItem(MIGRATION_V5_STAGING_KEY)!=null){
+          store.removeItem(MIGRATION_V5_STAGING_KEY);
+        }
+      }catch(error){
+        result.migrationArtifactDiscardError=error;
+      }
+
+      if(migrationFlag&&currentValid){
+        result.map=normalizeLoadedStatsMap(currentMap);
+        result.alreadyMigrated=true;
+        return result;
+      }
+
+      let parsedLegacyEntries=[];
+      try{
+        parsedLegacyEntries=readLegacyEntries(store,true);
+      }catch(error){
+        result.legacyDataError=error;
+      }
+      result.legacyEntries=parsedLegacyEntries.map(entry=>({
+        key:entry.key,
+        value:entry.value
+      }));
+
+      if(result.legacyDataError){
+        result.map=currentValid?normalizeLoadedStatsMap(currentMap):{};
+        result.blocked=true;
+        return result;
+      }
+
+      if(!currentValid&&currentRaw!=null&&!parsedLegacyEntries.length){
+        // 壊れた現行データしかない場合は、空データで上書きせず利用者の復旧判断を待つ。
+        result.map={};
+        result.blocked=true;
+        return result;
+      }
+      if(migrationFlag&&!currentValid&&!parsedLegacyEntries.length){
+        result.map={};
+        result.blocked=true;
+        return result;
+      }
+
+      const base=currentValid?currentMap:{};
+      result.map=normalizeLoadedStatsMap(
+        mergeLegacyEntries(base,parsedLegacyEntries)
+      );
+      return result;
     }
     // === 保存失敗を沈黙させない共通ラッパ ===
     const SAVE_FAILED_KEY='dejitan_save_failed';
@@ -5983,10 +6261,336 @@ function getBadge(stage){
         return false;
       }
     }
-    function saveMap(m){return safeSetItem(STORAGE_KEY, JSON.stringify(m))}
-    let wordMap=loadMap();
-    wordMap=migrateStatsV5(wordMap,WORD_DATA_META.collidingIds,WORD_DATA_META.duplicateIdRemap);
-    saveMap(wordMap);
+    function saveMap(m){return safeSetItem(STORAGE_KEY,JSON.stringify(m))}
+
+    function writeVerifiedStatsText(storage,key,serialized,label){
+      storage.setItem(key,serialized);
+      const stored=storage.getItem(key);
+      if(stored!==serialized){
+        throw new Error((label||'学習データ')+'の保存後照合に失敗しました。');
+      }
+      parseStatsRecordText(stored,label||'学習データ');
+      return stored;
+    }
+
+    function prepareStatsMigration(map,legacyEntries,storage,onFailure,options){
+      const fail=typeof onFailure==='function'?onFailure:()=>{};
+      const opts=options||{};
+      const owner=String(opts.owner||createMigrationOwner());
+      const createdAt=Number.isFinite(Number(opts.createdAt))
+        ? Number(opts.createdAt)
+        : Date.now();
+      try{
+        if(storage.getItem(MIGRATION_V5_JOURNAL_KEY)!=null){
+          throw new Error('別の移行処理が準備済みです。');
+        }
+        const serialized=JSON.stringify(map);
+        writeVerifiedStatsText(
+          storage,
+          MIGRATION_V5_STAGING_KEY,
+          serialized,
+          '移行ステージングデータ'
+        );
+        const journalObject={
+          version:5,
+          phase:'prepared',
+          owner,
+          createdAt,
+          payloadHash:hashMigrationText(serialized),
+          payloadLength:serialized.length,
+          legacySnapshot:createLegacySnapshot(legacyEntries)
+        };
+        const journal=JSON.stringify(journalObject);
+        storage.setItem(MIGRATION_V5_JOURNAL_KEY,journal);
+        const storedJournal=storage.getItem(MIGRATION_V5_JOURNAL_KEY);
+        if(storedJournal!==journal){
+          throw new Error('移行ジャーナルの保存後照合に失敗しました。');
+        }
+        const checked=readPreparedMigrationState(storage);
+        if(
+          !checked.prepared||
+          checked.owner!==owner||
+          checked.journal.payloadHash!==journalObject.payloadHash||
+          checked.journal.payloadLength!==journalObject.payloadLength
+        ){
+          throw new Error('移行ジャーナルの所有者または内容照合に失敗しました。');
+        }
+        return {ok:true,serialized,owner,journal:journalObject};
+      }catch(error){
+        const current=readPreparedMigrationState(storage);
+        // 自分のpreparedが成立していない場合だけ、自分が作成した可能性のある一時データを破棄する。
+        if(
+          (!current.prepared&&!current.conflict)||
+          current.owner===owner
+        ){
+          discardMigrationArtifacts(storage);
+        }
+        fail(error,'prepare');
+        return {ok:false,cleanup:false};
+      }
+    }
+
+    function recordMigrationLegacyConflict(storage,journalState,conflicts,onFailure){
+      const fail=typeof onFailure==='function'?onFailure:()=>{};
+      const conflictJournal={
+        ...journalState.journal,
+        phase:'conflict',
+        committedAt:Date.now(),
+        conflicts:(conflicts||[]).map(item=>({...item}))
+      };
+      try{
+        const serializedJournal=JSON.stringify(conflictJournal);
+        storage.setItem(MIGRATION_V5_JOURNAL_KEY,serializedJournal);
+        const stored=storage.getItem(MIGRATION_V5_JOURNAL_KEY);
+        if(stored!==serializedJournal){
+          throw new Error('移行競合情報の保存後照合に失敗しました。');
+        }
+        const checked=JSON.parse(stored);
+        if(
+          checked.phase!=='conflict'||
+          checked.owner!==journalState.owner
+        ){
+          throw new Error('移行競合情報の所有者照合に失敗しました。');
+        }
+        try{storage.removeItem(MIGRATION_V5_STAGING_KEY)}catch(error){
+          fail(error,'artifact-cleanup');
+        }
+      }catch(error){
+        fail(error,'legacy-conflict');
+        const discardError=discardMigrationArtifacts(storage);
+        if(discardError){
+          fail(discardError,'artifact-cleanup');
+          return false;
+        }
+        return true;
+      }
+      if(storage===localStorage){
+        window.__dejitanMigrationConflicts=conflictJournal.conflicts.slice();
+      }
+      fail(
+        new Error('prepared後に変更された旧学習データがあります。'),
+        'legacy-conflict'
+      );
+      return true;
+    }
+
+    function finishPreparedStatsMigration(serialized,expectedOwner,storage,onFailure){
+      const fail=typeof onFailure==='function'?onFailure:()=>{};
+      let journalState;
+      const assertOwnedPrepared=()=>{
+        const state=readPreparedMigrationState(storage);
+        if(
+          !state.prepared||
+          state.serialized!==serialized||
+          state.owner!==expectedOwner
+        ){
+          throw new Error('移行処理の所有者またはステージング内容が変更されました。');
+        }
+        return state;
+      };
+
+      try{
+        journalState=assertOwnedPrepared();
+        writeVerifiedStatsText(
+          storage,
+          STORAGE_KEY,
+          serialized,
+          '現在の学習データ'
+        );
+        journalState=assertOwnedPrepared();
+        storage.setItem(MIGRATION_V5_KEY,'1');
+        if(storage.getItem(MIGRATION_V5_KEY)!=='1'){
+          throw new Error('移行済みフラグの保存後照合に失敗しました。');
+        }
+        journalState=assertOwnedPrepared();
+      }catch(error){
+        // preparedステージと旧キーは残し、所有者が維持されている場合だけ次回再開する。
+        fail(error,'owner-conflict');
+        return {ok:false,cleanup:false,prepared:true};
+      }
+
+      const conflicts=[];
+      const removable=[];
+      for(const snapshot of journalState.journal.legacySnapshot){
+        const current=storage.getItem(snapshot.key);
+        if(current==null) continue;
+        if(
+          current.length===snapshot.length&&
+          hashMigrationText(current)===snapshot.hash
+        ){
+          removable.push(snapshot);
+        }else{
+          conflicts.push({
+            key:snapshot.key,
+            expectedHash:snapshot.hash,
+            currentHash:hashMigrationText(current),
+            expectedLength:snapshot.length,
+            currentLength:current.length
+          });
+        }
+      }
+
+      if(conflicts.length){
+        const recorded=recordMigrationLegacyConflict(
+          storage,
+          journalState,
+          conflicts,
+          fail
+        );
+        return {
+          ok:true,
+          cleanup:false,
+          prepared:!recorded,
+          conflicts,
+          conflictRecorded:recorded
+        };
+      }
+
+      try{
+        assertOwnedPrepared();
+        for(const snapshot of removable){
+          const current=storage.getItem(snapshot.key);
+          if(current==null) continue;
+          if(
+            current.length!==snapshot.length||
+            hashMigrationText(current)!==snapshot.hash
+          ){
+            const conflict=[{
+              key:snapshot.key,
+              expectedHash:snapshot.hash,
+              currentHash:hashMigrationText(current),
+              expectedLength:snapshot.length,
+              currentLength:current.length
+            }];
+            const latest=assertOwnedPrepared();
+            const recorded=recordMigrationLegacyConflict(
+              storage,
+              latest,
+              conflict,
+              fail
+            );
+            return {
+              ok:true,
+              cleanup:false,
+              prepared:!recorded,
+              conflicts:conflict,
+              conflictRecorded:recorded
+            };
+          }
+          storage.removeItem(snapshot.key);
+        }
+      }catch(error){
+        fail(error,'cleanup');
+        return {ok:true,cleanup:false,prepared:true};
+      }
+
+      let artifactError=null;
+      for(const key of [MIGRATION_V5_STAGING_KEY,MIGRATION_V5_JOURNAL_KEY]){
+        try{storage.removeItem(key)}catch(error){if(!artifactError) artifactError=error}
+      }
+      if(artifactError){
+        fail(artifactError,'artifact-cleanup');
+        return {ok:true,cleanup:true,artifactsCleared:false};
+      }
+      if(storage===localStorage){
+        window.__dejitanMigrationConflicts=[];
+      }
+      return {ok:true,cleanup:true,artifactsCleared:true};
+    }
+
+    function commitStatsMigrationTransaction(map,legacyEntries,storage,onFailure,options){
+      const prepared=prepareStatsMigration(
+        map,
+        legacyEntries,
+        storage,
+        onFailure,
+        options
+      );
+      if(!prepared.ok) return prepared;
+      return finishPreparedStatsMigration(
+        prepared.serialized,
+        prepared.owner,
+        storage,
+        onFailure
+      );
+    }
+
+    function reportStatsMigrationFailure(error,phase){
+      if(phase==='cleanup'){
+        markSaveFailure('新形式への保存は完了しましたが、旧学習データの整理に失敗しました。次回起動時に整理を再開します。');
+        return;
+      }
+      if(phase==='legacy-conflict'){
+        markSaveFailure('別タブなどで旧学習データが変更されたため、その旧データは削除していません。バックアップを書き出して内容を確認してください。');
+        return;
+      }
+      if(phase==='owner-conflict'){
+        markSaveFailure('別のタブまたは処理が学習データ移行を更新したため、この処理は確定を中止しました。旧データは削除していません。');
+        return;
+      }
+      if(phase==='artifact-cleanup'){
+        markSaveFailure('学習データの移行は完了しましたが、一時移行データの整理に失敗しました。次回起動時に再確認します。');
+        return;
+      }
+      if(phase==='prepare'){
+        markSaveFailure(isQuotaError(error)
+          ? '保存容量が上限に達したため、移行用データを準備できませんでした。旧データは削除していません。'
+          : '移行用データを準備できませんでした。旧データは削除していません（'+String(error&&error.message||error)+'）。');
+        return;
+      }
+      markSaveFailure(isQuotaError(error)
+        ? '保存容量が上限に達したため、学習データの移行を確定できませんでした。旧データと再開用データは保持しています。'
+        : '学習データの移行を確定できませんでした。旧データと再開用データは保持しています（'+String(error&&error.message||error)+'）。');
+    }
+
+    const loadedStats=loadMap(localStorage);
+    let wordMap={};
+    if(loadedStats.migrationArtifactError){
+      reportStatsMigrationFailure(
+        loadedStats.migrationArtifactError,
+        'artifact-cleanup'
+      );
+    }
+    if(loadedStats.migrationArtifactDiscardError){
+      reportStatsMigrationFailure(
+        loadedStats.migrationArtifactDiscardError,
+        'artifact-cleanup'
+      );
+    }
+
+    if(loadedStats.resumePrepared){
+      wordMap=loadedStats.map;
+      finishPreparedStatsMigration(
+        loadedStats.preparedSerialized,
+        loadedStats.legacyEntries,
+        localStorage,
+        reportStatsMigrationFailure
+      );
+    }else if(loadedStats.blocked){
+      wordMap=loadedStats.map;
+      reportStatsMigrationFailure(
+        loadedStats.currentDataError||
+        loadedStats.legacyDataError||
+        new Error('復旧可能な学習データを確認できません。'),
+        'commit'
+      );
+    }else if(loadedStats.alreadyMigrated){
+      wordMap=loadedStats.map;
+    }else{
+      const migratedStats=migrateStatsV5(
+        loadedStats.map,
+        WORD_DATA_META.collidingIds,
+        WORD_DATA_META.duplicateIdRemap,
+        false
+      );
+      wordMap=migratedStats.map;
+      commitStatsMigrationTransaction(
+        wordMap,
+        loadedStats.legacyEntries,
+        localStorage,
+        reportStatsMigrationFailure
+      );
+    }
     // 日次ログの無限増加対策：直近 DAILY_KEEP_DAYS 日より古い日付エントリを破棄
     // （ymdLocal はこの時点で未初期化＝TDZのため、日付生成を自前で行う）
     function pruneDailyMap(raw){
@@ -6699,11 +7303,66 @@ function getBadge(stage){
      syncRowVisibility();
      setCardPhase('back');
    }
-    const isRevealed=()=> jaEl.textContent.trim() && exEnEl.textContent.trim() && exJaEl.textContent.trim();
+    const isRevealed=()=>{
+      const host=document.getElementById('display');
+      return !!(host&&host.classList.contains('q-back')&&!host.classList.contains('q-front'));
+    };
     let currentWord=null, quizArmed=false, quizAnswered=false;
     const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]]}return a};
-    function buildQuizChoices(level,correct,kind){const pool=WORDS.filter(w=> level==='（全レベル）'?true:matchLevel(w.level, level)); const keyField = (kind==='JE')? 'en' : 'ja'; const wrongs=pool.filter(w=> (w[keyField]||'')!==(correct[keyField]||'')); const pick=[]; const used=new Set(); while(pick.length<3 && wrongs.length){const w=wrongs[(Math.random()*(wrongs.length))|0]; const key=(w[keyField]||'').trim(); if(!key||used.has(key)) continue; used.add(key); pick.push(w)} const arr=[{text:correct[keyField]||'', ok:true}]; for(const d of pick){arr.push({text:d[keyField]||'', ok:false})} return shuffle(arr).slice(0,4)}
-    function renderQuiz(level,word){const m=modeSelect.value; const kind = (m==='クイズ（日本語→英語）')?'JE':((m==='クイズ（リスニング）')?'LS':'EJ'); const choices=buildQuizChoices(level,word,kind); const slots=[qTop,qBottom,qLeft,qRight]; for(let i=0;i<slots.length;i++){const btn=slots[i];const ch=choices[i%choices.length]||choices[0]; btn.textContent=ch.text||''; btn.dataset.ok=ch.ok?'1':'0'} quizPad.style.display='block'; quizArmed=true; quizAnswered=false }
+    function buildQuizChoices(level,correct,kind,sourceWords){
+      const source=Array.isArray(sourceWords)?sourceWords:WORDS;
+      const keyField=(kind==='JE')?'en':'ja';
+      const correctText=String(correct&&correct[keyField]||'').trim();
+      const sameLevel=[];
+      const otherLevels=[];
+      const used=new Set([correctText]);
+
+      for(const word of source){
+        if(!word||word===correct) continue;
+        const text=String(word[keyField]||'').trim();
+        if(!text||used.has(text)) continue;
+        used.add(text);
+        if(level==='（全レベル）'||matchLevel(word.level,level)) sameLevel.push(text);
+        else otherLevels.push(text);
+      }
+
+      const wrongTexts=shuffle(sameLevel.slice()).concat(shuffle(otherLevels.slice())).slice(0,3);
+      const choices=[{text:correctText,ok:true}];
+      wrongTexts.forEach(text=>choices.push({text,ok:false}));
+      return shuffle(choices);
+    }
+    function renderQuiz(level,word){
+      const m=modeSelect.value;
+      const kind=(m==='クイズ（日本語→英語）')?'JE':((m==='クイズ（リスニング）')?'LS':'EJ');
+      const choices=buildQuizChoices(level,word,kind);
+      const slots=[qTop,qBottom,qLeft,qRight].filter(Boolean);
+
+      slots.forEach(btn=>{
+        btn.hidden=false;
+        btn.disabled=false;
+        btn.textContent='';
+        btn.dataset.ok='0';
+        btn.removeAttribute('aria-hidden');
+      });
+      choices.forEach((choice,index)=>{
+        const btn=slots[index];
+        if(!btn) return;
+        btn.textContent=choice.text;
+        btn.dataset.ok=choice.ok?'1':'0';
+      });
+      for(let i=choices.length;i<slots.length;i++){
+        const btn=slots[i];
+        btn.hidden=true;
+        btn.disabled=true;
+        btn.textContent='';
+        btn.dataset.ok='0';
+        btn.setAttribute('aria-hidden','true');
+      }
+
+      quizPad.style.display=choices.length?'block':'none';
+      quizArmed=choices.length>0;
+      quizAnswered=false;
+    }
     const modeKey=()=>({'英語→日本語':'EJ','日本語→英語':'JE','リスニング':'LS','シャドーイング':'SHD','クイズ（英語→日本語）':'QZ_EJ','クイズ（日本語→英語）':'QZ_JE','クイズ（リスニング）':'QZ_LS','単語一覧':'LIST'})[modeSelect.value]||'EJ';
   const modeKeyFor=v=>({'英語→日本語':'EJ','日本語→英語':'JE','リスニング':'LS','シャドーイング':'SHD','クイズ（英語→日本語）':'QZ_EJ','クイズ（日本語→英語）':'QZ_JE','クイズ（リスニング）':'QZ_LS','単語一覧':'LIST'})[v]||'EJ';
         const isListView=()=> modeSelect.value==='単語一覧';
@@ -6753,7 +7412,6 @@ function getBadge(stage){
       try{ localStorage.setItem('biotope_stage_current', String(st)) }catch(_){}
       applyGrowthEmoji(st, true);
     });
-    initGrowthEmoji();
 function closeStudyBio() {
     const studyScreen = document.getElementById('screen-study');
     if(studyScreen) studyScreen.classList.remove('bio-view');
@@ -8460,6 +9118,548 @@ revealRest(currentWord);
       };
     };
 
+    window.runDejitanCoreSelfTests=function(){
+      const results=[];
+      const initialState={
+        wordMap:JSON.stringify(wordMap),
+        dailyMap:JSON.stringify(dailyMap),
+        srsDailyState:JSON.stringify(srsDailyState),
+        localStorage:JSON.stringify(schedulerLocalStorageSnapshot())
+      };
+      const add=(name,test)=>{
+        try{
+          const detail=test();
+          results.push({
+            name,
+            passed:!!(detail&&detail.passed),
+            detail:detail&&detail.detail!=null?detail.detail:''
+          });
+        }catch(error){
+          results.push({name,passed:false,detail:String(error&&error.message||error)});
+        }
+      };
+
+      add('ビオトープ劣化計算は同じ入力で変化しない',()=>{
+        const first=calculateDegradedStage(12,'2026-07-01','2026-07-22');
+        const second=calculateDegradedStage(12,'2026-07-01','2026-07-22');
+        return {passed:first===9&&second===first,detail:{first,second}};
+      });
+
+      function failedMigrationFixture(){
+        const legacyKey=LEGACY_KEYS[0];
+        const legacyValue=JSON.stringify({'legacy-word':{shown:2,got:1}});
+        const values=new Map([[legacyKey,legacyValue]]);
+        let failStatsWrite=true;
+        const fakeStorage={
+          getItem(key){return values.has(key)?values.get(key):null},
+          setItem(key,value){
+            if(key===STORAGE_KEY&&failStatsWrite){
+              failStatsWrite=false;
+              const error=new Error('quota');
+              error.name='QuotaExceededError';
+              throw error;
+            }
+            values.set(key,String(value));
+          },
+          removeItem(key){values.delete(key)}
+        };
+        const outcome=commitStatsMigrationTransaction(
+          {'new-word':{shown:1,got:1}},
+          [{key:legacyKey,value:legacyValue}],
+          fakeStorage,
+          ()=>{}
+        );
+        return {outcome,values,legacyKey,legacyValue};
+      }
+
+      add('移行保存失敗時は旧キーを削除しない',()=>{
+        const fixture=failedMigrationFixture();
+        return {
+          passed:fixture.outcome.ok===false&&fixture.values.get(fixture.legacyKey)===fixture.legacyValue,
+          detail:fixture.outcome
+        };
+      });
+
+      add('移行保存失敗時は移行済みフラグを設定しない',()=>{
+        const fixture=failedMigrationFixture();
+        return {
+          passed:fixture.outcome.ok===false&&!fixture.values.has(MIGRATION_V5_KEY),
+          detail:{flag:fixture.values.get(MIGRATION_V5_KEY)||null}
+        };
+      });
+
+      add('例文が空でも答え表示後はback状態になる',()=>{
+        const display=document.getElementById('display');
+        if(!display) return {passed:false,detail:'displayがありません'};
+        const fieldSnapshots=[
+          [enEl,'text',enEl.textContent],
+          [pronEl,'text',pronEl.textContent],
+          [jaEl,'text',jaEl.textContent],
+          [exEnEl,'html',exEnEl.innerHTML],
+          [exJaEl,'text',exJaEl.textContent],
+          [synEl,'text',synEl.textContent],
+          [antEl,'text',antEl.textContent]
+        ];
+        const rows=Array.from(display.querySelectorAll('.row'));
+        const rowClasses=rows.map(row=>row.className);
+        const displayClass=display.className;
+        const hadQmode=Object.prototype.hasOwnProperty.call(display.dataset,'qmode');
+        const qmode=display.dataset.qmode;
+        const hint=document.getElementById('cardHint');
+        const hintText=hint?hint.textContent:'';
+        const previousWord=currentWord;
+        const previousTagged=cardRowsTagged;
+        let passed=false;
+        try{
+          currentWord={id:'core-empty-example',en:'sample',ja:'見本',pron:'',ex_en:'',ex_ja:'',syn:'',ant:''};
+          revealRest(currentWord);
+          passed=isRevealed()&&display.classList.contains('q-back');
+        }finally{
+          fieldSnapshots.forEach(([el,type,value])=>{
+            if(type==='html') el.innerHTML=value;
+            else el.textContent=value;
+          });
+          rows.forEach((row,index)=>{row.className=rowClasses[index]});
+          display.className=displayClass;
+          if(hadQmode) display.dataset.qmode=qmode;
+          else delete display.dataset.qmode;
+          if(hint) hint.textContent=hintText;
+          currentWord=previousWord;
+          cardRowsTagged=previousTagged;
+        }
+        return {passed,detail:{phase:passed?'back':'not-back'}};
+      });
+
+      [1,2,3].forEach(count=>{
+        add(count+'語のクイズ候補でも正解は1つだけ',()=>{
+          const source=Array.from({length:count},(_,index)=>({
+            id:'quiz-'+count+'-'+index,
+            level:'TEST',
+            en:'word-'+index,
+            ja:'意味-'+index
+          }));
+          const choices=buildQuizChoices('TEST',source[0],'EJ',source);
+          const texts=choices.map(choice=>choice.text);
+          return {
+            passed:
+              choices.length===count&&
+              choices.filter(choice=>choice.ok).length===1&&
+              new Set(texts).size===texts.length,
+            detail:choices
+          };
+        });
+      });
+
+      add('他レベルから補充して重複のない4択を作る',()=>{
+        const source=[
+          {id:'a',level:'TEST',en:'a',ja:'正解'},
+          {id:'b',level:'TEST',en:'b',ja:'同レベル'},
+          {id:'c',level:'OTHER',en:'c',ja:'他レベル1'},
+          {id:'d',level:'OTHER',en:'d',ja:'他レベル2'}
+        ];
+        const choices=buildQuizChoices('TEST',source[0],'EJ',source);
+        return {
+          passed:
+            choices.length===4&&
+            choices.filter(choice=>choice.ok).length===1&&
+            new Set(choices.map(choice=>choice.text)).size===4,
+          detail:choices
+        };
+      });
+
+      function createCoreMemoryStorage(initialValues){
+        const values=new Map(Object.entries(initialValues||{}).map(([key,value])=>[
+          key,
+          String(value)
+        ]));
+        return {
+          values,
+          getItem(key){return values.has(key)?values.get(key):null},
+          setItem(key,value){values.set(key,String(value))},
+          removeItem(key){values.delete(key)},
+          key(index){return Array.from(values.keys())[index]||null},
+          get length(){return values.size}
+        };
+      }
+
+      function coreLegacyFixture(){
+        const legacyKey=LEGACY_KEYS[0];
+        const legacyValue=JSON.stringify({
+          'legacy-word':{shown:2,got:1}
+        });
+        const storage=createCoreMemoryStorage({
+          [legacyKey]:legacyValue
+        });
+        return {storage,legacyKey,legacyValue};
+      }
+
+      function prepareCoreMigration(fixture,map,owner){
+        return prepareStatsMigration(
+          map,
+          [{key:fixture.legacyKey,value:fixture.legacyValue}],
+          fixture.storage,
+          ()=>{},
+          {owner:owner||'core-test-owner',createdAt:Date.now()}
+        );
+      }
+
+      add('本番保存直後の中断から再開しても旧統計を二重加算しない',()=>{
+        const fixture=coreLegacyFixture();
+        const first=loadMap(fixture.storage);
+        const migrated=migrateStatsV5(first.map,[],{},false);
+        const prepared=prepareCoreMigration(
+          fixture,
+          migrated.map,
+          'core-crash-owner'
+        );
+        if(!prepared.ok){
+          return {passed:false,detail:'prepared作成失敗'};
+        }
+        // STORAGE_KEY保存直後に強制終了した状態を再現する。
+        writeVerifiedStatsText(
+          fixture.storage,
+          STORAGE_KEY,
+          prepared.serialized,
+          'テスト学習データ'
+        );
+        const resumed=loadMap(fixture.storage);
+        const resumedShown=resumed.map['legacy-word']&&
+          resumed.map['legacy-word'].shown;
+        const finished=finishPreparedStatsMigration(
+          resumed.preparedSerialized,
+          resumed.preparedOwner,
+          fixture.storage,
+          ()=>{}
+        );
+        const finalMap=parseStatsRecordText(
+          fixture.storage.getItem(STORAGE_KEY),
+          'テスト確定データ'
+        );
+        return {
+          passed:
+            resumed.resumePrepared===true&&
+            resumedShown===2&&
+            finished.ok===true&&
+            finalMap['legacy-word'].shown===2&&
+            fixture.storage.getItem(fixture.legacyKey)===null,
+          detail:{resumedShown,finished}
+        };
+      });
+
+      add('preparedと有効なステージングがあれば旧データを再統合しない',()=>{
+        const fixture=coreLegacyFixture();
+        const stagedMap={'legacy-word':{shown:2,got:1}};
+        const prepared=prepareCoreMigration(
+          fixture,
+          stagedMap,
+          'core-resume-owner'
+        );
+        const loaded=loadMap(fixture.storage);
+        return {
+          passed:
+            prepared.ok===true&&
+            loaded.resumePrepared===true&&
+            loaded.preparedOwner==='core-resume-owner'&&
+            loaded.map['legacy-word'].shown===2&&
+            fixture.storage.getItem(fixture.legacyKey)===fixture.legacyValue,
+          detail:{
+            resumePrepared:loaded.resumePrepared,
+            owner:loaded.preparedOwner,
+            shown:loaded.map['legacy-word']&&loaded.map['legacy-word'].shown
+          }
+        };
+      });
+
+      add('有効JSONでもpayloadHashが違うステージングは確定しない',()=>{
+        const fixture=coreLegacyFixture();
+        const prepared=prepareCoreMigration(
+          fixture,
+          {'legacy-word':{shown:2,got:1}},
+          'core-hash-owner'
+        );
+        fixture.storage.setItem(
+          MIGRATION_V5_STAGING_KEY,
+          JSON.stringify({'legacy-word':{shown:9,got:9}})
+        );
+        const loaded=loadMap(fixture.storage);
+        const finished=finishPreparedStatsMigration(
+          prepared.serialized,
+          prepared.owner,
+          fixture.storage,
+          ()=>{}
+        );
+        return {
+          passed:
+            prepared.ok===true&&
+            loaded.resumePrepared===false&&
+            loaded.blocked===true&&
+            finished.ok===false&&
+            fixture.storage.getItem(fixture.legacyKey)===fixture.legacyValue&&
+            fixture.storage.getItem(MIGRATION_V5_KEY)!=='1',
+          detail:{
+            blocked:loaded.blocked,
+            migrationArtifactError:!!loaded.migrationArtifactError,
+            finish:finished
+          }
+        };
+      });
+
+      add('移行済みフラグだけがあり現行データが壊れていても旧データから復旧判定する',()=>{
+        const fixture=coreLegacyFixture();
+        fixture.storage.setItem(MIGRATION_V5_KEY,'1');
+        fixture.storage.setItem(STORAGE_KEY,'{broken');
+        const loaded=loadMap(fixture.storage);
+        return {
+          passed:
+            loaded.alreadyMigrated===false&&
+            loaded.blocked===false&&
+            loaded.map['legacy-word'].shown===2&&
+            fixture.storage.getItem(fixture.legacyKey)===fixture.legacyValue,
+          detail:{
+            alreadyMigrated:loaded.alreadyMigrated,
+            blocked:loaded.blocked
+          }
+        };
+      });
+
+      add('prepared後に変更された旧キーは削除しない',()=>{
+        const fixture=coreLegacyFixture();
+        const prepared=prepareCoreMigration(
+          fixture,
+          {'legacy-word':{shown:2,got:1}},
+          'core-legacy-conflict-owner'
+        );
+        const changedLegacy=JSON.stringify({
+          'legacy-word':{shown:3,got:2}
+        });
+        fixture.storage.setItem(fixture.legacyKey,changedLegacy);
+        const finished=finishPreparedStatsMigration(
+          prepared.serialized,
+          prepared.owner,
+          fixture.storage,
+          ()=>{}
+        );
+        const reloaded=loadMap(fixture.storage);
+        const conflictJournal=JSON.parse(
+          fixture.storage.getItem(MIGRATION_V5_JOURNAL_KEY)
+        );
+        return {
+          passed:
+            finished.ok===true&&
+            finished.cleanup===false&&
+            finished.conflictRecorded===true&&
+            Array.isArray(finished.conflicts)&&
+            finished.conflicts.length===1&&
+            conflictJournal.phase==='conflict'&&
+            fixture.storage.getItem(MIGRATION_V5_STAGING_KEY)===null&&
+            fixture.storage.getItem(fixture.legacyKey)===changedLegacy&&
+            fixture.storage.getItem(MIGRATION_V5_KEY)==='1'&&
+            reloaded.alreadyMigrated===true&&
+            reloaded.map['legacy-word'].shown===2,
+          detail:{finished,reloadedConflict:!!reloaded.migrationConflict}
+        };
+      });
+
+      add('ownerが途中で変わった場合は自分の移行確定を中止する',()=>{
+        const fixture=coreLegacyFixture();
+        const prepared=prepareCoreMigration(
+          fixture,
+          {'legacy-word':{shown:2,got:1}},
+          'core-owner-a'
+        );
+        const journal=JSON.parse(
+          fixture.storage.getItem(MIGRATION_V5_JOURNAL_KEY)
+        );
+        journal.owner='core-owner-b';
+        fixture.storage.setItem(
+          MIGRATION_V5_JOURNAL_KEY,
+          JSON.stringify(journal)
+        );
+        const finished=finishPreparedStatsMigration(
+          prepared.serialized,
+          prepared.owner,
+          fixture.storage,
+          ()=>{}
+        );
+        return {
+          passed:
+            finished.ok===false&&
+            fixture.storage.getItem(fixture.legacyKey)===fixture.legacyValue&&
+            fixture.storage.getItem(MIGRATION_V5_KEY)!=='1',
+          detail:finished
+        };
+      });
+
+      add('同じ生段階ではcurrentStageが一定で、生段階上昇時だけ当日中に成長する',()=>{
+        const snapshot={...BIOTOPE_SESSION};
+        const previousMarkedDay=markBiotopeOpened._today;
+        const storage=createCoreMemoryStorage({
+          biotope_last_open:'2026-07-01'
+        });
+        let first=0;
+        let second=0;
+        let grown=0;
+        let stepsBefore=0;
+        let stepsAfter=0;
+        try{
+          const options={
+            storage,
+            today:'2026-07-22',
+            lastOpen:'2026-07-01',
+            force:true
+          };
+          first=currentStage(12,options);
+          stepsBefore=BIOTOPE_SESSION.degradeSteps;
+          second=currentStage(12,{
+            storage,
+            today:'2026-07-22'
+          });
+          grown=currentStage(13,{
+            storage,
+            today:'2026-07-22'
+          });
+          markBiotopeOpened({
+            storage,
+            today:'2026-07-22'
+          });
+          stepsAfter=BIOTOPE_SESSION.degradeSteps;
+        }finally{
+          Object.assign(BIOTOPE_SESSION,snapshot);
+          markBiotopeOpened._today=previousMarkedDay;
+        }
+        return {
+          passed:
+            first===9&&
+            second===first&&
+            grown===10&&
+            stepsBefore===3&&
+            stepsAfter===stepsBefore&&
+            storage.getItem('biotope_last_open')==='2026-07-22',
+          detail:{first,second,grown,stepsBefore,stepsAfter}
+        };
+      });
+
+      add('initGrowthEmojiはTDZ例外へのフォールバックなしで実行できる',()=>{
+        const badge=document.getElementById('wordBadge');
+        const previous=badge?badge.innerHTML:null;
+        const sessionSnapshot={...BIOTOPE_SESSION};
+        let error=null;
+        try{
+          initGrowthEmoji();
+        }catch(caught){
+          error=caught;
+        }finally{
+          if(badge&&previous!=null) badge.innerHTML=previous;
+          Object.assign(BIOTOPE_SESSION,sessionSnapshot);
+        }
+        return {
+          passed:error===null,
+          detail:error?String(error&&error.message||error):'ok'
+        };
+      });
+
+      add('renderBiotopeはmountBiotopeLayersを実際に1回だけ呼ぶ',()=>{
+        const diagnosticsSnapshot={...BIO_RENDER_DIAGNOSTICS};
+        const sessionSnapshot={...BIOTOPE_SESSION};
+        const stageSnapshot=BIO2.stage;
+        const storage=createCoreMemoryStorage({
+          biotope_last_open:'2026-07-22'
+        });
+        const host=document.createElement('div');
+        let injectedCalls=0;
+        try{
+          BIO_RENDER_DIAGNOSTICS.enabled=true;
+          BIO_RENDER_DIAGNOSTICS.mountLayerCalls=0;
+          renderBiotope({
+            host,
+            rawStage:5,
+            sessionOptions:{
+              storage,
+              today:'2026-07-22',
+              lastOpen:'2026-07-22',
+              force:true
+            },
+            skipPersist:true,
+            skipEvent:true,
+            profile:()=>({maxTokens:0,motion:{amp:0,speed:0}}),
+            tokenPlan:()=>({tokens:[],school:null}),
+            scatter:()=>{},
+            renderSchool:()=>{},
+            mountLayers:()=>{injectedCalls++}
+          });
+          return {
+            passed:
+              BIO_RENDER_DIAGNOSTICS.mountLayerCalls===1&&
+              injectedCalls===1,
+            detail:{
+              diagnosticCalls:BIO_RENDER_DIAGNOSTICS.mountLayerCalls,
+              injectedCalls
+            }
+          };
+        }finally{
+          Object.assign(BIO_RENDER_DIAGNOSTICS,diagnosticsSnapshot);
+          Object.assign(BIOTOPE_SESSION,sessionSnapshot);
+          BIO2.stage=stageSnapshot;
+        }
+      });
+
+      add('renderBiotopeSceneはstartBioRenderLoopを実際に1回だけ呼ぶ',()=>{
+        const diagnosticsSnapshot={...BIO_RENDER_DIAGNOSTICS};
+        let skyCalls=0;
+        let biotopeCalls=0;
+        let loopCalls=0;
+        try{
+          BIO_RENDER_DIAGNOSTICS.enabled=true;
+          BIO_RENDER_DIAGNOSTICS.rafStartCalls=0;
+          renderBiotopeScene({
+            renderSky:()=>{skyCalls++},
+            renderBiotope:()=>{biotopeCalls++},
+            startLoop:()=>{loopCalls++}
+          });
+          return {
+            passed:
+              skyCalls===1&&
+              biotopeCalls===1&&
+              loopCalls===1&&
+              BIO_RENDER_DIAGNOSTICS.rafStartCalls===1,
+            detail:{
+              skyCalls,
+              biotopeCalls,
+              loopCalls,
+              diagnosticCalls:BIO_RENDER_DIAGNOSTICS.rafStartCalls
+            }
+          };
+        }finally{
+          Object.assign(BIO_RENDER_DIAGNOSTICS,diagnosticsSnapshot);
+        }
+      });
+
+      const finalState={
+        wordMap:JSON.stringify(wordMap),
+        dailyMap:JSON.stringify(dailyMap),
+        srsDailyState:JSON.stringify(srsDailyState),
+        localStorage:JSON.stringify(schedulerLocalStorageSnapshot())
+      };
+      results.push({
+        name:'コアセルフテスト前後で保存データを変更しない',
+        passed:JSON.stringify(initialState)===JSON.stringify(finalState),
+        detail:{
+          memoryUnchanged:
+            initialState.wordMap===finalState.wordMap&&
+            initialState.dailyMap===finalState.dailyMap&&
+            initialState.srsDailyState===finalState.srsDailyState,
+          localStorageUnchanged:initialState.localStorage===finalState.localStorage
+        }
+      });
+
+      return {
+        passed:results.every(item=>item.passed),
+        passedCount:results.filter(item=>item.passed).length,
+        total:results.length,
+        results
+      };
+    };
+
   modeSelect.addEventListener('change', ()=>{
     try{ speechSynthesis.cancel(); }catch(_){ }
     resetSchedulerSession(levelSelect.value,modeKey());
@@ -8798,8 +9998,11 @@ function idiomMastery(){
     layer.appendChild(el);
     return el;
   }
-function currentStage(){
-  try { return applyDegrade(bestStageRaw()); } catch(_){ return 1 }
+function currentStage(rawStageOverride,options){
+  const rawStage=Number.isFinite(Number(rawStageOverride))
+    ? Math.max(1,Math.round(Number(rawStageOverride)))
+    : Math.max(1,Math.round(Number(bestStageRaw())||1));
+  return getSessionBiotopeStage(rawStage,options);
 }
 function renderSky(){
   const host=document.getElementById('skyHost'); if(!host) return;
@@ -8951,8 +10154,7 @@ function renderSky(){
     }
   }
 
-  // 空と水槽の微小ゆらぎは startBioRenderLoop() の1本へ統合
-  startBioRenderLoop();
+  // 描画ループは renderBiotopeScene() が空と水槽の構築後に1回だけ開始する。
 }
   function applyTimeOfDay(el, tod){
     try{
@@ -8982,7 +10184,86 @@ function renderSky(){
     if(!anyValid) return 1;
     return best;
   }
-    function applyDegrade(stage){ const KEY='biotope_last_open'; const today=ymdToday(); const last=localStorage.getItem(KEY); let degrade=0; if(last){ const gap=Math.floor((new Date(today)-new Date(last))/86400000); degrade=Math.floor(gap/7); } localStorage.setItem(KEY,today); return Math.max(1, stage - degrade); }
+    const BIOTOPE_SESSION={
+      day:null,
+      lastOpen:null,
+      degradeSteps:0
+    };
+    function calculateBiotopeDegradeSteps(lastOpenDate,today){
+      const current=String(today||'');
+      const last=String(lastOpenDate||'');
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(current)||!/^\d{4}-\d{2}-\d{2}$/.test(last)){
+        return 0;
+      }
+      const currentTime=new Date(current+'T00:00:00').getTime();
+      const lastTime=new Date(last+'T00:00:00').getTime();
+      if(!Number.isFinite(currentTime)||!Number.isFinite(lastTime)) return 0;
+      const gap=Math.max(0,Math.floor((currentTime-lastTime)/86400000));
+      return Math.max(0,Math.floor(gap/7));
+    }
+    function calculateDegradedStage(stage,lastOpenDate,today){
+      const safeStage=Math.max(1,Math.round(Number(stage)||1));
+      return Math.max(
+        1,
+        safeStage-calculateBiotopeDegradeSteps(lastOpenDate,today)
+      );
+    }
+    function readBiotopeLastOpen(storage){
+      const store=storage||localStorage;
+      try{
+        const value=store.getItem('biotope_last_open');
+        return /^\d{4}-\d{2}-\d{2}$/.test(String(value||''))?String(value):null;
+      }catch(_){
+        return null;
+      }
+    }
+    function ensureBiotopeSessionBaseline(options){
+      const opts=options||{};
+      const today=String(opts.today||ymdToday());
+      const force=!!opts.force;
+      if(!force&&BIOTOPE_SESSION.day===today){
+        return BIOTOPE_SESSION;
+      }
+      const store=opts.storage||localStorage;
+      const lastOpen=Object.prototype.hasOwnProperty.call(opts,'lastOpen')
+        ? opts.lastOpen
+        : readBiotopeLastOpen(store);
+      BIOTOPE_SESSION.day=today;
+      BIOTOPE_SESSION.lastOpen=lastOpen;
+      BIOTOPE_SESSION.degradeSteps=calculateBiotopeDegradeSteps(
+        lastOpen,
+        today
+      );
+      return BIOTOPE_SESSION;
+    }
+    function getSessionBiotopeStage(stage,options){
+      const baseline=ensureBiotopeSessionBaseline(options);
+      const requested=Math.max(1,Math.round(Number(stage)||1));
+      return Math.max(1,requested-baseline.degradeSteps);
+    }
+    function markBiotopeOpened(options){
+      const opts=options||{};
+      const baseline=ensureBiotopeSessionBaseline(opts);
+      const store=opts.storage||localStorage;
+      const today=baseline.day;
+      if(markBiotopeOpened._today===today&&store===localStorage) return true;
+      let saved=false;
+      if(store===localStorage&&typeof safeSetItem==='function'){
+        saved=safeSetItem('biotope_last_open',today);
+      }else{
+        try{
+          store.setItem('biotope_last_open',today);
+          saved=store.getItem('biotope_last_open')===today;
+        }catch(_){
+          saved=false;
+        }
+      }
+      if(saved&&store===localStorage) markBiotopeOpened._today=today;
+      return saved;
+    }
+    function applyDegrade(stage){
+      return getSessionBiotopeStage(stage);
+    }
     function todayShownTotal(){const d=ymdToday(); const dm=dailyMap?.[d]||{}; let s=0; for(const mk in dm){ for(const lv in (dm[mk]||{})){ s += (dm[mk][lv]?.shown|0) } } return s; }
     function loadNum(k){return parseInt(localStorage.getItem(k)||'0',10)||0}
     function bumpStreakIfAnyShown(){
@@ -9107,7 +10388,7 @@ if(depth==='far') sp.dataset.sp=(parseFloat(sp.dataset.sp||'1')*.72).toFixed(2);
   el.appendChild(b); setTimeout(()=>b.remove(),3000);
  });
  el.appendChild(sp);} }
-place(rare,rarePos,true); place(normal,normalPos,false); mountBiotopeLayers(el,BIO2.stage||1); }
+place(rare,rarePos,true); place(normal,normalPos,false); }
     function scatterWithProfile(el,tokens,profile){
       const p=profile||{maxTokens:120,motion:{amp:8,speed:1}};
       const toks=(tokens||[]).slice(0,Math.max(0,Math.min(p.maxTokens,(tokens||[]).length)));
@@ -9444,39 +10725,71 @@ place(rare,rarePos,true); place(normal,normalPos,false); mountBiotopeLayers(el,B
        }
     }
   }
-  function renderBiotope(){
-    const bc = document.getElementById('biotopeCard');
+  const BIO_RENDER_DIAGNOSTICS={
+    enabled:false,
+    mountLayerCalls:0,
+    rafStartCalls:0
+  };
+  function renderBiotope(options){
+    const opts=options||{};
+    const bc=opts.host||document.getElementById('biotopeCard');
     if(!bc) return;
+    if(!opts.skipPersist) markBiotopeOpened();
     // クリア
     bc.innerHTML = '';
 
     // 時間帯テーマ（既存ヘルパー利用）
     try{ applyTimeOfDay && applyTimeOfDay(bc); }catch(_){ }
 
-    // 段階決定：直近7日→20段階→劣化補正
-    let stage = 1;
-    try{ stage = applyDegrade(bestStageRaw()); }catch(_){ stage = 1 }
+    // 劣化量だけを固定し、生段階は呼出し時点の学習状況から計算する。
+    const rawStage=Number.isFinite(Number(opts.rawStage))
+      ? Math.max(1,Math.round(Number(opts.rawStage)))
+      : Math.max(1,Math.round(Number(bestStageRaw())||1));
+    const stage=getSessionBiotopeStage(rawStage,opts.sessionOptions);
     BIO2.stage=stage;
 
     // プロファイル（散布挙動）
-    const profile = (typeof biotopeProfile==='function')
-      ? biotopeProfile(stage)
-      : {maxTokens:80,motion:{amp:8,speed:1}};
+    const profile = (typeof opts.profile==='function')
+      ? opts.profile(stage)
+      : ((typeof biotopeProfile==='function')
+          ? biotopeProfile(stage)
+          : {maxTokens:80,motion:{amp:8,speed:1}});
 
     // ★新ロジック：累積魚＋&#x1F990;制御＋スクール置換
-    const plan = biotopeTokenPlan(stage, profile);
-    scatterWithProfile(bc, plan.tokens, profile);
-    renderSchool(plan.school);
-    mountBiotopeLayers(bc,stage);
-
-    // 水槽と空の微小ゆらぎを単一RAFへ統合
-    startBioRenderLoop();
+    const tokenPlanFn=opts.tokenPlan||biotopeTokenPlan;
+    const scatterFn=opts.scatter||scatterWithProfile;
+    const renderSchoolFn=opts.renderSchool||renderSchool;
+    const mountLayersFn=opts.mountLayers||mountBiotopeLayers;
+    const plan=tokenPlanFn(stage,profile);
+    scatterFn(bc,plan.tokens,profile);
+    renderSchoolFn(plan.school);
+    if(BIO_RENDER_DIAGNOSTICS.enabled){
+      BIO_RENDER_DIAGNOSTICS.mountLayerCalls++;
+    }
+    mountLayersFn(bc,stage);
 
     // ステージ通知イベント（バッジ等連動用）
-    try{
-      const ev = new CustomEvent('biotopeStage',{detail:{stage}});
-      window.dispatchEvent(ev);
-    }catch(_){ }
+    if(!opts.skipEvent){
+      try{
+        const ev = new CustomEvent('biotopeStage',{detail:{stage}});
+        window.dispatchEvent(ev);
+      }catch(_){ }
+    }
+    return stage;
+  }
+  function renderBiotopeScene(options){
+    const opts=options||{};
+    const renderSkyFn=opts.renderSky||renderSky;
+    const renderBiotopeFn=opts.renderBiotope||renderBiotope;
+    const startLoopFn=opts.startLoop||startBioRenderLoop;
+    if(typeof renderSkyFn==='function') renderSkyFn();
+    if(typeof renderBiotopeFn==='function'){
+      renderBiotopeFn(opts.biotopeOptions);
+    }
+    if(BIO_RENDER_DIAGNOSTICS.enabled){
+      BIO_RENDER_DIAGNOSTICS.rafStartCalls++;
+    }
+    startLoopFn();
   }
             const bc=document.getElementById('biotopeCard');
     if(bc && !bc._tapBound){
@@ -9519,15 +10832,14 @@ place(rare,rarePos,true); place(normal,normalPos,false); mountBiotopeLayers(el,B
           btnBioToggle.textContent = '📚 学習カードに戻る';
           // UI更新（餌の数など）
           if(typeof updateFeedUI === 'function') updateFeedUI();
-          if(typeof renderSky === 'function') renderSky();
-          if(typeof renderBiotope === 'function') renderBiotope();
+          if(typeof renderBiotopeScene === 'function') renderBiotopeScene();
         } else {
           closeStudyBio();
         }
       });
     }
 
-    mountSrsUi(); applyQuotaVisibility(); startInitialView(); updateStatsView(); refreshTrend(); drawSrsForecast(); renderBiotope&&renderBiotope(); renderSky&&renderSky();
+    mountSrsUi(); applyQuotaVisibility(); ensureBiotopeSessionBaseline(); markBiotopeOpened(); initGrowthEmoji(); startInitialView(); updateStatsView(); refreshTrend(); drawSrsForecast(); renderBiotopeScene();
   });
   </script>
 
