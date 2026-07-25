@@ -3577,6 +3577,7 @@ body.ux2{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
     const CFG={EPSILON:0.18,MIN_SHOWN_LOWACC:3,LOWACC_TH:.6,COOLDOWN_GSTREAK:3,COOLDOWN_PICK:'soft',COOLDOWN_WEIGHT:0.2,SAT_K:6,STALE_BASE:1.0,STALE_PERDAY:0.06,RECENT_WINDOW:20};
     const tabs=$$('.tab');
   function showScreen(name){
+    resetSchedulerSession();
     if(name !== 'study') closeStudyBio();
     // 画面切り替え時はシャドーイングを必ず停止（成績へ移ったら強制ストップ）
     if(name!=='study'){ try{ stopShadowing(); speechSynthesis.cancel(); }catch(_){ } }
@@ -3922,6 +3923,7 @@ body.ux2{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
         trainMode = !trainMode;
         try{ localStorage.setItem(TRAIN_KEY, trainMode ? '1' : '0'); }catch(_){}
         renderTrainToggle();
+        resetSchedulerSession(levelSelect&&levelSelect.value,modeKey());
         // 出題プールを切り替えるため、現在の表示をリセット
         startInitialView();
       });
@@ -4931,9 +4933,14 @@ function getBadge(stage){
       out.gstreak=Math.max(base.gstreak|0,add.gstreak|0);
       out.by={...(base.by||{})};
       for(const k of ['EJ','JE','LS','QZ_EJ','QZ_JE','QZ_LS']){
-        const a=(base.by&&base.by[k])||{shown:0,got:0};
-        const b=(add.by&&add.by[k])||{shown:0,got:0};
-        out.by[k]={shown:(a.shown|0)+(b.shown|0),got:(a.got|0)+(b.got|0)};
+        const a=(base.by&&base.by[k])||{shown:0,got:0,missStreak:0,goodStreak:0};
+        const b=(add.by&&add.by[k])||{shown:0,got:0,missStreak:0,goodStreak:0};
+        out.by[k]={
+          shown:(a.shown|0)+(b.shown|0),
+          got:(a.got|0)+(b.got|0),
+          missStreak:Math.max(a.missStreak|0,b.missStreak|0),
+          goodStreak:Math.max(a.goodStreak|0,b.goodStreak|0)
+        };
       }
       out.last={...(base.last||{})};
       out.lastSeen={...(base.lastSeen||{})};
@@ -4981,8 +4988,34 @@ function getBadge(stage){
     const STORAGE_KEY='dejitan_word_stats';
     const STORAGE_DAILY='dejitan_daily_by_mode_level';
     const LEGACY_KEYS=['dejitan_word_stats_v4','dejitan_word_stats_v3','dejitan_word_stats_v2'];
-    const emptyBy=()=>({EJ:{shown:0,got:0},JE:{shown:0,got:0},LS:{shown:0,got:0},QZ_EJ:{shown:0,got:0},QZ_JE:{shown:0,got:0},QZ_LS:{shown:0,got:0}});
+    const MODE_KEYS=['EJ','JE','LS','QZ_EJ','QZ_JE','QZ_LS'];
+    const emptyModeStat=()=>({shown:0,got:0,missStreak:0,goodStreak:0});
+    const emptyBy=()=>({
+      EJ:emptyModeStat(),
+      JE:emptyModeStat(),
+      LS:emptyModeStat(),
+      QZ_EJ:emptyModeStat(),
+      QZ_JE:emptyModeStat(),
+      QZ_LS:emptyModeStat()
+    });
     const emptySeen=()=>({EJ:null,JE:null,LS:null,QZ_EJ:null,QZ_JE:null,QZ_LS:null});
+    function ensureModeStat(st,mk){
+      if(!st.by||typeof st.by!=='object'||Array.isArray(st.by)) st.by=emptyBy();
+      const key=MODE_KEYS.includes(mk)?mk:'EJ';
+      const cur=(st.by[key]&&typeof st.by[key]==='object'&&!Array.isArray(st.by[key]))
+        ? st.by[key]
+        : (st.by[key]=emptyModeStat());
+      cur.shown=Math.max(0,cur.shown|0);
+      cur.got=Math.max(0,cur.got|0);
+      cur.missStreak=Math.max(0,cur.missStreak|0);
+      cur.goodStreak=Math.max(0,cur.goodStreak|0);
+      return cur;
+    }
+    function ensureAllModeStats(st){
+      if(!st||typeof st!=='object') return emptyBy();
+      for(const key of MODE_KEYS) ensureModeStat(st,key);
+      return st.by;
+    }
     function loadMap(){
       try{let base={}; const raw=localStorage.getItem(STORAGE_KEY); if(raw) base=JSON.parse(raw);
         for(const k of LEGACY_KEYS){const v=localStorage.getItem(k); if(!v) continue;
@@ -4990,7 +5023,14 @@ function getBadge(stage){
             const cur=base[id]||{shown:0,got:0,streak:0,gstreak:0,last:emptySeen(),by:emptyBy(),lastSeen:emptySeen()};
             const add=obj[id]||{}; base[id]={shown:(cur.shown|0)+(add.shown|0),got:(cur.got|0)+(add.got|0),streak:Math.max(cur.streak|0,add.streak|0),gstreak:cur.gstreak|0,last:(cur.last||emptySeen()),by:(cur.by||emptyBy()),lastSeen:(cur.lastSeen||emptySeen())}
           } localStorage.removeItem(k) }
-        for(const id in base){const it=base[id]; if(!it.last) it.last=emptySeen(); if(!it.by) it.by=emptyBy(); if(!it.lastSeen) it.lastSeen=emptySeen(); if(typeof it.gstreak!=='number') it.gstreak=0; for(const kk of ['EJ','JE','LS','QZ_EJ','QZ_JE','QZ_LS']){ if(!it.by[kk]) it.by[kk]={shown:0,got:0} } }
+        for(const id in base){
+          const it=base[id];
+          if(!it.last) it.last=emptySeen();
+          if(!it.lastSeen) it.lastSeen=emptySeen();
+          if(typeof it.streak!=='number') it.streak=0;
+          if(typeof it.gstreak!=='number') it.gstreak=0;
+          ensureAllModeStats(it);
+        }
         return base }catch(e){return {}}
     }
     function saveMap(m){try{localStorage.setItem(STORAGE_KEY, JSON.stringify(m))}catch(e){}}
@@ -5007,6 +5047,71 @@ function getBadge(stage){
     const SRS_DAILY_KEY='dejitan_srs_daily_progress';
     const SRS_GOAL_VALUES=new Set([5,10,20,30]);
     let currentPickKind='practice';
+    const schedulerSession={
+      level:'',
+      mk:'',
+      reviewSinceNew:0,
+      trainNext:'review',
+      lastKind:null
+    };
+
+    function resetSchedulerSession(level,mk){
+      schedulerSession.level=String(level||'');
+      schedulerSession.mk=String(mk||'');
+      schedulerSession.reviewSinceNew=0;
+      schedulerSession.trainNext='review';
+      schedulerSession.lastKind=null;
+    }
+
+    function ensureSchedulerSession(level,mk){
+      const lv=String(level||'');
+      const mode=String(mk||'');
+      if(schedulerSession.level!==lv||schedulerSession.mk!==mode){
+        resetSchedulerSession(lv,mode);
+      }
+      return schedulerSession;
+    }
+
+    function noteSchedulerPick(kind){
+      if(kind==='review') schedulerSession.reviewSinceNew++;
+      else if(kind==='new') schedulerSession.reviewSinceNew=0;
+      if(kind==='review') schedulerSession.trainNext='weak';
+      else if(kind==='weak') schedulerSession.trainNext='review';
+      schedulerSession.lastKind=kind;
+    }
+
+    function candidatePoolAvoidingRecent(items,currentKey,allowRepeatFallback){
+      const source=Array.isArray(items)?items.filter(Boolean):[];
+      if(!source.length) return [];
+      const withoutCurrent=source.filter(item=>wordKey(item)!==String(currentKey||''));
+      const fresh=withoutCurrent.filter(item=>!isRecent(wordKey(item)));
+      if(fresh.length) return fresh;
+      if(withoutCurrent.length) return withoutCurrent;
+      return allowRepeatFallback?source:[];
+    }
+
+    function aliasSamplePreferred(table,predicate,currentKey,allowRepeatFallback){
+      if(!table||!Array.isArray(table.arr)||!table.arr.length) return null;
+      const source=table.arr.filter(word=>!predicate||predicate(word));
+      const pool=candidatePoolAvoidingRecent(source,currentKey,allowRepeatFallback);
+      if(!pool.length) return null;
+      const allowed=new Set(pool.map(wordKey));
+      for(let i=0;i<32;i++){
+        const candidate=aliasSample(table);
+        if(candidate&&allowed.has(wordKey(candidate))) return candidate;
+      }
+      return pool[(Math.random()*pool.length)|0]||null;
+    }
+
+    function isCompleteNewWord(word){
+      return (getStats(word).shown|0)===0;
+    }
+
+    function isModeNewWord(word,mk){
+      const st=getStats(word);
+      const by=ensureModeStat(st,mk);
+      return (st.shown|0)>0&&(by.shown|0)===0;
+    }
 
     function srsAddDays(ymd,days){
       const base=/^\d{4}-\d{2}-\d{2}$/.test(String(ymd||'')) ? new Date(String(ymd)+'T00:00:00') : new Date();
@@ -5052,9 +5157,10 @@ function getBadge(stage){
       const k=wordKey(w);
       const v=wordMap[k]||{shown:0,got:0,streak:0,gstreak:0,last:emptySeen(),by:emptyBy(),lastSeen:emptySeen()};
       if(!v.last) v.last=emptySeen();
-      if(!v.by) v.by=emptyBy();
       if(!v.lastSeen) v.lastSeen=emptySeen();
+      if(typeof v.streak!=='number') v.streak=0;
       if(typeof v.gstreak!=='number') v.gstreak=0;
+      ensureAllModeStats(v);
       ensureSrs(v);
       return v;
     };
@@ -5309,20 +5415,22 @@ function getBadge(stage){
     let recentKeys=[];
     const pushRecent=k=>{recentKeys.unshift(String(k)); if(recentKeys.length>CFG.RECENT_WINDOW) recentKeys.pop()};
     const isRecent=key=>recentKeys.includes(String(key));
-        // 現在モードの習熟度と連続不正解数を使い、新規・苦手を適度に優遇
+        // 現在モードの習熟度とモード別ストリークを使い、完全新規・モード初回・苦手を区別して優遇
     function weightFor(st,modeStats){
       if(!st) return 5;
-      const by=modeStats||{shown:0,got:0};
+      const by=modeStats||emptyModeStat();
       const shown=Math.max(0,by.shown|0);
       const got=Math.max(0,Math.min(shown,by.got|0));
-      const base=shown===0 ? 8 : Math.min(10,2+8*(1-got/shown));
-      const misses=Math.max(0,st.streak|0);
+      const completeNew=(st.shown|0)===0;
+      const modeFirst=shown===0;
+      let base=completeNew?8:(modeFirst?6.5:Math.min(10,2+8*(1-got/shown)));
+      const misses=Math.max(0,by.missStreak|0);
       const lapseBoost=Math.min(2.5,1+misses*0.45);
       const weighted=base*lapseBoost;
       return Number.isFinite(weighted)?Math.max(0,Math.min(20,weighted)):5;
     }
     function daysBetween(d1,d2){if(!d1||!d2) return Infinity;const a=new Date(d1),b=new Date(d2);return Math.floor((b-a)/(86400000))}
-    function isWeakAndStale(w,mk){const st=getStats(w); const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0}; if((by.shown|0)===0) return false; const acc=(by.got|0)/(by.shown|0); if(acc>=.5) return false; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; return daysBetween(last,todayStr())>=7}
+    function isWeakAndStale(w,mk){const st=getStats(w); const by=ensureModeStat(st,mk); if((by.shown|0)===0) return false; const acc=(by.got|0)/(by.shown|0); if(acc>=.5) return false; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; return daysBetween(last,todayStr())>=7}
     function satPenalty(shown){return 1/(1 + (shown/CFG.SAT_K))}
     function staleBoost(days){return Math.max(0.5, CFG.STALE_BASE + days*CFG.STALE_PERDAY)}
     function _normLevel(s){return String(s||'').replace(/[ \u3000]/g,'').toLowerCase();}
@@ -5331,7 +5439,33 @@ function getBadge(stage){
       const arr=WORDS.filter(w=> level==='（全レベル）' ? true : matchLevel(w.level, level));
       const n=arr.length;if(!n) return {arr:[],prob:[],alias:[]};
       const today=todayStr();
-      const w=arr.map(wd=>{const st=getStats(wd); const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0}; const s=by.shown|0, g=by.got|0; const acc = s>0 ? g/s : 0; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; const days = (!last)? 999 : Math.max(0, Math.floor((new Date(today)-new Date(last))/(86400000))); let base = weightFor(st,by); if(isWeakAndStale(wd,mk)) base*=1.5; base*=satPenalty(s); base*=staleBoost(days); if(isRecent((wd&&wd.id!=null)?wd.id:(wd?.en||''))) base*=0.2; if(s>=CFG.COOLDOWN_GSTREAK&&acc>=0.8&&st.last&&st.last[mk]==='got'&&(st.gstreak|0)>=CFG.COOLDOWN_GSTREAK){ if(CFG.COOLDOWN_PICK==='hard') return 0; base=Math.min(base, CFG.COOLDOWN_WEIGHT) } if(s>0 && acc<CFG.LOWACC_TH && s<CFG.MIN_SHOWN_LOWACC){ base*=2.4 } return Number.isFinite(base)?Math.max(0,Math.min(40,base)):0 });
+      const w=arr.map(wd=>{
+        const st=getStats(wd);
+        const by=ensureModeStat(st,mk);
+        const s=by.shown|0,g=by.got|0;
+        const acc=s>0?g/s:0;
+        const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null;
+        const days=(s>0&&last)?Math.max(0,Math.floor((new Date(today)-new Date(last))/(86400000))):0;
+        let base=weightFor(st,by);
+        if(s>0){
+          if(isWeakAndStale(wd,mk)) base*=1.5;
+          base*=satPenalty(s);
+          base*=staleBoost(days);
+        }
+        if(isRecent(wordKey(wd))) base*=0.2;
+        if(
+          s>=CFG.COOLDOWN_GSTREAK&&
+          acc>=0.8&&
+          st.last&&
+          st.last[mk]==='got'&&
+          (by.goodStreak|0)>=CFG.COOLDOWN_GSTREAK
+        ){
+          if(CFG.COOLDOWN_PICK==='hard') return 0;
+          base=Math.min(base,CFG.COOLDOWN_WEIGHT);
+        }
+        if(s>0&&acc<CFG.LOWACC_TH&&s<CFG.MIN_SHOWN_LOWACC) base*=2.4;
+        return Number.isFinite(base)?Math.max(0,Math.min(40,base)):0;
+      });
       const sum=w.reduce((a,b)=>a+b,0); if(sum<=0) return {arr:[],prob:[],alias:[]};
       const p=w.map(x=>x*n/sum); const prob=new Array(n),alias=new Array(n),small=[],large=[];
       for(let i=0;i<n;i++)(p[i]<1?small:large).push(i);
@@ -5565,7 +5699,13 @@ function startInitialView(){
     if(currentPickKind==='review'){
       flagEl.textContent='復習';
       flagEl.className='flag blue';
-    } else if(isWeakAndStale(w, mk)){
+    } else if(currentPickKind==='new'){
+      flagEl.textContent='新規';
+      flagEl.className='flag green';
+    } else if(currentPickKind==='mode-new'){
+      flagEl.textContent='このモード初回';
+      flagEl.className='flag blue';
+    } else if(currentPickKind==='weak'||isWeakAndStale(w,mk)){
       flagEl.textContent='苦手語チャレンジ！';
       flagEl.className='flag red';
     }
@@ -6210,22 +6350,28 @@ ${JSON.stringify(reportData, null, 2)}`;
 function markAndReveal(gotIt){ if(isListView()) return; if(!currentWord) return;
 const key=wordKey(currentWord); const st=getStats(currentWord);
 const prevStreak=st.streak||0; const mk=modeKey();
+const modeStat=ensureModeStat(st,mk);
+const prevModeMiss=modeStat.missStreak|0;
+const prevModeGood=modeStat.goodStreak|0;
 const srsWasNew=(st.shown|0)===0;
 const srsPickKind=currentPickKind;
-if(!st.by) st.by=emptyBy(); if(!st.by[mk]) st.by[mk]={shown:0,got:0};
 st.shown+=1;
 addFeedPoints(3); // カード学習で+3pt
 if(gotIt){
   st.got+=1; st.streak=0;
   st.gstreak=(st.gstreak||0)+1;
+  modeStat.missStreak=0;
+  modeStat.goodStreak=prevModeGood+1;
   showAction('Great!','flag green');
   dropFood(0,0,false);
   checkCommuteChallenge(); // Count for challenge
 } else {
   st.streak=(st.streak||0)+1; st.gstreak=0;
+  modeStat.missStreak=prevModeMiss+1;
+  modeStat.goodStreak=0;
   showAction('Try again!','flag blue')
 }
-st.by[mk].shown+=1; if(gotIt) st.by[mk].got+=1;
+modeStat.shown+=1; if(gotIt) modeStat.got+=1;
 st.last=st.last||emptySeen(); st.last[mk]= gotIt ? 'got':'ng';
 st.lastSeen=st.lastSeen||emptySeen(); st.lastSeen[mk]= todayStr();
 const lv=levelSelect.value; const d=todayStr();
@@ -6242,7 +6388,7 @@ if(gotIt){
   celebrateLite();
   if(gotStreak>0 && gotStreak%10===0) startFeverMode();
 } else { gotStreak=0; }
-lastAction={type: gotIt?'got':'ng', key, prevStreak, undone:false,
+lastAction={type: gotIt?'got':'ng', key, prevStreak, prevModeMiss, prevModeGood, undone:false,
   mkey:mk, level:lv, date:d, countedGot: !!gotIt};
 if(gotIt){
   let ms=0;
@@ -6292,7 +6438,12 @@ revealRest(currentWord);
     function commitCardAnswer(ok,dir){animateCardExit(dir,()=>{if(window.DEJITAN_UX)window.DEJITAN_UX.triggerHaptic(!!ok);markAndReveal(!!ok)})}
     function undoLastGot(){
       if(!(lastAction&&lastAction.type==='got'&&!lastAction.undone&&lastAction.key===String((currentWord&&currentWord.id!=null)?currentWord.id:(currentWord?.en||''))))return false;
-      const st=getStats(currentWord);if(st.got>0)st.got-=1;if(st.by&&st.by[lastAction.mkey]&&st.by[lastAction.mkey].got>0)st.by[lastAction.mkey].got-=1;
+      const st=getStats(currentWord);
+      const modeStat=ensureModeStat(st,lastAction.mkey);
+      if(st.got>0) st.got-=1;
+      if(modeStat.got>0) modeStat.got-=1;
+      modeStat.missStreak=Math.max(0,(lastAction.prevModeMiss|0)+1);
+      modeStat.goodStreak=0;
       st.streak=lastAction.prevStreak||0;st.gstreak=Math.max(0,(st.gstreak|0)-1);st.last=st.last||emptySeen();st.last[lastAction.mkey]='ng';
       if(lastAction.countedGot)gotStreak=Math.max(0,gotStreak-1);
       const d=todayStr(),mk=lastAction.mkey,lv=lastAction.level,slot=dailyMap?.[d]?.[mk]?.[lv];
@@ -6414,95 +6565,433 @@ revealRest(currentWord);
       return items[items.length-1]||null;
     }
 
-    function reviewPriorityWeight(word,mk){
+    function reviewFacts(word,mk){
       const st=getStats(word);
-      const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0};
+      const by=ensureModeStat(st,mk);
+      const s=ensureSrs(st);
       const shown=Math.max(0,by.shown|0);
       const got=Math.max(0,Math.min(shown,by.got|0));
-      const accuracy=shown>0?got/shown:0;
-      const s=ensureSrs(st);
-      const overdue=Math.max(0,daysBetween(s.due,todayStr()));
+      return {
+        st,
+        by,
+        shown,
+        got,
+        accuracy:shown>0?got/shown:0,
+        overdue:Math.max(0,daysBetween(s.due,todayStr())),
+        missStreak:Math.max(0,by.missStreak|0)
+      };
+    }
+
+    function reviewPriorityWeight(word,mk){
+      const facts=reviewFacts(word,mk);
       let weight=1;
-      weight+=Math.min(30,overdue)*0.18;
-      weight+=Math.min(3,Math.max(0,st.streak|0))*0.65;
-      weight+=(1-accuracy)*2.2;
-      if(st.last&&st.last[mk]==='ng') weight+=1.25;
+      weight+=Math.min(30,facts.overdue)*0.18;
+      weight+=Math.min(3,facts.missStreak)*0.65;
+      weight+=(1-facts.accuracy)*2.2;
+      if(facts.st.last&&facts.st.last[mk]==='ng') weight+=1.25;
       if(isRecent(wordKey(word))) weight*=0.2;
       return Number.isFinite(weight)?Math.max(0.05,Math.min(16,weight)):1;
     }
 
+    function pickReviewCandidate(items,mk,currentKey,allowRepeatFallback){
+      const pool=candidatePoolAvoidingRecent(items,currentKey,allowRepeatFallback);
+      return weightedRandomWord(pool,word=>reviewPriorityWeight(word,mk));
+    }
+
+    function pickWeakCandidate(level,mk,currentKey,allowRepeatFallback){
+      const weak=getWeakWords(level,mk);
+      const pool=candidatePoolAvoidingRecent(weak,currentKey,allowRepeatFallback);
+      return weightedRandomWord(pool,word=>{
+        const facts=reviewFacts(word,mk);
+        const value=1+(1-facts.accuracy)*3+Math.min(4,facts.missStreak)*0.9;
+        return Number.isFinite(value)?Math.max(0.05,value):1;
+      });
+    }
 
     function nextWordByLevel(level,mk){
       let w=null;
       currentPickKind='practice';
+      const normalCardMode=mk!=='SHD'&&mk!=='LIST';
+      const session=ensureSchedulerSession(level,mk);
+      const currentKey=currentWord?wordKey(currentWord):'';
+      const tbl=getTable(level,mk);
+      const dailySlot=ensureSrsDailySlot(level);
+      const newNeeded=Math.max(0,readDailyGoal()-dailySlot.newDone.length);
+      const due=normalCardMode?srsDueWords(level):[];
+      const critical=normalCardMode?tbl.arr.filter(word=>{
+        const st=getStats(word);
+        if((st.shown|0)<=0) return false;
+        const facts=reviewFacts(word,mk);
+        return facts.overdue>=7||facts.missStreak>=2;
+      }):[];
+      let deferredReview=[];
 
-      // 1) due到来済みの復習語を最優先。同じ語の連続表示は避ける。
-      if(mk!=='SHD'&&mk!=='LIST'){
-        const due=srsDueWords(level);
-        const currentKey=currentWord?wordKey(currentWord):'';
-        const reviewPool=due.filter(wd=>wordKey(wd)!==currentKey);
-        const candidates=reviewPool.length?reviewPool:due;
-        if(candidates.length){
-          w=weightedRandomWord(candidates,wd=>reviewPriorityWeight(wd,mk));
-          currentPickKind='review';
-        }
+      const chooseCompleteNew=()=>aliasSamplePreferred(
+        tbl,
+        word=>isCompleteNewWord(word),
+        currentKey,
+        false
+      );
+
+      // 1) 重大な期限超過・モード別連続不正解は配分より優先。
+      if(critical.length){
+        w=pickReviewCandidate(critical,mk,currentKey,true);
+        if(w) currentPickKind='review';
       }
 
-      // 2) 復習語が無い場合のみ、特訓モードの苦手語を使う。
-      if(!w&&trainMode&&mk!=='SHD'&&mk!=='LIST'){
-        w=sampleFromWeak(level,mk);
-        if(w) currentPickKind='weak';
-      }
-
-      // 3) 既存のalias法＋ε-greedyを新規語の供給源として残す。
-      if(!w){
-        const tbl=getTable(level,mk);
-        const dailySlot=ensureSrsDailySlot(level);
-        const newNeeded=Math.max(0,readDailyGoal()-dailySlot.newDone.length);
-
-        if(newNeeded>0){
-          for(let i=0;i<12;i++){
-            const candidate=aliasSample(tbl);
-            if(candidate&&(getStats(candidate).shown|0)===0&&!isRecent(wordKey(candidate))){
-              w=candidate;
-              currentPickKind='new';
-              break;
+      // 2) 特訓ONは、重大復習を除き復習と苦手語を交互にする。
+      if(!w&&trainMode&&normalCardMode){
+        const weakWords=getWeakWords(level,mk);
+        if(weakWords.length){
+          const order=session.trainNext==='weak'?['weak','review']:['review','weak'];
+          for(const kind of order){
+            if(w) break;
+            if(kind==='review'&&due.length){
+              w=pickReviewCandidate(due,mk,currentKey,false);
+              if(w) currentPickKind='review';
+            }else if(kind==='weak'){
+              w=pickWeakCandidate(level,mk,currentKey,false);
+              if(w) currentPickKind='weak';
+            }
+          }
+          if(!w){
+            if(order[0]==='review'&&due.length){
+              w=pickReviewCandidate(due,mk,currentKey,true);
+              if(w) currentPickKind='review';
+            }
+            if(!w){
+              w=pickWeakCandidate(level,mk,currentKey,true);
+              if(w) currentPickKind='weak';
             }
           }
         }
+      }
 
-        if(!w&&Math.random()<CFG.EPSILON){
-          const pool=tbl.arr.filter(wd=>{
-            const st=getStats(wd);
-            const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0};
-            const s=by.shown|0,g=by.got|0;
-            const acc=s>0?g/s:0;
-            const recent=isRecent(wordKey(wd));
-            return (!recent)&&(s<CFG.MIN_SHOWN_LOWACC||acc<CFG.LOWACC_TH);
-          });
-          if(pool.length) w=pool[(Math.random()*pool.length)|0];
+      // 3) 通常時は、復習3問（期限語20件以上なら4問）につき完全新規1問。
+      if(!w&&normalCardMode){
+        const reviewQuota=due.length>=20?4:3;
+        if(newNeeded>0&&session.reviewSinceNew>=reviewQuota){
+          w=chooseCompleteNew();
+          if(w) currentPickKind='new';
         }
+      }
 
-        if(!w) w=aliasSample(tbl);
+      // 4) 復習語を優先。ただし現在語しかない場合は一度ほかの候補を挟む。
+      if(!w&&normalCardMode&&due.length){
+        w=pickReviewCandidate(due,mk,currentKey,false);
+        if(w){
+          currentPickKind='review';
+        }else{
+          deferredReview=due.slice();
+        }
+      }
+
+      // 5) 単独の復習語を連続させないため、完全新規・モード初回・通常語を先に試す。
+      if(!w&&deferredReview.length&&newNeeded>0){
+        w=chooseCompleteNew();
+        if(w) currentPickKind='new';
+      }
+
+      if(!w&&normalCardMode&&Math.random()<CFG.EPSILON){
+        const pool=candidatePoolAvoidingRecent(tbl.arr.filter(word=>{
+          const st=getStats(word);
+          const by=ensureModeStat(st,mk);
+          const shown=by.shown|0;
+          const got=by.got|0;
+          const acc=shown>0?got/shown:0;
+          return shown<CFG.MIN_SHOWN_LOWACC||acc<CFG.LOWACC_TH;
+        }),currentKey,false);
+        if(pool.length) w=pool[(Math.random()*pool.length)|0];
+      }
+
+      if(!w){
+        w=aliasSamplePreferred(tbl,null,currentKey,false);
+      }
+
+      if(!w&&deferredReview.length){
+        w=pickReviewCandidate(deferredReview,mk,currentKey,true);
+        if(w) currentPickKind='review';
+      }
+
+      if(!w){
+        w=aliasSamplePreferred(tbl,null,currentKey,true);
       }
 
       if(!w) return null;
       if(currentPickKind==='practice'){
-        currentPickKind=(getStats(w).shown|0)===0?'new':'practice';
+        if(isCompleteNewWord(w)) currentPickKind='new';
+        else if(isModeNewWord(w,mk)) currentPickKind='mode-new';
       }
+      noteSchedulerPick(currentPickKind);
       currentWord=w;
       pushRecent(wordKey(w));
       return w;
     }
 
+    function simulationModeKey(value){
+      const raw=String(value||'').trim();
+      const map={
+        EJ:'EJ',
+        JE:'JE',
+        LS:'LS',
+        QZ_EJ:'QZ_EJ',
+        QZ_JE:'QZ_JE',
+        QZ_LS:'QZ_LS',
+        '英語→日本語':'EJ',
+        '日本語→英語':'JE',
+        'リスニング':'LS',
+        'クイズ（英語→日本語）':'QZ_EJ',
+        'クイズ（日本語→英語）':'QZ_JE',
+        'クイズ（リスニング）':'QZ_LS'
+      };
+      return map[raw]||'EJ';
+    }
+
+    window.runDejitanSchedulerSimulation=function(level,mode,trials){
+      const emptyResult={
+        level:'',
+        mode:'EJ',
+        trials:0,
+        review:0,
+        new:0,
+        'mode-new':0,
+        weak:0,
+        practice:0,
+        sameWordConsecutive:0,
+        top20:[],
+        factors:[],
+        trainMode:!!trainMode,
+        maxTrials:5000
+      };
+      try{
+        const requestedLevel=String(level||'').trim();
+        const availableLevels=[...new Set(WORDS.map(word=>String(word.level||'')).filter(Boolean))];
+        const selectedLevel=(
+          requestedLevel==='（全レベル）'||availableLevels.includes(requestedLevel)
+        )?requestedLevel:(
+          availableLevels.includes(levelSelect.value)?levelSelect.value:'（全レベル）'
+        );
+        const mk=simulationModeKey(mode);
+        const count=Math.max(1,Math.min(5000,parseInt(trials,10)||500));
+        const today=todayStr();
+        const source=WORDS.filter(word=>selectedLevel==='（全レベル）'||matchLevel(word.level,selectedLevel));
+        if(!source.length) return {...emptyResult,level:selectedLevel,mode:mk,error:'対象単語がありません'};
+
+        const rows=source.map(word=>{
+          const key=wordKey(word);
+          const raw=wordMap[key]&&typeof wordMap[key]==='object'?wordMap[key]:{};
+          const byRaw=raw.by&&raw.by[mk]&&typeof raw.by[mk]==='object'?raw.by[mk]:{};
+          const globalShown=Math.max(0,raw.shown|0);
+          const shown=Math.max(0,byRaw.shown|0);
+          const got=Math.max(0,byRaw.got|0);
+          const missStreak=Math.max(0,byRaw.missStreak|0);
+          const goodStreak=Math.max(0,byRaw.goodStreak|0);
+          const accuracy=shown>0?Math.min(1,got/shown):0;
+          let due=today;
+          if(raw.srs&&/^\d{4}-\d{2}-\d{2}$/.test(String(raw.srs.due||''))){
+            due=String(raw.srs.due);
+          }else{
+            const last=raw.lastSeen&&raw.lastSeen[mk];
+            due=last?srsAddDays(last,accuracy>=0.8?4:(accuracy>=0.5?2:1)):today;
+          }
+          const overdueDays=globalShown>0?Math.max(0,daysBetween(due,today)):0;
+          const lastSeen=raw.lastSeen&&raw.lastSeen[mk];
+          const staleDays=shown>0&&lastSeen?Math.max(0,daysBetween(lastSeen,today)):0;
+          let weight=globalShown===0?8:(shown===0?6.5:Math.min(10,2+8*(1-accuracy)));
+          weight*=Math.min(2.5,1+missStreak*0.45);
+          if(shown>0){
+            weight*=satPenalty(shown);
+            weight*=staleBoost(staleDays);
+          }
+          if(shown>=CFG.COOLDOWN_GSTREAK&&accuracy>=0.8&&goodStreak>=CFG.COOLDOWN_GSTREAK){
+            weight=CFG.COOLDOWN_PICK==='hard'?0:Math.min(weight,CFG.COOLDOWN_WEIGHT);
+          }
+          if(shown>0&&accuracy<CFG.LOWACC_TH&&shown<CFG.MIN_SHOWN_LOWACC) weight*=2.4;
+          weight=Number.isFinite(weight)?Math.max(0,Math.min(40,weight)):0;
+          return {
+            word,
+            key,
+            globalShown,
+            shown,
+            got,
+            accuracy,
+            missStreak,
+            goodStreak,
+            due,
+            overdueDays,
+            completeNew:globalShown===0,
+            modeNew:globalShown>0&&shown===0,
+            review:globalShown>0&&due<=today,
+            weak:shown>0&&(
+              (shown>=2&&accuracy<0.75)||
+              (raw.last&&raw.last[mk]==='ng')||
+              missStreak>=1
+            ),
+            weight
+          };
+        });
+
+        const pickWeighted=items=>{
+          if(!items.length) return null;
+          const total=items.reduce((sum,row)=>sum+Math.max(0,row.weight),0);
+          if(!(total>0)) return items[(Math.random()*items.length)|0]||null;
+          let point=Math.random()*total;
+          for(const row of items){
+            point-=Math.max(0,row.weight);
+            if(point<=0) return row;
+          }
+          return items[items.length-1]||null;
+        };
+        const prefer=(items,current,recent,allowFallback)=>{
+          const noCurrent=items.filter(row=>row.key!==current);
+          const fresh=noCurrent.filter(row=>!recent.includes(row.key));
+          if(fresh.length) return fresh;
+          if(noCurrent.length) return noCurrent;
+          return allowFallback?items:[];
+        };
+
+        const weakRows=rows.filter(row=>row.weak)
+          .sort((a,b)=>a.accuracy-b.accuracy||b.missStreak-a.missStreak||b.shown-a.shown)
+          .slice(0,20);
+        const dueRows=rows.filter(row=>row.review);
+        const existingNewDone=new Set(
+          (
+            srsDailyState&&
+            srsDailyState.date===today&&
+            srsDailyState.levels&&
+            srsDailyState.levels[selectedLevel]&&
+            Array.isArray(srsDailyState.levels[selectedLevel].newDone)
+          )?srsDailyState.levels[selectedLevel].newDone.map(String):[]
+        );
+        const goal=readDailyGoal();
+        let reviewSinceNew=0;
+        let trainNext='review';
+        let previous='';
+        let recent=[];
+        const totals={review:0,new:0,'mode-new':0,weak:0,practice:0};
+        const wordCounts=new Map();
+
+        for(let i=0;i<count;i++){
+          let row=null;
+          let kind='practice';
+          const critical=rows.filter(item=>
+            item.globalShown>0&&(item.overdueDays>=7||item.missStreak>=2)
+          );
+          if(critical.length){
+            row=pickWeighted(prefer(critical,previous,recent,true));
+            kind='review';
+          }
+
+          if(!row&&trainMode&&weakRows.length){
+            const order=trainNext==='weak'?['weak','review']:['review','weak'];
+            for(const candidateKind of order){
+              if(row) break;
+              const src=candidateKind==='weak'?weakRows:dueRows;
+              const pool=prefer(src,previous,recent,false);
+              if(pool.length){
+                row=pickWeighted(pool);
+                kind=candidateKind;
+              }
+            }
+          }
+
+          const newRemaining=Math.max(0,goal-existingNewDone.size);
+          const quota=dueRows.length>=20?4:3;
+          if(!row&&newRemaining>0&&reviewSinceNew>=quota){
+            const pool=prefer(rows.filter(item=>item.completeNew&&!existingNewDone.has(item.key)),previous,recent,false);
+            if(pool.length){
+              row=pickWeighted(pool);
+              kind='new';
+            }
+          }
+
+          if(!row&&dueRows.length){
+            const pool=prefer(dueRows,previous,recent,false);
+            if(pool.length){
+              row=pickWeighted(pool);
+              kind='review';
+            }
+          }
+
+          if(!row){
+            const pool=prefer(rows,previous,recent,false);
+            row=pickWeighted(pool.length?pool:prefer(rows,previous,recent,true));
+          }
+          if(!row) break;
+
+          if(kind==='practice'){
+            if(row.completeNew) kind='new';
+            else if(row.modeNew) kind='mode-new';
+            else if(row.weak&&trainMode) kind='weak';
+          }
+
+          totals[kind]=(totals[kind]||0)+1;
+          if(kind==='review') reviewSinceNew++;
+          else if(kind==='new'){
+            reviewSinceNew=0;
+            existingNewDone.add(row.key);
+          }
+          if(kind==='review') trainNext='weak';
+          else if(kind==='weak') trainNext='review';
+          if(previous===row.key) emptyResult.sameWordConsecutive++;
+          previous=row.key;
+          recent.unshift(row.key);
+          if(recent.length>CFG.RECENT_WINDOW) recent.pop();
+          wordCounts.set(row.key,(wordCounts.get(row.key)||0)+1);
+        }
+
+        const ranked=[...wordCounts.entries()]
+          .sort((a,b)=>b[1]-a[1])
+          .slice(0,20)
+          .map(([key,hits])=>{
+            const row=rows.find(item=>item.key===key);
+            return {word:row&&row.word?row.word.en:key,count:hits};
+          });
+        const factors=ranked.map(item=>{
+          const row=rows.find(candidate=>candidate.word.en===item.word);
+          return {
+            word:item.word,
+            count:item.count,
+            missStreak:row?row.missStreak:0,
+            goodStreak:row?row.goodStreak:0,
+            accuracyPct:row?Math.round(row.accuracy*100):0,
+            overdueDays:row?row.overdueDays:0,
+            modeShown:row?row.shown:0,
+            globalShown:row?row.globalShown:0
+          };
+        });
+
+        const result={
+          ...emptyResult,
+          level:selectedLevel,
+          mode:mk,
+          trials:Object.values(totals).reduce((sum,value)=>sum+value,0),
+          review:totals.review,
+          new:totals.new,
+          'mode-new':totals['mode-new'],
+          weak:totals.weak,
+          practice:totals.practice,
+          sameWordConsecutive:emptyResult.sameWordConsecutive,
+          top20:ranked,
+          factors
+        };
+        console.table(factors);
+        return result;
+      }catch(error){
+        return {...emptyResult,error:String(error&&error.message||error)};
+      }
+    };
+
   modeSelect.addEventListener('change', ()=>{
     try{ speechSynthesis.cancel(); }catch(_){ }
+    resetSchedulerSession(levelSelect.value,modeKey());
     startInitialView();
     try{ renderSky&&renderSky(); }catch(_){ }
     try{ applyGrowthEmoji(currentStage(), true); }catch(_){ }
   });
     levelSelect.addEventListener('change',()=>{
     try{ speechSynthesis.cancel(); }catch(_){ }
+    resetSchedulerSession(levelSelect.value,modeKey());
     startInitialView();
     try{ renderSky&&renderSky(); }catch(_){ }
     try{ applyGrowthEmoji(currentStage(), true); }catch(_){ }
@@ -6565,14 +7054,15 @@ revealRest(currentWord);
       const rows=[];
       for(const w of pool){
         const st=getStats(w);
-        const by=(st.by&&st.by[mkey])?st.by[mkey]:{shown:0,got:0};
-        const s=by.shown|0, g=by.got|0;
+        const by=ensureModeStat(st,mkey);
+        const s=by.shown|0,g=by.got|0;
         const acc=s>0?g/s:0;
         const lastNg=!!(st.last&&st.last[mkey]==='ng');
-        const missStreak=Math.max(0,st.streak|0);
-        if(s>0) rows.push({w,s,g,acc,lastNg,missStreak});
+        const missStreak=Math.max(0,by.missStreak|0);
+        const goodStreak=Math.max(0,by.goodStreak|0);
+        if(s>0) rows.push({w,s,g,acc,lastNg,missStreak,goodStreak});
       }
-      rows.sort((a,b)=> a.acc-b.acc || b.missStreak-a.missStreak || b.s-a.s);  // 正答率の低い順 → 連続不正解 → 出題数
+      rows.sort((a,b)=> a.acc-b.acc || b.missStreak-a.missStreak || b.s-a.s);  // 正答率の低い順 → モード別連続不正解 → 出題数
       return rows;
     }
 
