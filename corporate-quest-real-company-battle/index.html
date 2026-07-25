@@ -6327,8 +6327,8 @@ function selectPointerUp(e){
     smartAssignCompany(SELECT3D.companies[obj.userData.selectIndex]);
   }
 }
-/* 2タップ選択: 未割当なら自社→敵の順に自動割当。
-   両方割当済みなら敵を差し替え、割当済み企業の再タップは解除。 */
+/* 交互割当: タップごとに自社→敵→自社の順で確定する。
+   割当の決定権はinstallDeterministicCompanySelectionFlowへ委譲する。 */
 function smartAssignCompany(co){
   if(!co)return;
   SE.select();
@@ -6338,10 +6338,18 @@ function smartAssignCompany(co){
     renderSlots();
     return;
   }
-  if(S.playerCoId===co.id)S.playerCoId=null;
-  else if(S.cpuCoId===co.id)S.cpuCoId=null;
-  else if(!S.playerCoId)S.playerCoId=co.id;
-  else S.cpuCoId=co.id;
+  const flow=window.CQ_DETERMINISTIC_COMPANY_SELECTION;
+  if(flow&&typeof flow.assign==="function"){
+    flow.assign(co);
+    renderSlots();
+    return;
+  }
+  if(!S.playerCoId||S.cpuCoId){
+    S.playerCoId=co.id;
+    S.cpuCoId=null;
+  }else{
+    S.cpuCoId=co.id;
+  }
   renderSlots();
 }
 function stepSelectCompany(delta){
@@ -6565,7 +6573,7 @@ $("btnSelectFilterReset").addEventListener("click",()=>{
   renderSelect();
 });
 function assignFocusedCompany(side){
-  /* VS枠タップ: 割当済みなら解除、未割当なら閲覧中の企業を割当 */
+  /* VS枠タップ: 閲覧中の企業をその枠へ確定し、次のタップは反対の枠へ進む */
   SE.select();
   const co=currentSelectCompany();
   if(tournamentSelecting()){
@@ -6574,8 +6582,14 @@ function assignFocusedCompany(side){
     renderSlots();
     return;
   }
-  if(side==="p")S.playerCoId=S.playerCoId?null:(co?co.id:null);
-  else S.cpuCoId=S.cpuCoId?null:(co?co.id:null);
+  const flow=window.CQ_DETERMINISTIC_COMPANY_SELECTION;
+  if(co&&flow&&typeof flow.assign==="function"){
+    flow.assign(co,side==="p"?"p":"e");
+    renderSlots();
+    return;
+  }
+  if(side==="p")S.playerCoId=co?co.id:S.playerCoId;
+  else S.cpuCoId=co?co.id:S.cpuCoId;
   renderSlots();
 }
 $("slotP").addEventListener("click",()=>assignFocusedCompany("p"));
@@ -21107,6 +21121,9 @@ function configureTitleHelp(){
 (function installAlternatingCompanySelectionAndCompareInertia(){
   if(window.__CQ_ALTERNATING_COMPANY_SELECTION_INSTALLED__)return;
   window.__CQ_ALTERNATING_COMPANY_SELECTION_INSTALLED__=true;
+  /* 選択処理はinstallDeterministicCompanySelectionFlowへ統合したため無効化。
+     capture段階での二重割当と比較欄クリック封殺を止める。 */
+  return;
 
   const STATE={
     nextSide:"p",
@@ -21892,6 +21909,7 @@ function configureTitleHelp(){
     "[data-select-side='p']","[data-select-side='player']"
   ];
   const ENEMY_SELECTORS=[
+    "#slotC","#slotCpu",
     "#enemySlot","#selectEnemySlot","#selectedEnemy","#selectEnemy",
     "#enemyCompany","#opponentCompany","#eSlot","#slotE","#slotEnemy",
     ".enemy-slot",".select-enemy-slot",".opponent-company-slot",".slot-enemy",
@@ -22010,8 +22028,10 @@ function configureTitleHelp(){
   }
 
   function refreshSelectionUi(){
+    /* renderSelectは3Dカルーセルを再構築するため、割当ごとには呼ばない */
     [
-      "renderSelect",
+      "renderSlots",
+      "drawCompareChart",
       "renderSelectSlots",
       "updateSelectSlots",
       "refreshSelectSlots",
@@ -22029,60 +22049,50 @@ function configureTitleHelp(){
   }
 
   function activateNextSideSlot(){
+    /* クリック合成を廃止。枠の状態はCSSクラスだけで表現する。
+       属性書き込みは差分ガードし、MutationObserverの再入を防ぐ。 */
     const root=selectScreen();
     if(!root)return;
 
     const player=sideSlot("p");
     const enemy=sideSlot("e");
     const target=FLOW.nextSide==="p"?player:enemy;
-    const other=FLOW.nextSide==="p"?enemy:player;
 
     if(root.dataset.cqDeterministicNextSide!==FLOW.nextSide){
       root.dataset.cqDeterministicNextSide=FLOW.nextSide;
     }
 
-    if(other){
-      if(other.classList.contains("cq-next-company-target")){
-        other.classList.remove("cq-next-company-target");
-      }
-      if(other.classList.contains("cq-deterministic-company-target")){
-        other.classList.remove("cq-deterministic-company-target");
-      }
-      if(other.hasAttribute("data-cq-deterministic-target")){
-        other.removeAttribute("data-cq-deterministic-target");
-      }
-    }
+    [
+      [player,"player",FLOW.playerId],
+      [enemy,"enemy",FLOW.enemyId]
+    ].forEach(row=>{
+      const slot=row[0];
+      if(!slot)return;
 
-    if(!target)return;
+      if(slot.classList.contains("cq-next-company-target")){
+        slot.classList.remove("cq-next-company-target");
+      }
+      slot.classList.toggle(
+        "cq-deterministic-company-target",
+        slot===target
+      );
+      slot.classList.toggle("cq-slot-assigned",!!row[2]);
 
-    if(target.classList.contains("cq-next-company-target")){
-      target.classList.remove("cq-next-company-target");
-    }
-    if(!target.classList.contains("cq-deterministic-company-target")){
-      target.classList.add("cq-deterministic-company-target");
-    }
-    if(target.getAttribute("data-cq-deterministic-target")!=="true"){
-      target.setAttribute("data-cq-deterministic-target","true");
-    }
+      if(slot===target){
+        if(slot.getAttribute("data-cq-deterministic-target")!=="true"){
+          slot.setAttribute("data-cq-deterministic-target","true");
+        }
+      }else if(slot.hasAttribute("data-cq-deterministic-target")){
+        slot.removeAttribute("data-cq-deterministic-target");
+      }
 
-    if(
-      FLOW.visualSide===FLOW.nextSide&&
-      FLOW.visualTarget===target
-    )return;
+      if(!slot.hasAttribute("data-cq-slot-side")){
+        slot.setAttribute("data-cq-slot-side",row[1]);
+      }
+    });
 
     FLOW.visualSide=FLOW.nextSide;
-    FLOW.visualTarget=target;
-    FLOW.internal=true;
-    try{
-      target.dispatchEvent(new MouseEvent("click",{
-        bubbles:true,
-        cancelable:true,
-        view:window
-      }));
-    }catch(_){
-    }finally{
-      FLOW.internal=false;
-    }
+    FLOW.visualTarget=target||null;
   }
 
   function setButtonReady(button,ready){
@@ -22136,8 +22146,24 @@ function configureTitleHelp(){
     );
   }
 
+  function adoptExternalSelection(){
+    /* ランダム選択や詳細シートからの確定を取り込み、上書きで消さない */
+    if(typeof S!=="object"||!S)return;
+    const player=String(S.playerCoId||"");
+    const enemy=String(S.cpuCoId||S.enemyCoId||"");
+    if(player&&player!==FLOW.playerId&&companyById(player)){
+      FLOW.playerId=player;
+      if(FLOW.nextSide==="p")FLOW.nextSide="e";
+    }
+    if(enemy&&enemy!==FLOW.enemyId&&companyById(enemy)){
+      FLOW.enemyId=enemy;
+      if(FLOW.nextSide==="e")FLOW.nextSide="p";
+    }
+  }
+
   function synchronizeSelectionState(){
     if(!selectionScreenIsOpen())return;
+    adoptExternalSelection();
     writeSelectionToState();
     activateNextSideSlot();
     setButtonReady(startButton(),bothCompaniesReady());
@@ -22179,6 +22205,14 @@ function configureTitleHelp(){
       FLOW.enemyId="";
       FLOW.visualSide="";
       FLOW.visualTarget=null;
+      FLOW.lastAssignAt=0;
+      ["p","e"].forEach(side=>{
+        const slot=sideSlot(side);
+        if(!slot)return;
+        slot.classList.remove("cq-slot-assigned");
+        /* 旧企業名の残留表示を消す */
+        if(slot.dataset)delete slot.dataset.cqCompanyName;
+      });
       writeSelectionToState();
       refreshSelectionUi();
       activateNextSideSlot();
@@ -22189,17 +22223,31 @@ function configureTitleHelp(){
     }
   }
 
-  function assignCompany(company){
+  function assignCompany(company,side){
     if(!company||!company.id)return false;
 
     const id=String(company.id);
-    if(FLOW.nextSide==="p"){
+    const tournament=typeof tournamentSelecting==="function"&&
+      tournamentSelecting();
+    const target=tournament
+      ?"p"
+      :side==="p"||side==="e"
+        ?side
+        :FLOW.nextSide;
+
+    if(target==="p"){
       FLOW.playerId=id;
-      FLOW.nextSide="e";
+      if(tournament){
+        FLOW.enemyId="";
+        FLOW.nextSide="p";
+      }else{
+        FLOW.nextSide="e";
+      }
     }else{
       FLOW.enemyId=id;
       FLOW.nextSide="p";
     }
+    FLOW.lastAssignAt=performance.now();
 
     writeSelectionToState();
     refreshSelectionUi();
@@ -22287,6 +22335,13 @@ function configureTitleHelp(){
       if(company)return company;
     }
 
+    /* 能力比較欄・企業プロフィール欄のタップも企業選択として扱う */
+    const compare=target.closest(
+      "#compareChart,#selectCompanyComment,"+
+      ".select-comment-host,.compare-panel"
+    );
+    if(compare&&root.contains(compare))return centeredCompany();
+
     const stage=target.closest(STAGE_SELECTOR);
     return stage&&root.contains(stage)
       ?centeredCompany()
@@ -22308,35 +22363,85 @@ function configureTitleHelp(){
     style.id="cqDeterministicCompanySelectionStyle";
     style.textContent=`
 #scr-select .cq-deterministic-company-target{
-  outline:2px solid rgba(92,220,255,.88)!important;
+  outline:2px solid rgba(92,220,255,.9)!important;
   outline-offset:2px!important;
   box-shadow:
-    0 0 0 3px rgba(92,220,255,.14),
-    0 0 22px rgba(92,220,255,.28)!important;
+    0 0 0 3px rgba(92,220,255,.16),
+    0 0 22px rgba(92,220,255,.32)!important;
+  animation:cqSlotNextPulse 1.1s ease-in-out infinite alternate!important;
 }
+#scr-select .cq-deterministic-company-target[data-cq-slot-side="enemy"],
 #scr-select[data-cq-deterministic-next-side="e"]
 .cq-deterministic-company-target{
-  outline-color:rgba(255,102,125,.9)!important;
+  outline-color:rgba(255,102,125,.92)!important;
   box-shadow:
-    0 0 0 3px rgba(255,102,125,.14),
-    0 0 22px rgba(255,102,125,.28)!important;
+    0 0 0 3px rgba(255,102,125,.16),
+    0 0 22px rgba(255,102,125,.32)!important;
+}
+#scr-select .cq-slot-assigned{
+  border-style:solid!important;
+  background:linear-gradient(135deg,rgba(10,46,32,.94),rgba(10,18,34,.96))!important;
+}
+#scr-select .cq-slot-assigned[data-cq-slot-side="enemy"]{
+  background:linear-gradient(135deg,rgba(52,14,24,.94),rgba(10,18,34,.96))!important;
+}
+#scr-select .cq-slot-assigned .cq-company-slot-name{
+  text-shadow:0 0 10px rgba(255,255,255,.22)!important;
+}
+@keyframes cqSlotNextPulse{
+  from{filter:brightness(1)}
+  to{filter:brightness(1.3)}
 }
 `;
     document.head.appendChild(style);
   }
+
+  const TAP_GUARD={active:false,moved:false,x:0,y:0};
+  document.addEventListener("pointerdown",event=>{
+    TAP_GUARD.active=true;
+    TAP_GUARD.moved=false;
+    TAP_GUARD.x=event.clientX;
+    TAP_GUARD.y=event.clientY;
+  },true);
+  document.addEventListener("pointermove",event=>{
+    if(!TAP_GUARD.active)return;
+    if(
+      Math.abs(event.clientX-TAP_GUARD.x)>10||
+      Math.abs(event.clientY-TAP_GUARD.y)>10
+    )TAP_GUARD.moved=true;
+  },true);
+  ["pointerup","pointercancel"].forEach(name=>{
+    document.addEventListener(name,()=>{
+      TAP_GUARD.active=false;
+    },true);
+  });
 
   document.addEventListener("click",event=>{
     if(
       FLOW.internal||
       !selectionScreenIsOpen()||
       !event.target||
+      TAP_GUARD.moved||
       targetIsSideSlot(event.target)
     )return;
+
+    /* 3Dカルーセル側で既に確定した直後の二重割当を防ぐ */
+    if(performance.now()-(Number(FLOW.lastAssignAt)||0)<320)return;
 
     const button=startButton();
     if(
       button&&
       (event.target===button||button.contains(event.target))
+    )return;
+
+    if(
+      event.target.closest&&
+      event.target.closest(
+        "#btnSelectPrev,#btnSelectNext,#btnFocusDetail,"+
+        "#btnOpenSelectFilter,#btnGrowthPortfolio,#btnRandom,"+
+        "#btnAddCo,#btnSelBack,#btnTournamentEntry,"+
+        "#modalSelectFilter,.sheet-wrap,.modal"
+      )
     )return;
 
     const company=companyFromTap(event.target);
