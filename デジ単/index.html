@@ -5106,13 +5106,17 @@ function getBadge(stage){
       return slot;
     }
 
-    function updateSrsAfterAnswer(st,gotIt){
+    function updateSrsAfterAnswer(st,gotIt,previousMissStreak){
       const s=ensureSrs(st);
+      const missesBefore=Math.max(0,previousMissStreak|0);
       if(gotIt){
         s.reps=(s.reps|0)+1;
         if(s.reps===1) s.ivl=1;
         else if(s.reps===2) s.ivl=3;
         else s.ivl=Math.max(1,Math.round(s.ivl*s.ease));
+        if(missesBefore===0&&s.reps>=2){
+          s.ease=Math.min(3.0,s.ease+0.05);
+        }
       }else{
         s.reps=0;
         s.ivl=1;
@@ -5305,8 +5309,18 @@ function getBadge(stage){
     let recentKeys=[];
     const pushRecent=k=>{recentKeys.unshift(String(k)); if(recentKeys.length>CFG.RECENT_WINDOW) recentKeys.pop()};
     const isRecent=key=>recentKeys.includes(String(key));
-        // スパルタ仕様: 連勝中は重みを下げ、新規・苦手を大幅優遇
-    function weightFor(st){if(!st) return 5; if((st.streak|0)>=3) return 0.5; if((st.shown|0)===0) return 8; const pct=(st.got|0)/(st.shown|0); return Math.min(10, 2+8*(1-pct)) }
+        // 現在モードの習熟度と連続不正解数を使い、新規・苦手を適度に優遇
+    function weightFor(st,modeStats){
+      if(!st) return 5;
+      const by=modeStats||{shown:0,got:0};
+      const shown=Math.max(0,by.shown|0);
+      const got=Math.max(0,Math.min(shown,by.got|0));
+      const base=shown===0 ? 8 : Math.min(10,2+8*(1-got/shown));
+      const misses=Math.max(0,st.streak|0);
+      const lapseBoost=Math.min(2.5,1+misses*0.45);
+      const weighted=base*lapseBoost;
+      return Number.isFinite(weighted)?Math.max(0,Math.min(20,weighted)):5;
+    }
     function daysBetween(d1,d2){if(!d1||!d2) return Infinity;const a=new Date(d1),b=new Date(d2);return Math.floor((b-a)/(86400000))}
     function isWeakAndStale(w,mk){const st=getStats(w); const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0}; if((by.shown|0)===0) return false; const acc=(by.got|0)/(by.shown|0); if(acc>=.5) return false; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; return daysBetween(last,todayStr())>=7}
     function satPenalty(shown){return 1/(1 + (shown/CFG.SAT_K))}
@@ -5317,7 +5331,7 @@ function getBadge(stage){
       const arr=WORDS.filter(w=> level==='（全レベル）' ? true : matchLevel(w.level, level));
       const n=arr.length;if(!n) return {arr:[],prob:[],alias:[]};
       const today=todayStr();
-      const w=arr.map(wd=>{const st=getStats(wd); const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0}; const s=by.shown|0, g=by.got|0; const acc = s>0 ? g/s : 0; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; const days = (!last)? 999 : Math.max(0, Math.floor((new Date(today)-new Date(last))/(86400000))); let base = weightFor(st); if(isWeakAndStale(wd,mk)) base*=1.5; base*=satPenalty(s); base*=staleBoost(days); if(isRecent((wd&&wd.id!=null)?wd.id:(wd?.en||''))) base*=0.2; if((st.gstreak|0)>=CFG.COOLDOWN_GSTREAK){ if(CFG.COOLDOWN_PICK==='hard') return 0; base=Math.min(base, CFG.COOLDOWN_WEIGHT) } if(s>0 && acc<CFG.LOWACC_TH && s<CFG.MIN_SHOWN_LOWACC){ base*=2.4 } return Math.max(0, base) });
+      const w=arr.map(wd=>{const st=getStats(wd); const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0}; const s=by.shown|0, g=by.got|0; const acc = s>0 ? g/s : 0; const last=(st.lastSeen&&st.lastSeen[mk])?st.lastSeen[mk]:null; const days = (!last)? 999 : Math.max(0, Math.floor((new Date(today)-new Date(last))/(86400000))); let base = weightFor(st,by); if(isWeakAndStale(wd,mk)) base*=1.5; base*=satPenalty(s); base*=staleBoost(days); if(isRecent((wd&&wd.id!=null)?wd.id:(wd?.en||''))) base*=0.2; if(s>=CFG.COOLDOWN_GSTREAK&&acc>=0.8&&st.last&&st.last[mk]==='got'&&(st.gstreak|0)>=CFG.COOLDOWN_GSTREAK){ if(CFG.COOLDOWN_PICK==='hard') return 0; base=Math.min(base, CFG.COOLDOWN_WEIGHT) } if(s>0 && acc<CFG.LOWACC_TH && s<CFG.MIN_SHOWN_LOWACC){ base*=2.4 } return Number.isFinite(base)?Math.max(0,Math.min(40,base)):0 });
       const sum=w.reduce((a,b)=>a+b,0); if(sum<=0) return {arr:[],prob:[],alias:[]};
       const p=w.map(x=>x*n/sum); const prob=new Array(n),alias=new Array(n),small=[],large=[];
       for(let i=0;i<n;i++)(p[i]<1?small:large).push(i);
@@ -5352,7 +5366,7 @@ function getBadge(stage){
       SHD:['r-exen']
     };
     const CARD_HINTS={
-      EJ:'意味を思い出したらカードをタップ',
+      EJ:'',
       JE:'英語を思い出したらカードをタップ',
       LS:'🔊で再生／カードをタップで答え',
       QZ_EJ:'意味を4択から選ぶ',
@@ -5392,7 +5406,7 @@ function getBadge(stage){
     function clearDisplay(){enEl.textContent='';pronEl.textContent='';jaEl.textContent='';exEnEl.textContent='';exJaEl.textContent='';synEl.textContent='';antEl.textContent='';syncRowVisibility();setCardPhase('front')}
     function showEnglishOnly(w){enEl.textContent=w.en||'';pronEl.textContent='';jaEl.textContent='';exEnEl.textContent='';exJaEl.textContent='';synEl.textContent='';antEl.textContent='';syncRowVisibility();setCardPhase('front')}
     function showJapaneseOnly(w){enEl.textContent='';pronEl.textContent='';jaEl.textContent=w.ja||'';exEnEl.textContent='';exJaEl.textContent='';synEl.textContent='';antEl.textContent='';syncRowVisibility();setCardPhase('front')}
-    function showListeningOnly(w){enEl.textContent='';pronEl.textContent='タップで再生';jaEl.textContent=''; exJaEl.textContent=''; synEl.textContent=''; antEl.textContent=''; exEnEl.textContent=''; syncRowVisibility(); setCardPhase('front'); speak(w.en||'','en-US');}
+    function showListeningOnly(w){enEl.textContent='';pronEl.textContent='';jaEl.textContent=''; exJaEl.textContent=''; synEl.textContent=''; antEl.textContent=''; exEnEl.textContent=''; syncRowVisibility(); setCardPhase('front'); speak(w.en||'','en-US');}
    function revealRest(w){
      enEl.textContent = w.en||'';
      jaEl.textContent = w.ja||'';
@@ -6237,7 +6251,7 @@ if(gotIt){
   else if(gotStreak%50===0) ms=50;
   if(ms) celebrateStreak(ms);
 }
-updateSrsAfterAnswer(st,gotIt);
+updateSrsAfterAnswer(st,gotIt,prevStreak);
 setStats(currentWord,st);
 statsDirtyToken++;
 recordSrsDailyProgress(currentWord,srsPickKind,srsWasNew);
@@ -6384,6 +6398,39 @@ revealRest(currentWord);
       return src[idx];
     }
 
+    function weightedRandomWord(items,weightFn){
+      if(!Array.isArray(items)||!items.length) return null;
+      const weights=items.map(item=>{
+        const value=Number(weightFn(item));
+        return Number.isFinite(value)&&value>0?value:0;
+      });
+      const total=weights.reduce((sum,value)=>sum+value,0);
+      if(!(total>0)) return items[(Math.random()*items.length)|0]||null;
+      let point=Math.random()*total;
+      for(let i=0;i<items.length;i++){
+        point-=weights[i];
+        if(point<=0) return items[i];
+      }
+      return items[items.length-1]||null;
+    }
+
+    function reviewPriorityWeight(word,mk){
+      const st=getStats(word);
+      const by=(st.by&&st.by[mk])?st.by[mk]:{shown:0,got:0};
+      const shown=Math.max(0,by.shown|0);
+      const got=Math.max(0,Math.min(shown,by.got|0));
+      const accuracy=shown>0?got/shown:0;
+      const s=ensureSrs(st);
+      const overdue=Math.max(0,daysBetween(s.due,todayStr()));
+      let weight=1;
+      weight+=Math.min(30,overdue)*0.18;
+      weight+=Math.min(3,Math.max(0,st.streak|0))*0.65;
+      weight+=(1-accuracy)*2.2;
+      if(st.last&&st.last[mk]==='ng') weight+=1.25;
+      if(isRecent(wordKey(word))) weight*=0.2;
+      return Number.isFinite(weight)?Math.max(0.05,Math.min(16,weight)):1;
+    }
+
 
     function nextWordByLevel(level,mk){
       let w=null;
@@ -6393,11 +6440,10 @@ revealRest(currentWord);
       if(mk!=='SHD'&&mk!=='LIST'){
         const due=srsDueWords(level);
         const currentKey=currentWord?wordKey(currentWord):'';
-        const fresh=due.filter(wd=>!isRecent(wordKey(wd))&&wordKey(wd)!==currentKey);
-        const fallback=due.filter(wd=>wordKey(wd)!==currentKey);
-        const reviewPool=fresh.length?fresh:fallback;
-        if(reviewPool.length){
-          w=reviewPool[(Math.random()*reviewPool.length)|0];
+        const reviewPool=due.filter(wd=>wordKey(wd)!==currentKey);
+        const candidates=reviewPool.length?reviewPool:due;
+        if(candidates.length){
+          w=weightedRandomWord(candidates,wd=>reviewPriorityWeight(wd,mk));
           currentPickKind='review';
         }
       }
@@ -6522,9 +6568,11 @@ revealRest(currentWord);
         const by=(st.by&&st.by[mkey])?st.by[mkey]:{shown:0,got:0};
         const s=by.shown|0, g=by.got|0;
         const acc=s>0?g/s:0;
-        if(s>0) rows.push({w,s,g,acc});
+        const lastNg=!!(st.last&&st.last[mkey]==='ng');
+        const missStreak=Math.max(0,st.streak|0);
+        if(s>0) rows.push({w,s,g,acc,lastNg,missStreak});
       }
-      rows.sort((a,b)=> a.acc-b.acc || b.s-a.s);  // 正答率の低い順 → 出題数の多い順
+      rows.sort((a,b)=> a.acc-b.acc || b.missStreak-a.missStreak || b.s-a.s);  // 正答率の低い順 → 連続不正解 → 出題数
       return rows;
     }
 
@@ -6532,8 +6580,24 @@ revealRest(currentWord);
     function getWeakWords(level, mk){
       const pool = WORDS.filter(w=> level==='（全レベル）' ? true : matchLevel(w.level, level));
       const rows = buildWorstRows(pool, mk);
-      const top  = rows.slice(0,20);
-      return top.map(r=>r.w);
+      const selected=rows.filter(r=>
+        (r.s>=2&&r.acc<0.75) ||
+        r.lastNg ||
+        r.missStreak>=1
+      ).slice(0,20);
+
+      if(selected.length<20){
+        const used=new Set(selected.map(r=>wordKey(r.w)));
+        for(const row of rows){
+          if(selected.length>=20) break;
+          const key=wordKey(row.w);
+          if(row.acc>=1||used.has(key)) continue;
+          selected.push(row);
+          used.add(key);
+        }
+      }
+
+      return selected.map(r=>r.w);
     }
 
 
