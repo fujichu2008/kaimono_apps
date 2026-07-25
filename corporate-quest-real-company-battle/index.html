@@ -26292,6 +26292,837 @@ function configureTitleHelp(){
   };
 })();
 
+/* ================================================================
+   戦闘テンポ / 演出スキップ / コンパクトHUD
+================================================================ */
+(function(){
+  if(window.__CQ_BATTLE_TEMPO_HUD_V2__)return;
+  window.__CQ_BATTLE_TEMPO_HUD_V2__=true;
+
+  const KEY="cq_battle_speed_v1";
+  const timers=new Set();
+  let hudRaf=0;
+
+  const speedValue=value=>[1,2,3].includes(Number(value))
+    ?Number(value)
+    :1;
+  const inBattle=()=>!!(
+    typeof S==="object"&&S&&S.screen==="battle"
+  );
+  const speed=()=>{
+    if(typeof S!=="object"||!S)return 1;
+    S.settings=S.settings||{};
+    S.settings.battleSpeed=speedValue(S.settings.battleSpeed);
+    return S.settings.battleSpeed;
+  };
+  const scaled=value=>{
+    const number=Number(value);
+    return inBattle()&&Number.isFinite(number)
+      ?Math.max(0,number/speed())
+      :value;
+  };
+  const actionToken=()=>{
+    const battle=typeof S==="object"&&S?S.battle:null;
+    return battle?String(
+      battle.currentGrowthActionToken||
+      battle.currentActionToken||
+      String(Number(battle.turn)||0)+":"+String(Number(battle.actionCount)||0)
+    ):"";
+  };
+
+  if(typeof S==="object"&&S){
+    let saved=1;
+    try{saved=speedValue(localStorage.getItem(KEY));}catch(_){}
+    S.settings=S.settings||{};
+    S.settings.battleSpeed=saved;
+  }
+
+  if(typeof setTimer==="function"&&!setTimer.__cqTempoV2){
+    const original=setTimer;
+    const wrapped=function(fn,ms){
+      if(typeof fn!=="function")return original.apply(this,arguments);
+      const tracked=inBattle();
+      const record={
+        id:null,
+        done:false,
+        battle:tracked?S.battle:null,
+        token:tracked?actionToken():"",
+        run:null
+      };
+      record.run=()=>{
+        if(record.done)return;
+        record.done=true;
+        timers.delete(record);
+        return fn();
+      };
+      if(tracked)timers.add(record);
+      try{
+        record.id=original.call(this,record.run,tracked?scaled(ms):ms);
+      }catch(error){
+        record.done=true;
+        timers.delete(record);
+        throw error;
+      }
+      return record.id;
+    };
+    wrapped.__cqTempoV2=true;
+    try{setTimer=wrapped;}catch(error){
+      console.warn("[CQ TEMPO] setTimer",error);
+    }
+  }
+
+  if(typeof tween==="function"&&!tween.__cqTempoV2){
+    const original=tween;
+    const wrapped=function(duration,frame,done){
+      return original.call(this,scaled(duration),frame,done);
+    };
+    wrapped.__cqTempoV2=true;
+    try{tween=wrapped;}catch(error){
+      console.warn("[CQ TEMPO] tween",error);
+    }
+  }
+
+  function wrapDuration(name){
+    let original;
+    try{original=eval(name);}catch(_){original=window[name];}
+    if(typeof original!=="function"||original.__cqTempoV2)return;
+    const wrapped=function(){
+      return scaled(original.apply(this,arguments));
+    };
+    wrapped.__cqTempoV2=true;
+    try{
+      if(name==="actionDuration")actionDuration=wrapped;
+      if(name==="actionImpactDelay")actionImpactDelay=wrapped;
+      if(name==="optimizedBattleNarrationDuration"){
+        optimizedBattleNarrationDuration=wrapped;
+      }
+    }catch(error){
+      console.warn("[CQ TEMPO] "+name,error);
+    }
+  }
+  [
+    "actionDuration",
+    "actionImpactDelay",
+    "optimizedBattleNarrationDuration"
+  ].forEach(wrapDuration);
+
+  function speedButton(){
+    const modal=document.getElementById("modalMenu");
+    if(!modal)return;
+    let button=document.getElementById("btnBattleSpeed");
+    if(!button){
+      button=document.createElement("button");
+      button.id="btnBattleSpeed";
+      button.type="button";
+      button.className="cqg-action";
+      button.style.cssText="width:100%;margin-top:8px";
+      button.onclick=()=>{
+        if(typeof SE==="object"&&SE&&SE.select)SE.select();
+        S.settings.battleSpeed=speed()%3+1;
+        try{
+          localStorage.setItem(KEY,String(S.settings.battleSpeed));
+        }catch(_){}
+        speedButton();
+      };
+      (modal.querySelector(".modal-card,.modal-body,.body")||modal)
+        .appendChild(button);
+    }
+    button.textContent="⏩ SPEED: "+speed()+"x";
+  }
+
+  function skipAction(){
+    const battle=typeof S==="object"&&S?S.battle:null;
+    if(!battle||battle.over)return false;
+    const token=actionToken();
+    const list=Array.from(timers).filter(record=>
+      !record.done&&
+      record.battle===battle&&
+      (!token||record.token===token)
+    );
+    if(!list.length)return false;
+    list.forEach(record=>{
+      try{clearTimeout(record.id);}catch(_){}
+      try{clearInterval(record.id);}catch(_){}
+      try{record.run();}catch(error){
+        console.error("[CQ SKIP]",error);
+      }
+    });
+    if(typeof renderBattle==="function"){
+      try{renderBattle();}catch(_){}
+    }
+    return true;
+  }
+
+  const isControl=target=>!!(
+    target&&target.closest&&target.closest(
+      "button,a,input,select,textarea,label,[role='button'],"+
+      "[contenteditable='true'],[onclick],.cmd,.command,.command-btn,"+
+      ".action-btn,.skill-btn,.battle-actions,.battle-controls,"+
+      ".command-panel,.command-sheet,.strat-sheet,.support-sheet,"+
+      ".skill-sheet,.sheet,.drawer,.modal,.dialog,.menu,"+
+      ".strat-item,.support-item,.skill-item,#battleMenu,"+
+      "#modalMenu,#modalConfirm,#stratList"
+    )
+  );
+
+  function bindSkip(){
+    const arena=document.getElementById("arena");
+    if(!arena||arena.dataset.cqSkipV2==="1")return;
+    arena.dataset.cqSkipV2="1";
+    const tap={id:null,x:0,y:0,moved:false,time:0};
+
+    arena.addEventListener("pointerdown",event=>{
+      if(event.button!==undefined&&event.button!==0)return;
+      if(isControl(event.target))return;
+      tap.id=event.pointerId;
+      tap.x=event.clientX;
+      tap.y=event.clientY;
+      tap.moved=false;
+      tap.time=performance.now();
+    },true);
+
+    arena.addEventListener("pointermove",event=>{
+      if(event.pointerId!==tap.id)return;
+      if(
+        Math.abs(event.clientX-tap.x)>9||
+        Math.abs(event.clientY-tap.y)>9
+      )tap.moved=true;
+    },true);
+
+    arena.addEventListener("pointerup",event=>{
+      if(event.pointerId!==tap.id)return;
+      const camera=window.CQ_BATTLE_ORBIT_CAMERA&&
+        window.CQ_BATTLE_ORBIT_CAMERA.state;
+      const blocked=
+        tap.moved||
+        performance.now()-tap.time>520||
+        isControl(event.target)||
+        camera&&(camera.customView||camera.dragging||camera.resetting);
+      tap.id=null;
+      if(blocked)return;
+      if(skipAction()){
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },true);
+
+    arena.addEventListener("pointercancel",()=>tap.id=null,true);
+  }
+
+  function style(){
+    if(document.getElementById("cqBattleTempoHudStyle"))return;
+    const node=document.createElement("style");
+    node.id="cqBattleTempoHudStyle";
+    node.textContent=`
+#scr-battle #marketPanel{
+  display:flex!important;align-items:center!important;
+  width:100%!important;height:28px!important;min-height:28px!important;
+  max-height:28px!important;margin:0!important;padding:0 8px!important;
+  overflow:hidden!important;box-sizing:border-box!important
+}
+#scr-battle #marketPanel>:not(#cqUnifiedMarketLine),
+#scr-battle #cqMarketResponsePanel,
+#scr-battle #summonEnemy,
+#scr-battle #summonPlayer{display:none!important}
+#cqUnifiedMarketLine{
+  display:block;width:100%;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;
+  font:900 10px/28px ui-monospace,monospace;color:#dff4ff
+}
+#scr-battle .battle-narration,
+#scr-battle #battleNarration{
+  position:static!important;inset:auto!important;transform:none!important;
+  display:flex!important;align-items:center!important;gap:6px!important;
+  width:100%!important;height:22px!important;min-height:22px!important;
+  max-height:22px!important;margin:2px 0 0!important;padding:0 7px!important;
+  overflow:hidden!important;box-sizing:border-box!important;
+  white-space:nowrap!important;pointer-events:none!important;z-index:auto!important
+}
+#scr-battle .battle-narration>*,
+#scr-battle #battleNarration>*{
+  min-width:0!important;margin:0!important;overflow:hidden!important;
+  text-overflow:ellipsis!important;white-space:nowrap!important;
+  line-height:20px!important
+}
+#scr-battle .battle-narration>:first-child,
+#scr-battle #battleNarration>:first-child{
+  flex:0 0 auto!important;max-width:34%!important;
+  font-size:9px!important;font-weight:950!important
+}
+#scr-battle .battle-narration>:not(:first-child),
+#scr-battle #battleNarration>:not(:first-child){
+  flex:1 1 auto!important;font-size:10px!important
+}`;
+    document.head.appendChild(node);
+  }
+
+  function marketText(){
+    const battle=typeof S==="object"&&S?S.battle:null;
+    if(!battle||!battle.p||!battle.p.co){
+      return "📊 MARKET | — | 残—行動 | ヘッジ○○/2";
+    }
+    const market=battle.market||{};
+    const event=market.event||market.currentEvent||market.marketEvent||{};
+    const icon=event.ic||event.icon||event.emoji||"📊";
+    const title=String(event.title||event.name||event.label||"市場")
+      .replace(/\s+/g," ").trim();
+    let mult=1;
+    try{mult=Number(marketAttrMultiplier(battle.p.co.attr))||1;}catch(_){}
+    const percent=Math.round((mult-1)*100);
+    const count=[market.actionCount,battle.actionCount,battle.turn]
+      .map(Number).filter(Number.isFinite);
+    const now=count.length?Math.max(0,...count):0;
+    const next=Number(market.nextTurn);
+    const remain=Number.isFinite(next)?Math.max(0,next-now):"—";
+    const hedge=Math.max(0,Math.min(2,Math.floor(Number(battle.p.marketHedge)||0)));
+    return icon+" "+title+" | "+(percent>0?"+":"")+percent+
+      "% | 残"+remain+"行動 | ヘッジ"+
+      "●".repeat(hedge)+"○".repeat(2-hedge)+"/2";
+  }
+
+  function hpAnchor(){
+    const root=document.getElementById("scr-battle");
+    if(!root)return null;
+    const node=root.querySelector(
+      "#playerHpBar,#pHpBar,#hpBarPlayer,#hpPlayerBar,#pHp,"+
+      "#playerHp,#hpP,.player-hp-bar,.hud-player .hp-bar,"+
+      ".fighter-player .hp-bar,[data-side='p'] .hp-bar,"+
+      "[data-side='player'] .hp-bar"
+    );
+    return node&&(node.closest(".hp-bar,.hp-wrap,.fighter-hp,.status-hp")||node);
+  }
+
+  function syncHud(){
+    style();
+    bindSkip();
+
+    const panel=document.getElementById("marketPanel");
+    if(panel){
+      let line=document.getElementById("cqUnifiedMarketLine");
+      if(!line){
+        line=document.createElement("span");
+        line.id="cqUnifiedMarketLine";
+        panel.appendChild(line);
+      }
+      Array.from(panel.childNodes).forEach(node=>{
+        if(node!==line&&node.nodeType===Node.TEXT_NODE){
+          node.textContent="";
+        }
+      });
+      line.textContent=marketText();
+    }
+
+    const root=document.getElementById("scr-battle");
+    const narration=root&&root.querySelector(
+      ".battle-narration,#battleNarration"
+    );
+    const anchor=hpAnchor();
+    if(narration&&anchor&&narration.previousElementSibling!==anchor){
+      anchor.insertAdjacentElement("afterend",narration);
+    }
+  }
+
+  function queueHud(){
+    if(hudRaf)return;
+    hudRaf=requestAnimationFrame(()=>{
+      hudRaf=0;
+      syncHud();
+    });
+  }
+
+  if(typeof renderBattle==="function"&&!renderBattle.__cqHudV2){
+    const original=renderBattle;
+    renderBattle=function(){
+      const value=original.apply(this,arguments);
+      queueHud();
+      return value;
+    };
+    renderBattle.__cqHudV2=true;
+  }
+
+  if(
+    typeof queueBattleNarration==="function"&&
+    !queueBattleNarration.__cqHudV2
+  ){
+    const original=queueBattleNarration;
+    queueBattleNarration=function(){
+      const value=original.apply(this,arguments);
+      queueHud();
+      return value;
+    };
+    queueBattleNarration.__cqHudV2=true;
+  }
+
+  if(typeof showScreen==="function"&&!showScreen.__cqHudV2){
+    const original=showScreen;
+    showScreen=function(name){
+      const value=original.apply(this,arguments);
+      if(name==="battle"){
+        speedButton();
+        queueHud();
+      }
+      return value;
+    };
+    showScreen.__cqHudV2=true;
+  }
+
+  style();
+  speedButton();
+  bindSkip();
+  syncHud();
+
+  window.CQ_BATTLE_TEMPO={
+    getSpeed:speed,
+    setSpeed(value){
+      S.settings=S.settings||{};
+      S.settings.battleSpeed=speedValue(value);
+      try{localStorage.setItem(KEY,String(S.settings.battleSpeed));}catch(_){}
+      speedButton();
+      return S.settings.battleSpeed;
+    },
+    skip:skipAction
+  };
+})();
+
+(function installCompanyPassives(){
+  if(window.__CQ_COMPANY_PASSIVES_V1__)return;
+  window.__CQ_COMPANY_PASSIVES_V1__=true;
+
+  const DEF={
+    toyota:{id:"toyota_kaizen",name:"カイゼン",desc:"行動3回ごとに基礎攻撃力+5%。上限30%。",hook:"onAction",params:{interval:3,step:.05,max:.30,badge:"改善"}},
+    mufg:{id:"mufg_capital",name:"資本余力",desc:"ガード成立時に最大HPの3%を回復。",hook:"onGuard",params:{heal:.03}},
+    keyence:{id:"keyence_direct",name:"直販即応",desc:"直前が通常攻撃なら次の中技SPコスト半減。",hook:"onMoveCost",params:{rate:.5}},
+    nipponsteel:{id:"nipponsteel_learning",name:"操業知見",desc:"被弾ごとに基礎防御力+4%。上限20%。",hook:"onDamaged",params:{step:.04,max:.20,badge:"知見"}},
+    softbankg:{id:"softbankg_vision",name:"ビジョン・ファンド",desc:"大技倍率を0.6〜2.4倍のランダム値へ置換。",hook:"onAction",params:{min:.6,max:2.4}}
+  };
+  const RUN={fighter:null,action:null,token:"",seq:0,raf:0,narrationTimer:0};
+  const companies=()=>typeof allCompanies==="function"?allCompanies():(Array.isArray(COMPANIES)?COMPANIES:[]);
+  const bind=()=>companies().forEach(co=>{const p=co&&DEF[co.id];if(p)co.passive={id:p.id,name:p.name,desc:p.desc,hook:p.hook,params:Object.assign({},p.params)};});
+  const state=f=>f?(f.passiveState&&typeof f.passiveState==="object"?f.passiveState:(f.passiveState={})):null;
+  const passive=f=>f&&f.co&&f.co.passive||null;
+  const live=f=>!!(typeof S==="object"&&S&&S.battle&&!S.battle.over&&(f===S.battle.p||f===S.battle.e));
+  const token=(f,c)=>String(c&&c.token||f&&f.__cqPassiveToken||RUN.token||"");
+  function log(f,p,text,t){
+    if(!live(f)||typeof pushLog!=="function")return;
+    const s=state(f),key=p.id+":"+String(t);
+    if(s.logKey===key)return;
+    s.logKey=key;
+    pushLog(f.side==="p"?"me":"en",f.name+"【"+p.name+"】: "+text);
+  }
+  function baseBonus(f,key,ratio){
+    const box=f.base&&Number.isFinite(Number(f.base[key]))?f.base:Number.isFinite(Number(f[key]))?f:null;
+    if(!box)return;
+    const s=state(f),initial="initial_"+key;
+    if(!Number.isFinite(Number(s[initial])))s[initial]=Number(box[key])||0;
+    box[key]=Math.max(1,Math.round(s[initial]*(1+ratio)));
+  }
+  function ui(){
+    if(!live(typeof S==="object"&&S&&S.battle?S.battle.p:null)||RUN.raf)return;
+    RUN.raf=requestAnimationFrame(()=>{RUN.raf=0;renderPassiveBadges();});
+  }
+  function applyCompanyPassive(f,hook,ctx={}){
+    const p=passive(f);
+    if(!p||p.hook!==hook)return ctx;
+    const s=state(f),q=p.params||{},t=token(f,ctx);
+    if(p.id==="toyota_kaizen"){
+      if(ctx.phase!=="afterAction"||s.actionToken===t)return ctx;
+      s.actionToken=t;s.actions=(s.actions||0)+1;
+      if(s.actions%(q.interval||3)===0){
+        const next=Math.min(q.max||.30,Math.round(((s.atkBonus||0)+(q.step||.05))*100)/100);
+        if(next>(s.atkBonus||0)){
+          s.atkBonus=next;baseBonus(f,"atk",next);s.badge=(q.badge||"改善")+"+"+Math.round(next*100)+"%";
+          log(f,p,"基礎攻撃力が"+Math.round(next*100)+"%上昇",t);ui();
+        }
+      }
+    }else if(p.id==="mufg_capital"){
+      if(s.guardToken===t)return ctx;
+      s.guardToken=t;
+      const max=Math.max(1,Number(f.maxHp)||Number(f.base&&f.base.hp)||Number(f.co.st&&f.co.st.hp)||1),before=Number(f.hp)||0;
+      f.hp=Math.min(max,before+Math.max(1,Math.round(max*(q.heal||.03))));
+      if(f.hp>before)log(f,p,"HPを"+(f.hp-before)+"回復",t);
+    }else if(p.id==="keyence_direct"){
+      if(ctx.action&&ctx.action.type==="mid"&&f.__cqPassiveLastAction==="attack"&&Number.isFinite(Number(ctx.value))){
+        const before=Number(ctx.value);ctx.value=Math.max(0,Math.ceil(before*(q.rate||.5)));
+        log(f,p,"中技SP "+before+"→"+ctx.value,t);
+      }
+    }else if(p.id==="nipponsteel_learning"){
+      if(Number(ctx.damage)>0){
+        const next=Math.min(q.max||.20,Math.round(((s.defBonus||0)+(q.step||.04))*100)/100);
+        if(next>(s.defBonus||0)){
+          s.defBonus=next;baseBonus(f,"def",next);s.badge=(q.badge||"知見")+"+"+Math.round(next*100)+"%";
+          log(f,p,"基礎防御力が"+Math.round(next*100)+"%上昇",t);ui();
+        }
+      }
+    }else if(p.id==="softbankg_vision"){
+      const a=ctx.action||{},m=ctx.move;
+      if(ctx.phase==="beforeMove"&&(a.type==="big"||a.type==="skill"&&m===f.co.big)){
+        f.__cqPassiveBigMult=Math.round(((q.min||.6)+Math.random()*((q.max||2.4)-(q.min||.6)))*100)/100;
+        log(f,p,"大技倍率 x"+f.__cqPassiveBigMult.toFixed(2),t);
+      }
+    }
+    return ctx;
+  }
+  window.applyCompanyPassive=applyCompanyPassive;
+  bind();
+
+  if(typeof mkFighter==="function"&&!mkFighter.__cqPassiveV1){
+    const old=mkFighter;
+    mkFighter=function(){bind();const f=old.apply(this,arguments);state(f);f.__cqPassiveLastAction="";return f;};
+    mkFighter.__cqPassiveV1=true;
+  }
+  const moveOf=(f,a)=>!f||!f.co||!a?null:a.type==="mid"?f.co.mid:a.type==="big"||a.type==="skill"?f.co.big:null;
+  if(typeof execAction==="function"&&!execAction.__cqPassiveV1){
+    const old=execAction;
+    execAction=function(self,foe,act,opt){
+      if(!self||!act||opt&&opt.visualOnly)return old.apply(this,arguments);
+      const t=(S&&S.battle?String(S.battle.turn||0)+":"+String(S.battle.actionCount||0):"sim")+":"+(++RUN.seq)+":"+(self.side||"?");
+      const move=moveOf(self,act),cost=move&&Number.isFinite(Number(move.cost))?Number(move.cost):null;
+      self.__cqPassiveToken=t;self.__cqPassiveAction=act.type;RUN.fighter=self;RUN.action=act;RUN.token=t;
+      let adjusted=cost;
+      if(cost!==null){const c=applyCompanyPassive(self,"onMoveCost",{action:act,move,value:cost,token:t});adjusted=Number.isFinite(Number(c.value))?Number(c.value):cost;if(adjusted!==cost)move.cost=adjusted;}
+      applyCompanyPassive(self,"onAction",{phase:"beforeMove",action:act,move,token:t});
+      try{return old.apply(this,arguments);}finally{if(move&&cost!==null&&adjusted!==cost)move.cost=cost;delete self.__cqPassiveBigMult;delete self.__cqPassiveAction;}
+    };
+    execAction.__cqPassiveV1=true;
+  }
+  if(typeof finishATBAction==="function"&&!finishATBAction.__cqPassiveV1){
+    const old=finishATBAction;
+    finishATBAction=function(){
+      const f=Array.from(arguments).find(v=>v&&v.co&&"hp" in v)||RUN.fighter;
+      const a=Array.from(arguments).find(v=>v&&typeof v.type==="string"&&!v.co)||RUN.action;
+      const t=token(f,{token:RUN.token}),value=old.apply(this,arguments);
+      if(f&&a&&f.__cqPassiveFinished!==t){f.__cqPassiveFinished=t;applyCompanyPassive(f,"onAction",{phase:"afterAction",action:a,token:t});f.__cqPassiveLastAction=a.type;}
+      if(RUN.token===t){RUN.fighter=null;RUN.action=null;RUN.token="";}
+      return value;
+    };
+    finishATBAction.__cqPassiveV1=true;
+  }
+  if(typeof applyGuard==="function"&&!applyGuard.__cqPassiveV1){
+    const old=applyGuard;
+    applyGuard=function(){const f=Array.from(arguments).find(v=>v&&v.co&&"hp" in v)||RUN.fighter,v=old.apply(this,arguments);if(f)applyCompanyPassive(f,"onGuard",{token:token(f,{token:RUN.token})});return v;};
+    applyGuard.__cqPassiveV1=true;
+  }
+  if(CTX&&typeof CTX.dealDamage==="function"&&!CTX.dealDamage.__cqPassiveV1){
+    const old=CTX.dealDamage;
+    CTX.dealDamage=function(att,def,opt){
+      const mult=Number(att&&att.__cqPassiveBigMult),next=Number.isFinite(mult)&&mult>0&&att&&(att.__cqPassiveAction==="big"||att.__cqPassiveAction==="skill")?Object.assign({},opt||{},{mult}):opt;
+      const damage=old.call(this,att,def,next);
+      if(def&&Number(damage)>0)applyCompanyPassive(def,"onDamaged",{damage:Number(damage),attacker:att,token:token(att,{token:att&&att.__cqPassiveToken})});
+      return damage;
+    };
+    CTX.dealDamage.__cqPassiveV1=true;
+  }
+
+  function style(){
+    if(document.getElementById("cqPassiveStyle"))return;
+    const s=document.createElement("style");s.id="cqPassiveStyle";s.textContent=`.cq-passive-profile{margin-top:6px;padding:6px 8px;border:1px solid rgba(118,222,255,.25);border-radius:8px;background:rgba(7,21,38,.72);color:#cfe8f8;font-size:10px;line-height:1.4}.cq-passive-profile b{color:#7ce8ff}.cq-passive-profile.compact{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cq-passive-badge{display:inline-flex;min-height:18px;margin:2px 3px 0 0;padding:1px 6px;border:1px solid rgba(255,210,92,.42);border-radius:999px;background:rgba(71,50,6,.78);color:#ffe28a;font:900 8px/16px ui-monospace,monospace}#cqMinimumBattleNarration{display:none;align-items:center;gap:6px;width:100%;height:22px;margin:2px 0 0;padding:0 7px;overflow:hidden;border-radius:6px;background:rgba(3,12,24,.82);box-sizing:border-box;pointer-events:none;white-space:nowrap}#cqMinimumBattleNarration.on{display:flex}#cqMinimumBattleNarration b{flex:0 0 auto;max-width:34%;overflow:hidden;color:#7ce8ff;font-size:9px;text-overflow:ellipsis}#cqMinimumBattleNarration span{flex:1;min-width:0;overflow:hidden;color:#dcecff;font-size:10px;text-overflow:ellipsis}`;document.head.appendChild(s);
+  }
+  function profile(co,host,id,compact){
+    let box=document.getElementById(id);const p=co&&co.passive;
+    if(!p){if(box)box.remove();return;}if(!host)return;
+    if(!box){box=document.createElement("div");box.id=id;host.appendChild(box);}
+    box.className="cq-passive-profile"+(compact?" compact":"");box.textContent="";
+    const b=document.createElement("b"),span=document.createElement("span");b.textContent="PASSIVE / "+p.name;span.textContent=" — "+p.desc;box.append(b,span);
+  }
+  if(typeof openDetail==="function"&&!openDetail.__cqPassiveV1){
+    const old=openDetail;openDetail=function(id){const v=old.apply(this,arguments),a=document.getElementById("dSkillDesc");if(a){let h=document.getElementById("cqPassiveDetailHost");if(!h){h=document.createElement("div");h.id="cqPassiveDetailHost";a.insertAdjacentElement("afterend",h);}profile(companies().find(c=>String(c.id)===String(id)),h,"cqPassiveDetail",false);}return v;};openDetail.__cqPassiveV1=true;
+  }
+  if(typeof renderSelectCompanyComment==="function"&&!renderSelectCompanyComment.__cqPassiveV1){
+    const old=renderSelectCompanyComment;renderSelectCompanyComment=function(){const v=old.apply(this,arguments),h=document.getElementById("selectCompanyComment");let co=null;try{co=currentSelectCompany();}catch(_){}profile(co,h,"cqSelectPassive",true);return v;};renderSelectCompanyComment.__cqPassiveV1=true;
+  }
+  function buffHost(f){const root=document.getElementById("scr-battle");if(!root)return null;const list=f.side==="p"?["#pBuffs","#playerBuffs","#buffP",".player-buffs",".hud-player"]:["#eBuffs","#enemyBuffs","#buffE",".enemy-buffs",".hud-enemy"];for(const q of list){const h=root.querySelector(q);if(h)return h;}return null;}
+  function renderPassiveBadges(){
+    const b=typeof S==="object"&&S?S.battle:null;if(!b)return;
+    [b.p,b.e].forEach(f=>{if(!f)return;const side=f.side==="p"?"p":"e",root=document.getElementById("scr-battle"),s=state(f);if(!root)return;let badge=root.querySelector('.cq-passive-badge[data-side="'+side+'"]');if(!s.badge){if(badge)badge.remove();return;}const h=buffHost(f);if(!h)return;if(!badge){badge=document.createElement("span");badge.className="cq-passive-badge";badge.dataset.side=side;}badge.textContent=s.badge;if(badge.parentElement!==h)h.appendChild(badge);});
+  }
+  if(typeof renderBuffs==="function"&&!renderBuffs.__cqPassiveV1){const old=renderBuffs;renderBuffs=function(){const v=old.apply(this,arguments);renderPassiveBadges();return v;};renderBuffs.__cqPassiveV1=true;}
+  function hpAnchor(){const r=document.getElementById("scr-battle");if(!r)return null;const n=r.querySelector("#playerHpBar,#pHpBar,#hpBarPlayer,#pHp,.player-hp-bar,.hud-player .hp-bar,[data-side='p'] .hp-bar");return n&&(n.closest(".hp-bar,.hp-wrap,.fighter-hp")||n);}
+  function compactNarrationValue(value,maxLength,fallback){
+    let result=String(value||fallback||"")
+      .replace(/<[^>]*>/g,"")
+      .replace(/\s+/g," ")
+      .trim();
+
+    result=result
+      .replace(/ダメージを与えた/g,"ダメージ")
+      .replace(/HPを([0-9]+)回復/g,"HP$1回復")
+      .replace(/ゲージを?/g,"SP")
+      .replace(/強制解除された/g,"強制解除")
+      .replace(/戦場を/g,"");
+
+    const clauses=result
+      .split(/[。！？\n]/)
+      .map(value=>value.trim())
+      .filter(Boolean);
+
+    if(clauses.length>1){
+      result=clauses.find(value=>
+        /([0-9]+\s*ダメージ|回復|撃破|解除|上昇|低下|発動|召喚)/.test(value)
+      )||clauses[0];
+    }
+
+    const characters=Array.from(result||fallback||"");
+    return characters.length>maxLength
+      ?characters.slice(0,Math.max(1,maxLength-1)).join("")+"…"
+      :characters.join("");
+  }
+  function compactNarrationTitle(value){
+    return compactNarrationValue(value,14,"BATTLE");
+  }
+  function compactNarrationBody(value){
+    return compactNarrationValue(value,46,"効果発動");
+  }
+  function minimumNarration(title,text,duration){
+    if(!(typeof S==="object"&&S&&S.screen==="battle"&&S.battle))return;
+
+    const shortTitle=compactNarrationTitle(title);
+    const shortText=compactNarrationBody(text);
+    const displayDuration=Math.max(
+      shortText.length>24?2800:1800,
+      Number(duration)||2400
+    );
+    const show=()=>{
+      if(!(typeof S==="object"&&S&&S.screen==="battle"&&S.battle))return;
+
+      const root=document.getElementById("scr-battle");
+      const arena=document.getElementById("arena");
+      if(!root||!arena)return;
+
+      const arenaStyle=window.getComputedStyle
+        ?getComputedStyle(arena)
+        :null;
+      if(!arenaStyle||arenaStyle.position==="static"){
+        arena.style.position="relative";
+      }
+
+      let line=document.getElementById("cqMinimumBattleNarration");
+      if(!line){
+        line=document.createElement("div");
+        line.id="cqMinimumBattleNarration";
+
+        const heading=document.createElement("b");
+        const body=document.createElement("span");
+        line.append(heading,body);
+      }
+
+      if(line.parentElement!==arena){
+        arena.appendChild(line);
+      }else{
+        arena.appendChild(line);
+      }
+
+      line.children[0].textContent=shortTitle;
+      line.children[1].textContent=shortText;
+      line.hidden=false;
+      line.removeAttribute("hidden");
+      line.setAttribute("aria-hidden","false");
+      line.classList.add("on");
+      line.style.cssText=[
+        "display:flex!important",
+        "visibility:visible!important",
+        "opacity:1!important",
+        "position:absolute!important",
+        "left:8px!important",
+        "right:8px!important",
+        "bottom:8px!important",
+        "top:auto!important",
+        "width:auto!important",
+        "height:auto!important",
+        "min-height:24px!important",
+        "max-height:44px!important",
+        "margin:0!important",
+        "padding:4px 8px!important",
+        "align-items:flex-start!important",
+        "gap:7px!important",
+        "overflow:hidden!important",
+        "box-sizing:border-box!important",
+        "border:1px solid rgba(118,222,255,.48)!important",
+        "border-radius:7px!important",
+        "background:rgba(2,10,22,.94)!important",
+        "box-shadow:0 3px 14px rgba(0,0,0,.5)!important",
+        "transform:none!important",
+        "pointer-events:none!important",
+        "white-space:normal!important",
+        "z-index:2147483000!important"
+      ].join(";");
+
+      const heading=line.children[0];
+      const body=line.children[1];
+      heading.style.cssText=[
+        "display:block!important",
+        "flex:0 0 36%!important",
+        "min-width:0!important",
+        "max-width:36%!important",
+        "margin:0!important",
+        "overflow:hidden!important",
+        "color:#6fe8ff!important",
+        "font:950 10px/17px system-ui,sans-serif!important",
+        "text-overflow:ellipsis!important",
+        "white-space:nowrap!important"
+      ].join(";");
+      body.style.cssText=[
+        "display:-webkit-box!important",
+        "flex:1 1 auto!important",
+        "min-width:0!important",
+        "max-height:34px!important",
+        "margin:0!important",
+        "overflow:hidden!important",
+        "color:#ffffff!important",
+        "font:800 10px/17px system-ui,sans-serif!important",
+        "line-height:17px!important",
+        "text-overflow:clip!important",
+        "white-space:normal!important",
+        "overflow-wrap:anywhere!important",
+        "word-break:break-word!important",
+        "-webkit-box-orient:vertical!important",
+        "-webkit-line-clamp:2!important"
+      ].join(";");
+    };
+
+    clearTimeout(RUN.narrationTimer);
+    show();
+    [0,60,180,420].forEach(delay=>{
+      setTimeout(show,delay);
+    });
+
+    RUN.narrationTimer=setTimeout(()=>{
+      const line=document.getElementById("cqMinimumBattleNarration");
+      if(!line)return;
+      line.classList.remove("on");
+      line.setAttribute("aria-hidden","true");
+      line.style.setProperty("display","none","important");
+    },displayDuration);
+  }
+  function summonDefinitionForMove(move){
+    if(!move||typeof SUMMONS!=="object"||!SUMMONS)return null;
+    const moveName=String(move.name||"");
+    return Object.values(SUMMONS).find(definition=>{
+      if(!definition)return false;
+      if(definition.ultimate===move)return true;
+      if(Array.isArray(definition.moves)&&definition.moves.includes(move))return true;
+      if(
+        definition.ultimate&&
+        moveName&&
+        String(definition.ultimate.name||"")===moveName
+      )return true;
+      return Array.isArray(definition.moves)&&definition.moves.some(item=>
+        item&&moveName&&String(item.name||"")===moveName
+      );
+    })||null;
+  }
+  function hasAttackResult(move){
+    if(!move)return false;
+    const effects=Array.isArray(move.effects)?move.effects:[];
+    if(effects.some(effect=>effect&&[
+      "damage",
+      "multi",
+      "riskDamage",
+      "drainGauge",
+      "atbDrain",
+      "stun",
+      "poison"
+    ].includes(effect.kind)))return true;
+    return Number(move.power)>=2;
+  }
+  function shouldNarrateMove(self,move){
+    if(!self||!move||!move.name)return false;
+    const actionType=String(
+      self.__cqPassiveAction||
+      RUN.action&&RUN.action.type||
+      ""
+    );
+    if(
+      actionType==="attack"||
+      move.type==="attack"||
+      move.id==="attack"||
+      String(move.name)==="通常攻撃"
+    )return false;
+    if(summonDefinitionForMove(move))return true;
+    if(["mid","big","skill","secret"].includes(actionType))return true;
+    return hasAttackResult(move)&&
+      actionType!=="support"&&
+      actionType!=="strategy";
+  }
+  function compactMoveResult(self,foe,before,logs){
+    const parts=[];
+    const foeHp=Math.max(0,Number(foe&&foe.hp)||0);
+    const selfHp=Math.max(0,Number(self&&self.hp)||0);
+    const damage=Math.max(0,Math.round(before.foeHp-foeHp));
+    const healing=Math.max(0,Math.round(selfHp-before.selfHp));
+    const drained=Math.max(
+      0,
+      Math.round(before.foeGauge-(Number(foe&&foe.gauge)||0))
+    );
+
+    if(damage>0){
+      parts.push(String(foe&&foe.name||"相手")+"に"+damage+"ダメージ");
+    }
+    if(before.foeHp>0&&foeHp<=0)parts.push("撃破");
+    if(healing>0)parts.push("HP"+healing+"回復");
+    if(drained>0&&parts.length<2)parts.push("SP"+drained+"低下");
+
+    if(!parts.length&&Array.isArray(logs)){
+      const result=logs.find(value=>typeof value==="string"&&value.trim());
+      if(result){
+        const text=result.replace(/\s+/g," ").trim();
+        parts.push(text.length>48?text.slice(0,47)+"…":text);
+      }
+    }
+    return parts.length?parts.join("・"):"効果が発動";
+  }
+  function narrateExecutedMove(self,foe,move,before,logs){
+    if(
+      !(typeof S==="object"&&S&&S.screen==="battle"&&S.battle)||
+      !shouldNarrateMove(self,move)
+    )return;
+
+    const summon=summonDefinitionForMove(move);
+    const title=(summon&&summon.ic?String(summon.ic)+" ":"")+
+      String(move.name||summon&&summon.name||"攻撃");
+    const result=compactMoveResult(self,foe,before,logs);
+
+    if(typeof queueBattleNarration==="function"){
+      try{
+        queueBattleNarration(title,result,"system",2400,true);
+      }catch(error){
+        console.warn("[CQ NARRATION]",error);
+        minimumNarration(title,result,2400);
+      }
+    }else{
+      minimumNarration(title,result,2400);
+    }
+  }
+  if(typeof executeMove==="function"&&!executeMove.__cqMinimumMoveNarration){
+    const oldExecuteMove=executeMove;
+    executeMove=function(self,foe,move){
+      const before={
+        selfHp:Math.max(0,Number(self&&self.hp)||0),
+        foeHp:Math.max(0,Number(foe&&foe.hp)||0),
+        foeGauge:Math.max(0,Number(foe&&foe.gauge)||0)
+      };
+      const logs=oldExecuteMove.apply(this,arguments);
+      narrateExecutedMove(self,foe,move,before,logs);
+      return logs;
+    };
+    executeMove.__cqMinimumMoveNarration=true;
+  }
+  if(typeof queueBattleNarration==="function"&&!queueBattleNarration.__cqPassiveV1){
+    const old=queueBattleNarration;
+    queueBattleNarration=function(title,text,tone,duration){
+      const args=Array.from(arguments);
+      args[0]=compactNarrationTitle(title);
+      args[1]=compactNarrationBody(text);
+      const value=old.apply(this,args);
+      minimumNarration(args[0],args[1],duration);
+      return value;
+    };
+    queueBattleNarration.__cqPassiveV1=true;
+  }
+
+  style();renderPassiveBadges();
+  window.CQ_COMPANY_PASSIVES={definitions:DEF,bind,apply:applyCompanyPassive,state};
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
