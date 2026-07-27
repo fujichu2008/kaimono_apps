@@ -18271,17 +18271,120 @@ const CQ_EVENTS=window.CQ_EVENTS;
   };
   const oldChart=drawCompareChart;drawCompareChart=function(){const value=oldChart(),co=currentSelectCompany();if(!co||!allocatedTotal(get(co.id)))return value;const canvas=$("compareChart"),rect=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2),ctx=canvas.getContext("2d"),cx=rect.width/2,cy=rect.height*.52,radius=Math.min(rect.width*.31,rect.height*.37),axes=[["hp",1200],["atk",150],["def",150],["spd",150],["tech",150],["grw",150]],stats=grownStats(co);ctx.save();ctx.setTransform(dpr,0,0,dpr,0,0);ctx.beginPath();axes.forEach(([key,max],i)=>{const a=-Math.PI/2+i*Math.PI*2/6,v=Math.min(1,stats[key]/max),x=cx+Math.cos(a)*radius*v,y=cy+Math.sin(a)*radius*v;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.closePath();ctx.strokeStyle="#ffd25c";ctx.fillStyle="rgba(255,210,92,.1)";ctx.lineWidth=2.4;ctx.fill();ctx.stroke();ctx.restore();return value;};
 
-  const oldPrepare=prepareCustomCompanyInput;prepareCustomCompanyInput=function(data){const co=oldPrepare(data);co.secret=normalizeSecret(data&&data.secret,co);return co;};
-  const oldAdd=addCustomCompany;addCustomCompany=function(data,options){const co=oldAdd(data,options);co.secret=normalizeSecret(data&&data.secret,co);SECRET_STORE[co.id]=co.secret;save(SECRET_KEY,SECRET_STORE);return co;};
+  const oldPrepare=prepareCustomCompanyInput;
+  prepareCustomCompanyInput=function(data){
+    const co=oldPrepare(data);
+    co.secret=normalizeSecret(data&&data.secret,co);
+    if(typeof window.normalizeCompanyPassive==="function"){
+      co.passive=window.normalizeCompanyPassive(data&&data.passive,co);
+    }else if(data&&data.passive&&typeof data.passive==="object"){
+      co.passive=JSON.parse(JSON.stringify(data.passive));
+    }
+    return co;
+  };
+  const oldAdd=addCustomCompany;
+  addCustomCompany=function(data,options){
+    const co=oldAdd(data,options);
+    co.secret=normalizeSecret(data&&data.secret,co);
+    if(typeof window.normalizeCompanyPassive==="function"){
+      co.passive=window.normalizeCompanyPassive(data&&data.passive,co);
+    }
+    SECRET_STORE[co.id]=co.secret;
+    save(SECRET_KEY,SECRET_STORE);
+    return co;
+  };
   const oldDelete=deleteCustomCompanyFromForge;
   deleteCustomCompanyFromForge=function(id){
     const value=oldDelete(id);
     CQ_EVENTS.emit("company:deleted",{companyId:id,company:value});
     return value;
   };
-  const oldExport=exportCustomCompaniesJson;exportCustomCompaniesJson=function(){const data=JSON.parse(oldExport());data.companies.forEach(row=>{const co=findCo(row.id);if(co)row.secret=secret(co);});return JSON.stringify(data,null,2);};
-  const oldForge=buildForgePrompt;buildForgePrompt=function(){const base=oldForge(),extra="\n【企業秘策 secret】\n- 全企業にsecretを必須設定してください。\n- cost=70、power=2、oncePerBattle=true、effectsは1〜2個。\n- 中技より強く大技より弱く、既存motion/effect.kindだけを使用し、市場大技+15%の対象外としてください。\n- 企業特性と効果を結び付けた固有名、説明、narrationを付けてください。\n- 構造: "+JSON.stringify({secret:{name:"企業固有の秘策名",ic:"🔒",desc:"企業特性と効果の説明",motion:"orbit_cyan",cost:70,power:2,oncePerBattle:true,effects:[{kind:"damage",mult:1.1}],narration:{tone:"gold",text:"固有ナレーション"}}});return base.replace("\n上記条件を満たすJSONだけを出力してください。",extra+"\n\n上記条件を満たすJSONだけを出力してください。");};
-  const oldMerger=buildForgeMergerPrompt;buildForgeMergerPrompt=function(){const base=oldMerger(),extra="\n【合併企業のsecret】\n- secretを必須設定。cost=70、power=2、oncePerBattle=true、effectsは1〜2個。\n- 両社の強みを統合し、中技より強く大技より弱い1戦1回技としてください。";return base.replace("\n条件を満たすJSONだけを出力してください。",extra+"\n\n条件を満たすJSONだけを出力してください。");};
+  const oldExport=exportCustomCompaniesJson;
+  exportCustomCompaniesJson=function(){
+    const data=JSON.parse(oldExport());
+    data.companies.forEach(row=>{
+      const co=findCo(row.id);
+      if(!co)return;
+      row.secret=secret(co);
+      if(typeof window.normalizeCompanyPassive==="function"){
+        row.passive=window.normalizeCompanyPassive(co.passive,co);
+      }else if(co.passive){
+        row.passive=JSON.parse(JSON.stringify(co.passive));
+      }
+    });
+    return JSON.stringify(data,null,2);
+  };
+  const oldForge=buildForgePrompt;
+  buildForgePrompt=function(){
+    const base=oldForge();
+    const passiveSample={
+      passive:{
+        id:"company_learning_curve",
+        name:"企業固有のパッシブ名",
+        desc:"発動条件と効果を具体的に説明",
+        kind:"actionStack",
+        hook:"onAction",
+        params:{
+          stat:"tech",
+          interval:3,
+          step:.04,
+          max:.2,
+          badge:"学習"
+        }
+      }
+    };
+    const extra=
+      "\n【企業秘策 secret】"+
+      "\n- 全企業にsecretを必須設定してください。"+
+      "\n- cost=70、power=2、oncePerBattle=true、effectsは1〜2個。"+
+      "\n- 中技より強く大技より弱く、既存motion/effect.kindだけを使用し、市場大技+15%の対象外としてください。"+
+      "\n- 企業特性と効果を結び付けた固有名、説明、narrationを付けてください。"+
+      "\n- 構造: "+JSON.stringify({
+        secret:{
+          name:"企業固有の秘策名",
+          ic:"🔒",
+          desc:"企業特性と効果の説明",
+          motion:"orbit_cyan",
+          cost:70,
+          power:2,
+          oncePerBattle:true,
+          effects:[{kind:"damage",mult:1.1}],
+          narration:{tone:"gold",text:"固有ナレーション"}
+        }
+      })+
+      "\n\n【企業固有パッシブ passive】"+
+      "\n- 全企業にpassiveを必須設定してください。企業名・事業・技・財務特性とルールを結び付けてください。"+
+      "\n- kindは actionStack / guardRecovery / moveDiscount / damageStack / bigVariance / actionPulse のいずれかだけを使用してください。"+
+      "\n- hookはkindに対応させます。actionStack・actionPulse・bigVarianceはonAction、guardRecoveryはonGuard、moveDiscountはonMoveCost、damageStackはonDamagedです。"+
+      "\n- actionStack params: stat(atk/def/spd/tech/grw), interval(2〜6), step(0.02〜0.08), max(0.10〜0.35), badge。"+
+      "\n- guardRecovery params: heal(0〜0.08), gauge(0〜12)。"+
+      "\n- moveDiscount params: triggerAction(attack/guard/support/strategy), targetAction(mid/big/skill/secret), rate(0.45〜0.85)。"+
+      "\n- damageStack params: stat(atk/def/spd/tech/grw), step(0.02〜0.06), max(0.10〜0.30), badge。"+
+      "\n- bigVariance params: min(0.50〜1.00), max(1.20〜2.50)。"+
+      "\n- actionPulse params: interval(2〜6), heal(0〜0.08), gauge(0〜20), atb(0〜25), badge。"+
+      "\n- 数値はゲームバランス範囲内にし、常時無条件で大幅強化するルールは禁止です。"+
+      "\n- 構造: "+JSON.stringify(passiveSample);
+    return base.replace(
+      "\n上記条件を満たすJSONだけを出力してください。",
+      extra+"\n\n上記条件を満たすJSONだけを出力してください。"
+    );
+  };
+  const oldMerger=buildForgeMergerPrompt;
+  buildForgeMergerPrompt=function(){
+    const base=oldMerger();
+    const extra=
+      "\n【合併企業のsecret】"+
+      "\n- secretを必須設定。cost=70、power=2、oncePerBattle=true、effectsは1〜2個。"+
+      "\n- 両社の強みを統合し、中技より強く大技より弱い1戦1回技としてください。"+
+      "\n\n【合併企業のpassive】"+
+      "\n- passiveを必須設定。両社の事業特性が自然に結び付く固有ルールにしてください。"+
+      "\n- kindは actionStack / guardRecovery / moveDiscount / damageStack / bigVariance / actionPulse のいずれかだけを使用してください。"+
+      "\n- hookとparamsは通常のAI Forge企業生成と同じ対応関係・上限を守ってください。";
+    return base.replace(
+      "\n条件を満たすJSONだけを出力してください。",
+      extra+"\n\n条件を満たすJSONだけを出力してください。"
+    );
+  };
 
   function runCorporateQuestSelfTests(){
     const results=[];
@@ -26689,15 +26792,122 @@ function configureTitleHelp(){
   window.__CQ_COMPANY_PASSIVES_V1__=true;
 
   const DEF={
-    toyota:{id:"toyota_kaizen",name:"カイゼン",desc:"行動3回ごとに基礎攻撃力+5%。上限30%。",hook:"onAction",params:{interval:3,step:.05,max:.30,badge:"改善"}},
-    mufg:{id:"mufg_capital",name:"資本余力",desc:"ガード成立時に最大HPの3%を回復。",hook:"onGuard",params:{heal:.03}},
-    keyence:{id:"keyence_direct",name:"直販即応",desc:"直前が通常攻撃なら次の中技SPコスト半減。",hook:"onMoveCost",params:{rate:.5}},
-    nipponsteel:{id:"nipponsteel_learning",name:"操業知見",desc:"被弾ごとに基礎防御力+4%。上限20%。",hook:"onDamaged",params:{step:.04,max:.20,badge:"知見"}},
-    softbankg:{id:"softbankg_vision",name:"ビジョン・ファンド",desc:"大技倍率を0.6〜2.4倍のランダム値へ置換。",hook:"onAction",params:{min:.6,max:2.4}}
+    toyota:{id:"toyota_kaizen",name:"カイゼン",desc:"行動3回ごとに基礎攻撃力+5%。上限30%。",kind:"actionStack",hook:"onAction",params:{stat:"atk",interval:3,step:.05,max:.30,badge:"改善"}},
+    mufg:{id:"mufg_capital",name:"資本余力",desc:"ガード成立時に最大HPの3%を回復。",kind:"guardRecovery",hook:"onGuard",params:{heal:.03,gauge:0}},
+    keyence:{id:"keyence_direct",name:"直販即応",desc:"直前が通常攻撃なら次の中技SPコスト半減。",kind:"moveDiscount",hook:"onMoveCost",params:{triggerAction:"attack",targetAction:"mid",rate:.5}},
+    nipponsteel:{id:"nipponsteel_learning",name:"操業知見",desc:"被弾ごとに基礎防御力+4%。上限20%。",kind:"damageStack",hook:"onDamaged",params:{stat:"def",step:.04,max:.20,badge:"知見"}},
+    softbankg:{id:"softbankg_vision",name:"ビジョン・ファンド",desc:"大技倍率を0.6〜2.4倍のランダム値へ置換。",kind:"bigVariance",hook:"onAction",params:{min:.6,max:2.4}}
   };
+  const PASSIVE_HOOKS={
+    actionStack:"onAction",
+    guardRecovery:"onGuard",
+    moveDiscount:"onMoveCost",
+    damageStack:"onDamaged",
+    bigVariance:"onAction",
+    actionPulse:"onAction"
+  };
+  const PASSIVE_KINDS=Object.keys(PASSIVE_HOOKS);
+  const PASSIVE_STATS=["atk","def","spd","tech","grw"];
   const RUN={fighter:null,action:null,token:"",seq:0,raf:0,narrationTimer:0};
   const companies=()=>typeof allCompanies==="function"?allCompanies():(Array.isArray(COMPANIES)?COMPANIES:[]);
-  const bind=()=>companies().forEach(co=>{const p=co&&DEF[co.id];if(p)co.passive={id:p.id,name:p.name,desc:p.desc,hook:p.hook,params:Object.assign({},p.params)};});
+  const passiveClamp=(value,min,max,fallback)=>{
+    const number=Number(value);
+    return Math.max(min,Math.min(max,Number.isFinite(number)?number:fallback));
+  };
+  const passiveInt=(value,min,max,fallback)=>Math.round(passiveClamp(value,min,max,fallback));
+  const passiveId=(value,fallback)=>String(value||fallback||"company_passive")
+    .toLowerCase().replace(/[^a-z0-9_-]+/g,"_").replace(/^_+|_+$/g,"").slice(0,64)||"company_passive";
+  const passiveHash=value=>{
+    let result=2166136261;
+    for(const character of String(value||"")){
+      result^=character.charCodeAt(0);
+      result=Math.imul(result,16777619);
+    }
+    return result>>>0;
+  };
+
+  function autoCompanyPassive(company){
+    const label=String(company&&(company.short||company.tick||company.name)||"企業").replace(/\s+/g,"").slice(0,14);
+    const stats=company&&company.st||{};
+    const id=passiveId(company&&company.id,label);
+    const seed=passiveHash(id+"|"+String(company&&company.ind||"")+"|"+String(company&&company.attr||""));
+
+    if((Number(stats.grw)||0)>=120){
+      const min=Math.round((.68+(seed%5)*.04)*100)/100;
+      const max=Math.round((1.55+(seed%6)*.09)*100)/100;
+      return {id:id+"_growth_swing",name:label+"・成長オプション",desc:"大技倍率が"+min.toFixed(2)+"〜"+max.toFixed(2)+"倍で変動する。",kind:"bigVariance",hook:"onAction",params:{min,max}};
+    }
+    if(company&&company.attr==="金融"){
+      const heal=.02+(seed%4)*.005,gauge=3+(seed%5);
+      return {id:id+"_capital_buffer",name:label+"・資本バッファ",desc:"ガード成立時にHPとSPを回復する。",kind:"guardRecovery",hook:"onGuard",params:{heal,gauge}};
+    }
+    if(company&&company.attr==="素材"){
+      const stat=(Number(stats.tech)||0)>(Number(stats.def)||0)?"tech":"def";
+      return {id:id+"_operating_knowledge",name:label+"・操業蓄積",desc:"被弾ごとに操業知見を蓄積し、基礎能力を段階的に高める。",kind:"damageStack",hook:"onDamaged",params:{stat,step:.025+(seed%4)*.005,max:.15+(seed%5)*.02,badge:"操業"}};
+    }
+    if(company&&company.attr==="インフラ"){
+      return {id:id+"_redundant_operation",name:label+"・冗長運用",desc:"一定行動ごとにHP・SP・ATBを小回復する。",kind:"actionPulse",hook:"onAction",params:{interval:3+(seed%3),heal:.01+(seed%3)*.005,gauge:4+(seed%5),atb:6+(seed%5)*2,badge:"冗長"}};
+    }
+    if(company&&company.attr==="消費"){
+      return {id:id+"_customer_response",name:label+"・顧客即応",desc:"直前行動を起点に次の中技SPコストを軽減する。",kind:"moveDiscount",hook:"onMoveCost",params:{triggerAction:seed%3===0?"guard":"attack",targetAction:"mid",rate:.62+(seed%6)*.04}};
+    }
+    const stat=(Number(stats.spd)||0)>(Number(stats.tech)||0)+15?"spd":(Number(stats.atk)||0)>(Number(stats.tech)||0)+15?"atk":"tech";
+    return {id:id+"_learning_curve",name:label+"・学習曲線",desc:"行動を重ねるほど基礎能力が段階的に上昇する。",kind:"actionStack",hook:"onAction",params:{stat,interval:2+(seed%4),step:.03+(seed%5)*.005,max:.16+(seed%6)*.025,badge:"学習"}};
+  }
+
+  function normalizeCompanyPassive(raw,company){
+    const fallback=autoCompanyPassive(company);
+    const source=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw:fallback;
+    const kind=PASSIVE_KINDS.includes(source.kind)?source.kind:fallback.kind;
+    const incoming=source.params&&typeof source.params==="object"?source.params:{};
+    const base=fallback.params||{};
+    const params={};
+
+    if(kind==="actionStack"||kind==="damageStack"){
+      params.stat=PASSIVE_STATS.includes(incoming.stat)?incoming.stat:(PASSIVE_STATS.includes(base.stat)?base.stat:(kind==="damageStack"?"def":"tech"));
+      params.step=passiveClamp(incoming.step,.02,kind==="damageStack"?.06:.08,base.step||.04);
+      params.max=passiveClamp(incoming.max,.10,kind==="damageStack"?.30:.35,base.max||.20);
+      params.badge=String(incoming.badge||base.badge||"成長").slice(0,10);
+      if(kind==="actionStack")params.interval=passiveInt(incoming.interval,2,6,base.interval||3);
+    }else if(kind==="guardRecovery"){
+      params.heal=passiveClamp(incoming.heal,0,.08,base.heal||.025);
+      params.gauge=passiveInt(incoming.gauge,0,12,base.gauge||0);
+      if(params.heal<=0&&params.gauge<=0)params.gauge=5;
+    }else if(kind==="moveDiscount"){
+      const triggers=["attack","guard","support","strategy"];
+      const targets=["mid","big","skill","secret"];
+      params.triggerAction=triggers.includes(incoming.triggerAction)?incoming.triggerAction:(triggers.includes(base.triggerAction)?base.triggerAction:"attack");
+      params.targetAction=targets.includes(incoming.targetAction)?incoming.targetAction:(targets.includes(base.targetAction)?base.targetAction:"mid");
+      params.rate=passiveClamp(incoming.rate,.45,.85,base.rate||.72);
+    }else if(kind==="bigVariance"){
+      params.min=passiveClamp(incoming.min,.50,1,base.min||.78);
+      params.max=passiveClamp(incoming.max,1.20,2.50,base.max||1.72);
+      if(params.max<=params.min)params.max=Math.min(2.50,Math.max(1.20,params.min+.35));
+    }else{
+      params.interval=passiveInt(incoming.interval,2,6,base.interval||4);
+      params.heal=passiveClamp(incoming.heal,0,.08,base.heal||0);
+      params.gauge=passiveInt(incoming.gauge,0,20,base.gauge||0);
+      params.atb=passiveInt(incoming.atb,0,25,base.atb||0);
+      params.badge=String(incoming.badge||base.badge||"循環").slice(0,10);
+      if(params.heal<=0&&params.gauge<=0&&params.atb<=0)params.gauge=8;
+    }
+
+    return {
+      id:passiveId(source.id,passiveId(company&&company.id,"company")+"_"+kind),
+      name:String(source.name||fallback.name||"企業固有パッシブ").slice(0,36),
+      desc:String(source.desc||fallback.desc||"企業固有の常時効果。").slice(0,180),
+      kind,
+      hook:PASSIVE_HOOKS[kind],
+      params
+    };
+  }
+
+  const bind=()=>companies().forEach(company=>{
+    if(!company)return;
+    company.passive=normalizeCompanyPassive(DEF[company.id]||company.passive,company);
+  });
+  window.normalizeCompanyPassive=normalizeCompanyPassive;
+  window.createAutoCompanyPassive=autoCompanyPassive;
   const state=f=>f?(f.passiveState&&typeof f.passiveState==="object"?f.passiveState:(f.passiveState={})):null;
   const passive=f=>f&&f.co&&f.co.passive||null;
   const live=f=>!!(typeof S==="object"&&S&&S.battle&&!S.battle.over&&(f===S.battle.p||f===S.battle.e));
@@ -26723,43 +26933,192 @@ function configureTitleHelp(){
   function applyCompanyPassive(f,hook,ctx={}){
     const p=passive(f);
     if(!p||p.hook!==hook)return ctx;
-    const s=state(f),q=p.params||{},t=token(f,ctx);
-    if(p.id==="toyota_kaizen"){
+
+    const s=state(f);
+    const q=p.params||{};
+    const t=token(f,ctx);
+    const kind=p.kind||"";
+
+    if(kind==="actionStack"){
       if(ctx.phase!=="afterAction"||s.actionToken===t)return ctx;
-      s.actionToken=t;s.actions=(s.actions||0)+1;
+      s.actionToken=t;
+      s.actions=(s.actions||0)+1;
+
       if(s.actions%(q.interval||3)===0){
-        const next=Math.min(q.max||.30,Math.round(((s.atkBonus||0)+(q.step||.05))*100)/100);
-        if(next>(s.atkBonus||0)){
-          s.atkBonus=next;baseBonus(f,"atk",next);s.badge=(q.badge||"改善")+"+"+Math.round(next*100)+"%";
-          log(f,p,"基礎攻撃力が"+Math.round(next*100)+"%上昇",t);ui();
+        const stat=PASSIVE_STATS.includes(q.stat)?q.stat:"tech";
+        const stateKey=stat+"Bonus";
+        const next=Math.min(
+          q.max||.20,
+          Math.round(((s[stateKey]||0)+(q.step||.04))*100)/100
+        );
+        if(next>(s[stateKey]||0)){
+          s[stateKey]=next;
+          baseBonus(f,stat,next);
+          s.badge=(q.badge||"成長")+"+"+Math.round(next*100)+"%";
+          log(
+            f,
+            p,
+            "基礎"+({atk:"攻撃",def:"防御",spd:"速度",tech:"技術",grw:"成長"}[stat]||"能力")+
+              "が"+Math.round(next*100)+"%上昇",
+            t
+          );
+          ui();
         }
       }
-    }else if(p.id==="mufg_capital"){
+    }else if(kind==="actionPulse"){
+      if(ctx.phase!=="afterAction"||s.pulseActionToken===t)return ctx;
+      s.pulseActionToken=t;
+      s.pulseActions=(s.pulseActions||0)+1;
+      if(s.pulseActions%(q.interval||4)!==0)return ctx;
+
+      const effects=[];
+      const maxHp=Math.max(
+        1,
+        Number(f.maxHp)||
+        Number(f.base&&f.base.hp)||
+        Number(f.co&&f.co.st&&f.co.st.hp)||
+        1
+      );
+      const beforeHp=Number(f.hp)||0;
+      if(Number(q.heal)>0){
+        f.hp=Math.min(
+          maxHp,
+          beforeHp+Math.max(1,Math.round(maxHp*Number(q.heal)))
+        );
+        if(f.hp>beforeHp)effects.push("HP+"+(f.hp-beforeHp));
+      }
+
+      if(Number(q.gauge)>0){
+        const beforeGauge=Number(f.gauge)||0;
+        if(typeof gainBattleGauge==="function"){
+          gainBattleGauge(f,Number(q.gauge));
+        }else{
+          f.gauge=Math.max(
+            0,
+            Math.min(100,beforeGauge+Number(q.gauge))
+          );
+        }
+        const gained=Math.max(0,Math.round((Number(f.gauge)||0)-beforeGauge));
+        if(gained>0)effects.push("SP+"+gained);
+      }
+
+      if(Number(q.atb)>0){
+        const beforeAtb=Number(f.atb)||0;
+        f.atb=Math.max(0,Math.min(100,beforeAtb+Number(q.atb)));
+        const gained=Math.max(0,Math.round((Number(f.atb)||0)-beforeAtb));
+        if(gained>0)effects.push("ATB+"+gained);
+      }
+
+      s.pulses=(s.pulses||0)+1;
+      s.badge=(q.badge||"循環")+" "+s.pulses;
+      log(f,p,effects.length?effects.join(" / "):"運用サイクルが発動",t);
+      ui();
+    }else if(kind==="guardRecovery"){
       if(s.guardToken===t)return ctx;
       s.guardToken=t;
-      const max=Math.max(1,Number(f.maxHp)||Number(f.base&&f.base.hp)||Number(f.co.st&&f.co.st.hp)||1),before=Number(f.hp)||0;
-      f.hp=Math.min(max,before+Math.max(1,Math.round(max*(q.heal||.03))));
-      if(f.hp>before)log(f,p,"HPを"+(f.hp-before)+"回復",t);
-    }else if(p.id==="keyence_direct"){
-      if(ctx.action&&ctx.action.type==="mid"&&f.__cqPassiveLastAction==="attack"&&Number.isFinite(Number(ctx.value))){
-        const before=Number(ctx.value);ctx.value=Math.max(0,Math.ceil(before*(q.rate||.5)));
-        log(f,p,"中技SP "+before+"→"+ctx.value,t);
+
+      const effects=[];
+      const maxHp=Math.max(
+        1,
+        Number(f.maxHp)||
+        Number(f.base&&f.base.hp)||
+        Number(f.co&&f.co.st&&f.co.st.hp)||
+        1
+      );
+      const beforeHp=Number(f.hp)||0;
+      if(Number(q.heal)>0){
+        f.hp=Math.min(
+          maxHp,
+          beforeHp+Math.max(1,Math.round(maxHp*Number(q.heal)))
+        );
+        if(f.hp>beforeHp)effects.push("HPを"+(f.hp-beforeHp)+"回復");
       }
-    }else if(p.id==="nipponsteel_learning"){
+
+      if(Number(q.gauge)>0){
+        const beforeGauge=Number(f.gauge)||0;
+        if(typeof gainBattleGauge==="function"){
+          gainBattleGauge(f,Number(q.gauge));
+        }else{
+          f.gauge=Math.max(
+            0,
+            Math.min(100,beforeGauge+Number(q.gauge))
+          );
+        }
+        const gained=Math.max(0,Math.round((Number(f.gauge)||0)-beforeGauge));
+        if(gained>0)effects.push("SP+"+gained);
+      }
+
+      if(effects.length)log(f,p,effects.join(" / "),t);
+    }else if(kind==="moveDiscount"){
+      const action=ctx.action||{};
+      const trigger=String(q.triggerAction||"attack");
+      const target=String(q.targetAction||"mid");
+      const matchesTarget=
+        action.type===target||
+        target==="big"&&action.type==="skill";
+      if(
+        matchesTarget&&
+        f.__cqPassiveLastAction===trigger&&
+        Number.isFinite(Number(ctx.value))
+      ){
+        const before=Number(ctx.value);
+        ctx.value=Math.max(
+          0,
+          Math.ceil(before*Number(q.rate||.72))
+        );
+        log(
+          f,
+          p,
+          String(action.type||target)+" SP "+before+"→"+ctx.value,
+          t
+        );
+      }
+    }else if(kind==="damageStack"){
       if(Number(ctx.damage)>0){
-        const next=Math.min(q.max||.20,Math.round(((s.defBonus||0)+(q.step||.04))*100)/100);
-        if(next>(s.defBonus||0)){
-          s.defBonus=next;baseBonus(f,"def",next);s.badge=(q.badge||"知見")+"+"+Math.round(next*100)+"%";
-          log(f,p,"基礎防御力が"+Math.round(next*100)+"%上昇",t);ui();
+        const stat=PASSIVE_STATS.includes(q.stat)?q.stat:"def";
+        const stateKey=stat+"Bonus";
+        const next=Math.min(
+          q.max||.18,
+          Math.round(((s[stateKey]||0)+(q.step||.03))*100)/100
+        );
+        if(next>(s[stateKey]||0)){
+          s[stateKey]=next;
+          baseBonus(f,stat,next);
+          s.badge=(q.badge||"蓄積")+"+"+Math.round(next*100)+"%";
+          log(
+            f,
+            p,
+            "基礎"+({atk:"攻撃",def:"防御",spd:"速度",tech:"技術",grw:"成長"}[stat]||"能力")+
+              "が"+Math.round(next*100)+"%上昇",
+            t
+          );
+          ui();
         }
       }
-    }else if(p.id==="softbankg_vision"){
-      const a=ctx.action||{},m=ctx.move;
-      if(ctx.phase==="beforeMove"&&(a.type==="big"||a.type==="skill"&&m===f.co.big)){
-        f.__cqPassiveBigMult=Math.round(((q.min||.6)+Math.random()*((q.max||2.4)-(q.min||.6)))*100)/100;
-        log(f,p,"大技倍率 x"+f.__cqPassiveBigMult.toFixed(2),t);
+    }else if(kind==="bigVariance"){
+      const action=ctx.action||{};
+      const move=ctx.move;
+      if(
+        ctx.phase==="beforeMove"&&
+        (
+          action.type==="big"||
+          action.type==="skill"&&move===f.co.big
+        )
+      ){
+        const minimum=Number(q.min)||.78;
+        const maximum=Math.max(minimum,Number(q.max)||1.72);
+        f.__cqPassiveBigMult=Math.round(
+          (minimum+Math.random()*(maximum-minimum))*100
+        )/100;
+        log(
+          f,
+          p,
+          "大技倍率 x"+f.__cqPassiveBigMult.toFixed(2),
+          t
+        );
       }
     }
+
     return ctx;
   }
   window.applyCompanyPassive=applyCompanyPassive;
@@ -27119,8 +27478,17 @@ function configureTitleHelp(){
     queueBattleNarration.__cqPassiveV1=true;
   }
 
-  style();renderPassiveBadges();
-  window.CQ_COMPANY_PASSIVES={definitions:DEF,bind,apply:applyCompanyPassive,state};
+  style();
+  renderPassiveBadges();
+  window.CQ_COMPANY_PASSIVES={
+    definitions:DEF,
+    supportedKinds:Array.from(PASSIVE_KINDS),
+    bind,
+    normalize:normalizeCompanyPassive,
+    auto:autoCompanyPassive,
+    apply:applyCompanyPassive,
+    state
+  };
 })();
 
 initSelectScreenEnhancement();
