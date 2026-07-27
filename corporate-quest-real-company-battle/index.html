@@ -1466,6 +1466,7 @@ input,select{font-family:inherit;font-size:16px}
             <label class="forge-check"><input type="checkbox" id="forgeIncludeStats" checked>円換算財務から能力値を算出</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeMoves" checked>中技・大技</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeNarration" checked>技固有ナレーション</label>
+            <label class="forge-check"><input type="checkbox" id="forgeIncludeFx" checked>技ごとの独自3D演出</label>
             <label class="forge-check"><input type="checkbox" id="forgeIncludeClassify" checked>属性・召喚タイプ</label>
           </div>
         </div>
@@ -2133,6 +2134,66 @@ function normalizeEffect(effect){
   if(out.vsAttrMult!==undefined)out.vsAttrMult=Math.max(.1,Math.min(3,out.vsAttrMult));
   return out;
 }
+/* ================================================================
+   2.05 技ごとの独自3D演出 (AIフォージ fx スキーマ)
+   - AI生成データはコードではなく宣言的レイヤー定義だけを受け入れる。
+   - fx.layersが1件以上ある技だけ独自演出。無い技は従来のmotion共通演出。
+   - 数値は全てクランプし、層数・mesh数・粒子数の上限を仕様として固定する。
+================================================================ */
+const MOVE_FX_LAYER_TYPES=new Set([
+  "projectile","emoji","beam","ring","shockwave","pillar","orb","spark","arc","text"
+]);
+const MOVE_FX_ANCHORS=new Set(["self","foe","between","sky","ground"]);
+const MOVE_FX_LAYER_LIMIT=6;
+function normalizeMoveFxLayer(raw){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))return null;
+  const type=String(raw.type||"");
+  if(!MOVE_FX_LAYER_TYPES.has(type))return null;
+  const spark=type==="spark";
+  const layer={
+    type,
+    color:normalizeBrand(raw.color),
+    count:clamp(raw.count,1,spark?120:14,spark?48:6),
+    size:Math.max(.08,Math.min(6,finiteNumber(raw.size,.6))),
+    radius:Math.max(.2,Math.min(7,finiteNumber(raw.radius,1.4))),
+    spread:Math.max(0,Math.min(6,finiteNumber(raw.spread,1.2))),
+    height:Math.max(-2,Math.min(9,finiteNumber(raw.height,1.1))),
+    delay:clamp(raw.delay,0,1600,0),
+    duration:clamp(raw.duration,200,2600,900),
+    spin:Math.max(0,Math.min(12,finiteNumber(raw.spin,1.2))),
+    from:MOVE_FX_ANCHORS.has(raw.from)?raw.from:"self",
+    to:MOVE_FX_ANCHORS.has(raw.to)?raw.to:"foe",
+    text:cleanText(raw.text,12,"")
+  };
+  if(type==="emoji"&&!layer.text)layer.text="✨";
+  if(type==="text"&&!layer.text)layer.text="IMPACT";
+  return layer;
+}
+function normalizeMoveFx(raw){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))return null;
+  const layers=(Array.isArray(raw.layers)?raw.layers:[])
+    .map(normalizeMoveFxLayer)
+    .filter(Boolean)
+    .slice(0,MOVE_FX_LAYER_LIMIT);
+  if(!layers.length)return null;
+  return {
+    label:cleanText(raw.label,24,""),
+    flash:normalizeBrand(raw.flash),
+    shake:Math.max(0,Math.min(2.4,finiteNumber(raw.shake,1))),
+    impact:clamp(raw.impact,0,3,2),
+    duration:clamp(raw.duration,400,2800,1400),
+    layers
+  };
+}
+function moveHasCustomFx(move){
+  return !!(move&&move.fx&&Array.isArray(move.fx.layers)&&move.fx.layers.length);
+}
+function countCustomMoveFx(company){
+  if(!company)return 0;
+  return [company.mid,company.big]
+    .concat(Array.isArray(company.supportSkills)?company.supportSkills:[])
+    .filter(moveHasCustomFx).length;
+}
 function normalizeMoveRecord(move,fallback){
   const base=fallback&&typeof fallback==="object"?fallback:{};
   const src=move&&typeof move==="object"?move:{};
@@ -2150,6 +2211,7 @@ function normalizeMoveRecord(move,fallback){
     effects,
     cost:clamp(src.cost!==undefined?src.cost:base.cost,0,100,0),
     power:clamp(src.power!==undefined?src.power:base.power,0,3,0),
+    fx:normalizeMoveFx(src.fx||base.fx),
     narration:normalizeNarration(src.narration||base.narration)
   };
 }
@@ -2818,6 +2880,7 @@ function normalizeSupportSkill(raw,index,co){
     cooldown:clamp(source.cooldown,4,6,fallback[4]),
     cost:0,power:1,
     effects:effects.length?effects:fallbackEffects,
+    fx:normalizeMoveFx(source.fx),
     narration
   };
 }
@@ -4587,7 +4650,8 @@ function buildForgePrompt(){
   const includeStats=forgeChecked("forgeIncludeStats");
   const includeFinance=forgeChecked("forgeIncludeFinance")||includeStats;
   const includeNarration=forgeChecked("forgeIncludeNarration");
-  const includeMoves=forgeChecked("forgeIncludeMoves")||includeNarration;
+  const includeFx=forgeChecked("forgeIncludeFx");
+  const includeMoves=forgeChecked("forgeIncludeMoves")||includeNarration||includeFx;
   const includeClassify=forgeChecked("forgeIncludeClassify");
   const existingCompanies=allCompanies().map(co=>({
     name:cleanText(co.name,30,""),
@@ -4683,6 +4747,45 @@ function buildForgePrompt(){
         text:"大技の意味が伝わり、会社員にも刺さる固有ナレーション"
       };
     }
+    if(includeFx){
+      sample.mid.fx={
+        label:"中技の演出名",
+        flash:"#4dc3ff",
+        shake:.9,
+        impact:2,
+        duration:1300,
+        layers:[
+          {type:"projectile",color:"#4dc3ff",count:6,size:.6,spread:1.2,height:1.1,duration:900,from:"self",to:"foe"},
+          {type:"ring",color:"#ffffff",count:3,radius:1.3,spread:1.1,height:.4,delay:320,duration:820,to:"foe"}
+        ]
+      };
+      sample.big.fx={
+        label:"大技の演出名",
+        flash:"#ffb84a",
+        shake:1.7,
+        impact:3,
+        duration:2000,
+        layers:[
+          {type:"emoji",text:"🏭",color:"#ffb84a",count:8,size:.9,spread:2.2,height:1.5,duration:1150,from:"self",to:"foe"},
+          {type:"beam",color:"#ffffff",size:.5,height:1.4,duration:1050,from:"self",to:"foe"},
+          {type:"pillar",color:"#ffb84a",count:3,size:.8,radius:2.4,spread:1.6,height:2.2,delay:620,duration:900,to:"foe"},
+          {type:"spark",color:"#fff2c4",count:70,spread:4.2,height:1.2,delay:900,duration:1150,to:"foe"}
+        ]
+      };
+      sample.supportSkills.forEach((skill,index)=>{
+        skill.fx={
+          label:index===0?"回復支援の演出名":"状態制御支援の演出名",
+          flash:index===0?"#5cff9b":"#4dc3ff",
+          shake:.6,
+          impact:1,
+          duration:1050,
+          layers:[
+            {type:"ring",color:index===0?"#5cff9b":"#4dc3ff",count:3,radius:1.1,spread:.9,height:.5,duration:820,to:index===0?"self":"foe"},
+            {type:"spark",color:"#ffffff",count:34,spread:2.4,height:1,delay:260,duration:820,to:index===0?"self":"foe"}
+          ]
+        };
+      });
+    }
   }
 
   const requested=[
@@ -4692,6 +4795,7 @@ function buildForgePrompt(){
     includeStats?"円換算後の財務から能力値6項目をアプリ側で算出（statusMode=finance、stは出力しない）":"能力値は省略し、アプリ側の自動補完を利用",
     includeMoves?"中技・大技（mid / big）":"中技・大技は省略し、アプリ側の標準技を利用",
     includeNarration?"各技の固有ナレーション":"技固有ナレーションは省略",
+    includeFx?"各技の独自3D演出（fx）。中技・大技・支援戦術それぞれに設定":"独自演出（fx）は省略し、共通モーション演出を利用",
     includeClassify?"属性・召喚タイプ（attr / summon）":"属性・召喚タイプは省略し、アプリ側の自動補完を利用"
   ];
 
@@ -4752,7 +4856,17 @@ function buildForgePrompt(){
     "- summonの許容値: "+COMPANY_SUMMONS.join(" / ")+"。円換算後の資本金3億円超の大企業はpolitician、3億円以下はjftcを基本にしてください。",
     "- stを直接指定する場合の範囲: hp=200〜1200、atk/def/spd/tech/grw=20〜150。statusMode=financeではstを出力しないでください。",
     "- 中技はcost=40・power=2、大技はcost=100・power=3を基本とし、effectsは各技1〜4個にしてください。",
-    "- motionは「パターン_色」。パターン="+MOTION_PATTERNS.join("|")+"、色="+Object.keys(MOTION_PALETTES).join("|")+"。",
+    "- motionは「パターン_色」。パターン="+MOTION_PATTERNS.join("|")+"、色="+Object.keys(MOTION_PALETTES).join("|")+"。fxを付けない技はこのmotionで描画されます。",
+    includeFx
+      ?"- fxは技ごとの独自3D演出データです。fx.layersが1件以上ある技だけ独自演出になり、fxが無い技はmotionの共通演出になります。\n"+
+       "- fx構造: label / flash / shake / impact / duration / layers。layersは最大6件です。\n"+
+       "- layer.typeの許容値: projectile / emoji / beam / ring / shockwave / pillar / orb / spark / arc / text。\n"+
+       "- layerの数値範囲: count 1〜14（sparkのみ1〜120）、size 0.1〜6、radius 0.2〜7、spread 0〜6、height -2〜9、delay 0〜1600、duration 200〜2600、spin 0〜12。\n"+
+       "- layer.colorは#rrggbb、fromとtoは self / foe / between / sky / ground、textはtypeがemojiまたはtextのときだけ12文字以内で指定します。\n"+
+       "- fx.flashは#rrggbb、fx.shakeは0〜2.4、fx.impactは0〜3、fx.durationは400〜2800にしてください。\n"+
+       "- 中技は2〜3層、大技は3〜6層、支援戦術は1〜2層を目安に、企業の事業内容が視覚的に伝わる構成にしてください。\n"+
+       "- fxはデータだけです。JavaScript、関数、式、URL、HTMLを絶対に書かないでください。"
+      :"- fxは出力しないでください。各技はmotionの共通演出で描画されます。",
     "- narration.toneの許容値: "+Array.from(COMPANY_TONES).join(" / "),
     "- 通常技effect.kindの許容値: "+Array.from(COMPANY_EFFECT_KINDS).join(" / "),
     "- supportSkills専用effect.kind: heal / regen / poison / stun / atbDrain / atbBoost / gauge / cleanse / buff / guard。",
@@ -5571,7 +5685,7 @@ function analyzeForgeImportPayload(input){
   const builtInNames=new Set(COMPANIES.map(co=>co.name));
   const customNames=new Set(customCompanies.map(co=>co.name));
   const payloadNames=new Set();
-  const analysis={total:rows.length,add:0,replace:0,skip:0,errors:[],names:[]};
+  const analysis={total:rows.length,add:0,replace:0,skip:0,fx:0,errors:[],names:[]};
 
   rows.forEach((row,index)=>{
     try{
@@ -5589,7 +5703,8 @@ function analyzeForgeImportPayload(input){
         return;
       }
 
-      prepareCustomCompanyInput(row);
+      const prepared=prepareCustomCompanyInput(row);
+      if(countCustomMoveFx(prepared)>0)analysis.fx++;
       if(customNames.has(name)){
         if(duplicateMode==="replace"){
           analysis.replace++;
@@ -5615,6 +5730,12 @@ function renderForgeImportAnalysis(analysis){
   const summary=document.createElement("b");
   summary.textContent="検出 "+analysis.total+"社 / 新規 "+analysis.add+"社 / 上書き "+analysis.replace+"社 / スキップ "+analysis.skip+"社";
   preview.appendChild(summary);
+
+  if(Number(analysis.fx)>0){
+    const fxLine=document.createElement("div");
+    fxLine.textContent="独自演出あり: "+Number(analysis.fx)+"社（fx未指定の技は共通演出で描画）";
+    preview.appendChild(fxLine);
+  }
 
   if(analysis.names.length){
     const names=document.createElement("div");
@@ -5811,8 +5932,16 @@ function initForgeUI(){
     if(e.currentTarget.checked)$("forgeIncludeMoves").checked=true;
   });
   $("forgeIncludeMoves").addEventListener("change",e=>{
-    if(!e.currentTarget.checked)$("forgeIncludeNarration").checked=false;
+    if(!e.currentTarget.checked){
+      $("forgeIncludeNarration").checked=false;
+      if($("forgeIncludeFx"))$("forgeIncludeFx").checked=false;
+    }
   });
+  if($("forgeIncludeFx")){
+    $("forgeIncludeFx").addEventListener("change",e=>{
+      if(e.currentTarget.checked)$("forgeIncludeMoves").checked=true;
+    });
+  }
   $("forgeIncludeStats").addEventListener("change",e=>{
     if(e.currentTarget.checked)$("forgeIncludeFinance").checked=true;
   });
@@ -6904,6 +7033,8 @@ const CTX={
 function playMoveVisual(self,foe,move){
   if(!move)return;
   const motionPower=move.power||(move.cost>=100?3:2);
+  /* AIフォージのfxを持つ技は独自演出を最優先。fxが無い技は共通演出へ退避 */
+  if(playCustomMoveFx(self,foe,move))return;
   /* デフォルト企業の大技は固有演出へ分岐。未登録(カスタム企業)や3D不可時は従来パターンへ退避 */
   if(!(self.co&&self.co.big===move&&playUniqueBig(self.co,self,foe))){
     playMotion(move.motion,self,foe,motionPower);
@@ -11494,6 +11625,186 @@ function playUniqueBig(co,att,dfd){
   try{fx(ap,dp,att,dfd);}catch(err){console.error("[UniqueBigFx] "+co.id,err);return false;}
   camShake(.6);
   setTimer(()=>motionImpact(dp,ATTR_INFO[co.attr]?ATTR_INFO[co.attr].hex:0x4dc3ff,3),1500);
+  return true;
+}
+/* ================================================================
+   11.55 AIフォージ独自演出レンダラ
+   - move.fx(宣言的レイヤー定義)を既存プリミティブの合成へ変換する。
+   - AI生成データを一切evalせず、全数値を再クランプして描画する。
+================================================================ */
+function moveFxHex(color,fallback){
+  const value=Number.parseInt(String(color||"").replace("#",""),16);
+  return Number.isFinite(value)?value:(fallback===undefined?0x4dc3ff:fallback);
+}
+function moveFxAnchorPoint(kind,ap,dp){
+  if(kind==="self")return ap.clone();
+  if(kind==="between")return ap.clone().lerp(dp,.5);
+  if(kind==="sky")return dp.clone().add(V3(0,6.2,0));
+  if(kind==="ground")return V3(dp.x,.06,dp.z);
+  return dp.clone();
+}
+function playMoveFxLayer(layer,ap,dp){
+  if(!layer||!GL.active||!GL.scene||!window.THREE)return;
+  const T=THREE;
+  const num=(value,min,max,def)=>{
+    const parsed=Number(value);
+    return Math.max(min,Math.min(max,Number.isFinite(parsed)?parsed:def));
+  };
+  const type=MOVE_FX_LAYER_TYPES.has(layer.type)?layer.type:"projectile";
+  const color=moveFxHex(layer.color);
+  const count=Math.round(num(layer.count,1,type==="spark"?120:14,6));
+  const size=num(layer.size,.08,6,.6);
+  const radius=num(layer.radius,.2,7,1.4);
+  const spread=num(layer.spread,0,6,1.2);
+  const height=num(layer.height,-2,9,1.1);
+  const life=Math.round(num(layer.duration,200,2600,900));
+  const spin=num(layer.spin,0,12,1.2);
+  const from=moveFxAnchorPoint(layer.from,ap,dp).add(V3(0,height,0));
+  const to=moveFxAnchorPoint(layer.to,ap,dp);
+  const impactPoint=to.clone().add(V3(0,Math.max(.3,height*.6),0));
+
+  if(type==="beam"){
+    fxBeam(from,impactPoint,color,num(size*.45,.06,.9,.2),life);
+    return;
+  }
+  if(type==="spark"){
+    motionParticles(impactPoint,color,count,Math.max(.8,spread+1),life,Math.max(.6,spread*.6+.6));
+    return;
+  }
+  if(type==="arc"){
+    for(let index=0;index<Math.min(count,8);index++){
+      motionArc(
+        from.clone().add(V3((Math.random()-.5)*spread,(Math.random()-.5)*.7,(Math.random()-.5)*spread)),
+        impactPoint.clone().add(V3((Math.random()-.5)*spread*.6,(Math.random()-.5)*.5,(Math.random()-.5)*spread*.6)),
+        color,Math.min(1200,life),.6+index*.14
+      );
+    }
+    return;
+  }
+  if(type==="ring"||type==="shockwave"){
+    for(let index=0;index<Math.min(count,7);index++){
+      const geometry=type==="ring"
+        ?new T.TorusGeometry(radius+index*.28,Math.max(.02,size*.08),8,56)
+        :new T.RingGeometry(Math.max(.05,radius*.22),radius+index*.3,48);
+      const mesh=simpleFx(geometry,color,
+        type==="ring"
+          ?to.clone().add(V3(0,Math.max(.05,height)+index*.16,0))
+          :V3(to.x,.05+index*.02,to.z),
+        Math.max(220,life-index*45),
+        (object,progress)=>{
+          object.rotation.x=Math.PI/2;
+          object.rotation.z=progress*spin*(index%2?-1:1);
+          object.scale.setScalar(.45+progress*(1.4+spread*.5));
+        }
+      );
+      if(mesh&&mesh.material)mesh.material.depthWrite=false;
+    }
+    return;
+  }
+  if(type==="pillar"){
+    const pillars=Math.min(count,6);
+    for(let index=0;index<pillars;index++){
+      const offset=(index-(pillars-1)/2)*Math.max(.4,spread*.6);
+      const mesh=simpleFx(
+        new T.CylinderGeometry(Math.max(.1,size*.45),Math.max(.2,size),Math.max(2.4,radius*3),20,1,true),
+        color,
+        to.clone().add(V3(offset,Math.max(1.6,height+1.8),0)),
+        Math.max(240,life-index*40),
+        (object,progress)=>{object.scale.x=object.scale.z=.32+progress*(1.2+spread*.25);}
+      );
+      if(mesh&&mesh.material){
+        mesh.material.depthWrite=false;
+        mesh.material.blending=T.AdditiveBlending;
+      }
+    }
+    return;
+  }
+  if(type==="orb"){
+    const mesh=simpleFx(
+      new T.IcosahedronGeometry(Math.max(.2,size),1),color,from.clone(),life,
+      (object,progress)=>{
+        object.rotation.x=progress*spin;
+        object.rotation.y=progress*spin*1.4;
+        object.scale.setScalar(.3+progress*(1+spread*.4));
+      }
+    );
+    if(mesh&&mesh.material)mesh.material.wireframe=true;
+    return;
+  }
+  if(type==="text"){
+    const scale=Math.max(1.2,size*3);
+    fxSprite(String(layer.text||"IMPACT").slice(0,12),layer.color,
+      to.clone().add(V3(0,Math.max(1.8,height+1.9),.2)),scale,life,
+      (sprite,progress)=>{sprite.scale.setScalar(scale*(.7+progress*.5));},
+      "900 40px system-ui");
+    return;
+  }
+  if(type==="emoji"){
+    for(let index=0;index<count;index++){
+      const spawn=from.clone().add(V3((Math.random()-.5)*spread*1.4,(index%4)*.3,(Math.random()-.5)*spread*1.2));
+      const land=impactPoint.clone().add(V3((Math.random()-.5)*spread,(Math.random()-.5)*.6,(Math.random()-.5)*spread*.8));
+      fxSprite(String(layer.text||"✨").slice(0,12),null,spawn,Math.max(.4,size*1.5),life,(sprite,progress)=>{
+        const eased=1-Math.pow(1-progress,3);
+        sprite.position.lerpVectors(spawn,land,eased);
+        sprite.position.y+=Math.sin(Math.PI*progress)*(.7+spread*.4);
+        sprite.rotation.z=Math.sin(progress*(1+spin))*.3;
+      });
+    }
+    return;
+  }
+  for(let index=0;index<count;index++){
+    const spawn=from.clone().add(V3((Math.random()-.5)*spread,(index%3)*.26,(Math.random()-.5)*spread));
+    const land=impactPoint.clone().add(V3((Math.random()-.5)*spread*.7,(Math.random()-.5)*.5,(Math.random()-.5)*spread*.7));
+    const mesh=simpleFx(
+      new T.BoxGeometry(Math.max(.08,size*.5),Math.max(.08,size*.5),Math.max(.14,size)),
+      color,spawn.clone(),life,
+      (object,progress)=>{
+        const eased=1-Math.pow(1-progress,3);
+        object.position.lerpVectors(spawn,land,eased);
+        object.position.y+=Math.sin(Math.PI*progress)*(.6+spread*.35);
+        object.rotation.x+=.14;
+        object.rotation.y+=.18;
+        object.rotation.z+=.1;
+      }
+    );
+    if(mesh&&mesh.material)mesh.material.depthWrite=false;
+  }
+}
+function playCustomMoveFx(self,foe,move){
+  if(!moveHasCustomFx(move))return false;
+  if(!GL.active||!GL.scene||!window.THREE)return false;
+  const attacker=fighter3D(self),defender=fighter3D(foe);
+  if(!attacker||!defender)return false;
+  const ap=(attacker.userData.base||attacker.position).clone();
+  const dp=(defender.userData.base||defender.position).clone();
+  const fx=move.fx;
+  const duration=Math.max(400,Math.min(2800,Math.round(Number(fx.duration)||1400)));
+
+  if(fx.label){
+    fxSprite(String(fx.label).slice(0,24),"#eaf6ff",dp.clone().add(V3(0,3.1,.15)),2.1,Math.min(2200,duration),
+      (sprite,progress)=>{
+        sprite.position.y=dp.y+3.1+Math.sin(progress*Math.PI)*.4;
+        sprite.scale.setScalar(2.1*(.68+progress*.4));
+      },"900 34px system-ui");
+  }
+  fx.layers.forEach((layer,index)=>{
+    const delay=Math.max(0,Math.min(1600,Math.round(Number(layer&&layer.delay)||0)))+index*30;
+    const run=()=>{
+      try{playMoveFxLayer(layer,ap,dp);}
+      catch(error){console.error("[CustomMoveFx layer]",error);}
+    };
+    if(delay<=16)run();
+    else setTimer(run,delay);
+  });
+  setTimer(()=>{
+    if(!GL.active)return;
+    try{
+      arenaFlash(fx.flash||"#4dc3ff");
+      camShake(Math.max(0,Math.min(2.4,Number(fx.shake)||1)));
+      const impact=Math.round(Math.max(0,Math.min(3,Number(fx.impact)||0)));
+      if(impact>0)motionImpact(dp.clone(),moveFxHex(fx.flash),Math.max(1,impact));
+    }catch(error){console.error("[CustomMoveFx impact]",error);}
+  },Math.max(140,Math.round(duration*.6)));
   return true;
 }
 /* ================================================================
