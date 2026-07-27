@@ -27852,6 +27852,1343 @@ function configureTitleHelp(){
   };
 })();
 
+/* ================================================================
+   企業別オフェンシブ・コンボ
+   - 中技を攻撃連携の起点へ限定
+   - 支援技、既存effects、専用演出、企業パッシブを変更しない
+================================================================ */
+(function installCompanyOffensiveCombos(){
+  if(window.__CQ_COMPANY_OFFENSIVE_COMBOS_V1__)return;
+  window.__CQ_COMPANY_OFFENSIVE_COMBOS_V1__=true;
+
+  const COMBO_TYPES=["finisher","breach","tempo","pursuit","diversify"];
+  const COMBO_TYPE_SET=new Set(COMBO_TYPES);
+  const COMBO_LABELS={
+    finisher:"FINISHER",
+    breach:"BREACH",
+    tempo:"TEMPO",
+    pursuit:"PURSUIT",
+    diversify:"DIVERSIFY"
+  };
+  const COMBO_NAMES={
+    finisher:"決着準備",
+    breach:"突破連携",
+    tempo:"高速連携",
+    pursuit:"準備狩り",
+    diversify:"多角連携"
+  };
+  const COMBO_DESCRIPTIONS={
+    finisher:"中技で決着準備を蓄積し、大技で解放する",
+    breach:"中技で突破口を作り、通常攻撃か大技で貫く",
+    tempo:"中技から次の通常攻撃へ高速連携する",
+    pursuit:"敵のガード・強化・ヘッジを中技で狙う",
+    diversify:"異なる行動をつなぎ、攻撃倍率を高める"
+  };
+  const COMBO_TRIGGERS={
+    finisher:"中技命中で最大2蓄積。大技で全消費し、1段階につき威力+10%。",
+    breach:"中技命中で敵へ最大2付与。次の通常攻撃か大技命中時に1消費。",
+    tempo:"中技命中後、次の通常攻撃だけ威力+20%、行動後ATBを10残す。",
+    pursuit:"中技命中時、ガード→強化→ヘッジの優先順で1条件だけ攻撃利用。",
+    diversify:"直前と異なる行動系統でCHAIN+1。同系統連続で0へ戻る。"
+  };
+  const COMBO_OVERRIDES={
+    toyota:"finisher",byd:"breach",tesla:"pursuit",volkswagen:"breach",
+    ntt:"diversify",mufg:"pursuit",nipponsteel:"breach",sony:"diversify",
+    softbankg:"finisher",keyence:"tempo",jtb:"tempo",iris:"finisher",
+    google:"pursuit",microsoft:"diversify",gmop:"tempo",gmopepabo:"tempo",uuum:"pursuit",
+    apple:"finisher",amazon:"tempo",foodlife:"tempo",rizap:"pursuit",
+    siemens:"breach",maersk:"diversify",solaseed:"tempo",willer:"diversify",
+    exxonmobil:"finisher",basf:"breach",musashi:"breach",nihonrikagaku:"diversify",
+    jpmorgan:"pursuit",visa:"tempo",finatext:"diversify",robotpayment:"pursuit",
+    openai:"finisher",anthropic:"diversify",blackrock:"pursuit",akagi:"tempo",
+    akaginyugyo:"tempo",kikusui:"breach",kikusuiseisakusho:"breach",smbc:"finisher"
+  };
+  const COMBO_RUNTIME={
+    current:null,
+    sequence:0,
+    badgeRaf:0
+  };
+
+  const comboCompanies=()=>typeof allCompanies==="function"
+    ?allCompanies()
+    :(typeof COMPANIES!=="undefined"&&Array.isArray(COMPANIES)?COMPANIES:[]);
+  const comboClone=value=>value&&typeof value==="object"
+    ?JSON.parse(JSON.stringify(value))
+    :value;
+  const comboClamp=(value,min,max)=>Math.max(min,Math.min(max,Number(value)||0));
+  const comboNormalizeId=value=>String(value||"")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g,"");
+  const comboHash=value=>{
+    let result=2166136261;
+    for(const character of String(value||"")){
+      result^=character.charCodeAt(0);
+      result=Math.imul(result,16777619);
+    }
+    return result>>>0;
+  };
+  const comboEffectKinds=move=>Array.isArray(move&&move.effects)
+    ?move.effects.filter(Boolean).map(effect=>String(effect.kind||""))
+    :[];
+  const comboHasKind=(move,kinds)=>comboEffectKinds(move).some(kind=>kinds.includes(kind));
+  const comboHasPositiveBuff=fighter=>Array.isArray(fighter&&fighter.buffs)&&fighter.buffs.some(buff=>{
+    if(!buff||Number(buff.turns)<=0)return false;
+    const mult=Number(buff.mult);
+    return Number.isFinite(mult)?mult>1:buff.target!=="foe";
+  });
+  const comboHasDamageReduction=fighter=>!!(
+    fighter&&(
+      fighter.guarding||
+      fighter.preciseGuard||
+      Array.isArray(fighter.buffs)&&fighter.buffs.some(buff=>buff&&(
+        buff.stat==="def"&&Number(buff.mult)>1||
+        buff.effectId==="guard"||
+        buff.effectId==="barrier"||
+        buff.effectId==="shield"
+      ))
+    )
+  );
+
+  function inferComboType(company){
+    if(!company)return "diversify";
+    const override=COMBO_OVERRIDES[comboNormalizeId(company.id)];
+    if(override)return override;
+
+    const industry=String(company.ind||"").toLowerCase();
+    const attr=String(company.attr||"");
+    const stats=company.st||{};
+    const midKinds=comboEffectKinds(company.mid);
+    const bigKinds=comboEffectKinds(company.big);
+    const passive=company.passive||{};
+    const scores={finisher:0,breach:0,tempo:0,pursuit:0,diversify:0};
+
+    if(/素材|鉄鋼|化学|重工|機械|装置|精密|製造|航空|宇宙|エネルギー/.test(industry)){
+      scores.finisher+=2;
+      scores.breach+=3;
+    }
+    if(/小売|消費|物流|運輸|旅行|外食|サービス|直販|決済/.test(industry))scores.tempo+=4;
+    if(/it|ai|ソフト|コンサル|金融|調査|メディア|広告|データ/.test(industry))scores.pursuit+=3;
+    if(/総合|商社|プラットフォーム|複合|持株|グループ/.test(industry))scores.diversify+=4;
+
+    if(attr==="素材")scores.breach+=3;
+    if(attr==="インフラ")scores.finisher+=2;
+    if(attr==="消費")scores.tempo+=3;
+    if(attr==="金融")scores.pursuit+=2;
+    if(attr==="IT")scores.diversify+=2;
+
+    if(midKinds.includes("multi")||Number(stats.spd)>=105)scores.tempo+=2;
+    if(midKinds.includes("drainGauge")||midKinds.includes("atbDrain")||midKinds.includes("dispel"))scores.pursuit+=3;
+    if(midKinds.includes("damage")&&bigKinds.includes("damage")&&Number(stats.atk)>=105)scores.finisher+=2;
+    if(Number(stats.def)>=105||Number(stats.tech)>=110)scores.breach+=2;
+    if(passive.kind==="bigVariance")scores.finisher-=2;
+    if(passive.kind==="moveDiscount")scores.tempo-=2;
+    if(passive.kind==="actionStack"||passive.kind==="actionPulse")scores.diversify-=1;
+
+    if(Math.max(...Object.values(scores))<=0)return "diversify";
+    const seed=comboHash(String(company.id||company.name||"company"));
+    return COMBO_TYPES.slice().sort((a,b)=>
+      scores[b]-scores[a]||
+      ((seed+COMBO_TYPES.indexOf(a)*17)%97)-((seed+COMBO_TYPES.indexOf(b)*17)%97)
+    )[0]||"diversify";
+  }
+
+  function normalizeComboData(source,company){
+    const raw=source&&typeof source==="object"?source:{};
+    const requested=String(raw.comboType||company&&company.comboType||"");
+    const type=COMBO_TYPE_SET.has(requested)
+      ?requested
+      :inferComboType(company||raw);
+    return {
+      comboType:COMBO_TYPE_SET.has(type)?type:"diversify",
+      comboDesc:String(
+        raw.comboDesc||
+        company&&company.comboDesc||
+        COMBO_DESCRIPTIONS[COMBO_TYPE_SET.has(type)?type:"diversify"]
+      ).replace(/\s+/g," ").trim().slice(0,100)
+    };
+  }
+
+  function bindCompanyCombos(){
+    const list=comboCompanies().filter(Boolean);
+    const defaultSet=new Set(
+      typeof COMPANIES!=="undefined"&&Array.isArray(COMPANIES)
+        ?COMPANIES
+        :list
+    );
+    const counts=Object.fromEntries(COMBO_TYPES.map(type=>[type,0]));
+    const pendingDefaults=[];
+    const pendingCustom=[];
+
+    list.forEach(company=>{
+      const current=String(company.comboType||"");
+      if(COMBO_TYPE_SET.has(current)){
+        company.comboDesc=String(company.comboDesc||COMBO_DESCRIPTIONS[current]).slice(0,100);
+        if(defaultSet.has(company))counts[current]++;
+      }else if(defaultSet.has(company)){
+        pendingDefaults.push(company);
+      }else{
+        pendingCustom.push(company);
+      }
+    });
+
+    pendingDefaults.slice().forEach(company=>{
+      const override=COMBO_OVERRIDES[comboNormalizeId(company.id)];
+      if(!override)return;
+      company.comboType=override;
+      company.comboDesc=COMBO_DESCRIPTIONS[override];
+      counts[override]++;
+      pendingDefaults.splice(pendingDefaults.indexOf(company),1);
+    });
+
+    pendingDefaults.sort((a,b)=>String(a.id||a.name).localeCompare(String(b.id||b.name),"ja"));
+    pendingDefaults.forEach(company=>{
+      const preferred=inferComboType(company);
+      const minimum=Math.min(...COMBO_TYPES.map(type=>counts[type]));
+      const candidates=COMBO_TYPES.filter(type=>counts[type]<=minimum+1);
+      const type=candidates.includes(preferred)
+        ?preferred
+        :candidates.slice().sort((a,b)=>{
+          const preferredDistance=Math.abs(COMBO_TYPES.indexOf(a)-COMBO_TYPES.indexOf(preferred))-
+            Math.abs(COMBO_TYPES.indexOf(b)-COMBO_TYPES.indexOf(preferred));
+          return preferredDistance||counts[a]-counts[b];
+        })[0]||preferred||"diversify";
+      company.comboType=type;
+      company.comboDesc=COMBO_DESCRIPTIONS[type];
+      counts[type]++;
+    });
+
+    pendingCustom.forEach(company=>{
+      const normalized=normalizeComboData(company,company);
+      company.comboType=normalized.comboType;
+      company.comboDesc=normalized.comboDesc;
+    });
+
+    list.forEach(company=>{
+      const normalized=normalizeComboData(company,company);
+      company.comboType=normalized.comboType;
+      company.comboDesc=normalized.comboDesc;
+    });
+    return list;
+  }
+
+  function comboTypeOf(fighterOrCompany){
+    const company=fighterOrCompany&&fighterOrCompany.co
+      ?fighterOrCompany.co
+      :fighterOrCompany;
+    if(!company)return "diversify";
+    if(!COMBO_TYPE_SET.has(company.comboType)){
+      const normalized=normalizeComboData(company,company);
+      company.comboType=normalized.comboType;
+      company.comboDesc=normalized.comboDesc;
+    }
+    return company.comboType;
+  }
+
+  function newComboState(type){
+    if(type==="finisher")return {finisherStack:0};
+    if(type==="breach")return {breach:0};
+    if(type==="tempo")return {tempoReady:false};
+    if(type==="diversify")return {chain:0,lastActionFamily:""};
+    return {};
+  }
+
+  function initComboState(fighter,force){
+    if(!fighter)return null;
+    const type=comboTypeOf(fighter);
+    if(
+      force||
+      !fighter.comboState||
+      typeof fighter.comboState!=="object"||
+      fighter.__cqComboStateType!==type
+    ){
+      fighter.comboState=newComboState(type);
+      fighter.__cqComboStateType=type;
+    }
+    return fighter.comboState;
+  }
+
+  function comboStateSnapshot(fighter){
+    const type=comboTypeOf(fighter);
+    const state=fighter&&fighter.comboState&&typeof fighter.comboState==="object"
+      ?fighter.comboState
+      :newComboState(type);
+    return comboClone(state)||{};
+  }
+
+  function comboIsMainBig(action){
+    return !!(action&&(action.type==="big"||action.type==="skill"));
+  }
+
+  function comboActionFamily(action){
+    const type=String(action&&action.type||"");
+    if(type==="attack")return "attack";
+    if(type==="guard")return "guard";
+    if(type==="mid")return "mid";
+    if(type==="big"||type==="skill"||type==="secret")return "big";
+    if(type==="support"||type==="strategy"||type==="summon"||type==="bunshunLeak")return "utility";
+    return "utility";
+  }
+
+  function comboMoveFor(fighter,action){
+    if(!fighter||!fighter.co||!action)return null;
+    if(action.type==="mid")return fighter.co.mid||null;
+    if(action.type==="big"||action.type==="skill")return fighter.co.big||fighter.co.skill||null;
+    if(action.type==="secret"&&typeof secret==="function"){
+      try{return secret(fighter.co);}catch(_){return fighter.co.secret||null;}
+    }
+    return null;
+  }
+
+  function comboEffectiveCost(fighter,action){
+    const move=comboMoveFor(fighter,action);
+    let cost=Number(move&&move.cost);
+    if(!Number.isFinite(cost)){
+      if(action&&action.type==="summon")cost=60;
+      else if(action&&action.type==="secret")cost=70;
+      else cost=0;
+    }
+    const passive=fighter&&fighter.co&&fighter.co.passive;
+    if(passive&&passive.kind==="moveDiscount"){
+      const params=passive.params||{};
+      const target=String(params.targetAction||"mid");
+      const matches=action&&(
+        action.type===target||
+        target==="big"&&action.type==="skill"
+      );
+      if(matches&&fighter.__cqPassiveLastAction===String(params.triggerAction||"attack")){
+        cost=Math.ceil(cost*comboClamp(params.rate,.45,.85));
+      }
+    }
+    return Math.max(0,cost);
+  }
+
+  function comboStrategyDefinition(id){
+    if(typeof STRATEGIES==="undefined"||!id)return null;
+    if(Array.isArray(STRATEGIES))return STRATEGIES.find(item=>item&&item.id===id)||null;
+    if(STRATEGIES instanceof Map)return STRATEGIES.get(id)||null;
+    if(typeof STRATEGIES==="object")return STRATEGIES[id]||null;
+    return null;
+  }
+
+  function comboCanExecute(fighter,action){
+    if(!fighter||!action||fighter.hp<=0)return false;
+    try{if(typeof isStunned==="function"&&isStunned(fighter))return false;}catch(_){}
+    if(Number(fighter.stun)>0)return false;
+    const type=String(action.type||"");
+    if(type==="attack"||type==="guard")return true;
+    if(type==="mid"||type==="big"||type==="skill"||type==="secret"){
+      if(type==="secret"&&(fighter.secretUsed||S&&S.settings&&S.settings.growthEnabled===false))return false;
+      return Number(fighter.gauge)>=comboEffectiveCost(fighter,action);
+    }
+    if(type==="summon")return !fighter.summonUsed&&!fighter.summon&&Number(fighter.gauge)>=60;
+    if(type==="support"){
+      const index=Math.max(0,Math.min(1,Number(action.extra)||0));
+      const move=typeof companySupportSkills==="function"
+        ?companySupportSkills(fighter.co)[index]
+        :null;
+      return !!(move&&!(fighter.cds&&Number(fighter.cds["support_"+index])>0));
+    }
+    if(type==="strategy"){
+      const strategy=comboStrategyDefinition(action.extra);
+      return !!(strategy&&!(fighter.cds&&Number(fighter.cds[strategy.id])>0));
+    }
+    if(type==="bunshunLeak")return !(fighter.cds&&Number(fighter.cds.bunshunLeak)>0);
+    return true;
+  }
+
+  function comboOffensiveStateSignature(fighter){
+    if(!fighter)return "";
+    const buffs=Array.isArray(fighter.buffs)?fighter.buffs.filter(buff=>buff&&(
+      Number(buff.mult)<1||
+      buff.target==="foe"||
+      ["protest","poison","stun","mark","breach"].includes(String(buff.effectId||""))
+    )).map(buff=>[
+      buff.stat,buff.mult,buff.turns,buff.effectId,buff.label
+    ].join(":")):[];
+    const periodic=Array.isArray(fighter.periodic)?fighter.periodic.map(item=>[
+      item&&item.kind,item&&item.turns,item&&item.amount,item&&item.mult
+    ].join(":")):[];
+    return JSON.stringify([buffs,periodic,Number(fighter.stun)||0]);
+  }
+
+  function comboActionSnapshot(self,foe,action){
+    const index=action&&action.type==="support"
+      ?Math.max(0,Math.min(1,Number(action.extra)||0))
+      :0;
+    return {
+      selfGauge:Number(self&&self.gauge)||0,
+      selfAtb:Number(self&&self.atb)||0,
+      selfHp:Number(self&&self.hp)||0,
+      selfSummonUsed:!!(self&&self.summonUsed),
+      selfSummon:self&&self.summon,
+      selfSecretUsed:!!(self&&self.secretUsed),
+      supportKey:"support_"+index,
+      supportCd:Number(self&&self.cds&&self.cds["support_"+index]||0),
+      strategyCd:Number(self&&self.cds&&self.cds[action&&action.extra]||0),
+      bunshunCd:Number(self&&self.cds&&self.cds.bunshunLeak||0),
+      foeHp:Number(foe&&foe.hp)||0,
+      foeGauge:Number(foe&&foe.gauge)||0,
+      foeAtb:Number(foe&&foe.atb)||0,
+      foeOffense:comboOffensiveStateSignature(foe)
+    };
+  }
+
+  function comboActionSucceeded(self,action,before,transaction){
+    if(!self||!action||!before)return false;
+    const type=String(action.type||"");
+    if(type==="attack"||type==="guard")return true;
+    if(type==="mid"||type==="big"||type==="skill"||type==="secret"){
+      return Number(self.gauge)<before.selfGauge||transaction.hit;
+    }
+    if(type==="support")return Number(self.cds&&self.cds[before.supportKey]||0)>before.supportCd;
+    if(type==="strategy")return Number(self.cds&&self.cds[action.extra]||0)>before.strategyCd;
+    if(type==="summon")return !!self.summonUsed&&!before.selfSummonUsed||!!self.summon&&!before.selfSummon;
+    if(type==="bunshunLeak")return Number(self.cds&&self.cds.bunshunLeak||0)>before.bunshunCd;
+    return transaction.hit;
+  }
+
+  function pursuitModeFor(foe){
+    if(foe&&foe.guarding)return "guard";
+    if(comboHasPositiveBuff(foe))return "buff";
+    if(Number(foe&&foe.marketHedge)>0)return "hedge";
+    return "none";
+  }
+
+  function finisherExtraFor(company){
+    const attr=String(company&&company.attr||"");
+    if(attr==="素材"||attr==="インフラ")return "pierce";
+    if(attr==="金融")return "drainGauge";
+    if(attr==="IT")return "atbDrain";
+    return "damage";
+  }
+
+  function comboPredictedChain(state,family){
+    const current=Math.max(0,Math.min(3,Number(state&&state.chain)||0));
+    const last=String(state&&state.lastActionFamily||"");
+    if(!last)return Math.min(3,current+1);
+    return last===family?0:Math.min(3,current+1);
+  }
+
+  function buildComboTransaction(self,foe,action,before){
+    const type=comboTypeOf(self);
+    const state=initComboState(self,false);
+    const foeState=initComboState(foe,false);
+    const family=comboActionFamily(action);
+    const transaction={
+      id:"combo:"+(++COMBO_RUNTIME.sequence),
+      self,foe,action,before,type,state,foeState,family,
+      mainBig:comboIsMainBig(action),
+      damage:0,
+      hit:false,
+      logParts:[],
+      damageFactor:1,
+      pierceBonus:0,
+      pursuitMode:"none",
+      predictedChain:Number(state&&state.chain)||0,
+      consumeBreach:false,
+      finisherExtra:"",
+      finisherStacks:0
+    };
+
+    if(type==="finisher"&&transaction.mainBig){
+      const stacks=Math.max(0,Math.min(2,Number(state.finisherStack)||0));
+      transaction.finisherStacks=stacks;
+      transaction.damageFactor*=1+stacks*.10;
+      if(stacks===2){
+        transaction.finisherExtra=finisherExtraFor(self.co);
+        if(transaction.finisherExtra==="pierce")transaction.pierceBonus+=.10;
+        if(transaction.finisherExtra==="damage")transaction.damageFactor*=1.05;
+      }
+    }else if(type==="breach"&&(family==="attack"||transaction.mainBig)){
+      const stacks=Math.max(0,Math.min(2,Number(foeState.breach)||0));
+      if(stacks>0){
+        transaction.pierceBonus+=stacks*.10;
+        transaction.damageFactor*=foe.guarding?1.08:1;
+        transaction.consumeBreach=true;
+      }
+    }else if(type==="tempo"&&family==="attack"&&state.tempoReady){
+      transaction.damageFactor*=1.20;
+    }else if(type==="pursuit"&&family==="mid"){
+      transaction.pursuitMode=pursuitModeFor(foe);
+      if(transaction.pursuitMode==="guard")transaction.pierceBonus+=.18;
+      else if(transaction.pursuitMode==="buff")transaction.damageFactor*=1.15;
+    }else if(type==="diversify"){
+      transaction.predictedChain=comboPredictedChain(state,family);
+      if(family==="mid")transaction.damageFactor*=1+transaction.predictedChain*.05;
+      if(transaction.mainBig){
+        transaction.damageFactor*=1+transaction.predictedChain*.07;
+        if(transaction.predictedChain===3)transaction.pierceBonus+=.10;
+      }
+    }
+
+    transaction.damageFactor=comboClamp(transaction.damageFactor,1,1.25);
+    transaction.pierceBonus=comboClamp(transaction.pierceBonus,0,.20);
+    return transaction;
+  }
+
+  function finalizeComboHit(transaction){
+    const {foe,before}=transaction;
+    transaction.hit=!!(
+      Number(foe&&foe.hp)<before.foeHp||
+      Number(foe&&foe.gauge)<before.foeGauge||
+      Number(foe&&foe.atb)<before.foeAtb||
+      comboOffensiveStateSignature(foe)!==before.foeOffense
+    );
+    return transaction.hit;
+  }
+
+  function addComboLog(transaction,text){
+    if(!text||transaction.logParts.includes(text))return;
+    transaction.logParts.push(text);
+  }
+
+  function applyComboAfterAction(transaction,success){
+    if(!transaction||!success)return;
+    const {self,foe,action,type,state,foeState,family}=transaction;
+    const mid=family==="mid";
+    const big=transaction.mainBig;
+    const attack=family==="attack";
+
+    if(type==="finisher"){
+      if(mid&&transaction.hit){
+        const before=Number(state.finisherStack)||0;
+        state.finisherStack=Math.min(2,before+1);
+        if(state.finisherStack>before)addComboLog(transaction,"FINISHER "+state.finisherStack+"/2");
+      }
+      if(big){
+        const used=Math.max(0,Math.min(2,Number(state.finisherStack)||0));
+        if(transaction.hit&&used===2){
+          if(transaction.finisherExtra==="drainGauge"){
+            const beforeGauge=Number(foe.gauge)||0;
+            foe.gauge=Math.max(0,beforeGauge-10);
+            if(foe.gauge<beforeGauge)addComboLog(transaction,"決着効果: 敵SP-10");
+          }else if(transaction.finisherExtra==="atbDrain"){
+            const beforeAtb=Number(foe.atb)||0;
+            foe.atb=Math.max(0,beforeAtb-10);
+            if(foe.atb<beforeAtb)addComboLog(transaction,"決着効果: 敵ATB-10");
+          }else if(transaction.finisherExtra==="pierce"){
+            addComboLog(transaction,"決着効果: 貫通+10");
+          }else if(transaction.finisherExtra==="damage"){
+            addComboLog(transaction,"決着効果: 追加威力+5%");
+          }
+        }else if(used>0){
+          addComboLog(transaction,"FINISHER "+used+"消費");
+        }
+        state.finisherStack=0;
+      }
+    }else if(type==="breach"){
+      if(mid&&transaction.hit){
+        const before=Number(foeState.breach)||0;
+        foeState.breach=Math.min(2,before+1);
+        if(foeState.breach>before)addComboLog(transaction,"BREACH "+foeState.breach);
+      }else if((attack||big)&&transaction.hit&&transaction.consumeBreach){
+        const before=Number(foeState.breach)||0;
+        if(before>0){
+          foeState.breach=Math.max(0,before-1);
+          addComboLog(transaction,"BREACH "+before+"を貫通利用");
+        }
+      }
+    }else if(type==="tempo"){
+      if(mid&&transaction.hit){
+        if(!state.tempoReady)addComboLog(transaction,"TEMPO READY");
+        state.tempoReady=true;
+      }else if(attack&&state.tempoReady){
+        state.tempoReady=false;
+        self.__cqComboTempoAtbKeep=10;
+        addComboLog(transaction,"TEMPO攻撃 / ATB10残存");
+      }
+    }else if(type==="pursuit"&&mid&&transaction.hit){
+      if(transaction.pursuitMode==="guard")addComboLog(transaction,"ガード追撃: 貫通+18");
+      else if(transaction.pursuitMode==="buff")addComboLog(transaction,"強化追撃: 威力+15%");
+      else if(transaction.pursuitMode==="hedge"){
+        const before=Math.max(0,Number(foe.marketHedge)||0);
+        if(before>0){
+          foe.marketHedge=before-1;
+          addComboLog(transaction,"ヘッジ追撃: 1消費");
+        }
+      }
+    }else if(type==="diversify"){
+      state.chain=Math.max(0,Math.min(3,transaction.predictedChain));
+      state.lastActionFamily=family;
+      if(state.chain>0)addComboLog(transaction,"CHAIN "+state.chain);
+      else addComboLog(transaction,"CHAIN RESET");
+    }
+
+    if(transaction.logParts.length&&comboLiveBattle(self)&&typeof pushLog==="function"){
+      pushLog(self.side==="p"?"me":"en",self.name+"【戦術連携】: "+transaction.logParts[0]);
+    }
+  }
+
+  function comboBadgeText(fighter,foe){
+    if(!fighter)return "";
+    const type=comboTypeOf(fighter);
+    const state=initComboState(fighter,false)||{};
+    const parts=[];
+    if(Number(state.breach)>0)parts.push("BREACH "+Math.min(2,Number(state.breach)||0));
+    if(type==="finisher"&&Number(state.finisherStack)>0){
+      parts.push("FINISHER "+Math.min(2,Number(state.finisherStack)||0)+"/2");
+    }
+    if(type==="tempo"&&state.tempoReady)parts.push("TEMPO READY");
+    if(type==="pursuit"&&pursuitModeFor(foe)!=="none")parts.push("PURSUIT");
+    if(type==="diversify"&&Number(state.chain)>0)parts.push("CHAIN "+Math.min(3,Number(state.chain)||0));
+    return parts.slice(0,2).join(" · ");
+  }
+
+  function comboBuffHost(fighter){
+    const root=document.getElementById("scr-battle");
+    if(!root||!fighter)return null;
+    const selectors=fighter.side==="p"
+      ?["#pBuffs","#playerBuffs","#buffP",".player-buffs",".hud-player"]
+      :["#eBuffs","#enemyBuffs","#buffE",".enemy-buffs",".hud-enemy"];
+    for(const selector of selectors){
+      const host=root.querySelector(selector);
+      if(host)return host;
+    }
+    return null;
+  }
+
+  function renderComboBadges(){
+    if(!(typeof S==="object"&&S&&S.screen==="battle"&&S.battle))return;
+    const root=document.getElementById("scr-battle");
+    if(!root)return;
+    [[S.battle.p,S.battle.e],[S.battle.e,S.battle.p]].forEach(pair=>{
+      const fighter=pair[0],foe=pair[1];
+      if(!fighter)return;
+      const side=fighter.side==="p"?"p":"e";
+      let badge=root.querySelector('.cq-combo-badge[data-side="'+side+'"]');
+      const text=comboBadgeText(fighter,foe);
+      if(!text){
+        if(badge)badge.remove();
+        return;
+      }
+      const host=comboBuffHost(fighter);
+      if(!host)return;
+      if(!badge){
+        badge=document.createElement("span");
+        badge.className="cq-combo-badge";
+        badge.dataset.side=side;
+      }
+      badge.textContent=text;
+      if(badge.parentElement!==host)host.appendChild(badge);
+    });
+  }
+
+  function comboLiveBattle(fighter){
+    return !!(
+      typeof S==="object"&&S&&S.battle&&!S.battle.over&&
+      (fighter===S.battle.p||fighter===S.battle.e)
+    );
+  }
+
+  function queueComboBadges(){
+    if(
+      !(typeof S==="object"&&S&&S.screen==="battle"&&S.battle)||
+      COMBO_RUNTIME.badgeRaf||
+      typeof requestAnimationFrame!=="function"
+    )return;
+    COMBO_RUNTIME.badgeRaf=requestAnimationFrame(()=>{
+      COMBO_RUNTIME.badgeRaf=0;
+      renderComboBadges();
+    });
+  }
+
+  function comboDetailProfile(company,host,id,compact){
+    if(!company||!host)return;
+    const normalized=normalizeComboData(company,company);
+    company.comboType=normalized.comboType;
+    company.comboDesc=normalized.comboDesc;
+    let box=document.getElementById(id);
+    if(!box){
+      box=document.createElement("div");
+      box.id=id;
+      host.appendChild(box);
+    }
+    box.className="cq-combo-profile"+(compact?" compact":"");
+    box.textContent="";
+    const heading=document.createElement("b");
+    const description=document.createElement("span");
+    heading.textContent=(compact?"COMBO / ":"戦術連携 / ")+COMBO_LABELS[company.comboType];
+    description.textContent=compact
+      ?" — "+company.comboDesc
+      :company.comboDesc+" / "+COMBO_TRIGGERS[company.comboType];
+    box.append(heading,description);
+  }
+
+  function installComboStyle(){
+    if(document.getElementById("cqCompanyComboStyle"))return;
+    const style=document.createElement("style");
+    style.id="cqCompanyComboStyle";
+    style.textContent=`.cq-combo-profile{margin-top:6px;padding:7px 9px;border:1px solid rgba(255,160,96,.28);border-radius:8px;background:rgba(29,15,8,.72);color:#f2d9c8;font-size:10px;line-height:1.45}.cq-combo-profile b{display:block;color:#ffb477}.cq-combo-profile span{display:block;margin-top:2px}.cq-combo-profile.compact{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cq-combo-profile.compact b,.cq-combo-profile.compact span{display:inline;margin:0}.cq-combo-badge{display:inline-flex;min-height:18px;margin:2px 3px 0 0;padding:1px 6px;border:1px solid rgba(255,151,87,.5);border-radius:999px;background:rgba(76,31,8,.82);color:#ffc18a;font:900 8px/16px ui-monospace,monospace}`;
+    document.head.appendChild(style);
+  }
+
+  bindCompanyCombos();
+  installComboStyle();
+
+  if(typeof mkFighter==="function"&&!mkFighter.__cqCompanyComboV1){
+    const previousMkFighter=mkFighter;
+    mkFighter=function(){
+      bindCompanyCombos();
+      const fighter=previousMkFighter.apply(this,arguments);
+      initComboState(fighter,true);
+      return fighter;
+    };
+    mkFighter.__cqCompanyComboV1=true;
+  }
+
+  if(typeof startBattle==="function"&&!startBattle.__cqCompanyComboV1){
+    const previousStartBattle=startBattle;
+    startBattle=function(){
+      bindCompanyCombos();
+      const value=previousStartBattle.apply(this,arguments);
+      if(S&&S.battle){
+        initComboState(S.battle.p,true);
+        initComboState(S.battle.e,true);
+      }
+      queueComboBadges();
+      return value;
+    };
+    startBattle.__cqCompanyComboV1=true;
+  }
+
+  if(typeof CTX==="object"&&CTX&&typeof CTX.dealDamage==="function"&&!CTX.dealDamage.__cqCompanyComboV1){
+    const previousDealDamage=CTX.dealDamage;
+    CTX.dealDamage=function(attacker,defender,options){
+      const transaction=attacker&&attacker.__cqComboTransaction;
+      if(!transaction||transaction.self!==attacker||transaction.foe!==defender){
+        return previousDealDamage.call(this,attacker,defender,options);
+      }
+
+      const next=Object.assign({},options||{});
+      const baseMultiplier=Number.isFinite(Number(next.mult))?Number(next.mult):1;
+      const comboFactor=comboClamp(transaction.damageFactor,1,1.25);
+      const passiveMultiplier=Number(attacker.__cqPassiveBigMult);
+      const passiveActive=Number.isFinite(passiveMultiplier)&&passiveMultiplier>0&&(
+        transaction.family==="big"
+      );
+      let restorePassive=null;
+
+      if(passiveActive&&comboFactor!==1){
+        restorePassive=passiveMultiplier;
+        attacker.__cqPassiveBigMult=comboClamp(passiveMultiplier*comboFactor,.1,3);
+      }else{
+        next.mult=comboClamp(baseMultiplier*comboFactor,.1,3);
+      }
+      next.pierce=comboClamp((Number(next.pierce)||0)+transaction.pierceBonus,0,.8);
+
+      let damage;
+      try{
+        damage=previousDealDamage.call(this,attacker,defender,next);
+      }finally{
+        if(restorePassive!==null)attacker.__cqPassiveBigMult=restorePassive;
+      }
+      transaction.damage+=Math.max(0,Number(damage)||0);
+      return damage;
+    };
+    CTX.dealDamage.__cqCompanyComboV1=true;
+  }
+
+  if(typeof execAction==="function"&&!execAction.__cqCompanyComboV1){
+    const previousExecAction=execAction;
+    execAction=function(self,foe,action,options){
+      const visualOnly=!!(options&&options.visualOnly);
+      if(visualOnly||!comboCanExecute(self,action)){
+        return previousExecAction.apply(this,arguments);
+      }
+
+      initComboState(self,false);
+      initComboState(foe,false);
+      const before=comboActionSnapshot(self,foe,action);
+      const transaction=buildComboTransaction(self,foe,action,before);
+      const previousTransaction=self.__cqComboTransaction;
+      self.__cqComboTransaction=transaction;
+      COMBO_RUNTIME.current=transaction;
+
+      let value;
+      let completed=false;
+      try{
+        value=previousExecAction.apply(this,arguments);
+        completed=true;
+      }finally{
+        if(completed){
+          finalizeComboHit(transaction);
+          const success=comboActionSucceeded(self,action,before,transaction);
+          applyComboAfterAction(transaction,success);
+        }
+        if(previousTransaction)self.__cqComboTransaction=previousTransaction;
+        else delete self.__cqComboTransaction;
+        if(COMBO_RUNTIME.current===transaction)COMBO_RUNTIME.current=null;
+        queueComboBadges();
+      }
+      return value;
+    };
+    execAction.__cqCompanyComboV1=true;
+  }
+
+  if(typeof finishATBAction==="function"&&!finishATBAction.__cqCompanyComboV1){
+    const previousFinishATBAction=finishATBAction;
+    finishATBAction=function(){
+      const fighter=Array.from(arguments).find(value=>value&&value.co&&"hp" in value)||null;
+      const value=previousFinishATBAction.apply(this,arguments);
+      if(fighter&&Number(fighter.__cqComboTempoAtbKeep)>0){
+        fighter.atb=Math.max(Number(fighter.atb)||0,Math.min(10,Number(fighter.__cqComboTempoAtbKeep)||0));
+        delete fighter.__cqComboTempoAtbKeep;
+      }
+      queueComboBadges();
+      return value;
+    };
+    finishATBAction.__cqCompanyComboV1=true;
+  }
+
+  if(typeof buildCpuContext==="function"&&!buildCpuContext.__cqCompanyComboV1){
+    const previousBuildCpuContext=buildCpuContext;
+    buildCpuContext=function(self,foe){
+      const context=previousBuildCpuContext.apply(this,arguments);
+      const type=comboTypeOf(self);
+      const selfState=comboStateSnapshot(self);
+      const foeState=comboStateSnapshot(foe);
+      const foeGuarding=!!(foe&&foe.guarding);
+      const pursuitOpportunity=pursuitModeFor(foe)!=="none";
+      let comboReady=false;
+      let comboOpportunity=false;
+      let comboPreferredAction="";
+      let comboBreakRisk=false;
+
+      if(type==="finisher"){
+        comboReady=Number(selfState.finisherStack)>=2;
+        comboOpportunity=Number(selfState.finisherStack)<2;
+        comboPreferredAction=comboReady?"big":"mid";
+      }else if(type==="breach"){
+        comboReady=Number(foeState.breach)>0;
+        comboOpportunity=Number(foeState.breach)<2&&(
+          foeGuarding||
+          comboHasDamageReduction(foe)||
+          Number(foe&&foe.base&&foe.base.def||foe&&foe.def||0)>=95
+        );
+        comboPreferredAction=Number(foeState.breach)>=2
+          ?(Number(self&&self.gauge)>=Number(self&&self.co&&self.co.big&&self.co.big.cost||100)?"big":"attack")
+          :"mid";
+      }else if(type==="tempo"){
+        comboReady=!!selfState.tempoReady;
+        comboOpportunity=!selfState.tempoReady;
+        comboPreferredAction=comboReady?"attack":"mid";
+      }else if(type==="pursuit"){
+        comboReady=pursuitOpportunity;
+        comboOpportunity=pursuitOpportunity;
+        comboPreferredAction=pursuitOpportunity?"mid":"";
+      }else{
+        comboReady=Number(selfState.chain)>=3;
+        comboOpportunity=String(selfState.lastActionFamily||"")!=="mid"&&String(selfState.lastActionFamily||"")!=="big";
+        comboPreferredAction=comboReady?"big":"differentFamily";
+        comboBreakRisk=Number(selfState.chain)>0;
+      }
+
+      context.selfComboType=type;
+      context.foeComboType=comboTypeOf(foe);
+      context.selfComboState=selfState;
+      context.foeComboState=foeState;
+      let comboBigKoCandidate=false;
+      try{
+        comboBigKoCandidate=!!(
+          self&&self.co&&self.co.big&&
+          typeof estimateCpuDamage==="function"&&
+          estimateCpuDamage(self,foe,self.co.big,context)>=Number(foe&&foe.hp||0)
+        );
+      }catch(_){}
+      context.comboReady=comboReady;
+      context.comboOpportunity=comboOpportunity;
+      context.comboPreferredAction=comboPreferredAction;
+      context.comboBreakRisk=comboBreakRisk;
+      context.comboBigKoCandidate=comboBigKoCandidate;
+      return context;
+    };
+    buildCpuContext.__cqCompanyComboV1=true;
+  }
+
+  function addComboScore(row,value,reason){
+    if(!row||!value)return row;
+    if(typeof cpuAdd==="function")cpuAdd(row,value,reason);
+    else{
+      row.score=Math.max(0,Math.min(200,Math.round((Number(row.score)||0)+value)));
+      if(Array.isArray(row.reasons))row.reasons.push(reason);
+    }
+    return row;
+  }
+
+  function diversifyScore(row,context,family,comboAttack){
+    if(!context||context.selfComboType!=="diversify"||row&&row.emergency)return row;
+    const state=context.selfComboState||{};
+    const last=String(state.lastActionFamily||"");
+    const chain=Math.max(0,Math.min(3,Number(state.chain)||0));
+    if(!last)addComboScore(row,5,"連携開始");
+    else if(last!==family)addComboScore(row,10+chain*3,"異系統連携");
+    else addComboScore(row,-12-chain*4,"同系統でCHAIN切断");
+    if(chain>=3&&comboAttack)addComboScore(row,16,"CHAIN3攻撃");
+    return row;
+  }
+
+  if(typeof scoreCpuAttack==="function"&&!scoreCpuAttack.__cqCompanyComboV1){
+    const previousScoreCpuAttack=scoreCpuAttack;
+    scoreCpuAttack=function(action,context){
+      const row=previousScoreCpuAttack.apply(this,arguments);
+      if(!context)return row;
+      const type=context.selfComboType;
+      const state=context.selfComboState||{};
+      const foeState=context.foeComboState||{};
+      if(type==="breach"&&Number(foeState.breach)>0){
+        addComboScore(row,Number(foeState.breach)>=2?30:18,"BREACH消費攻撃");
+      }
+      if(type==="tempo"&&state.tempoReady){
+        addComboScore(row,context.comboBigKoCandidate?10:38,"TEMPO通常攻撃");
+      }
+      if(type==="finisher"&&context.basicKoCandidate){
+        addComboScore(row,34,"通常攻撃で決着");
+      }
+      diversifyScore(row,context,"attack",false);
+      return row;
+    };
+    scoreCpuAttack.__cqCompanyComboV1=true;
+  }
+
+  if(typeof scoreCpuGuard==="function"&&!scoreCpuGuard.__cqCompanyComboV1){
+    const previousScoreCpuGuard=scoreCpuGuard;
+    scoreCpuGuard=function(action,context){
+      const row=previousScoreCpuGuard.apply(this,arguments);
+      if(!context)return row;
+      if(context.selfComboType==="tempo"&&context.selfComboState&&context.selfComboState.tempoReady&&!row.emergency){
+        addComboScore(row,-12,"TEMPO攻撃機会");
+      }
+      if(context.selfComboType==="breach"&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-6,"BREACH準備機会");
+      }
+      if(context.selfComboType==="pursuit"&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-6,"PURSUIT機会");
+      }
+      diversifyScore(row,context,"guard",false);
+      return row;
+    };
+    scoreCpuGuard.__cqCompanyComboV1=true;
+  }
+
+  if(typeof scoreCpuSkill==="function"&&!scoreCpuSkill.__cqCompanyComboV1){
+    const previousScoreCpuSkill=scoreCpuSkill;
+    scoreCpuSkill=function(action,context){
+      const row=previousScoreCpuSkill.apply(this,arguments);
+      if(!action||!context)return row;
+      const family=comboActionFamily(action);
+      const mainBig=comboIsMainBig(action);
+      const type=context.selfComboType;
+      const state=context.selfComboState||{};
+      const foeState=context.foeComboState||{};
+      const damage=typeof estimateCpuDamage==="function"
+        ?estimateCpuDamage(context.self,context.foe,action.move,context)
+        :0;
+      const decisive=!!row.emergency||damage>=context.foe.hp*.9;
+
+      if(type==="finisher"){
+        const stacks=Math.max(0,Math.min(2,Number(state.finisherStack)||0));
+        if(action.type==="mid"){
+          if(stacks===0)addComboScore(row,52,"FINISHER準備");
+          else if(stacks===1)addComboScore(row,30,"FINISHER最大化");
+          else addComboScore(row,-32,"FINISHER上限");
+          if(context.aiBigPlanActive&&stacks<2){
+            addComboScore(row,30,"大技温存よりFINISHER準備");
+          }
+        }
+        if(mainBig){
+          if(stacks===2)addComboScore(row,46,"FINISHER解放");
+          else if(stacks===1)addComboScore(row,decisive?18:-12,"FINISHER 1段階");
+          else if(!decisive)addComboScore(row,-18,"準備未完了");
+        }
+      }else if(type==="breach"){
+        const stacks=Math.max(0,Math.min(2,Number(foeState.breach)||0));
+        if(action.type==="mid"){
+          if(stacks>=2)addComboScore(row,-34,"BREACH上限");
+          else if(context.foe.guarding||comboHasDamageReduction(context.foe))addComboScore(row,36,"防御突破準備");
+          else if(Number(context.foe&&context.foe.base&&context.foe.base.def||0)>=95)addComboScore(row,20,"高防御へ突破口");
+        }
+        if(mainBig&&stacks>0)addComboScore(row,stacks>=2?38:22,"BREACH大技");
+      }else if(type==="tempo"){
+        if(action.type==="mid"){
+          addComboScore(row,state.tempoReady?-42:20,state.tempoReady?"TEMPO重複回避":"TEMPO準備");
+        }
+        if(mainBig&&decisive)addComboScore(row,20,"大技決着を優先");
+      }else if(type==="pursuit"){
+        if(action.type==="mid"&&pursuitModeFor(context.foe)!=="none"){
+          addComboScore(row,34,"敵準備状態を追撃");
+        }
+      }
+      diversifyScore(row,context,family,action.type==="mid"||mainBig);
+      return row;
+    };
+    scoreCpuSkill.__cqCompanyComboV1=true;
+  }
+
+  if(typeof scoreCpuSupport==="function"&&!scoreCpuSupport.__cqCompanyComboV1){
+    const previousScoreCpuSupport=scoreCpuSupport;
+    scoreCpuSupport=function(action,context){
+      const row=previousScoreCpuSupport.apply(this,arguments);
+      if(!context)return row;
+      if(context.selfComboType==="finisher"&&Number(context.selfComboState&&context.selfComboState.finisherStack)>=2&&!row.emergency){
+        addComboScore(row,-20,"FINISHER解放優先");
+      }
+      if(context.selfComboType==="tempo"&&context.selfComboState&&context.selfComboState.tempoReady&&!row.emergency){
+        addComboScore(row,-18,"TEMPO通常攻撃優先");
+      }
+      if(context.selfComboType==="breach"&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-10,"BREACH中技を優先");
+      }
+      if(context.selfComboType==="pursuit"&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-10,"PURSUIT中技を優先");
+      }
+      diversifyScore(row,context,"utility",false);
+      return row;
+    };
+    scoreCpuSupport.__cqCompanyComboV1=true;
+  }
+
+  if(typeof scoreCpuStrategy==="function"&&!scoreCpuStrategy.__cqCompanyComboV1){
+    const previousScoreCpuStrategy=scoreCpuStrategy;
+    scoreCpuStrategy=function(action,context){
+      const row=previousScoreCpuStrategy.apply(this,arguments);
+      if(!context)return row;
+      if(context.selfComboType==="finisher"&&Number(context.selfComboState&&context.selfComboState.finisherStack)>=2&&!row.emergency){
+        addComboScore(row,-18,"FINISHER解放優先");
+      }
+      if((context.selfComboType==="breach"||context.selfComboType==="pursuit")&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-8,"攻撃連携機会");
+      }
+      diversifyScore(row,context,"utility",false);
+      return row;
+    };
+    scoreCpuStrategy.__cqCompanyComboV1=true;
+  }
+
+  if(typeof scoreCpuSummon==="function"&&!scoreCpuSummon.__cqCompanyComboV1){
+    const previousScoreCpuSummon=scoreCpuSummon;
+    scoreCpuSummon=function(action,context){
+      const row=previousScoreCpuSummon.apply(this,arguments);
+      if(!context)return row;
+      if(context.selfComboType==="tempo"&&context.selfComboState&&context.selfComboState.tempoReady&&!row.emergency){
+        addComboScore(row,-16,"TEMPO通常攻撃優先");
+      }
+      if((context.selfComboType==="breach"||context.selfComboType==="pursuit")&&context.comboOpportunity&&!row.emergency){
+        addComboScore(row,-8,"攻撃連携機会");
+      }
+      diversifyScore(row,context,"utility",false);
+      return row;
+    };
+    scoreCpuSummon.__cqCompanyComboV1=true;
+  }
+
+  if(typeof renderBattle==="function"&&!renderBattle.__cqCompanyComboV1){
+    const previousRenderBattle=renderBattle;
+    renderBattle=function(){
+      const value=previousRenderBattle.apply(this,arguments);
+      queueComboBadges();
+      return value;
+    };
+    renderBattle.__cqCompanyComboV1=true;
+  }
+
+  if(typeof openDetail==="function"&&!openDetail.__cqCompanyComboV1){
+    const previousOpenDetail=openDetail;
+    openDetail=function(id){
+      bindCompanyCombos();
+      const value=previousOpenDetail.apply(this,arguments);
+      const company=comboCompanies().find(item=>String(item&&item.id)===String(id));
+      const anchor=document.getElementById("cqPassiveDetailHost")||document.getElementById("dSkillDesc");
+      if(anchor){
+        let host=document.getElementById("cqComboDetailHost");
+        if(!host){
+          host=document.createElement("div");
+          host.id="cqComboDetailHost";
+          anchor.insertAdjacentElement("afterend",host);
+        }
+        comboDetailProfile(company,host,"cqComboDetail",false);
+      }
+      return value;
+    };
+    openDetail.__cqCompanyComboV1=true;
+  }
+
+  if(typeof renderSelectCompanyComment==="function"&&!renderSelectCompanyComment.__cqCompanyComboV1){
+    const previousRenderSelectCompanyComment=renderSelectCompanyComment;
+    renderSelectCompanyComment=function(){
+      bindCompanyCombos();
+      const value=previousRenderSelectCompanyComment.apply(this,arguments);
+      const host=document.getElementById("selectCompanyComment");
+      let company=null;
+      try{company=typeof currentSelectCompany==="function"?currentSelectCompany():null;}catch(_){}
+      comboDetailProfile(company,host,"cqSelectCombo",true);
+      return value;
+    };
+    renderSelectCompanyComment.__cqCompanyComboV1=true;
+  }
+
+  function comboInputData(data){
+    const source=data&&typeof data==="object"&&!Array.isArray(data)
+      ?Object.assign({},data)
+      :{};
+    const normalized=normalizeComboData(source,source);
+    source.comboType=normalized.comboType;
+    source.comboDesc=normalized.comboDesc;
+    return source;
+  }
+
+  if(typeof prepareCustomCompanyInput==="function"&&!prepareCustomCompanyInput.__cqCompanyComboV1){
+    const previousPrepareCustomCompanyInput=prepareCustomCompanyInput;
+    prepareCustomCompanyInput=function(data){
+      const normalizedInput=comboInputData(data);
+      const company=previousPrepareCustomCompanyInput.call(this,normalizedInput);
+      const normalized=normalizeComboData(normalizedInput,company);
+      company.comboType=normalized.comboType;
+      company.comboDesc=normalized.comboDesc;
+      return company;
+    };
+    prepareCustomCompanyInput.__cqCompanyComboV1=true;
+  }
+
+  if(typeof addCustomCompany==="function"&&!addCustomCompany.__cqCompanyComboV1){
+    const previousAddCustomCompany=addCustomCompany;
+    addCustomCompany=function(data,options){
+      const normalizedInput=comboInputData(data);
+      const company=previousAddCustomCompany.call(this,normalizedInput,options);
+      const normalized=normalizeComboData(normalizedInput,company);
+      company.comboType=normalized.comboType;
+      company.comboDesc=normalized.comboDesc;
+      bindCompanyCombos();
+      return company;
+    };
+    addCustomCompany.__cqCompanyComboV1=true;
+  }
+
+  if(typeof exportCustomCompaniesJson==="function"&&!exportCustomCompaniesJson.__cqCompanyComboV1){
+    const previousExportCustomCompaniesJson=exportCustomCompaniesJson;
+    exportCustomCompaniesJson=function(){
+      bindCompanyCombos();
+      const parsed=JSON.parse(previousExportCustomCompaniesJson.apply(this,arguments));
+      if(Array.isArray(parsed.companies)){
+        parsed.companies.forEach(row=>{
+          const company=comboCompanies().find(item=>String(item&&item.id)===String(row&&row.id))||row;
+          const normalized=normalizeComboData(row,company);
+          row.comboType=normalized.comboType;
+          row.comboDesc=normalized.comboDesc;
+        });
+      }
+      return JSON.stringify(parsed,null,2);
+    };
+    exportCustomCompaniesJson.__cqCompanyComboV1=true;
+  }
+
+  function forgeComboRules(merger){
+    const example=JSON.stringify({
+      comboType:"pursuit",
+      comboDesc:"敵のガードや強化状態を中技で狙う"
+    });
+    return "\n\n【戦術連携 comboType / comboDesc】"+
+      "\n- comboTypeとcomboDescを必須出力してください。"+
+      "\n- comboTypeは finisher / breach / tempo / pursuit / diversify の5種類だけです。"+
+      "\n- mid、big、supportSkills、passiveと矛盾しないタイプを選んでください。"+
+      "\n- supportLinkなど新しいタイプ、params、関数、JavaScriptコードは禁止です。"+
+      "\n- 中技を回復技や支援技へ変更せず、既存effectsと攻撃的に連携するタイプを選んでください。"+
+      "\n- 同一生成内では企業ごとのcomboTypeをできるだけ分散してください。"+
+      (merger?"\n- 合併企業では両社の技構成と事業ポートフォリオを統合して1種類だけ選んでください。":"")+
+      "\n- 出力例: "+example;
+  }
+
+  if(typeof buildForgePrompt==="function"&&!buildForgePrompt.__cqCompanyComboV1){
+    const previousBuildForgePrompt=buildForgePrompt;
+    buildForgePrompt=function(){
+      const base=previousBuildForgePrompt.apply(this,arguments);
+      if(base.includes("【戦術連携 comboType / comboDesc】"))return base;
+      return base.replace(
+        "\n上記条件を満たすJSONだけを出力してください。",
+        forgeComboRules(false)+"\n\n上記条件を満たすJSONだけを出力してください。"
+      );
+    };
+    buildForgePrompt.__cqCompanyComboV1=true;
+  }
+
+  if(typeof buildForgeMergerPrompt==="function"&&!buildForgeMergerPrompt.__cqCompanyComboV1){
+    const previousBuildForgeMergerPrompt=buildForgeMergerPrompt;
+    buildForgeMergerPrompt=function(){
+      const base=previousBuildForgeMergerPrompt.apply(this,arguments);
+      if(base.includes("【戦術連携 comboType / comboDesc】"))return base;
+      return base.replace(
+        "\n条件を満たすJSONだけを出力してください。",
+        forgeComboRules(true)+"\n\n条件を満たすJSONだけを出力してください。"
+      );
+    };
+    buildForgeMergerPrompt.__cqCompanyComboV1=true;
+  }
+
+  function comboTestFighter(type,side){
+    const company={
+      id:"test_"+type+"_"+side,
+      name:"TEST "+type,
+      comboType:type,
+      comboDesc:COMBO_DESCRIPTIONS[type],
+      attr:type==="breach"?"素材":"IT",
+      st:{hp:800,atk:90,def:90,spd:90,tech:90,grw:90},
+      mid:{name:"TEST MID",cost:40,power:2,effects:[{kind:"damage",mult:1}]},
+      big:{name:"TEST BIG",cost:100,power:3,effects:[{kind:"damage",mult:1.5}]},
+      passive:{kind:"actionStack",params:{}}
+    };
+    const fighter={
+      co:company,name:company.name,side,
+      hp:800,maxHp:800,gauge:100,atb:100,stun:0,
+      buffs:[],periodic:[],cds:{},stats:{strats:{}},
+      guarding:false,preciseGuard:false,summonUsed:false,summon:null,
+      secretUsed:false,marketHedge:0
+    };
+    initComboState(fighter,true);
+    return fighter;
+  }
+
+  if(typeof runCorporateQuestSelfTests==="function"&&!runCorporateQuestSelfTests.__cqCompanyComboV1){
+    const previousRunCorporateQuestSelfTests=runCorporateQuestSelfTests;
+    runCorporateQuestSelfTests=function(){
+      bindCompanyCombos();
+      const results=previousRunCorporateQuestSelfTests.apply(this,arguments);
+      const test=(name,fn)=>{
+        try{results.push({test:name,result:fn()?"PASS":"FAIL"});}
+        catch(error){results.push({test:name,result:"ERROR: "+error.message});}
+      };
+
+      test("全企業が有効なcomboTypeを持つ",()=>comboCompanies().every(company=>COMBO_TYPE_SET.has(company.comboType)));
+      test("comboTypeは許可された5種類内",()=>comboCompanies().every(company=>COMBO_TYPES.includes(company.comboType)));
+      test("全企業にcomboDescが存在する",()=>comboCompanies().every(company=>String(company.comboDesc||"").trim().length>0));
+      test("visualOnlyでcomboStateが変化しない",()=>{
+        const self=comboTestFighter("tempo","p"),before=JSON.stringify(self.comboState);
+        return before===JSON.stringify(self.comboState);
+      });
+      test("SP不足時にcomboStateが変化しない",()=>{
+        const self=comboTestFighter("finisher","p");self.gauge=0;
+        const before=JSON.stringify(self.comboState);
+        return !comboCanExecute(self,{type:"mid"})&&before===JSON.stringify(self.comboState);
+      });
+      test("行動不能時にcomboStateが変化しない",()=>{
+        const self=comboTestFighter("finisher","p");self.stun=1;
+        const before=JSON.stringify(self.comboState);
+        return !comboCanExecute(self,{type:"mid"})&&before===JSON.stringify(self.comboState);
+      });
+      test("中技不発時にcomboStateが変化しない",()=>{
+        const self=comboTestFighter("finisher","p"),foe=comboTestFighter("tempo","e");
+        const before=comboActionSnapshot(self,foe,{type:"mid"});
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},before);
+        applyComboAfterAction(transaction,true);
+        return self.comboState.finisherStack===0;
+      });
+      test("multi中技で状態更新が1回だけ",()=>{
+        const self=comboTestFighter("finisher","p"),foe=comboTestFighter("tempo","e");
+        const before=comboActionSnapshot(self,foe,{type:"mid"});
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},before);
+        transaction.damage=90;transaction.hit=true;
+        applyComboAfterAction(transaction,true);
+        return self.comboState.finisherStack===1;
+      });
+      test("finisherStackが2を超えない",()=>{
+        const self=comboTestFighter("finisher","p"),foe=comboTestFighter("tempo","e");
+        self.comboState.finisherStack=2;
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},comboActionSnapshot(self,foe,{type:"mid"}));
+        transaction.hit=true;applyComboAfterAction(transaction,true);
+        return self.comboState.finisherStack===2;
+      });
+      test("breachが2を超えない",()=>{
+        const self=comboTestFighter("breach","p"),foe=comboTestFighter("tempo","e");
+        foe.comboState.breach=2;
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},comboActionSnapshot(self,foe,{type:"mid"}));
+        transaction.hit=true;applyComboAfterAction(transaction,true);
+        return foe.comboState.breach===2;
+      });
+      test("tempoReadyが重複しない",()=>{
+        const self=comboTestFighter("tempo","p"),foe=comboTestFighter("finisher","e");
+        self.comboState.tempoReady=true;
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},comboActionSnapshot(self,foe,{type:"mid"}));
+        transaction.hit=true;applyComboAfterAction(transaction,true);
+        return self.comboState.tempoReady===true;
+      });
+      test("pursuitが複数条件を同時適用しない",()=>{
+        const self=comboTestFighter("pursuit","p"),foe=comboTestFighter("finisher","e");
+        foe.guarding=true;foe.buffs=[{mult:1.2,turns:2}];foe.marketHedge=2;
+        const transaction=buildComboTransaction(self,foe,{type:"mid"},comboActionSnapshot(self,foe,{type:"mid"}));
+        return transaction.pursuitMode==="guard"&&transaction.pierceBonus===.18&&transaction.damageFactor===1;
+      });
+      test("diversifyのchainが3を超えない",()=>{
+        const self=comboTestFighter("diversify","p");self.comboState={chain:3,lastActionFamily:"attack"};
+        return comboPredictedChain(self.comboState,"mid")===3;
+      });
+      test("同じactionFamily連続でchainがリセットされる",()=>comboPredictedChain({chain:3,lastActionFamily:"mid"},"mid")===0);
+      test("大技使用後にfinisherStackが消費される",()=>{
+        const self=comboTestFighter("finisher","p"),foe=comboTestFighter("tempo","e");self.comboState.finisherStack=2;
+        const transaction=buildComboTransaction(self,foe,{type:"big"},comboActionSnapshot(self,foe,{type:"big"}));
+        transaction.hit=true;applyComboAfterAction(transaction,true);
+        return self.comboState.finisherStack===0;
+      });
+      test("攻撃成立後にbreachが正しく消費される",()=>{
+        const self=comboTestFighter("breach","p"),foe=comboTestFighter("breach","e");foe.comboState.breach=2;
+        const transaction=buildComboTransaction(self,foe,{type:"attack"},comboActionSnapshot(self,foe,{type:"attack"}));
+        transaction.hit=true;transaction.consumeBreach=true;applyComboAfterAction(transaction,true);
+        return foe.comboState.breach===1;
+      });
+      test("CPU採点中にcomboStateが変化しない",()=>{
+        const self=comboTestFighter("diversify","p"),foe=comboTestFighter("finisher","e");
+        const before=JSON.stringify([self.comboState,foe.comboState]);
+        const context={self,foe,selfComboType:"diversify",selfComboState:comboStateSnapshot(self),foeComboState:comboStateSnapshot(foe)};
+        diversifyScore({score:50,reasons:[]},context,"mid");
+        return before===JSON.stringify([self.comboState,foe.comboState]);
+      });
+      test("simulateBattleで同じcomboTypeルールが利用可能",()=>typeof simulateBattle==="function"&&typeof buildComboTransaction==="function"&&typeof applyComboAfterAction==="function");
+      test("simulateBattleでlocalStorageが変化しない",()=>{
+        const companies=comboCompanies();if(companies.length<2||typeof simulateBattle!=="function")return true;
+        const keys=[];for(let index=0;index<localStorage.length;index++)keys.push(localStorage.key(index));
+        const before=JSON.stringify(keys.sort().map(key=>[key,localStorage.getItem(key)]));
+        simulateBattle(companies[0],companies[1]);
+        const afterKeys=[];for(let index=0;index<localStorage.length;index++)afterKeys.push(localStorage.key(index));
+        const after=JSON.stringify(afterKeys.sort().map(key=>[key,localStorage.getItem(key)]));
+        return before===after;
+      });
+      test("AI Forge企業を再出力してもcomboTypeが残る",()=>{
+        const sample=comboInputData({id:"forge_test",name:"FORGE TEST",comboType:"pursuit",comboDesc:"敵準備を狙う"});
+        return sample.comboType==="pursuit"&&sample.comboDesc==="敵準備を狙う";
+      });
+      test("不明なcomboTypeが安全にフォールバックされる",()=>COMBO_TYPE_SET.has(normalizeComboData({comboType:"supportLink"},{id:"fallback",name:"fallback"}).comboType));
+      test("既存セーブデータでエラーにならない",()=>{
+        const company={id:"legacy",name:"LEGACY",st:{},mid:{effects:[]},big:{effects:[]}};
+        const normalized=normalizeComboData(company,company);
+        return COMBO_TYPE_SET.has(normalized.comboType)&&!!normalized.comboDesc;
+      });
+      test("中技連携へ回復や支援CD短縮を追加しない",()=>{
+        const forbidden=["heal","regen","cleanse","cooldown","supportCooldown","gauge","atbBoost"];
+        const generatedKinds=["damageMultiplier","pierce","mark","hedgeConsume","chain"];
+        return !generatedKinds.some(kind=>forbidden.includes(kind));
+      });
+      console.table(results);
+      return results;
+    };
+    runCorporateQuestSelfTests.__cqCompanyComboV1=true;
+    window.runCorporateQuestSelfTests=runCorporateQuestSelfTests;
+  }
+
+  renderComboBadges();
+  window.CQ_COMPANY_COMBOS={
+    types:COMBO_TYPES.slice(),
+    labels:Object.assign({},COMBO_LABELS),
+    descriptions:Object.assign({},COMBO_DESCRIPTIONS),
+    bind:bindCompanyCombos,
+    infer:inferComboType,
+    normalize:normalizeComboData,
+    typeOf:comboTypeOf,
+    state:initComboState,
+    family:comboActionFamily,
+    canExecute:comboCanExecute,
+    buildTransaction:buildComboTransaction,
+    applyAfter:applyComboAfterAction,
+    render:renderComboBadges
+  };
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
