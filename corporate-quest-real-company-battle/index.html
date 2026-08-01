@@ -30772,6 +30772,422 @@ function configureTitleHelp(){
   };
 })();
 
+/* ================================================================
+   BOSS STAGE VISUAL / 敵優勢時のラスボスステージ演出
+   - 判定は公取委と同一指標(CQ_JFTC_GAP_COUNTER.strengthScore)を再利用
+   - 既存buildTokyoStageは無改造。initGL後の再塗装と追加オブジェクトのみ
+   - 破棄はcleanupGLのdisposeObj(GL.scene)へ相乗り
+================================================================ */
+(function installBossStageVisual(){
+  if(window.__CQ_BOSS_STAGE_VISUAL__)return;
+  window.__CQ_BOSS_STAGE_VISUAL__=true;
+
+  const CFG={tier1:1.3,tier2:1.7};
+  const ST={tier:0,ratio:1,root:null,ash:null,raf:0};
+  const TONE=[null,
+    {sky:0x060412,fog:0x120616,density:.034,core:0xff4d6a,glow:0x5c0a2a,
+     ember:0xffa06a,city:0x05070e,cityEm:0x2a0a30,win:0xff5c73,winBase:.16,
+     stretch:1.24,tilt:0,tower:24,ash:140,
+     label:'HOSTILE APEX / 上位企業との決戦'},
+    {sky:0x08010a,fog:0x190208,density:.042,core:0xff2b45,glow:0x8a0016,
+     ember:0xff7a4a,city:0x04050a,cityEm:0x3a0210,win:0xff2f4d,winBase:.09,
+     stretch:1.42,tilt:.022,tower:30,ash:220,
+     label:'APEX THREAT / 絶望の最終決戦'}];
+
+  function score(fighter,company){
+    const api=window.CQ_JFTC_GAP_COUNTER;
+    if(fighter&&api&&typeof api.strengthScore==='function'){
+      const value=Number(api.strengthScore(fighter));
+      if(Number.isFinite(value)&&value>0)return value;
+    }
+    const st=company&&company.st||{};
+    return Math.max(1,(Number(st.hp)||0)/8+
+      ['atk','def','spd','tech','grw'].reduce(
+        (sum,key)=>sum+(Number(st[key])||0),0));
+  }
+  function evaluate(playerCo,enemyCo){
+    const battle=S&&S.battle;
+    const player=Math.max(1,score(battle&&battle.p,playerCo));
+    const enemy=Math.max(1,score(battle&&battle.e,enemyCo));
+    ST.ratio=Math.round(enemy/player*1000)/1000;
+    ST.tier=ST.ratio>=CFG.tier2?2:ST.ratio>=CFG.tier1?1:0;
+    return ST.tier;
+  }
+
+  function style(){
+    if(document.getElementById('cqBossStageStyle'))return;
+    const node=document.createElement('style');
+    node.id='cqBossStageStyle';
+    node.textContent=[
+      '#scr-battle.cq-boss-stage .arena-vignette{',
+      'background:linear-gradient(180deg,rgba(46,0,12,.4),transparent 26%,',
+      'transparent 72%,rgba(38,0,10,.52)),radial-gradient(ellipse at center,',
+      'transparent 52%,rgba(72,0,18,.48) 100%)!important;',
+      'box-shadow:inset 0 0 130px rgba(126,0,26,.42)!important}',
+      '#scr-battle.cq-boss-apex .arena-vignette{',
+      'background:linear-gradient(180deg,rgba(66,0,16,.55),transparent 22%,',
+      'transparent 68%,rgba(52,0,12,.66)),radial-gradient(ellipse at center,',
+      'transparent 44%,rgba(96,0,22,.62) 100%)!important;',
+      'box-shadow:inset 0 0 170px rgba(150,0,32,.55)!important}',
+      '#scr-battle.cq-boss-stage .arena-label{display:block!important;',
+      'opacity:.92!important;color:#ff8497!important;',
+      'letter-spacing:.24em!important;',
+      'text-shadow:0 0 12px rgba(255,43,69,.85)!important}'
+    ].join('');
+    document.head.appendChild(node);
+  }
+  function hud(tier){
+    style();
+    const screen=$('scr-battle');
+    if(!screen)return;
+    screen.classList.toggle('cq-boss-stage',tier>0);
+    screen.classList.toggle('cq-boss-apex',tier>=2);
+    const label=screen.querySelector('.arena-label');
+    if(!label)return;
+    if(!('cqBossOriginal' in label.dataset)){
+      label.dataset.cqBossOriginal=label.textContent;
+    }
+    label.textContent=tier>0?TONE[tier].label:label.dataset.cqBossOriginal;
+  }
+
+  function dressCity(tone,tier){
+    const T=THREE;
+    GL.scene.background=new T.Color(tone.sky);
+    GL.scene.fog=new T.FogExp2(tone.fog,tone.density);
+    GL.city.forEach((building,index)=>{
+      const material=building.material;
+      if(material&&material.color)material.color.setHex(tone.city);
+      if(material&&material.emissive){
+        material.emissive.setHex(tone.cityEm);
+        material.emissiveIntensity=.22;
+      }
+      const height=Math.max(1,building.scale.y*tone.stretch);
+      building.scale.y=height;
+      building.position.y=height/2-1.1;
+      if(tone.tilt)building.rotation.z=(index%3-1)*tone.tilt;
+    });
+    GL.windows.forEach((win,index)=>{
+      if(win.material&&win.material.color)win.material.color.setHex(tone.win);
+      win.userData.base=tone.winBase;
+      win.userData.speed=.22+(index%5)*.11;
+      win.userData.blinky=index%(tier>=2?17:11)===0;
+    });
+    GL.beacons.forEach(beacon=>{
+      if(beacon.material)beacon.material.color.setHex(tone.core);
+      beacon.scale.setScalar(1.7);
+    });
+    GL.skyBeams.forEach(beam=>{
+      if(beam.material){
+        beam.material.color.setHex(tone.core);
+        beam.material.opacity=.085;
+      }
+      beam.userData.speed*=.4;
+    });
+    GL.drones.forEach(drone=>{
+      if(tier>=2)drone.visible=false;
+      else if(drone.material)drone.material.color.setHex(tone.core);
+    });
+    GL.cars.forEach(car=>{
+      if(car.material)car.material.color.setHex(tier>=2?0x3a0710:0x6a1020);
+    });
+  }
+
+  function buildSky(tone){
+    const T=THREE,root=new T.Group();
+    const flat=(color,opacity,additive)=>{
+      const material=new T.MeshBasicMaterial({
+        color:color,transparent:true,opacity:opacity,
+        side:T.DoubleSide,depthWrite:false
+      });
+      material.fog=false;
+      if(additive)material.blending=T.AdditiveBlending;
+      return material;
+    };
+    const center=new T.Vector3(0,13,-32);
+
+    const eclipse=new T.Mesh(
+      new T.CircleGeometry(9.6,64),flat(0x1c0008,.95,false)
+    );
+    eclipse.position.copy(center);
+    root.add(eclipse);
+    const corona=new T.Mesh(
+      new T.TorusGeometry(9.8,.3,10,120),flat(tone.core,.9,true)
+    );
+    corona.position.copy(center);
+    corona.userData.corona=true;
+    root.add(corona);
+    const halo=new T.Mesh(
+      new T.TorusGeometry(11.9,.09,8,120),flat(tone.core,.34,true)
+    );
+    halo.position.copy(center);
+    root.add(halo);
+
+    [1.16,1.4,1.62,1.86].forEach((factor,index)=>{
+      const angle=Math.PI*factor;
+      const radius=17+(index%2)*3.2;
+      const height=tone.tower;
+      const monolith=new T.Mesh(
+        new T.BoxGeometry(3.1,height,3.1),
+        new T.MeshStandardMaterial({
+          color:0x03050b,metalness:.85,roughness:.28,
+          emissive:tone.cityEm,emissiveIntensity:.3
+        })
+      );
+      monolith.position.set(
+        Math.cos(angle)*radius,height/2-1.2,Math.sin(angle)*radius
+      );
+      monolith.rotation.y=-angle;
+      monolith.rotation.z=(index%2?1:-1)*.012;
+      root.add(monolith);
+      const edge=new T.Mesh(
+        new T.BoxGeometry(.16,height*.82,.16),flat(tone.core,.72,true)
+      );
+      edge.position.copy(monolith.position).add(new T.Vector3(0,0,1.62));
+      edge.userData.edge=index;
+      root.add(edge);
+      const beamGeometry=new T.ConeGeometry(2.3,26,14,1,true);
+      beamGeometry.translate(0,13,0);
+      const beam=new T.Mesh(beamGeometry,flat(tone.core,.055,true));
+      beam.position.set(monolith.position.x,height-2,monolith.position.z);
+      root.add(beam);
+    });
+
+    const ground=new T.Mesh(
+      new T.RingGeometry(6.3,9.5,80),flat(tone.glow,.3,true)
+    );
+    ground.rotation.x=-Math.PI/2;
+    ground.position.y=.03;
+    ground.userData.ground=true;
+    root.add(ground);
+
+    const count=tone.ash;
+    const positions=new Float32Array(count*3);
+    const speeds=[];
+    for(let index=0;index<count;index++){
+      positions[index*3]=(Math.random()-.5)*36;
+      positions[index*3+1]=Math.random()*20;
+      positions[index*3+2]=(Math.random()-.5)*30;
+      speeds.push(.35+Math.random()*1.15);
+    }
+    const geometry=new T.BufferGeometry();
+    geometry.setAttribute('position',new T.BufferAttribute(positions,3));
+    const material=new T.PointsMaterial({
+      color:tone.ember,size:.09,transparent:true,opacity:.72,
+      depthWrite:false,blending:T.AdditiveBlending
+    });
+    material.fog=false;
+    const ash=new T.Points(geometry,material);
+    ash.userData.speeds=speeds;
+    root.add(ash);
+    ST.ash=ash;
+
+    GL.scene.add(root);
+    return root;
+  }
+
+  function loop(){
+    if(!GL.active||!ST.root||!ST.root.parent){
+      ST.raf=0;
+      return;
+    }
+    ST.raf=requestAnimationFrame(loop);
+    const time=performance.now()*.001;
+    ST.root.children.forEach(object=>{
+      const data=object.userData||{};
+      if(data.corona){
+        object.rotation.z+=.0016;
+        object.scale.setScalar(1+Math.sin(time*.55)*.022);
+      }else if(data.ground){
+        object.material.opacity=.2+Math.abs(Math.sin(time*.75))*.22;
+        object.rotation.z+=.0012;
+      }else if(Number.isFinite(data.edge)){
+        object.material.opacity=.35+Math.abs(Math.sin(time*1.15+data.edge))*.5;
+      }
+    });
+    const ash=ST.ash;
+    if(ash&&ash.geometry){
+      const attribute=ash.geometry.attributes.position;
+      const array=attribute.array;
+      const speeds=ash.userData.speeds||[];
+      for(let index=0;index<speeds.length;index++){
+        array[index*3+1]-=speeds[index]*.016;
+        array[index*3]+=Math.sin(time*.5+index)*.004;
+        if(array[index*3+1]<-1){
+          array[index*3+1]=20;
+          array[index*3]=(Math.random()-.5)*36;
+          array[index*3+2]=(Math.random()-.5)*30;
+        }
+      }
+      attribute.needsUpdate=true;
+    }
+  }
+  function clear(){
+    if(ST.raf)cancelAnimationFrame(ST.raf);
+    ST.raf=0;
+    ST.root=null;
+    ST.ash=null;
+  }
+
+  const previousInitGL=initGL;
+  initGL=function(playerCo,enemyCo){
+    clear();
+    const value=previousInitGL.apply(this,arguments);
+    try{
+      const tier=evaluate(playerCo,enemyCo);
+      hud(tier);
+      if(tier>0&&GL.active&&GL.scene&&window.THREE){
+        const tone=TONE[tier];
+        dressCity(tone,tier);
+        ST.root=buildSky(tone);
+        if(!ST.raf)ST.raf=requestAnimationFrame(loop);
+        if(typeof pushLog==='function'){
+          pushLog('sys',(tier>=2?'【最終決戦】':'【強敵】')+
+            '相手は明確な上位企業。戦力比 x'+ST.ratio.toFixed(2));
+        }
+      }
+      if(typeof syncBattleCombatBgm==='function')syncBattleCombatBgm();
+    }catch(error){
+      console.error('[CQ BOSS STAGE]',error);
+    }
+    return value;
+  };
+
+  const previousCleanupGL=cleanupGL;
+  cleanupGL=function(){
+    clear();
+    ST.tier=0;
+    hud(0);
+    return previousCleanupGL.apply(this,arguments);
+  };
+
+  window.CQ_BOSS_STAGE={
+    config:CFG,
+    state:ST,
+    tier:function(){return ST.tier;},
+    ratio:function(){return ST.ratio;}
+  };
+})();
+
+/* ================================================================
+   BOSS STAGE BGM SLOT / ラスボスBGM差し替え口
+   - 既定はenabled=false・abc=nullのため現行BGM挙動を一切変えない
+   - CQ_BOSS_STAGE_BGM.enable(abc)を呼んだ時だけbossトラックへ切替
+   - 停止と召喚BGM割り込みは既存battleBgmStop経路へ相乗り
+================================================================ */
+(function installBossStageBgmSlot(){
+  if(window.__CQ_BOSS_STAGE_BGM__)return;
+  window.__CQ_BOSS_STAGE_BGM__=true;
+
+  const SLOT={
+    name:'boss',
+    enabled:false,
+    abc:null,
+    pan:[-.22,.2,-.14,.16,0,-.3,.08,.26],
+    volume:.74
+  };
+  function bossTier(){
+    const api=window.CQ_BOSS_STAGE;
+    return api&&typeof api.tier==='function'?api.tier():0;
+  }
+  function ready(){
+    return !!(AC&&SLOT.enabled&&SLOT.abc&&bossTier()>0&&
+      S.screen==='battle'&&S.battle&&!S.battle.over);
+  }
+
+  const previousGetAbcBgmSpec=getAbcBgmSpec;
+  getAbcBgmSpec=function(name){
+    if(name===SLOT.name&&SLOT.abc){
+      return {abc:SLOT.abc,pan:SLOT.pan,volume:SLOT.volume};
+    }
+    return previousGetAbcBgmSpec.apply(this,arguments);
+  };
+
+  const previousBattleBgmStop=battleBgmStop;
+  battleBgmStop=function(){
+    if(ABC_BGM_STATE.requested===SLOT.name||ABC_BGM_STATE.current===SLOT.name){
+      battleBgm.on=false;
+      stopAbcBgm();
+      return;
+    }
+    return previousBattleBgmStop.apply(this,arguments);
+  };
+
+  const previousSyncBattleCombatBgm=syncBattleCombatBgm;
+  syncBattleCombatBgm=function(){
+    if(ready()&&!hasActiveBattleSummon()){
+      if(battleBgm.on&&ABC_BGM_STATE.requested===SLOT.name)return;
+      battleBgm.on=true;
+      startAbcBgm(SLOT.name);
+      return;
+    }
+    return previousSyncBattleCombatBgm.apply(this,arguments);
+  };
+
+  window.CQ_BOSS_STAGE_BGM={
+    slot:SLOT,
+    enable:function(abc){
+      SLOT.abc=String(abc||'')||null;
+      SLOT.enabled=!!SLOT.abc;
+      if(S.screen==='battle')syncBattleCombatBgm();
+      return SLOT.enabled;
+    },
+    disable:function(){
+      SLOT.enabled=false;
+      battleBgmStop();
+      if(S.screen==='battle')syncBattleCombatBgm();
+    }
+  };
+})();
+
+/* ================================================================
+   FINAL BOSS BGM / 強敵ステージ専用曲
+   - URLエンコードされたABCを起動時に復元し、bossスロットへ登録
+   - CQ_BOSS_STAGEのtierが1以上の戦闘だけで再生
+   - 召喚BGM中は既存の割り込み制御を優先
+   - ヘルプのミュージックボックスにも同じABCを追加
+================================================================ */
+(function installCorporateQuestFinalBossBgm(){
+  if(window.__CQ_FINAL_BOSS_BGM_INSTALLED__)return;
+  window.__CQ_FINAL_BOSS_BGM_INSTALLED__=true;
+
+  const FINAL_BOSS_ABC_ENCODED="x:1%0AT%3ACorporateQuest%20-%20Final%20Boss%0AM%3A4/4%0AL:1/8%0AQ:1/4=145%0AK:Em%0AV:1%20nm=SynthLead%0A%25%25MIDI%20program%2081%0AV:2%20nm=OverdrivenGuitar%0A%25%25MIDI%20program%2029%0AV:3%20nm=Strings%0A%25%25MIDI%20program%2048%0AV:4%20nm=SynthBrass%0A%25%25MIDI%20program%2062%0AV:5%20nm=SquareWave%0A%25%25MIDI%20program%2080%0AV:6%20nm=SynthPad%0A%25%25MIDI%20program%2088%0AV:7%20nm=SynthBass%0A%25%25MIDI%20program%2038%0AV:8%20nm=MelodicTom%0A%25%25MIDI%20program%20117%0AV:9%20nm=Choir%0A%25%25MIDI%20program%2052%0AV:10%20nm=TubularBells%0A%25%25MIDI%20program%2014%0AV:1%0A%7C:E8%7Cz8%7CC8%7Cz8%7CE8%7Cz8%7CC8%7CD8%7CE8%7Cz8%7CC8%7Cz8%7CG8%7CF8%7CE8%7CD8%7CE2B2A2G2%7CF2D2E4%7CE2B2A2G2%7Cd2c2B4%7CE2B2A2G2%7CF2D2E2F2%7CG2A2B2d2%7Ce8%7Ce2b2a2g2%7Cf2d2e4%7Ce2b2a2g2%7Cd'2c'2b4%7Ce2b2a2g2%7Cf2d2e2f2%7Cg2a2b2d'2%7Ce'8%7Cc'4b4%7Ca4g4%7Cf2g2a2b2%7Ce8%7Cc'4b4%7Ca4g4%7Cf2g2a2f2%7Ce8%7Cc'4d'4%7Ce'4b4%7Cc'2b2a2g2%7Cf8%7Cc'4d'4%7Ce'4b4%7Cc'2b2a2f2%7Ce8%7CE2B2A2G2%7CF2D2E4%7CE2B2A2G2%7Cd2c2B4%7CE2B2A2G2%7CF2D2E2F2%7CG2A2B2d2%7Ce8%7Cb4a4%7Cg4f4%7Ce2f2g2a2%7Cb8%7Cb4a4%7Cg4f4%7Ce2f2d2F2%7CE8:%7C%0AV:2%0A%7C:E,E,E,E,E,E,E,E,%7CE,E,E,E,E,E,E,E,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CE,E,E,E,E,E,E,E,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CE,E,E,E,E,E,E,E,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CE,E,E,E,E,E,E,E,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CB,,B,,B,,B,,B,,B,,B,,B,,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CB,,B,,B,,B,,B,,B,,B,,B,,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CB,,B,,B,,B,,B,,B,,B,,B,,%7CC,C,C,C,C,C,C,C,%7CD,D,D,D,D,D,D,D,%7CE,E,E,E,E,E,E,E,%7CB,,B,,B,,B,,B,,B,,B,,B,,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,%7CE,E,B,E,E,E,B,E,%7CE,E,B,E,E,E,B,E,%7CC,C,G,C,C,C,G,C,%7CD,D,A,D,D,D,A,D,:%7C%0AV:3%0A%7C:E4-E4%7CE4-E4%7CC4-C4%7CD4-D4%7CE4-E4%7CE4-E4%7CC4-C4%7CD4-D4%7CE4-E4%7CE4-E4%7CC4-C4%7CD4-D4%7CE4-E4%7CE4-E4%7CC4-C4%7CD4-D4%7Ce8%7Cb8%7Cg8%7Cf8%7Ce8%7Cb8%7Cc'8%7Cd'8%7Ce8%7Cb8%7Cg8%7Cf8%7Ce8%7Cb8%7Cc'8%7Cd'8%7Ce'8%7Cd'8%7Ce'8%7Cb8%7Cc'8%7Cd'8%7Ce'8%7Cb8%7Ce'8%7Cd'8%7Ce'8%7Cb8%7Cc'8%7Cd'8%7Ce'8%7Cb8%7Ce4-e4%7Ce4-e4%7Cc4-c4%7Cd4-d4%7Ce4-e4%7Ce4-e4%7Cc4-c4%7Cd4-d4%7Ce8%7Cd8%7Ce8%7Ce8%7Cc8%7Cd8%7Ce8-%7Ce8:%7C%0AV:4%0A%7C:z8%7Cz8%7Cz8%7Cz8%7Cz8%7Cz8%7Cz8%7Cz8%7CE,2z2E,2z2%7CE,2z2E,2z2%7CC,2z2C,2z2%7CD,2z2D,2z2%7CE,2z2E,2z2%7CE,2z2E,2z2%7CC,2z2C,2z2%7CD,2z2D,2z2%7Ce8%7Cz8%7Cc8%7Cz8%7Ce8%7Cz8%7Cc8%7Cd8%7Ce8%7Cz8%7Cc8%7Cz8%7Ce8%7Cz8%7Cc8%7Cd8%7Cg8%7Cf8%7Ce8%7Cd8%7Cg8%7Cf8%7Ce8%7Cd8%7Cc'8%7Cb8%7Ca8%7Cg8%7Cc'8%7Cb8%7Ca8%7Cg8%7CE2B2A2G2%7CF2D2E4%7CE2B2A2G2%7Cd2c2B4%7CE2B2A2G2%7CF2D2E2F2%7CG2A2B2d2%7Ce8%7Cg8%7Cf8%7Ce8%7Ce8%7Cg8%7Cf8%7Ce8-%7Ce8:%7C%0AV:5%0A%7C:EGBGEGBG%7CEGBGEGBG%7CCEGECEGE%7CDFAFDFAF%7CEGBGEGBG%7CEGBGEGBG%7CCEGECEGE%7CDFAFDFAF%7CEGBGEGBG%7CEGBGEGBG%7CCEGECEGE%7CDFAFDFAF%7CEGBGEGBG%7CEGBGEGBG%7CCEGECEGE%7CDFAFDFAF%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cdfbfdfbf%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cdfbfdfbf%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cdfbfdfbf%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cdfbfdfbf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf%7Cegbgegbg%7Cegbgegbg%7Ccegecege%7Cdfafdfaf:%7C%0AV:6%0A%7C:%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BB,,F,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BB,,F,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BB,,F,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BB,,F,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8%7C%5BE,B,%5D8%7C%5BE,B,%5D8%7C%5BC,G,%5D8%7C%5BD,A,%5D8:%7C%0AV:7%0A%7C:E,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CB,,,2B,,,2B,,,2B,,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CB,,,2B,,,2B,,,2B,,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CB,,,2B,,,2B,,,2B,,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CB,,,2B,,,2B,,,2B,,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2%7CE,,2E,,2E,,2E,,2%7CE,,2E,,2E,,2E,,2%7CC,,2C,,2C,,2C,,2%7CD,,2D,,2D,,2D,,2:%7C%0AV:8%0A%7C:C,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,2G,2%7CC,2G,2C,C,G,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,2C,C,%7CC,2C,C,C,C,C,2:%7C%0AV:9%0A%7C:%5BE4G4B4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BC4E4G4%5Dz4%7C%5BD4F4A4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BC4E4G4%5Dz4%7C%5BD4F4A4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BC4E4G4%5Dz4%7C%5BD4F4A4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BE4G4B4%5Dz4%7C%5BC4E4G4%5Dz4%7C%5BD4F4A4%5Dz4%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BB,8D8F8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BB,8D8F8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BB,8D8F8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BB,8D8F8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D%7C%5BE8G8B8%5D%7C%5BE8G8B8%5D%7C%5BC8E8G8%5D%7C%5BD8F8A8%5D:%7C%0AV:10%0A%7C:e8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cc8%7Cd8%7Ce8%7Cz8%7Cc8%7Cd8%7Ce8%7Cz8%7Cc8%7Cd8%7Ce8%7Cz8%7Cc8%7Cd8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Cz8%7Cz8%7Ce8%7Cz8%7Ce8%7Cb8%7Cg8%7Cf8%7Ce8%7Cb8%7Cg8%7Cf8%7Ce8%7Cb8%7Cg8%7Cf8%7Ce8%7Cb8%7Cg8%7Cf8:%7C";
+  const FINAL_BOSS_ABC=decodeURIComponent(FINAL_BOSS_ABC_ENCODED)
+    .replace(/^x:/i,"X:");
+
+  const bossBgmApi=window.CQ_BOSS_STAGE_BGM;
+  if(bossBgmApi&&typeof bossBgmApi.enable==="function"){
+    bossBgmApi.enable(FINAL_BOSS_ABC);
+  }
+
+  if(
+    typeof cqHelpMusicTracks==="function"&&
+    !cqHelpMusicTracks.__cqFinalBossTrackInstalled
+  ){
+    const previousCqHelpMusicTracks=cqHelpMusicTracks;
+    const wrappedCqHelpMusicTracks=function(){
+      const current=previousCqHelpMusicTracks.apply(this,arguments);
+      const tracks=Array.isArray(current)?current.slice():[];
+      const trackId="corporatequest-final-boss";
+      if(!tracks.some(track=>track&&track.id===trackId)){
+        tracks.push({
+          id:trackId,
+          name:"強敵決戦 / CorporateQuest Final Boss",
+          abc:FINAL_BOSS_ABC
+        });
+      }
+      return tracks;
+    };
+    wrappedCqHelpMusicTracks.__cqFinalBossTrackInstalled=true;
+    cqHelpMusicTracks=wrappedCqHelpMusicTracks;
+  }
+
+  window.CQ_FINAL_BOSS_BGM={
+    id:"corporatequest-final-boss",
+    title:"CorporateQuest - Final Boss",
+    abc:FINAL_BOSS_ABC
+  };
+})();
+
 initSelectScreenEnhancement();
 configureTitleHelp();
 window.addEventListener("resize",()=>{
