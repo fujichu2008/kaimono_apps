@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-iqube-4308cd61193a5142d05c";
+const CACHE_NAME = "appstudio-pwa-iqube-f2a863435c49dfe767a5";
 const CACHE_PREFIX = "appstudio-pwa-iqube-";
 const PRECACHE_URLS = [
     "./",
