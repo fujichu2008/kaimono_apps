@@ -8744,14 +8744,88 @@ function fxSkill(f,label,isUnique,moveName,moveKey,moveNarration){
   });
 }
 function fxHit(f,dmg,guarded,type){
-  camShake(dmg>160?1.2:.55);
-  arenaFlash(type>1?"#ffd34d":guarded?"#4dc3ff":"#ff5a6e");
+  const amount=Math.max(0,Math.round(Number(dmg)||0));
+  const hitType=Number.isFinite(Number(type))?Number(type):1;
+  const now=performance.now();
+  let state=f&&f.__cqDamagePopupState;
+
+  const formatPopup=current=>{
+    const prefix=current.type>1?"▲ ":current.type<1?"▽ ":"";
+    current.pop.textContent=prefix+(current.guarded?current.total+" 🛡":current.total);
+    current.pop.style.color=current.type>1
+      ?"#ffe16a"
+      :current.type<1
+        ?"#a5b3c9"
+        :current.guarded
+          ?"var(--cyan)"
+          :"var(--bear)";
+  };
+
+  if(
+    state&&
+    state.pop&&
+    state.pop.isConnected&&
+    now-state.lastAt<=80
+  ){
+    state.total+=amount;
+    state.hits++;
+    state.lastAt=now;
+    state.guarded=state.guarded||!!guarded;
+    if(hitType>1||state.type>1)state.type=Math.max(state.type,hitType);
+    else if(hitType<1||state.type<1)state.type=Math.min(state.type,hitType);
+    else state.type=1;
+    state.token++;
+    formatPopup(state);
+    camShake(state.total>160?1.2:.55);
+    arenaFlash(state.type>1?"#ffd34d":state.guarded?"#4dc3ff":"#ff5a6e");
+
+    const token=state.token;
+    setTimer(()=>{
+      if(
+        f&&
+        f.__cqDamagePopupState===state&&
+        state.token===token
+      ){
+        state.pop.remove();
+        delete f.__cqDamagePopupState;
+      }
+    },850);
+    return;
+  }
+
+  camShake(amount>160?1.2:.55);
+  arenaFlash(hitType>1?"#ffd34d":guarded?"#4dc3ff":"#ff5a6e");
   const arena=$("arena"),pt=toScreen(f),pop=document.createElement("div");
   pop.className="dmg-pop mono";
-  pop.textContent=(type>1?"▲ ":"")+(type<1?"▽ ":"")+(guarded?dmg+" 🛡":dmg);
-  pop.style.color=type>1?"#ffe16a":type<1?"#a5b3c9":guarded?"var(--cyan)":"var(--bear)";
-  pop.style.left=(pt.x-22)+"px";pop.style.top=(pt.y-34)+"px";
-  arena.appendChild(pop);setTimer(()=>pop.remove(),850);
+  pop.style.left=(pt.x-22)+"px";
+  pop.style.top=(pt.y-34)+"px";
+
+  state={
+    pop,
+    total:amount,
+    hits:1,
+    lastAt:now,
+    guarded:!!guarded,
+    type:hitType,
+    token:1
+  };
+  if(f)f.__cqDamagePopupState=state;
+  formatPopup(state);
+  arena.appendChild(pop);
+
+  const token=state.token;
+  setTimer(()=>{
+    if(
+      f&&
+      f.__cqDamagePopupState===state&&
+      state.token===token
+    ){
+      state.pop.remove();
+      delete f.__cqDamagePopupState;
+    }else if(!f){
+      state.pop.remove();
+    }
+  },850);
 }
 function pushLog(cls,msg){
   S.log.push({cls,msg});
@@ -33068,6 +33142,424 @@ function configureTitleHelp(){
 
   setTimeout(()=>{bindMazda();bindBay();if(typeof renderSelect==="function")try{renderSelect();}catch(_){}},0);
   window.CQ_MAZDA_BAYCURRENT={mazda,bay,bindMazda,bindBay,isMazda,isBay,playMazdaMid,playMazdaBig,playBayMid,playBayBig};
+})();
+
+(function installPoliticalBenefitMove(){
+  if(window.__CQ_POLITICAL_BENEFIT_MOVE_INSTALLED__)return;
+  if(
+    typeof SUMMONS!=="object"||
+    !SUMMONS||
+    !SUMMONS.politician||
+    !Array.isArray(SUMMONS.politician.moves)
+  )return;
+  window.__CQ_POLITICAL_BENEFIT_MOVE_INSTALLED__=true;
+
+  const MOVE_NAME="利益誘導";
+  const MOTION_ID="politician_benefit_route";
+  const SUCCESS_CHANCE=.55;
+  const HEAL_RATIO=.34;
+
+  function createBenefitMove(){
+    let move=typeof mv==="function"
+      ?mv(
+          MOVE_NAME,
+          "💰",
+          "55%の確率で最大HPの34%を大回復",
+          MOTION_ID,
+          []
+        )
+      :{
+          name:MOVE_NAME,
+          ic:"💰",
+          desc:"55%の確率で最大HPの34%を大回復",
+          motion:MOTION_ID,
+          effects:[],
+          cost:0
+        };
+
+    if(typeof normalizeMoveRecord==="function"){
+      try{
+        const normalized=normalizeMoveRecord(move);
+        if(normalized)move=normalized;
+      }catch(_){}
+    }
+
+    move.name=MOVE_NAME;
+    move.ic="💰";
+    move.desc="55%の確率で最大HPの34%を大回復";
+    move.motion=MOTION_ID;
+    move.effects=[];
+    move.cqPoliticalBenefit=true;
+    move.successChance=SUCCESS_CHANCE;
+    move.healRatio=HEAL_RATIO;
+    move.explanation="金色の予算ルートと配分カードが自社へ集中し、利益誘導が成立した場合だけHPを大幅回復する。";
+    move.narration={
+      tone:"humor",
+      text:"予算の流れが不自然なほどこちらへ曲がる。通れば大回復、止められれば何も起きない。"
+    };
+    return move;
+  }
+
+  const politician=SUMMONS.politician;
+  let benefitMove=politician.moves.find(move=>
+    move&&String(move.name||"")===MOVE_NAME
+  );
+  if(!benefitMove){
+    benefitMove=createBenefitMove();
+    politician.moves.push(benefitMove);
+  }else{
+    benefitMove.cqPoliticalBenefit=true;
+    benefitMove.successChance=SUCCESS_CHANCE;
+    benefitMove.healRatio=HEAL_RATIO;
+    benefitMove.motion=MOTION_ID;
+    benefitMove.effects=[];
+  }
+
+  function benefitPosition(fighter){
+    if(!window.THREE)return null;
+    try{
+      if(typeof fighterWorldPosition==="function"){
+        const value=fighterWorldPosition(fighter);
+        if(value&&typeof value.clone==="function")return value.clone();
+      }
+      if(typeof fighter3D==="function"){
+        const object=fighter3D(fighter);
+        if(object&&object.userData&&object.userData.base){
+          return object.userData.base.clone();
+        }
+        if(object&&object.position&&object.position.clone){
+          return object.position.clone();
+        }
+      }
+    }catch(_){}
+    return new THREE.Vector3(fighter&&fighter.side==="e"?3:-3,.2,0);
+  }
+
+  function benefitLater(callback,delay){
+    if(typeof setTimer==="function")setTimer(callback,delay);
+    else setTimeout(callback,delay);
+  }
+
+  function disposeBenefit(root){
+    if(!root)return;
+    if(typeof disposeObj==="function"){
+      disposeObj(root);
+      return;
+    }
+    if(root.parent)root.parent.remove(root);
+    root.traverse(object=>{
+      if(object.geometry&&object.geometry.dispose)object.geometry.dispose();
+      const materials=Array.isArray(object.material)
+        ?object.material
+        :[object.material];
+      materials.filter(Boolean).forEach(material=>{
+        if(material.dispose)material.dispose();
+      });
+    });
+  }
+
+  function playBenefitVisual(owner,success){
+    if(
+      !window.THREE||
+      typeof GL!=="object"||
+      !GL||
+      !GL.active||
+      !GL.scene
+    ){
+      if(typeof fxSkill==="function"){
+        fxSkill(
+          owner,
+          success?"💰 利益誘導 / 特別枠確保":"💰 利益誘導 / 調整不成立",
+          true
+        );
+      }
+      if(typeof arenaFlash==="function"){
+        arenaFlash(success?"#ffe7a0":"#ff6378");
+      }
+      return;
+    }
+
+    const T=THREE;
+    const target=benefitPosition(owner).add(new T.Vector3(0,1.05,0));
+    const direction=owner&&owner.side==="p"?1:-1;
+    const source=target.clone().add(new T.Vector3(-direction*4.8,3.2,-1.2));
+    const root=new T.Group();
+    const cards=[];
+    const rings=[];
+    const routeNodes=[];
+    const gold=0xffd45c;
+    const ivory=0xfff4c7;
+    const green=0x63f5a5;
+    const red=0xff4f68;
+
+    const gateMaterial=new T.MeshStandardMaterial({
+      color:0x28200d,
+      metalness:.82,
+      roughness:.2,
+      emissive:success?0x775200:0x66101c,
+      emissiveIntensity:.8
+    });
+    const lightMaterial=new T.MeshBasicMaterial({
+      color:success?gold:red,
+      transparent:true,
+      opacity:.85,
+      depthWrite:false,
+      blending:T.AdditiveBlending
+    });
+
+    [-1.05,1.05].forEach(x=>{
+      const pillar=new T.Mesh(
+        new T.BoxGeometry(.32,2.9,.32),
+        gateMaterial
+      );
+      pillar.position.copy(source).add(new T.Vector3(x,0,0));
+      root.add(pillar);
+    });
+    const lintel=new T.Mesh(
+      new T.BoxGeometry(2.45,.34,.34),
+      gateMaterial
+    );
+    lintel.position.copy(source).add(new T.Vector3(0,1.25,0));
+    root.add(lintel);
+
+    for(let index=0;index<26;index++){
+      const card=new T.Mesh(
+        new T.BoxGeometry(.42,.25,.055),
+        new T.MeshStandardMaterial({
+          color:index%4===0?ivory:gold,
+          metalness:.58,
+          roughness:.2,
+          emissive:index%4===0?0x6d571c:0x8f6500,
+          emissiveIntensity:.7
+        })
+      );
+      const row=Math.floor(index/6);
+      const lane=index%6;
+      const from=source.clone().add(new T.Vector3(
+        (lane-2.5)*.34,
+        .85-row*.3,
+        (row-2)*.18
+      ));
+      const to=target.clone().add(new T.Vector3(
+        (lane-2.5)*.12,
+        (row-2)*.1,
+        Math.sin(index*1.7)*.24
+      ));
+      card.position.copy(from);
+      card.userData={from,to,index,row};
+      root.add(card);
+      cards.push(card);
+    }
+
+    for(let index=0;index<8;index++){
+      const ring=new T.Mesh(
+        new T.TorusGeometry(1.05+index*.32,.045,8,64),
+        new T.MeshBasicMaterial({
+          color:success?(index%2?ivory:green):(index%2?red:gold),
+          transparent:true,
+          opacity:.68,
+          depthWrite:false,
+          blending:T.AdditiveBlending
+        })
+      );
+      ring.position.copy(target);
+      ring.rotation.set(index*.12,index*.2,index*.16);
+      ring.userData={index};
+      root.add(ring);
+      rings.push(ring);
+    }
+
+    for(let index=0;index<10;index++){
+      const node=new T.Mesh(
+        new T.OctahedronGeometry(.08+(index%3)*.018,0),
+        lightMaterial.clone()
+      );
+      const t=index/9;
+      node.position.lerpVectors(source,target,t);
+      node.position.y+=Math.sin(t*Math.PI)*1.15;
+      node.userData={index,base:node.position.clone()};
+      root.add(node);
+      routeNodes.push(node);
+    }
+
+    GL.scene.add(root);
+
+    if(typeof fxSprite==="function"){
+      fxSprite(
+        success?"利益誘導 / SPECIAL BUDGET ROUTE":"利益誘導 / ROUTE BLOCKED",
+        success?"#fff1ac":"#ff9aaa",
+        target.clone().add(new T.Vector3(0,3.25,.16)),
+        success?2.45:2.15,
+        2100,
+        null,
+        "900 38px system-ui"
+      );
+    }
+
+    if(typeof fxBeam==="function"){
+      fxBeam(source.clone(),target.clone(),success?gold:red,.18,1800);
+      fxBeam(source.clone(),target.clone(),success?ivory:0xffaf75,.055,1800);
+    }
+
+    if(typeof tween==="function"){
+      tween(2150,progress=>{
+        cards.forEach(card=>{
+          const data=card.userData;
+          const delayed=Math.max(
+            0,
+            Math.min(1,(progress-data.index*.018)/.64)
+          );
+          const eased=1-Math.pow(1-delayed,3);
+          if(success){
+            card.position.lerpVectors(data.from,data.to,eased);
+            card.position.y+=Math.sin(delayed*Math.PI)*(
+              .65+data.row*.08
+            );
+          }else{
+            const scatter=data.to.clone().add(new T.Vector3(
+              Math.sin(data.index*2.1)*2.2,
+              -1.3-Math.abs(Math.cos(data.index))*1.1,
+              Math.cos(data.index*1.4)*1.5
+            ));
+            card.position.lerpVectors(data.from,scatter,eased);
+          }
+          card.rotation.x+=.13;
+          card.rotation.y+=.18*direction;
+          card.rotation.z+=success?.12:-.2;
+        });
+
+        routeNodes.forEach(node=>{
+          const data=node.userData;
+          node.rotation.x+=.16;
+          node.rotation.y+=.2;
+          node.scale.setScalar(
+            .7+Math.abs(Math.sin(progress*Math.PI*8+data.index))*.65
+          );
+          if(!success){
+            node.position.x=data.base.x+
+              Math.sin(progress*Math.PI*5+data.index)*progress*1.4;
+            node.position.y=data.base.y-progress*1.8;
+          }
+        });
+
+        rings.forEach((ring,index)=>{
+          const cycle=Math.max(
+            0,
+            Math.min(1,progress-index*.035)
+          );
+          ring.scale.setScalar(.3+cycle*(success?1.85:1.25));
+          ring.material.opacity=(1-cycle)*.75;
+          ring.rotation.z+=index%2?.09:-.08;
+        });
+      },()=>{
+        if(typeof motionParticles==="function"){
+          if(success){
+            motionParticles(target,gold,128,5.2,1450,2.5);
+            motionParticles(target,green,82,4.3,1300,2.05);
+            motionParticles(target,ivory,58,3.6,1150,1.7);
+          }else{
+            motionParticles(target,red,92,4.4,1250,2.1);
+            motionParticles(target,gold,44,3.2,1050,1.5);
+          }
+        }
+        if(typeof arenaFlash==="function"){
+          arenaFlash(success?"#fff5c7":"#ff7082");
+          if(success)benefitLater(()=>arenaFlash("#6cffac"),110);
+        }
+        if(typeof camShake==="function")camShake(success?1.55:.85);
+        if(typeof tone==="function"){
+          tone(success?196:92,.46,"triangle",.12,0,success?330:70);
+        }
+        benefitLater(()=>disposeBenefit(root),600);
+      });
+    }else{
+      benefitLater(()=>disposeBenefit(root),2200);
+    }
+  }
+
+  if(
+    typeof executeMove==="function"&&
+    !executeMove.__cqPoliticalBenefitInstalled
+  ){
+    const previousExecuteMove=executeMove;
+    executeMove=function(self,foe,move,ctx,visual){
+      const politicalBenefit=!!(
+        move&&(
+          move.cqPoliticalBenefit===true||
+          String(move.name||"")===MOVE_NAME
+        )
+      );
+      if(!politicalBenefit){
+        return previousExecuteMove.apply(this,arguments);
+      }
+
+      const probability=Number.isFinite(Number(move.successChance))
+        ?Math.max(0,Math.min(1,Number(move.successChance)))
+        :SUCCESS_CHANCE;
+      const healRatio=Number.isFinite(Number(move.healRatio))
+        ?Math.max(0,Math.min(.6,Number(move.healRatio)))
+        :HEAL_RATIO;
+      const success=Math.random()<probability;
+      const maxHp=Math.max(
+        1,
+        Number(self&&self.maxHp)||
+        Number(self&&self.base&&self.base.hp)||
+        Number(self&&self.co&&self.co.st&&self.co.st.hp)||
+        1
+      );
+      const beforeHp=Math.max(0,Number(self&&self.hp)||0);
+      let healed=0;
+
+      if(success&&self){
+        self.hp=Math.min(
+          maxHp,
+          beforeHp+Math.max(1,Math.round(maxHp*healRatio))
+        );
+        healed=Math.max(0,Math.round(Number(self.hp)-beforeHp));
+      }
+
+      if(visual!==false){
+        playBenefitVisual(self,success);
+      }
+
+      if(success){
+        return [
+          healed>0
+            ?"利益誘導が成立。HP "+healed+"大回復"
+            :"利益誘導は成立したが、HPはすでに最大"
+        ];
+      }
+      return ["利益誘導は調整不成立。回復なし"];
+    };
+    executeMove.__cqPoliticalBenefitInstalled=true;
+  }
+
+  if(
+    typeof S==="object"&&
+    S&&
+    S.battle
+  ){
+    [S.battle.p,S.battle.e].forEach(fighter=>{
+      if(
+        fighter&&
+        fighter.summon&&
+        fighter.summon.id==="politician"&&
+        Array.isArray(fighter.summon.moves)&&
+        !fighter.summon.moves.some(move=>
+          move&&String(move.name||"")===MOVE_NAME
+        )
+      ){
+        fighter.summon.moves.push(benefitMove);
+      }
+    });
+  }
+
+  window.CQ_POLITICAL_BENEFIT_MOVE={
+    move:benefitMove,
+    successChance:SUCCESS_CHANCE,
+    healRatio:HEAL_RATIO,
+    playVisual:playBenefitVisual
+  };
 })();
 
 initSelectScreenEnhancement();
