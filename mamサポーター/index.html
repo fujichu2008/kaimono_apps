@@ -2442,6 +2442,10 @@ function renderHome(){
 
 /* ---------- まきまきソフトクリーム（🪙1で あそぶ 2.5Dゲーム） ---------- */
 const SOFT_COST=1;
+const SOFT_SEG=3.2;   /* 1かい うけとめた クリームの たかさ(px) */
+const SOFT_TIER=7;    /* この かず つもると 1だん（やく22px） */
+const SOFT_TIME=60;   /* せいげん じかん（びょう） */
+const SOFT_HEAVY=70;  /* この たかさ(px)を こえると てっぺんが たおれやすくなる */
 let SC={run:false,raf:0};
 function softScores(){
  if(!S.soft||typeof S.soft!=="object")S.soft={scores:[]};
@@ -2536,7 +2540,7 @@ function softIntro(){
  $("#softScore").textContent="0";
  $("#softBestLb").textContent="ベスト "+softBest();
  $("#softMsgTitle").textContent="🍦 まきまきソフトクリーム";
- $("#softMsgBody").innerHTML="うごく ノズルから おちてくる クリームを<br>コーンを ドラッグして キャッチ！<br>かたむきすぎたり ゆれすぎると くずれちゃうよ";
+ $("#softMsgBody").innerHTML="60びょうかんで なんだん つめるか しょうぶ！<br>ノズルから でてくる クリームを コーンで うけとめよう<br>たかく つむと おもみで てっぺんが ゆらゆら…<br>たおれそうな ほうへ コーンを うごかして たてなおしてね";
  drawSoftRank();
  const b=$("#softBtn");
  b.textContent=`🪙${SOFT_COST}まいで あそぶ！`;
@@ -2555,28 +2559,38 @@ function softStart(){
  cv.width=W*dpr;cv.height=H*dpr;
  SC={run:true,raf:0,dpr,W,H,cv,ctx:cv.getContext("2d"),
   t:0,last:performance.now(),
-  coneX:W/2,targetX:W/2,
+  coneX:W/2,targetX:W/2,coneV:0,
   stack:[],score:0,over:false,
-  sway:0,swayV:0,lean:0,squash:0,
+  sway:0,swayV:0,lean:0,offset:0,squash:0,catching:0,
+  tipA:0,tipV:0,warned:false,
+  timeLeft:SOFT_TIME,timeShown:-1,
   nozzleX:W/2,nozzlePh:Math.random()*6,
-  blobs:[],nextDrop:1.2,
+  blobs:[],emitT:0,
   parts:[],clouds:[],camY:0,shake:0};
  for(let i=0;i<4;i++)SC.clouds.push({x:Math.random()*W,y:110+Math.random()*H*.25,s:.5+Math.random()*.9,v:6+Math.random()*10});
  $("#softScore").textContent="0";
+ $("#softBestLb").textContent="⏱ のこり "+SOFT_TIME+"びょう";
  SFX.fanfare();
  SC.raf=requestAnimationFrame(softLoop);
 }
-function softTopY(){ return SC.H-96+SC.camY-8-SC.stack.length*22; }
+function softHeight(){ return SC.stack.length*SOFT_SEG; }
+function softTopY(){ return SC.H-96+SC.camY-6-SC.stack.length*SOFT_SEG; }
 function softTopX(){
  let x=SC.coneX;SC.stack.forEach(s=>{x+=s.dx;});
- return x+Math.sin(SC.sway)*SC.stack.length*3;
+ const n=SC.stack.length;
+ /* うえはんぶんの おれまがり（tipA）も うけとめ いちに はんえいする */
+ return x+Math.sin(SC.sway)*Math.min(34,softHeight()*.16)
+        +Math.sin(SC.tipA||0)*Math.max(0,n*.5-1)*SOFT_SEG;
 }
+/* かたむき：うけとめた ズレの ごうけい。たかいほど ゆるされる はばが せまくなる */
 function softLeanCalc(){
- let l=0;SC.stack.forEach((s,i)=>{l+=s.dx*(1+i*.13);});
- SC.lean=l/90;
+ let off=0;SC.stack.forEach(s=>{off+=s.dx;});
+ SC.offset=off;
+ const tol=Math.max(32,66-softHeight()*.09);
+ SC.lean=off/tol;
 }
 function softSplat(x,y){
- for(let i=0;i<7;i++)SC.parts.push({x,y,vx:(Math.random()*2-1)*140,vy:-Math.random()*160,life:.5+Math.random()*.3,r:4+Math.random()*5,rot:0,vr:(Math.random()*2-1)*6});
+ for(let i=0;i<5;i++)SC.parts.push({x,y,vx:(Math.random()*2-1)*130,vy:-Math.random()*150,life:.45+Math.random()*.3,r:3+Math.random()*4,rot:0,vr:(Math.random()*2-1)*6});
 }
 function softLoop(now){
  if(!SC.run)return;
@@ -2587,40 +2601,77 @@ function softLoop(now){
 }
 function softUpdate(dt){
  const W=SC.W,H=SC.H,lv=SC.score;
+ /* せいげん じかん */
+ SC.timeLeft-=dt;
+ const tl=Math.ceil(SC.timeLeft);
+ if(tl!==SC.timeShown){
+  SC.timeShown=tl;
+  const lb=$("#softBestLb");
+  if(lb)lb.textContent="⏱ のこり "+Math.max(0,tl)+"びょう";
+  if(tl<=5&&tl>0)tone(880,.08,"square",.12);
+ }
+ if(SC.timeLeft<=0){softOver("60びょう やりきった！",true);return;}
+ const prevX=SC.coneX;
  SC.coneX+=(SC.targetX-SC.coneX)*Math.min(1,dt*14);
  SC.coneX=Math.max(46,Math.min(W-46,SC.coneX));
- const nSpeed=.9+lv*.09,nRange=W*.26+Math.min(W*.15,lv*6);
+ SC.coneV=Math.max(-500,Math.min(500,(SC.coneX-prevX)/Math.max(dt,.001)));
+ /* ノズルは 左右に うごきながら クリームを だしつづける（じかんが たつほど はやく） */
+ const prog=(SOFT_TIME-Math.max(0,SC.timeLeft))/SOFT_TIME;
+ const nSpeed=.8+lv*.07+prog*.9,nRange=W*.24+Math.min(W*.16,lv*7);
  SC.nozzleX=W/2+Math.sin(SC.t*nSpeed+SC.nozzlePh)*nRange;
- SC.nextDrop-=dt;
- if(SC.nextDrop<=0){
-  SC.nextDrop=Math.max(.55,1.25-lv*.04);
-  SC.blobs.push({x:SC.nozzleX,y:106,vy:40,r:20});
+ SC.emitT-=dt;
+ let guard=0;
+ while(SC.emitT<=0&&guard++<6){
+  SC.emitT+=Math.max(.055,.095-lv*.0015);
+  SC.blobs.push({x:SC.nozzleX+(Math.random()*2-1)*1.6,y:108,vy:90,r:8.5+Math.random()*1.6});
  }
- const topY=softTopY(),topX=softTopX(),grav=740+lv*22;
+ const grav=760+lv*14;
+ let caught=0;
  for(let i=SC.blobs.length-1;i>=0;i--){
   const b=SC.blobs[i];
   b.vy+=grav*dt;b.y+=b.vy*dt;
-  if(b.y>=topY-14&&Math.abs(b.x-topX)<34){
+  const topY=softTopY(),topX=softTopX();
+  const catchR=Math.max(20,30-softHeight()*.018);
+  if(b.y>=topY-5&&b.y<topY+34&&Math.abs(b.x-topX)<catchR){
    SC.blobs.splice(i,1);
-   const dx=Math.max(-16,Math.min(16,(b.x-topX)*.8));
+   const dx=Math.max(-1.7,Math.min(1.7,(b.x-topX)*.05));
    SC.stack.push({dx});
-   SC.score++;SC.squash=1;SC.swayV+=dx*.06;
-   $("#softScore").textContent=SC.score;
-   SFX.good();
-   if(SC.score%5===0){confetti(14);SFX.coin();}
-   softLeanCalc();
-   if(Math.abs(SC.lean)>1){softOver("かたむきすぎて くずれちゃった！");return;}
-  }else if(b.y>=H-66){
-   SC.blobs.splice(i,1);softSplat(b.x,H-66);SFX.buzz();
+   SC.squash=.8;SC.swayV+=dx*.09;SC.tipV+=dx*.1;
+   caught++;
+  }else if(b.y>=H-64){
+   SC.blobs.splice(i,1);
+   if(Math.random()<.3)softSplat(b.x,H-64);
   }
  }
+ if(caught){
+  SC.catching=.22;
+  const sc=Math.floor(SC.stack.length/SOFT_TIER);
+  if(sc!==SC.score){
+   SC.score=sc;
+   $("#softScore").textContent=sc;
+   tone(520+Math.min(sc,22)*22,.07,"triangle",.11);
+   if(sc>0&&sc%5===0){confetti(14);SFX.coin();}
+  }
+ }
+ SC.catching=Math.max(0,SC.catching-dt);
  softLeanCalc();
- SC.swayV+=(-SC.sway*8-SC.lean*3.4)*dt-SC.swayV*2.6*dt;
+ if(Math.abs(SC.lean)>1){softOver("おもみで かたむいて くずれちゃった！");return;}
+ /* おもみで てっぺんが ゆれる ふりこ物理：たかいほど ふあんてい に */
+ const h=softHeight(),heavy=Math.max(0,h-SOFT_HEAVY);
+ SC.tipV+=(SC.tipA*(heavy*.05-1.2)+SC.lean*1.3+Math.sin(SC.sway)*.45)*dt;
+ SC.tipV-=SC.coneV*dt*.0024;   /* かたむいた ほうへ コーンを うごかすと たてなおせる */
+ SC.tipV-=SC.tipV*Math.max(.9,3-heavy*.03)*dt;
+ SC.tipA+=SC.tipV*dt;
+ const lim=Math.max(.3,.85-heavy*.005);
+ if(h>40&&Math.abs(SC.tipA)>lim*.7&&!SC.warned){SC.warned=true;tone(240,.14,"sawtooth",.14);}
+ if(Math.abs(SC.tipA)<lim*.45)SC.warned=false;
+ if(h>40&&Math.abs(SC.tipA)>lim){softOver("てっぺんが たおれちゃった！");return;}
+ SC.swayV+=(-SC.sway*9-SC.lean*2.6)*dt-SC.swayV*2.2*dt;
  SC.sway+=SC.swayV*dt;
- if(SC.stack.length>2&&Math.abs(SC.sway)>.55){softOver("ゆれすぎて くずれちゃった！");return;}
- const targetCam=Math.max(0,SC.stack.length*22-H*.42);
+ if(softHeight()>44&&Math.abs(SC.sway)>.6){softOver("ゆれすぎて くずれちゃった！");return;}
+ const targetCam=Math.max(0,softHeight()-H*.42);
  SC.camY+=(targetCam-SC.camY)*Math.min(1,dt*4);
- SC.squash=Math.max(0,SC.squash-dt*4);
+ SC.squash=Math.max(0,SC.squash-dt*3);
  SC.shake=Math.max(0,SC.shake-dt*3);
  SC.clouds.forEach(c=>{c.x+=c.v*dt;if(c.x>W+80)c.x=-80;});
  for(let i=SC.parts.length-1;i>=0;i--){
@@ -2629,21 +2680,23 @@ function softUpdate(dt){
   if(p.life<=0)SC.parts.splice(i,1);
  }
 }
-function softOver(msg){
+function softOver(msg,clean){
  if(SC.over)return;
  SC.over=true;SC.run=false;cancelAnimationFrame(SC.raf||0);
- SC.shake=1;
- const tx=softTopX(),ty=softTopY();
- for(let i=0;i<14;i++)SC.parts.push({x:tx,y:ty+i*4,vx:(Math.random()*2-1)*220,vy:-120-Math.random()*160,life:.9,r:8+Math.random()*8,rot:0,vr:(Math.random()*2-1)*8});
+ if(!clean){
+  SC.shake=1;
+  const tx=softTopX(),ty=softTopY();
+  for(let i=0;i<14;i++)SC.parts.push({x:tx,y:ty+i*4,vx:(Math.random()*2-1)*220,vy:-120-Math.random()*160,life:.9,r:8+Math.random()*8,rot:0,vr:(Math.random()*2-1)*8});
+ }
  softDraw();
  const sc=SC.score,prevBest=softBest();
  const arr=softScores();arr.push(sc);
  if(arr.length>30)arr.splice(0,arr.length-30);
  save();
  const isBest=sc>0&&sc>prevBest;
- SFX.drum();
+ if(clean)SFX.good();else SFX.drum();
  setTimeout(()=>{
-  $("#softMsgTitle").textContent=isBest?`👑 しんきろく！ ${sc}だん！！`:`🍦 ${sc}だん つめたよ！`;
+  $("#softMsgTitle").textContent=isBest?`👑 しんきろく！ ${sc}だん！！`:clean?`⏱ タイムアップ！ ${sc}だん つめたよ！`:`🍦 ${sc}だん つめたよ！`;
   $("#softMsgBody").innerHTML=msg+"<br>ベスト3に はいれたかな？";
   drawSoftRank();
   $("#softBestLb").textContent="ベスト "+softBest();
@@ -2698,23 +2751,52 @@ function softDrawTower(){
  ctx.beginPath();ctx.moveTo(cx-24,baseY+15);ctx.lineTo(cx+24,baseY+15);ctx.stroke();
  ctx.fillStyle="#f7c98a";
  ctx.beginPath();ctx.ellipse(cx,baseY,33,9,0,0,Math.PI*2);ctx.fill();
- let x=cx;
- for(let i=0;i<SC.stack.length;i++){
+ /* うけとめた クリームを こまかく つみあげて ソフトの まきを つくる */
+ const n=SC.stack.length;
+ if(!n)return;
+ const swayK=Math.min(34,n*SOFT_SEG*.16);
+ const pivot=n*.5,tipS=Math.sin(SC.tipA||0);   /* うえはんぶんは tipA で おれまがる */
+ let x=cx,tx=cx,ty=baseY;
+ for(let i=0;i<n;i++){
   x+=SC.stack[i].dx;
-  const swx=Math.sin(SC.sway)*(i+1)*3;
-  const y=baseY-8-i*22;
-  const r=26-Math.min(10,i*.5);
-  const sq=(i===SC.stack.length-1)?1+SC.squash*.25:1;
-  softDrawBlob(x+swx,y,r*sq,i);
+  const y=baseY-6-i*SOFT_SEG;
+  const swx=Math.sin(SC.sway)*swayK*((i+1)/n)+tipS*Math.max(0,i-pivot)*SOFT_SEG;
+  tx=x+swx;ty=y;
+  if(y>H+30||y<-30)continue;
+  const ph=i*.62;
+  const sq=(i===n-1)?1+SC.squash*.16:1;
+  const r=Math.max(9,29-i*SOFT_SEG*.055)*(1+.07*Math.sin(ph))*sq;
+  ctx.fillStyle=Math.sin(ph)>0?"#ffffff":"#f1e3f8";
+  ctx.beginPath();ctx.ellipse(tx,y,r,r*.42,0,0,Math.PI*2);ctx.fill();
+  if(i%7===0){
+   ctx.fillStyle="rgba(255,255,255,.85)";
+   ctx.beginPath();ctx.ellipse(tx-r*.42,y-1,r*.2,r*.13,-.35,0,Math.PI*2);ctx.fill();
+  }
  }
- if(SC.stack.length){
-  const i=SC.stack.length-1;
-  const tx=x+Math.sin(SC.sway)*(i+1)*3;
-  const ty=baseY-8-i*22-16;
-  ctx.fillStyle="#fff";
-  ctx.beginPath();ctx.ellipse(tx,ty,12,10,0,0,Math.PI*2);ctx.fill();
-  ctx.beginPath();ctx.ellipse(tx+4,ty-9,6,7,.5,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle="#fff";
+ ctx.beginPath();ctx.ellipse(tx,ty-5,11,9,0,0,Math.PI*2);ctx.fill();
+ ctx.beginPath();ctx.ellipse(tx+3,ty-13,6,7,.5,0,Math.PI*2);ctx.fill();
+ if(SC.catching>0){
+  ctx.fillStyle="rgba(255,255,255,"+(SC.catching*2).toFixed(2)+")";
+  ctx.beginPath();ctx.ellipse(tx,ty-3,16+SC.catching*26,6,0,0,Math.PI*2);ctx.fill();
  }
+}
+/* とぎれない クリームの ながれ（つぶを かさねて 1ぽんに みせる） */
+function softDrawStream(){
+ const ctx=SC.ctx;
+ if(!SC.blobs.length)return;
+ ctx.fillStyle="#ffffff";
+ SC.blobs.forEach(b=>{
+  ctx.beginPath();ctx.ellipse(b.x,b.y,b.r*.8,b.r,0,0,Math.PI*2);ctx.fill();
+ });
+ ctx.fillStyle="rgba(226,207,242,.75)";
+ SC.blobs.forEach(b=>{
+  ctx.beginPath();ctx.ellipse(b.x+b.r*.34,b.y,b.r*.3,b.r*.9,0,0,Math.PI*2);ctx.fill();
+ });
+ ctx.fillStyle="rgba(255,255,255,.9)";
+ SC.blobs.forEach(b=>{
+  ctx.beginPath();ctx.ellipse(b.x-b.r*.3,b.y,b.r*.2,b.r*.7,0,0,Math.PI*2);ctx.fill();
+ });
 }
 function softDraw(){
  const ctx=SC.ctx,W=SC.W,H=SC.H,dpr=SC.dpr;
@@ -2743,7 +2825,7 @@ function softDraw(){
  ctx.fillStyle="rgba(107,74,58,.22)";
  ctx.beginPath();ctx.ellipse(SC.coneX,fy+9,46,9,0,0,Math.PI*2);ctx.fill();
  softDrawTower();
- SC.blobs.forEach(b=>softDrawBlob(b.x,b.y,b.r,0));
+ softDrawStream();
  SC.parts.forEach(p=>{
   ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot);
   ctx.fillStyle="rgba(255,255,255,"+Math.max(0,Math.min(1,p.life*1.6))+")";
