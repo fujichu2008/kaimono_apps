@@ -1186,20 +1186,24 @@ function defaults(){
   shop:{owned:[],placed:[]},     // あいぼうのおうち（かぐ）
   soft:{scores:[]},              // まきまきソフトクリームの きろく
   moleScores:[],         // もぐらたたきの とくてん（ちょっきん30けん）
+  prunedAt:"",           // 'YYYY-MM-DD' ふるい日づけキーの せんてい を した日
+  lastExport:"",         // 'YYYY-MM-DD' さいごに バックアップした日
   freeGacha:{},          // 'YYYY-MM-DD' -> 1 きょうの むりょうガチャを つかった
   missions:{},           // 'YYYY-MM-DD' -> [{id,done,base}] きょうの ミッション
   timer:{run:false,ts:0},
  };
 }
+let lsLoadFailed=false;   /* localStorage から よみこめなかった（IndexedDBからの ふくげん たいしょう） */
 function load(){
  try{
   const raw=localStorage.getItem(KEY);
-  if(!raw) { const d=defaults(); d.collection={hamy:1}; return d; }
+  if(!raw) { lsLoadFailed=true; const d=defaults(); d.collection={hamy:1}; return d; }
   const s=JSON.parse(raw);
   return Object.assign(defaults(),s);
- }catch(e){ return defaults(); }
+ }catch(e){ lsLoadFailed=true; return defaults(); }
 }
 let saveTm=null;
+let saveIdbTm=null;
 /* 起動時に localStorage が使えるか判定（opaque origin では throw する） */
 let storageOK=(function(){
  try{ localStorage.setItem("__mam_t","1"); localStorage.removeItem("__mam_t"); return true; }
@@ -1218,6 +1222,69 @@ function save(){
    }
   }
  },200);
+ /* IndexedDB への にじゅう ほぞん（localStorage の タイミングには えいきょうしない） */
+ clearTimeout(saveIdbTm);
+ saveIdbTm=setTimeout(()=>{
+  try{ stateIdbSave(S); }catch(e){}
+ },1500);
+}
+/* ---------- 本体データの IndexedDB にじゅう ほぞん ---------- */
+const STATE_KEY="S";
+function stateIdbSave(obj){
+ return idbOpen().then(db=>{
+  if(!db)return false;
+  return new Promise(res=>{
+   try{
+    if(!db.objectStoreNames.contains("state"))return res(false);
+    const tx=db.transaction("state","readwrite");
+    tx.objectStore("state").put(JSON.parse(JSON.stringify(obj)),STATE_KEY);
+    tx.oncomplete=()=>res(true);tx.onerror=()=>res(false);tx.onabort=()=>res(false);
+   }catch(e){ res(false); }
+  });
+ }).catch(()=>false);
+}
+function stateIdbLoad(){
+ return idbOpen().then(db=>{
+  if(!db)return null;
+  return new Promise(res=>{
+   try{
+    if(!db.objectStoreNames.contains("state"))return res(null);
+    const rq=db.transaction("state").objectStore("state").get(STATE_KEY);
+    rq.onsuccess=()=>res(rq.result||null);rq.onerror=()=>res(null);
+   }catch(e){ res(null); }
+  });
+ }).catch(()=>null);
+}
+/* localStorage が よめなかった／きろくが からっぽ の ときだけ ふくげん する */
+function needsRestore(){
+ if(!lsLoadFailed)return false;
+ return !S.records||Object.keys(S.records).length===0;
+}
+function tryRestoreFromIdb(){
+ if(!needsRestore())return;
+ stateIdbLoad().then(obj=>{
+  if(!obj||!obj.records||Object.keys(obj.records).length===0)return;
+  S=Object.assign(defaults(),obj);
+  lsLoadFailed=false;
+  save();
+  try{ renderAll(); }catch(e){}
+  try{ renderParent(); }catch(e){}
+  try{ toast("きろくを ふくげん しました"); }catch(e){}
+ }).catch(()=>{});
+}
+/* ---------- ふるい日づけキーの せんてい（records/collection/bond は たいしょうがい） ---------- */
+function pruneOldKeys(){
+ const t=todayKey();
+ if(S.prunedAt===t)return;
+ const cut=shiftKey(t,-90);
+ ["ms","pain","freezeUsed","freezeChecked","missions","freeGacha","gameSec"].forEach(name=>{
+  const o=S[name];
+  if(!o||typeof o!=="object"||Array.isArray(o))return;
+  for(const k in o){
+   if(/^\d{4}-\d{2}-\d{2}$/.test(k)&&k<cut)delete o[k];
+  }
+ });
+ S.prunedAt=t;save();
 }
 /* Promise拒否はhead内の早期リスナーで詳細を記録する。ここでは握りつぶさない。 */
 
@@ -3817,11 +3884,12 @@ function idbOpen(){
   let rq;
   try{
    if(typeof indexedDB==="undefined"||!indexedDB){ idbOK=false; return res(null); }
-   rq=indexedDB.open("mamapp",1);
+   rq=indexedDB.open("mamapp",2);
   }catch(e){ idbOK=false; return res(null); }
   rq.onupgradeneeded=e=>{
    const db=e.target.result;
    if(!db.objectStoreNames.contains("album")) db.createObjectStore("album",{keyPath:"ts"});
+   if(!db.objectStoreNames.contains("state")) db.createObjectStore("state");
   };
   rq.onsuccess=e=>{ idb=e.target.result; idbOK=true; albumMode="idb"; res(idb); };
   rq.onerror  =()=>{ idbOK=false; res(null); };
@@ -4448,9 +4516,24 @@ function renderStorageState(){
  const photo = albumMode==="idb" ? "端末内のデータベースに保存されています。"
    : albumMode==="ls" ? "簡易保存中です（新しい30枚まで写真を保持します）。"
    : "保存できません。画面を閉じると消えます。";
+ let size=0;
+ try{ size=JSON.stringify(S).length; }catch(e){}
+ const kb=(size/1024).toFixed(1);
+ const dayCount=S.records?Object.keys(S.records).length:0;
+ const dual=(idbOK===true)?"（バックアップとして端末内データベースにも保存）":"";
+ let bk;
+ if(!S.lastExport){
+  bk=`<span style="color:#D9534F">まだバックアップしていません。「記録をバックアップ」でJSONを保存してください。</span>`;
+ }else{
+  const p=S.lastExport.split("-").map(Number);
+  const days=Math.max(0,Math.round((new Date().setHours(0,0,0,0)-new Date(p[0],p[1]-1,p[2]).getTime())/86400000));
+  bk=days>=30
+   ? `<span style="color:#D9534F">⚠ 前回のバックアップから${days}日たっています</span>`
+   : `前回のバックアップ：${S.lastExport}（${days}日前）`;
+ }
  el.innerHTML = storageOK
-  ? `記録：この端末に保存されています。<br>写真：${photo}`
-  : "⚠ この環境では記録を保存できません。画面を閉じると消えます。<br>通常のページとして開き直すか、こまめに「記録をバックアップ」でJSONを保存してください。";
+  ? `記録：この端末に保存されています。${dual}<br>記録日数：${dayCount}日／データ量：約${kb}KB<br>写真：${photo}<br>${bk}`
+  : `⚠ この環境では記録を保存できません。画面を閉じると消えます。<br>通常のページとして開き直すか、こまめに「記録をバックアップ」でJSONを保存してください。<br>${bk}`;
 }
 $("#setGameLimit").addEventListener("change",e=>{S.settings.gameLimit=+e.target.value;save();});
 $("#setLearn").addEventListener("change",e=>{S.settings.learn=e.target.value;save();});
@@ -4471,6 +4554,8 @@ $("#btnExport").addEventListener("click",()=>{
  a.href=URL.createObjectURL(blob);
  a.download=`マウピー_バックアップ_${todayKey()}.json`;
  a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+ S.lastExport=todayKey();save();
+ renderStorageState();
  toast("バックアップを保存しました");
 });
 $("#btnImport").addEventListener("click",()=>$("#importFile").click());
@@ -4544,6 +4629,8 @@ function renderParent(){
 /* ---------- init ---------- */
 buildDome();
 buildHoles();
+pruneOldKeys();
+setTimeout(tryRestoreFromIdb,300);   /* しょきびょうが を ブロックしない */
 if(grantFreeze())toast("🛡 まもりが 1つ ふえたよ！");
 maybeUseFreeze();
 renderAll();
