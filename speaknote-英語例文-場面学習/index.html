@@ -523,7 +523,7 @@ header nav button:hover{
   .toast{
     position:fixed;
     left:50%;
-    bottom:calc(28px + env(safe-area-inset-bottom));
+    bottom:calc(72px + env(safe-area-inset-bottom));
     transform:translateX(-50%);
     max-width:min(560px,92vw);
     padding:12px 16px;
@@ -1597,6 +1597,9 @@ let kpiCurrentRange = 7;             // 7 / 30 / 120
 async function updateHomeKpi(){
   const el1 = $('#kpi-today-sentences');
   if(!el1) return; // ホームがまだ描画されていないケース
+  // ホームが表示されていないときは描画しない（表示に戻った時点で更新する）
+  const homeView = $('#view-home');
+  if(!homeView || !homeView.classList.contains('active')) return;
   const t = getTodayKpi();
  
   // 全件数を取得して表示
@@ -1940,6 +1943,13 @@ function toLightSentence(row){
   const { imageData, ...rest } = row || {};
   return Object.assign(rest, { hasImage: !!imageData });
 }
+/* 件数が変わらない更新はキャッシュを捨てずに該当行だけ差し替える */
+function patchSentenceCache(item){
+  if(!sentenceCache || !item || !item.id) return;
+  const index = sentenceCache.findIndex(row => row.id === item.id);
+  if(index < 0) return;
+  sentenceCache[index] = toLightSentence(item);
+}
 async function getAllCached(){
   if(sentenceCache) return sentenceCache;
   const rows = await getAll();
@@ -1953,7 +1963,7 @@ const addSentence = async item => {
 };
 const updateSentence = async item => {
   await runStoreRequest('readwrite', os=>os.put(item));
-  invalidateSentenceCache();
+  patchSentenceCache(item);
 };
 const deleteSentence = async id => {
   await runStoreRequest('readwrite', os=>os.delete(id));
@@ -1961,6 +1971,7 @@ const deleteSentence = async id => {
 };
 const getAll = ()=> runStoreRequest('readonly', os=>os.getAll(), v=>v||[]);
 const countAllSentences = async ()=>{
+  if(sentenceCache) return sentenceCache.length;
   if(!db) return 0;
   return runStoreRequest('readonly', os=>os.count(), v=>v||0);
 };
@@ -2400,6 +2411,8 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
   this.state='playing'; this._emit('state','playing');
   await ensureTtsUnlocked(); await loadVoices();
   const self = this;
+  // 実際に発話していた時間だけを積算する（間合い・一時停止・再試行の待機は含めない）
+  let spokenMs = 0;
 
   // ★変更：voiceOverride（役割別の声指定）と baseOffset を受け取れるように
   const speakOne = (text,langHint, {baseOffset=0, voiceOverride=null} = {})=>{
@@ -2444,13 +2457,24 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
         }
       }
       let settled=false, watchdog=null, sawSpeaking=false, notSpeakingCount=0, watchdogStart=0, watchdogDeadline=0;
+      let speakStartedAt=0, pausedMs=0;
       const cleanup=()=>{
         if(fbTimer) clearInterval(fbTimer);
         if(watchdog){ clearInterval(watchdog); watchdog=null; }
         if(targetEl) clearHighlight(targetEl);
       };
       // onend / onerror が発火しない環境でもPromiseを必ず解放する
-      const finish=()=>{ if(settled) return; settled=true; cleanup(); resolve(); };
+      const finish=()=>{
+        if(settled) return;
+        settled=true;
+        if(speakStartedAt){
+          // 一時停止していた分を差し引いた実発話時間を積算する
+          spokenMs += Math.max(0, (performance.now() - speakStartedAt) - pausedMs);
+          speakStartedAt = 0;
+        }
+        cleanup();
+        resolve();
+      };
 
       u.onend = finish;
       u.onerror = finish;
@@ -2470,6 +2494,13 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
         watchdog = setInterval(()=>{
           if(settled) return;
           if(my !== self.session){ finish(); return; }
+          // 一時停止中は打ち切らず、上限時間を繰り延べる
+          if(self.state === 'paused'){
+            watchdogDeadline += 1000;
+            pausedMs += 1000;
+            notSpeakingCount = 0;
+            return;
+          }
           let speaking=false;
           try{ speaking = !!(speechSynthesis.speaking || speechSynthesis.pending); }catch(_){}
           if(speaking){
@@ -2489,9 +2520,12 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
       const startSpeak = ()=>{
         if(my !== self.session){ finish(); return; }
         try {
+          speakStartedAt = performance.now();
+          pausedMs = 0;
           speechSynthesis.speak(u);
           armWatchdog();
         } catch(e) {
+          speakStartedAt = 0;
           setTimeout(finish, 120);
         }
       };
@@ -2718,28 +2752,25 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
 
 const t0 = performance.now();
 await doFlow();
-let dur = performance.now() - t0;
+const dur = performance.now() - t0;
 
 // 起爆に失敗したとみなせるときだけ、1回に限り再実行する。
 // 和訳のみの再生は二重読み上げになるため対象外とする。
-let retried = false;
-if(my===self.session && !retried && dur < 150 && script.order !== 'ja' && !speechSynthesis.speaking){
-  retried = true;
+if(my===self.session && dur < 150 && script.order !== 'ja' && !speechSynthesis.speaking){
   await ensureTtsUnlocked(); await loadVoices(); await sleep(120);
   if(my===self.session){
     await doFlow();
-    dur = performance.now() - t0; // 2回目も含めた実時間
   }
 }
 
 if(my===self.session){
   this.state='idle';
   this._emit('state','idle');
-  this._emit('ended', { durationMs: dur });
+  this._emit('ended', { durationMs: spokenMs });
 
-  // KPI：再実行が起きても加算は1回だけ（0.2秒未満はノイズとして無視）
-  if(dur > 200){
-    trackKpiPlay(dur);
+  // KPI：実際に発話していた時間だけを加算（0.2秒未満はノイズとして無視）
+  if(spokenMs > 200){
+    trackKpiPlay(spokenMs);
   }
 }
   }    // ← このカッコが抜けていた
@@ -2957,6 +2988,14 @@ function setRecButtonMode(mode){
   }
 }
 
+/* 録音プレビュー音声のクリア（空文字srcによる再リクエストを避ける） */
+function clearRecAudio(){
+  const a = $('#d-rec-audio');
+  if(!a) return;
+  try{ a.pause(); }catch(_){}
+  a.removeAttribute('src');
+}
+
 /* 詳細ダイアログ：メタ表示（カテゴリ＋再生回数） */
 function renderDetailMeta(categories, playCount){
   const meta=[];
@@ -2978,8 +3017,7 @@ async function openDetail(id){
 
   setPlayToggleLabel($('#d-toggle'),'idle');
   setRecButtonMode('idle');
-  try{ $('#d-rec-audio').pause(); }catch(_){}
-  $('#d-rec-audio').src=''; recEngine.dispose();
+  clearRecAudio(); recEngine.dispose();
 
   bindDetailPlayback(row);
   bindDetailRecording();
@@ -3172,7 +3210,7 @@ else if(recEngine.state==='ready'){
   function handleRecLongPress(){
     if(recEngine.state==='ready' || recEngine.url){
       recEngine.dispose();
-      $('#d-rec-audio').src='';
+      clearRecAudio();
       setRecButtonMode('idle');
     }
   }
@@ -3255,7 +3293,7 @@ function bindDetailActions(id){
 }
 $('#dlg-detail').addEventListener('close', ()=>{
   speakEngine.stop(); stopAllPlayback(); clearHighlight($('#d-en'));
-  try{ const a=$('#d-rec-audio'); if(a){ a.pause(); a.src=''; } }catch(_){}
+  clearRecAudio();
   recEngine.dispose();
   setPlayToggleLabel($('#d-toggle'),'idle'); setRecButtonMode('idle');
 });
@@ -4047,8 +4085,7 @@ $('#reset-all-sentences').onclick = async (ev)=>{
 const sh = {
   list: [], index: 0, rate: 1.0, container: null,
   opened:false, auto:false,
-  _lastAbs:0, _boundHook:false, _endedHook:false,
-  all:[]
+  _endedHook:false
 };
 
 let pocketLocked = false;
@@ -4156,7 +4193,6 @@ async function prepareShadow(){
     setActiveNav('nav-create'); show('create');
     return;
   }
-  sh.all = pool.slice();
   sh.list = [];
   sh.index = 0;
   sh.rate = settings.rate || 1.0;
@@ -4179,10 +4215,6 @@ async function prepareShadow(){
   sh.auto = false;
   setPlayToggleLabel($('#sh-toggle'),'idle');
 
-  if(!sh._boundHook){
-    speakEngine.on('boundary', (abs)=>{ sh._lastAbs = abs||0; });
-    sh._boundHook = true;
-  }
   if(!sh._endedHook){
     speakEngine.on('ended', ()=>{
       if(!sh.opened || !sh.auto) return;
@@ -4198,16 +4230,23 @@ async function prepareShadow(){
   }
 }
 
-/* シャドー用の画像は表示直前にだけ取得する（一覧データは画像を持たない） */
+/* シャドー用の画像は「画像を表示」を押したときにだけ取得する（一覧データは画像を持たない） */
 let shImageToken = 0;
+let shImageLoadedId = null;
+let shCurrentRow = null;
 async function loadShadowImage(row){
   const imgView = $('#sh-image-view');
   if(!imgView || !row) return;
+  // 同じ文で読み込み済みなら再取得しない
+  if(shImageLoadedId === row.id && imgView.getAttribute('src')) return;
   const token = ++shImageToken;
   try{
     const full = row.imageData ? row : await getOne(row.id);
     if(token !== shImageToken) return;
-    if(full && full.imageData){ imgView.src = full.imageData; }
+    if(full && full.imageData){
+      imgView.src = full.imageData;
+      shImageLoadedId = row.id;
+    }
   }catch(e){
     console.warn('shadow image load error', e);
   }
@@ -4215,6 +4254,7 @@ async function loadShadowImage(row){
 
 async function playCurrentShadow({ startCharIndex=0 } = {}){
   const row = sh.list[sh.index];
+  shCurrentRow = row;
   const text=(row.english||'').trim();
   $('#sh-scene').innerHTML = '🔊 <strong>' + escapeHTML(row.scene || '(未設定)') + '</strong>';
 
@@ -4247,10 +4287,10 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
   if(imgWrap && imgView && imgBtn){
     imgWrap.classList.add('hidden');
     imgView.removeAttribute('src');
+    shImageLoadedId = null;
     if(row.hasImage || row.imageData){
       imgBtn.classList.remove('hidden');
       imgBtn.textContent = '画像を表示';
-      loadShadowImage(row);
     }else{
       imgBtn.classList.add('hidden');
     }
@@ -4359,15 +4399,15 @@ $('#sh-toggle').onclick = async ()=>{
     speakEngine.resume(); setPlayToggleLabel(btn,'playing');
   }
 };
-$('#sh-slower').onclick = ()=>{
+$('#sh-slower').onclick = async ()=>{
   sh.rate = Math.max(0.5, Math.round((sh.rate-0.1)*10)/10);
   $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×';
   if(speakEngine.state==='playing' || speakEngine.state==='paused'){
     const resumeAt = Math.max(0, speakEngine.getLastBoundary());
-    speakEngine.stop();
+    await speakEngine.stop();
     sh.auto = true;
     setPlayToggleLabel($('#sh-toggle'),'playing');
-    playCurrentShadow({ startCharIndex: resumeAt });
+    await playCurrentShadow({ startCharIndex: resumeAt });
   }
 };
 // 「前へ」ボタン
@@ -4409,25 +4449,26 @@ $('#sh-toggle-ja').onclick = ()=> {
   const h = wrap.classList.toggle('hidden');
   btn.textContent = h ? '和訳を表示' : '和訳を隠す';
 };
-// 画像表示の開閉ボタン
+// 画像表示の開閉ボタン（表示する瞬間に初めて画像を読み込む）
 $('#sh-toggle-image').onclick = ()=>{
   const wrap = $('#sh-image-wrap');
   const btn  = $('#sh-toggle-image');
   if(!wrap || !btn) return;
   const h = wrap.classList.toggle('hidden');
   btn.textContent = h ? '画像を表示' : '画像を隠す';
+  if(!h) loadShadowImage(shCurrentRow);
 };
 
 
-$('#sh-faster').onclick = ()=>{
+$('#sh-faster').onclick = async ()=>{
   sh.rate = Math.min(2.0, Math.round((sh.rate+0.1)*10)/10);
   $('#rate-badge').textContent=(Math.round(sh.rate*10)/10).toFixed(1)+'×';
   if(speakEngine.state==='playing' || speakEngine.state==='paused'){
     const resumeAt = Math.max(0, speakEngine.getLastBoundary());
-    speakEngine.stop();
+    await speakEngine.stop();
     sh.auto = true;
     setPlayToggleLabel($('#sh-toggle'),'playing');
-    playCurrentShadow({ startCharIndex: resumeAt });
+    await playCurrentShadow({ startCharIndex: resumeAt });
   }
 };
 
