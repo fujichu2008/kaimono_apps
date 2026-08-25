@@ -520,6 +520,31 @@ header nav button:hover{
   .hidden{display:none}
   .divider{height:1px;background:var(--line);margin:8px 0}
   footer{position:fixed;left:0;right:0;bottom:calc(6px + env(safe-area-inset-bottom));text-align:center;font-size:11px;color:#9aa6bc;pointer-events:none}
+  .toast{
+    position:fixed;
+    left:50%;
+    bottom:calc(28px + env(safe-area-inset-bottom));
+    transform:translateX(-50%);
+    max-width:min(560px,92vw);
+    padding:12px 16px;
+    border:1px solid var(--line);
+    border-radius:var(--r-md);
+    background:#1a2338;
+    color:var(--ink);
+    font-size:14px;
+    line-height:1.6;
+    text-align:center;
+    box-shadow:0 12px 32px rgba(0,0,0,.45);
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+    z-index:9998;
+    transition:opacity .18s ease, visibility .18s ease;
+  }
+  .toast.show{
+    opacity:1;
+    visibility:visible;
+  }
 
   .speak-text{white-space:pre-wrap;line-height:1.9;max-height:36vh;overflow:auto;padding:6px 8px;border:1px dashed rgba(255,255,255,.08);border-radius:8px}
   .speak-text .w{padding:0 .03em;border-radius:.15em}
@@ -1259,6 +1284,8 @@ header nav button:hover{
   </div>
 </dialog>
 
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
 <footer>(C) Efsol All rights reserved.</footer>
 
 <script>
@@ -1284,10 +1311,32 @@ function uid(){
   return 'id-' + Date.now().toString(16) + '-' + Math.random().toString(16).slice(2,10);
 }
 
-/* 利用者向けの短い日本語メッセージ通知 */
+/* 利用者向けの短い日本語メッセージ通知（失敗はalert、成功や軽い通知はトースト） */
 function notifyError(message, error){
   if(error) console.error(message, error);
   alert(message);
+}
+
+let _toastTimer = null;
+function notify(message, ms=2600){
+  const el = document.getElementById('toast');
+  if(!el) return;
+  el.textContent = message;
+  el.classList.add('show');
+  if(_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{
+    el.classList.remove('show');
+    _toastTimer = null;
+  }, ms);
+}
+
+/* 連続入力の処理を間引く共通デバウンス */
+function debounce(fn, ms=250){
+  let timer = null;
+  return (...args)=>{
+    if(timer) clearTimeout(timer);
+    timer = setTimeout(()=>{ timer = null; fn(...args); }, ms);
+  };
 }
 
 /* 非同期処理中のボタン表示・disabledを共通化する */
@@ -1629,7 +1678,7 @@ async function renderHomeGraph(){
     }
         title.textContent = `登録例文数（カテゴリ別／全期間）`;
 
-    const rows = await getAll();
+    const rows = await getAllCached();
     // 全期間のため期間フィルタは行わない
     const map = new Map(); // cat -> count
 
@@ -1884,29 +1933,38 @@ function runStoreRequest(mode, build, pick){
     tx.onabort = ()=> reject(tx.error || new Error('db_transaction_aborted'));
   });
 }
-const addSentence = item => runStoreRequest('readwrite', os=>os.add(item));
-const updateSentence = item => runStoreRequest('readwrite', os=>os.put(item));
-const deleteSentence = id => runStoreRequest('readwrite', os=>os.delete(id));
+/* 一覧・シャドー用の軽量キャッシュ（画像データは保持しない） */
+let sentenceCache = null;
+function invalidateSentenceCache(){ sentenceCache = null; }
+function toLightSentence(row){
+  const { imageData, ...rest } = row || {};
+  return Object.assign(rest, { hasImage: !!imageData });
+}
+async function getAllCached(){
+  if(sentenceCache) return sentenceCache;
+  const rows = await getAll();
+  sentenceCache = rows.map(toLightSentence);
+  return sentenceCache;
+}
+
+const addSentence = async item => {
+  await runStoreRequest('readwrite', os=>os.add(item));
+  invalidateSentenceCache();
+};
+const updateSentence = async item => {
+  await runStoreRequest('readwrite', os=>os.put(item));
+  invalidateSentenceCache();
+};
+const deleteSentence = async id => {
+  await runStoreRequest('readwrite', os=>os.delete(id));
+  invalidateSentenceCache();
+};
 const getAll = ()=> runStoreRequest('readonly', os=>os.getAll(), v=>v||[]);
 const countAllSentences = async ()=>{
   if(!db) return 0;
   return runStoreRequest('readonly', os=>os.count(), v=>v||0);
 };
 const getOne = id => runStoreRequest('readonly', os=>os.get(id), v=>v||null);
-
-async function clearAllSentences(){
-  if(!db) return;
-  return new Promise((resolve,reject)=>{
-    try{
-      const tx = db.transaction([STORE],'readwrite');
-      const os = tx.objectStore(STORE);
-      os.clear();
-      tx.oncomplete = ()=>resolve();
-      tx.onerror = e=>reject(e);
-      tx.onabort  = e=>reject(e);
-    }catch(e){ reject(e); }
-  });
-}
 
 async function ensureDefaultSentences(){
   try{
@@ -2044,7 +2102,7 @@ function defaultSaveHandler(){
         trackKpiAdd(1); // 今日の登録数に+1
 
         clearForm();
-        alert('保存しました');
+        notify('保存しました');
         await fillCategoryFilter();
         await refreshList();
         setActiveNav('nav-list'); show('list');
@@ -2385,10 +2443,10 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
           }, msPerWord);
         }
       }
-      let settled=false, watchdog=null;
+      let settled=false, watchdog=null, sawSpeaking=false, notSpeakingCount=0, watchdogStart=0, watchdogDeadline=0;
       const cleanup=()=>{
         if(fbTimer) clearInterval(fbTimer);
-        if(watchdog){ clearTimeout(watchdog); watchdog=null; }
+        if(watchdog){ clearInterval(watchdog); watchdog=null; }
         if(targetEl) clearHighlight(targetEl);
       };
       // onend / onerror が発火しない環境でもPromiseを必ず解放する
@@ -2401,19 +2459,29 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
 
       const speakRate = Math.max(0.5, Number(u.rate) || 1);
       const maxWaitMs = Math.min(600000, 5000 + (text.length / speakRate) * 260);
+      // 1秒ごとに発話状態を監視する。停止が2回続いたとき、セッションが変わったとき、
+      // または保険の上限時間を超えたときにPromiseを解放する。
       const armWatchdog = ()=>{
-        if(watchdog) clearTimeout(watchdog);
-        watchdog = setTimeout(()=>{
+        if(watchdog) clearInterval(watchdog);
+        sawSpeaking = false;
+        notSpeakingCount = 0;
+        watchdogStart = performance.now();
+        watchdogDeadline = watchdogStart + maxWaitMs;
+        watchdog = setInterval(()=>{
           if(settled) return;
-          // まだ発話中で同一セッションなら少しだけ待ち直す
+          if(my !== self.session){ finish(); return; }
           let speaking=false;
-          try{ speaking = !!speechSynthesis.speaking; }catch(_){}
-          if(speaking && my === self.session){
-            watchdog = setTimeout(finish, 5000);
-            return;
+          try{ speaking = !!(speechSynthesis.speaking || speechSynthesis.pending); }catch(_){}
+          if(speaking){
+            sawSpeaking = true;
+            notSpeakingCount = 0;
+          }else if(sawSpeaking || (performance.now() - watchdogStart) > 3000){
+            // 発話開始前の空白で誤検知しないよう、観測済みか一定時間経過後だけ数える
+            notSpeakingCount++;
+            if(notSpeakingCount >= 2){ finish(); return; }
           }
-          finish();
-        }, maxWaitMs);
+          if(performance.now() >= watchdogDeadline){ finish(); }
+        }, 1000);
       };
 
       const delay = isIOS ? 0 : 40;
@@ -2652,8 +2720,11 @@ const t0 = performance.now();
 await doFlow();
 let dur = performance.now() - t0;
 
-if(my===self.session && dur < 150 && !speechSynthesis.speaking){
-  // ごく短時間で終わった＝起爆に失敗した可能性 → もう一度だけ試す
+// 起爆に失敗したとみなせるときだけ、1回に限り再実行する。
+// 和訳のみの再生は二重読み上げになるため対象外とする。
+let retried = false;
+if(my===self.session && !retried && dur < 150 && script.order !== 'ja' && !speechSynthesis.speaking){
+  retried = true;
   await ensureTtsUnlocked(); await loadVoices(); await sleep(120);
   if(my===self.session){
     await doFlow();
@@ -2666,7 +2737,7 @@ if(my===self.session){
   this._emit('state','idle');
   this._emit('ended', { durationMs: dur });
 
-  // ★ KPI：再生時間を記録（0.2秒未満はノイズとして無視）
+  // KPI：再実行が起きても加算は1回だけ（0.2秒未満はノイズとして無視）
   if(dur > 200){
     trackKpiPlay(dur);
   }
@@ -2713,9 +2784,10 @@ $('#btn-pause-preview').onclick = ()=>{
    一覧とカード
 ========================= */
 const fCat=$('#f-cat'), fTag=$('#f-tag'), q=$('#q');
-[fCat,fTag,q].forEach(el=> el.oninput = ()=>refreshList());
+const refreshListDebounced = debounce(()=>refreshList(), 250);
+[fCat,fTag,q].forEach(el=> el.oninput = refreshListDebounced);
 async function fillCategoryFilter(){
-  const rows = await getAll();
+  const rows = await getAllCached();
   const cats = new Set();
   rows.forEach(r=>(r.categories||[]).forEach(c=>{
     if(ALLOWED_CATEGORIES.includes(c)) cats.add(c);
@@ -2725,7 +2797,7 @@ async function fillCategoryFilter(){
 }
 async function refreshList(){
   if(!db) return;
-  const rows = await getAll();
+  const rows = await getAllCached();
   const kw = q.value.trim().toLowerCase();
   const cat = fCat.value;
   const tagkw = fTag.value.trim().toLowerCase();
@@ -2885,6 +2957,15 @@ function setRecButtonMode(mode){
   }
 }
 
+/* 詳細ダイアログ：メタ表示（カテゴリ＋再生回数） */
+function renderDetailMeta(categories, playCount){
+  const meta=[];
+  const catsArr = (categories||[]).filter(c=>ALLOWED_CATEGORIES.includes(c));
+  if(catsArr.length) meta.push(...catsArr.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
+  meta.push(`<span class="flag">再生 ${playCount||0}</span>`);
+  $('#d-meta').innerHTML=meta.join(' ');
+}
+
 async function openDetail(id){
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
@@ -2892,12 +2973,23 @@ async function openDetail(id){
   // iOS 無音対策：詳細表示と同時にウォームアップ
   try { await ensureTtsUnlocked(); await loadVoices(); } catch(_){}
 
+  renderDetailBody(row);
+  $('#dlg-detail').showModal();
+
+  setPlayToggleLabel($('#d-toggle'),'idle');
+  setRecButtonMode('idle');
+  try{ $('#d-rec-audio').pause(); }catch(_){}
+  $('#d-rec-audio').src=''; recEngine.dispose();
+
+  bindDetailPlayback(row);
+  bindDetailRecording();
+  bindDetailActions(id);
+}
+
+/* 詳細ダイアログ：本文（場面・メタ・英文・和訳・画像）の描画 */
+function renderDetailBody(row){
   $('#d-scene').textContent=row.scene||'(場面未設定)';
-  const meta=[];
-  const catsArr = (row.categories||[]).filter(c=>ALLOWED_CATEGORIES.includes(c));
-  if(catsArr.length) meta.push(...catsArr.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-  meta.push(`<span class="flag">再生 ${row.playCount||0}</span>`);
-  $('#d-meta').innerHTML=meta.join(' ');
+  renderDetailMeta(row.categories, row.playCount);
 
   // 英文：これまで通りハイライト付き枠
   renderSpeakText($('#d-en'), row.english||'');
@@ -2945,18 +3037,14 @@ async function openDetail(id){
       };
     }else{
       imgSec.classList.add('hidden');
-      imgView.src = '';
+      imgWrap.classList.add('hidden');
+      imgView.removeAttribute('src');
     }
   }
+}
 
-  $('#dlg-detail').showModal();
-
-
-  setPlayToggleLabel($('#d-toggle'),'idle');
-  setRecButtonMode('idle');
-  try{ $('#d-rec-audio').pause(); }catch(_){}
-  $('#d-rec-audio').src=''; recEngine.dispose();
-
+/* 詳細ダイアログ：再生・速度変更 */
+function bindDetailPlayback(row){
   let detailRate = settings.rate || 1.0;
   const rateBadge = $('#d-rate-badge');
   if(rateBadge){
@@ -2991,10 +3079,7 @@ async function openDetail(id){
       const fresh = await getOne(currentDetailId);
       if(fresh){
         fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
-        const m=[];
-        const freshCats = (fresh.categories||[]).filter(c=>ALLOWED_CATEGORIES.includes(c));
-        if(freshCats.length) m.push(...freshCats.map(c=>`<span class="flag">${escapeHTML(c)}</span>`));
-        m.push(`<span class="flag">再生 ${fresh.playCount}</span>`); $('#d-meta').innerHTML=m.join(' ');
+        renderDetailMeta(fresh.categories, fresh.playCount);
       }
     }else if(speakEngine.state==='playing'){
       speakEngine.pause(); setPlayToggleLabel(btn,'paused');
@@ -3033,7 +3118,10 @@ async function openDetail(id){
       if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#d-toggle'),'idle'); }
     }
   };
+}
 
+/* 詳細ダイアログ：録音まわり */
+function bindDetailRecording(){
   const recBtn = $('#d-rec-main');
   const recPlayBtn = $('#d-rec-play');
   const recDeleteBtn = $('#d-rec-delete');
@@ -3108,7 +3196,10 @@ else if(recEngine.state==='ready'){
       handleRecLongPress();
     };
   }
+}
 
+/* 詳細ダイアログ：編集・削除・閉じる */
+function bindDetailActions(id){
   $('#d-edit').onclick = ()=>{
     speakEngine.stop(); stopAllPlayback();
     $('#dlg-detail').close();
@@ -3132,7 +3223,7 @@ else if(recEngine.state==='ready'){
           try{
             collectFormToItem(row); row.updatedAt=now();
             await updateSentence(row);
-            alert('更新しました');
+            notify('更新しました');
             defaultSaveHandler(); clearForm();
             setActiveNav('nav-list'); show('list');
             await refreshList();
@@ -3151,8 +3242,10 @@ else if(recEngine.state==='ready'){
         speakEngine.stop(); stopAllPlayback(); recEngine.dispose();
         await deleteSentence(id);
         $('#dlg-detail').close();
+        notify('削除しました');
         await refreshList();
         await fillCategoryFilter();
+        await updateHomeKpi();
       }catch(e){
         notifyError('削除に失敗しました。もう一度お試しください。', e);
       }
@@ -3695,7 +3788,7 @@ function saveImportedSentenceBatch(items, replace){
       if(replace) objectStore.clear();
       for(const item of items) objectStore.add(item);
 
-      tx.oncomplete = ()=>resolve();
+      tx.oncomplete = ()=>{ invalidateSentenceCache(); resolve(); };
       tx.onerror = ()=>reject(tx.error || new Error('import_failed'));
       tx.onabort = ()=>reject(tx.error || new Error('import_aborted'));
     }catch(error){
@@ -3932,15 +4025,20 @@ $('#save-settings').onclick = (ev)=>{
 };
 $('#reset-all-sentences').onclick = async (ev)=>{
   ev.preventDefault();
+  const button = ev.currentTarget;
   if(!confirm('登録されている例文をすべて削除します。よろしいですか？\n\n※この操作は元に戻せません。')) return;
-  try{
-    await clearAllSentences();
-    alert('すべての例文を削除しました。');
-    refreshList(); fillCategoryFilter();
-  }catch(e){
-    console.error(e);
-    alert('削除に失敗しました。');
-  }
+  await withBusy(button, '削除中…', async ()=>{
+    try{
+      // 全削除も取り込みと同じ単一トランザクション処理に統一する
+      await saveImportedSentenceBatch([], true);
+      notify('すべての例文を削除しました。');
+      await refreshList();
+      await fillCategoryFilter();
+      await updateHomeKpi();
+    }catch(e){
+      notifyError('削除に失敗しました。', e);
+    }
+  });
 };
 
 /* =========================
@@ -3971,6 +4069,7 @@ function isPocketLockButtonEvent(event){
 async function setPocketLock(locked){
   pocketLocked = !!locked;
   document.body.classList.toggle('pocket-locked', pocketLocked);
+  setPocketInteractionBlocking(pocketLocked);
 
   const btn = $('#sh-pocket-lock');
   if(btn){
@@ -4004,7 +4103,7 @@ function blockPocketInteraction(event){
   event.stopImmediatePropagation();
 }
 
-[
+const POCKET_LOCK_EVENTS = [
   'click',
   'dblclick',
   'pointerdown',
@@ -4015,12 +4114,23 @@ function blockPocketInteraction(event){
   'contextmenu',
   'wheel',
   'keydown'
-].forEach(type=>{
-  document.addEventListener(type, blockPocketInteraction, {
-    capture:true,
-    passive:false
-  });
-});
+];
+const POCKET_LOCK_LISTENER_OPTIONS = { capture:true, passive:false };
+let pocketBlockingBound = false;
+
+/* ロック中だけ捕捉リスナーを登録し、解除時は必ず外す */
+function setPocketInteractionBlocking(enabled){
+  const next = !!enabled;
+  if(next === pocketBlockingBound) return;
+  pocketBlockingBound = next;
+  for(const type of POCKET_LOCK_EVENTS){
+    if(next){
+      document.addEventListener(type, blockPocketInteraction, POCKET_LOCK_LISTENER_OPTIONS);
+    }else{
+      document.removeEventListener(type, blockPocketInteraction, POCKET_LOCK_LISTENER_OPTIONS);
+    }
+  }
+}
 
 const pocketLockButton = $('#sh-pocket-lock');
 if(pocketLockButton){
@@ -4039,7 +4149,7 @@ $('#dlg-shadow').addEventListener('cancel', event=>{
 });
 
 async function prepareShadow(){
-  const rows = await getAll();
+  const rows = await getAllCached();
   const pool = rows.filter(r=> (r.english||'').trim().length>0 );
   if(pool.length===0){
     alert('英語例文がありません。登録してください。');
@@ -4076,6 +4186,7 @@ async function prepareShadow(){
   if(!sh._endedHook){
     speakEngine.on('ended', ()=>{
       if(!sh.opened || !sh.auto) return;
+      if(!sh.list || sh.list.length === 0) return; // 対象未確定のときは進めない
       sh.index = (sh.index + 1) % sh.list.length;
       setTimeout(()=>{
         if(!sh.opened || !sh.auto) return;
@@ -4084,6 +4195,21 @@ async function prepareShadow(){
       }, 1000);
     });
     sh._endedHook = true;
+  }
+}
+
+/* シャドー用の画像は表示直前にだけ取得する（一覧データは画像を持たない） */
+let shImageToken = 0;
+async function loadShadowImage(row){
+  const imgView = $('#sh-image-view');
+  if(!imgView || !row) return;
+  const token = ++shImageToken;
+  try{
+    const full = row.imageData ? row : await getOne(row.id);
+    if(token !== shImageToken) return;
+    if(full && full.imageData){ imgView.src = full.imageData; }
+  }catch(e){
+    console.warn('shadow image load error', e);
   }
 }
 
@@ -4119,15 +4245,14 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
   }
 
   if(imgWrap && imgView && imgBtn){
-    if(row.imageData){
+    imgWrap.classList.add('hidden');
+    imgView.removeAttribute('src');
+    if(row.hasImage || row.imageData){
       imgBtn.classList.remove('hidden');
-      imgWrap.classList.add('hidden');
-      imgView.src = row.imageData;
       imgBtn.textContent = '画像を表示';
+      loadShadowImage(row);
     }else{
       imgBtn.classList.add('hidden');
-      imgWrap.classList.add('hidden');
-      imgView.src = '';
     }
   }
 
@@ -4152,7 +4277,7 @@ $('#sh-start').onclick = async ()=>{
 
   let all = [];
   try{
-    all = await getAll();
+    all = await getAllCached();
   }catch(e){
     notifyError('例文の読み込みに失敗しました。もう一度お試しください。', e);
     return;
@@ -4306,7 +4431,10 @@ $('#sh-faster').onclick = ()=>{
   }
 };
 
+let exitingShadow = false;
 function exitShadowDialog(){
+  if(exitingShadow) return; // 再入防止
+  exitingShadow = true;
   sh.opened=false;
   sh.auto=false;
   setPocketLock(false);
@@ -4315,9 +4443,14 @@ function exitShadowDialog(){
   setPlayToggleLabel($('#sh-toggle'),'idle');
   const dlg = $('#dlg-shadow');
   if(dlg && dlg.open){ dlg.close(); }
+  exitingShadow = false;
 }
 $('#sh-exit').onclick = ()=> exitShadowDialog();
-$('#dlg-shadow').addEventListener('close', ()=> exitShadowDialog());
+$('#dlg-shadow').addEventListener('close', ()=>{
+  // 明示的な終了処理で片付け済みなら二重に実行しない
+  if(!sh.opened && !sh.auto) return;
+  exitShadowDialog();
+});
 
 /* =========================
    ルックアップ（日本語たっぷり）
@@ -4329,11 +4462,20 @@ function setLookupLinks(word){
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
+/* 翻訳失敗の通知は1回の操作につき1度だけ出す */
+let translateIssueNotified = false;
+function beginTranslateSession(){ translateIssueNotified = false; }
+function reportTranslateIssue(){
+  if(translateIssueNotified) return;
+  translateIssueNotified = true;
+  notify('翻訳できなかった箇所があります。');
+}
+
 async function translateJa(text){
   if(!text) return '';
   text = text.trim();
 
-  // 単発の翻訳リクエスト関数
+  // 単発の翻訳リクエスト関数（失敗時は原文で埋めずnullを返す）
   const req = async (q) => {
     try {
       const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|ja`;
@@ -4345,12 +4487,13 @@ async function translateJa(text){
       return (json.responseData.translatedText || '').trim();
     } catch(e) {
       console.warn('Translate error:', e);
-      return q; // エラー時は原文を返す（穴あき防止）
+      reportTranslateIssue();
+      return null;
     }
   };
 
   // 短い場合は即リクエスト（目安500文字未満）
-  if(text.length < 500) return await req(text);
+  if(text.length < 500) return (await req(text)) || '';
 
   // 長文分割処理: 文末区切りなどでトークン化
   const sentences = text.match(/[^.!?\n]+[.!?\n]*(\s+|$)|.+/g) || [text];
@@ -4371,7 +4514,8 @@ async function translateJa(text){
   // チャンクごとに翻訳（API制限回避のため直列実行＆ウェイト）
   const results = [];
   for(const chunk of chunks){
-    results.push(await req(chunk));
+    const translated = await req(chunk);
+    if(translated) results.push(translated);
     await new Promise(r => setTimeout(r, 300)); // レートリミット対策
   }
 
@@ -4458,6 +4602,7 @@ function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, p
 }
 async function openLookup(word){
   if(!word) return;
+  beginTranslateSession();
   setLookupLinks(word);
   $('#lk-body').innerHTML = '単語を読み込み中…';
   $('#dlg-lookup').showModal();
@@ -4559,6 +4704,7 @@ if(autoBtn){
     try{
       autoBtn.disabled = true;
       autoBtn.textContent = '翻訳中…';
+      beginTranslateSession();
       const ja = await translateJa(enText);
       if(!ja){
         alert('自動和訳の取得に失敗しました。ネットワーク状況をご確認ください。');
