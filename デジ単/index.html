@@ -3987,13 +3987,12 @@ body #screen-ai #btnPasteJson:active{
       refreshTrend&&refreshTrend();
       drawSrsForecast&&drawSrsForecast();
       setTimeout(()=>{
-        try{ renderBiotopeScene() }catch(_){ }
+        try{ renderBiotopeSceneIfVisible() }catch(_){ }
       },0);
   } else {
     if(window._bioTimer){clearInterval(window._bioTimer); window._bioTimer=null}
     if(window._bioEventTimer){clearInterval(window._bioEventTimer); window._bioEventTimer=null}
-    if(window._bioRAF){cancelAnimationFrame(window._bioRAF); window._bioRAF=null}
-    try{ document.body.classList.remove('bio-live') }catch(_){ }
+    stopBioRenderLoop();
     if(window._feverTimer){clearTimeout(window._feverTimer); window._feverTimer=null}
     try{ endEvent(); }catch(_){}
     try{
@@ -5595,8 +5594,49 @@ body.bio-live .ux-nav{
     });
   }
 
+  function stopBioRenderLoopState(rafId,cancelFrame){
+    const cancel=cancelFrame||cancelAnimationFrame;
+    if(rafId != null){
+      try{ cancel(rafId) }catch(_){ }
+    }
+    return null;
+  }
+
+  function stopBioRenderLoop(options){
+    const opts=options||{};
+    const cancelFrame=opts.cancelFrame||cancelAnimationFrame;
+    window._bioRAF=stopBioRenderLoopState(window._bioRAF,cancelFrame);
+    try{ document.body.classList.remove('bio-live') }catch(_){ }
+  }
+
+  function isBiotopeSceneVisible(){
+    const study=document.getElementById('screen-study');
+    const studyHost=document.getElementById('studyBioHost');
+    const studyVisible=!!(
+      study&&
+      study.classList.contains('active')&&
+      study.classList.contains('bio-view')&&
+      studyHost&&
+      studyHost.style.display!=='none'
+    );
+    if(studyVisible) return true;
+    const stats=document.getElementById('screen-stats');
+    return !!(stats&&stats.classList.contains('active'));
+  }
+
+  function renderBiotopeSceneIfVisible(options){
+    const opts=options||{};
+    const visible=Object.prototype.hasOwnProperty.call(opts,'visible')
+      ? !!opts.visible
+      : isBiotopeSceneVisible();
+    if(!visible) return false;
+    const renderSceneFn=opts.renderScene||renderBiotopeScene;
+    renderSceneFn(opts.sceneOptions);
+    return true;
+  }
+
   function startBioRenderLoop(){
-    if(window._bioRAF){
+    if(window._bioRAF != null){
       cancelAnimationFrame(window._bioRAF);
       window._bioRAF=null;
     }
@@ -6940,6 +6980,17 @@ function getBadge(stage){
       );
     }
 
+    // prepared移行の再開経路を1か所に集約し、本番とセルフテストで同じowner配線を使う。
+    function resumePreparedStatsMigration(loaded,storage,onFailure){
+      const state=loaded||{};
+      return finishPreparedStatsMigration(
+        state.preparedSerialized,
+        state.preparedOwner,
+        storage,
+        onFailure
+      );
+    }
+
     function reportStatsMigrationFailure(error,phase){
       if(phase==='cleanup'){
         markSaveFailure('新形式への保存は完了しましたが、旧学習データの整理に失敗しました。次回起動時に整理を再開します。');
@@ -6985,9 +7036,8 @@ function getBadge(stage){
 
     if(loadedStats.resumePrepared){
       wordMap=loadedStats.map;
-      finishPreparedStatsMigration(
-        loadedStats.preparedSerialized,
-        loadedStats.legacyEntries,
+      resumePreparedStatsMigration(
+        loadedStats,
         localStorage,
         reportStatsMigrationFailure
       );
@@ -7844,10 +7894,9 @@ function closeStudyBio() {
     if(!host || host.style.display === 'none') return;
     host.style.display = 'none';
     // 閉じた後もループが回り続けるのを防ぐ
-    if(window._bioRAF){ try{ cancelAnimationFrame(window._bioRAF) }catch(_){ } window._bioRAF=null }
+    stopBioRenderLoop();
     if(window._feverTimer){ try{ clearTimeout(window._feverTimer) }catch(_){ } window._feverTimer=null }
     try{ endEvent(); }catch(_){ }
-    try{ document.body.classList.remove('bio-live') }catch(_){ }
    
     const header = document.getElementById('biotopeHeader');
     const desc = document.getElementById('biotopeDesc');
@@ -7867,7 +7916,793 @@ function closeStudyBio() {
     if(btn) btn.textContent = '🌿 ビオトープを表示';
   }
 
+  const PREP_VISUAL_LEVEL='前置詞ビジュアル解説';
+  const PREP_VISUAL_CARDS=[
+    {
+      key:'at',term:'at',core:'広がりではなく「一点」に照準を合わせる感覚',
+      senses:[
+        {scene:'point',title:'場所の一点',ja:'場所を面ではなく、特定のポイントとして見る。',example:'Meet me at the entrance.'},
+        {scene:'clock',title:'時刻の一点',ja:'時間の流れの中の、ぴったり一点を指す。',example:'The meeting starts at 9:00.'},
+        {scene:'event',title:'活動の地点',ja:'その場所で行われている活動に焦点を当てる。',example:'She is at work.'}
+      ]
+    },
+    {
+      key:'on',term:'on',core:'表面・線に「接触して乗っている」感覚',
+      senses:[
+        {scene:'surface',title:'面に接触',ja:'物が表面に触れ、支えられている。',example:'The cup is on the table.'},
+        {scene:'wall',title:'面に付着',ja:'水平でなくても、表面に接していれば on。',example:'There is a picture on the wall.'},
+        {scene:'path',title:'線・道の上',ja:'道路や線を一本のラインとして捉える。',example:'The shop is on this street.'},
+        {scene:'clock',title:'曜日・日付',ja:'カレンダー上の特定の日に接している感覚。',example:'The event is on Monday.'}
+      ]
+    },
+    {
+      key:'in',term:'in',core:'境界の「内側に包まれている」感覚',
+      senses:[
+        {scene:'inside',title:'容器の中',ja:'境界に囲まれた内部に存在する。',example:'The keys are in the box.'},
+        {scene:'area',title:'地域・範囲の中',ja:'都市や国など、大きな領域も箱のように捉える。',example:'They live in Tokyo.'},
+        {scene:'clock',title:'月・年・期間',ja:'大きな時間の枠の中に入っていると捉える。',example:'The project will start in April.'}
+      ]
+    },
+    {
+      key:'between',term:'between / in between',core:'2つの基準を意識し、その「あいだ」に位置する感覚',
+      senses:[
+        {scene:'between',title:'2つの物の間',ja:'AとBという2つの基準点の中央・間にある。',example:'The café is between the bank and the station.'},
+        {scene:'interval',title:'in between',ja:'両側に何かがあり、その中間位置に入っていることを強調する。',example:'He stood in between the two cars.'}
+      ]
+    },
+    {
+      key:'among',term:'among',core:'3つ以上のものに「囲まれて混ざっている」感覚',
+      senses:[
+        {scene:'among',title:'集団の中',ja:'多数の人・物の中に一員として入っている。',example:'She was standing among the crowd.'}
+      ]
+    },
+    {
+      key:'under',term:'under',core:'基準となる物の「真下・支配範囲の下」にある感覚',
+      senses:[
+        {scene:'below',title:'真下',ja:'上にある物を基準に、その下側へ位置する。',example:'The bag is under the chair.'}
+      ]
+    },
+    {
+      key:'over',term:'over',core:'上方にあり、ときに「覆う・越える」動きを含む感覚',
+      senses:[
+        {scene:'over',title:'上方',ja:'接触せず、基準物より高い位置にある。',example:'The lamp hangs over the table.'},
+        {scene:'overpass',title:'上を越える',ja:'対象の上空を一方から他方へ移動する。',example:'The plane flew over the city.'}
+      ]
+    },
+    {
+      key:'through',term:'through',core:'内部へ入り「中を通って反対側へ抜ける」感覚',
+      senses:[
+        {scene:'through',title:'内部を通過',ja:'入口から内部へ入り、出口まで抜けていく。',example:'We walked through the tunnel.'}
+      ]
+    },
+    {
+      key:'across',term:'across',core:'面・領域の「こちら側から向こう側へ渡る」感覚',
+      senses:[
+        {scene:'across',title:'横断',ja:'領域の端から反対側の端へ移動する。',example:'She ran across the street.'}
+      ]
+    },
+    {
+      key:'next-to',term:'next to',core:'基準物の「すぐ隣」に並ぶ感覚',
+      senses:[
+        {scene:'next',title:'隣接',ja:'間隔がほとんどなく、横に並んでいる。',example:'Sit next to me.'}
+      ]
+    },
+    {
+      key:'in-front-of',term:'in front of',core:'基準物より「手前側」に位置する感覚',
+      senses:[
+        {scene:'front',title:'手前',ja:'見る方向を基準に、対象より前側にある。',example:'A car is parked in front of the building.'}
+      ]
+    },
+    {
+      key:'behind',term:'behind',core:'基準物の「後ろ側・隠れる側」に位置する感覚',
+      senses:[
+        {scene:'behind',title:'後方',ja:'基準物を挟んで、視点から遠い側にある。',example:'The bicycle is behind the tree.'}
+      ]
+    },
+    {
+      key:'above',term:'above',core:'基準より「高い位置」にあるが、覆うニュアンスは弱い感覚',
+      senses:[
+        {scene:'over',title:'より高い位置',ja:'真上に限らず、基準より高ければ above を使える。',example:'A sign is hanging above the door.'}
+      ]
+    },
+    {
+      key:'below',term:'below',core:'基準より「低い位置」にある感覚',
+      senses:[
+        {scene:'below',title:'より低い位置',ja:'真下に限定せず、基準より低い位置を表す。',example:'The shelves are below the window.'}
+      ]
+    },
+    {
+      key:'near',term:'near',core:'基準物の「近く」にあるが、接してはいない感覚',
+      senses:[
+        {scene:'next',title:'近く',ja:'next to より距離に幅があり、少し離れていても使える。',example:'A woman is standing near the counter.'}
+      ]
+    },
+    {
+      key:'by-beside',term:'by / beside',core:'基準物の「そば・脇」に寄り添う感覚',
+      senses:[
+        {scene:'next',title:'すぐそば',ja:'人や物の横・近くに位置する。',example:'There is a chair by the window.'}
+      ]
+    },
+    {
+      key:'across-from',term:'across from / opposite',core:'道・空間をはさんだ「向かい側」にある感覚',
+      senses:[
+        {scene:'between',title:'向かい側',ja:'2つの場所が空間を挟んで互いに向き合う。',example:'The bank is across from the hotel.'}
+      ]
+    },
+    {
+      key:'around',term:'around',core:'中心や対象の「周囲を取り巻く」感覚',
+      senses:[
+        {scene:'among',title:'周囲に分布',ja:'人や物が中心のまわりに広がっている。',example:'Several people are sitting around the table.'}
+      ]
+    },
+    {
+      key:'along',term:'along',core:'線・道に「沿って」進む感覚',
+      senses:[
+        {scene:'path',title:'線に沿う',ja:'道路・川・壁などの長い線をたどる。',example:'Trees are planted along the road.'}
+      ]
+    },
+    {
+      key:'toward',term:'toward / towards',core:'目標地点の「方向へ向かう」感覚',
+      senses:[
+        {scene:'path',title:'方向',ja:'到着したかではなく、向かっている方向に焦点を当てる。',example:'A man is walking toward the entrance.'}
+      ]
+    },
+    {
+      key:'into',term:'into',core:'外側から「中へ入り込む」動きの感覚',
+      senses:[
+        {scene:'through',title:'中へ移動',ja:'静止した in と違い、境界を越えて内部へ入る動き。',example:'She walked into the room.'}
+      ]
+    },
+    {
+      key:'out-of',term:'out of',core:'内側から「外へ出る」動きの感覚',
+      senses:[
+        {scene:'through',title:'外へ移動',ja:'境界の内側から外側へ抜けていく。',example:'He came out of the building.'}
+      ]
+    },
+    {
+      key:'from',term:'from',core:'移動・時間・情報の「出発点」を示す感覚',
+      senses:[
+        {scene:'path',title:'出発点',ja:'どこから始まったか、起点に焦点を当てる。',example:'She is coming from the station.'},
+        {scene:'event',title:'情報源',ja:'人・資料など、情報や物の出どころを示す。',example:'I received an email from the client.'}
+      ]
+    },
+    {
+      key:'to',term:'to',core:'移動・受け渡しの「到達点」を示す感覚',
+      senses:[
+        {scene:'path',title:'目的地',ja:'移動が向かう終点・目的地に焦点を当てる。',example:'They are going to the conference room.'},
+        {scene:'event',title:'相手へ',ja:'情報・物・行為が届く相手を示す。',example:'Please send the file to me.'}
+      ]
+    },
+    {
+      key:'past',term:'past',core:'基準点の「横を通り過ぎる」感覚',
+      senses:[
+        {scene:'path',title:'通過',ja:'対象のそばを通り、その先へ進む。',example:'A cyclist is riding past the building.'}
+      ]
+    },
+    {
+      key:'up-down',term:'up / down',core:'基準となる方向へ「上がる・下がる」動きの感覚',
+      senses:[
+        {scene:'over',title:'up',ja:'上方向へ移動する。',example:'A man is walking up the stairs.'},
+        {scene:'below',title:'down',ja:'下方向へ移動する。',example:'A woman is walking down the stairs.'}
+      ]
+    },
+    {
+      key:'inside',term:'inside',core:'境界の「内側」にいることを強く意識する感覚',
+      senses:[
+        {scene:'inside',title:'内部',ja:'in よりも「内側／外側」の対比をはっきり示す。',example:'Several customers are inside the store.'}
+      ]
+    },
+    {
+      key:'outside',term:'outside',core:'境界の「外側」にいる感覚',
+      senses:[
+        {scene:'area',title:'外部',ja:'建物・範囲などの境界より外に位置する。',example:'A few people are waiting outside the building.'}
+      ]
+    },
+    {
+      key:'within',term:'within',core:'決められた「範囲・時間の内側」に収まる感覚',
+      senses:[
+        {scene:'area',title:'範囲内',ja:'場所・数量・ルールなどの許容範囲の中。',example:'Please stay within the marked area.'},
+        {scene:'clock',title:'期限内',ja:'指定された時間を超えない。',example:'We will respond within two days.'}
+      ]
+    },
+    {
+      key:'beyond',term:'beyond',core:'基準点を「越えたさらに先」にある感覚',
+      senses:[
+        {scene:'overpass',title:'その先',ja:'境界・地点を越えて向こう側へ広がる。',example:'The parking lot is beyond the building.'}
+      ]
+    },
+    {
+      key:'against',term:'against',core:'表面に「押し当てる・寄りかかる」感覚',
+      senses:[
+        {scene:'wall',title:'接触して支える',ja:'壁などの表面に触れた状態で置く・寄りかかる。',example:'A bicycle is leaning against the wall.'}
+      ]
+    },
+    {
+      key:'corner',term:'at the corner of',core:'2本の線が交わる「角の一点」に焦点を当てる感覚',
+      senses:[
+        {scene:'point',title:'角・交差点',ja:'道路や部屋などの角を特定の地点として示す。',example:'A café is located at the corner of the street.'}
+      ]
+    },
+    {
+      key:'middle-center',term:'in the middle of / in the center of',core:'領域の「中央部」に位置する感覚',
+      senses:[
+        {scene:'inside',title:'中央',ja:'空間や集団の中心付近にあることを示す。',example:'A table is in the middle of the room.'}
+      ]
+    },
+    {
+      key:'left-right',term:'to the left of / to the right of',core:'基準物から見た「左右の位置」を示す感覚',
+      senses:[
+        {scene:'next',title:'左側',ja:'基準物より左に位置する。',example:'The printer is to the left of the desk.'},
+        {scene:'next',title:'右側',ja:'基準物より右に位置する。',example:'The plant is to the right of the sofa.'}
+      ]
+    },
+    {
+      key:'foreground-background',term:'in the foreground / in the background',core:'写真・視野の「手前／奥」を表す感覚',
+      senses:[
+        {scene:'front',title:'foreground',ja:'写真の手前側、見る人に近い部分。',example:'A table is visible in the foreground.'},
+        {scene:'behind',title:'background',ja:'写真の奥側、主題の後方にある部分。',example:'Several buildings can be seen in the background.'}
+      ]
+    },
+    {
+      key:'top-bottom',term:'at the top of / at the bottom of',core:'縦方向の「最上部／最下部」に位置する感覚',
+      senses:[
+        {scene:'over',title:'最上部',ja:'ページ・画面・物体などの上端を示す。',example:'A sign appears at the top of the screen.'},
+        {scene:'below',title:'最下部',ja:'ページ・画面・物体などの下端を示す。',example:'The caption is at the bottom of the image.'}
+      ]
+    },
+    {
+      key:'end-of',term:'at the end of',core:'道・列・期間などの「終点」に焦点を当てる感覚',
+      senses:[
+        {scene:'path',title:'終点',ja:'長さのあるものの最後の位置を示す。',example:'There is an elevator at the end of the hallway.'}
+      ]
+    },
+    {
+      key:'before-after',term:'before / after',core:'時間の基準点より「前／後」に置く感覚',
+      senses:[
+        {scene:'clock',title:'before',ja:'基準となる出来事・時刻より前。',example:'Please arrive before 9:00.'},
+        {scene:'clock',title:'after',ja:'基準となる出来事・時刻より後。',example:'We can talk after the meeting.'}
+      ]
+    },
+    {
+      key:'during',term:'during',core:'出来事・期間の「進行中の中」にいる感覚',
+      senses:[
+        {scene:'clock',title:'期間中',ja:'あるイベントや期間が続いている間を示す。',example:'Please remain seated during the presentation.'}
+      ]
+    },
+    {
+      key:'until',term:'until / till',core:'ある時点を「終点」として、そこまで続く感覚',
+      senses:[
+        {scene:'clock',title:'〜まで',ja:'状態や行為が指定時刻まで継続する。',example:'The store is open until 8 p.m.'}
+      ]
+    },
+    {
+      key:'since',term:'since',core:'過去の一点を「起点」にして現在までつなぐ感覚',
+      senses:[
+        {scene:'clock',title:'〜以来',ja:'開始時点を示し、そこから今までの継続を表す。',example:'I have worked here since 2020.'}
+      ]
+    },
+    {
+      key:'for',term:'for',core:'「期間・目的・受け手」に向けて幅を持たせる感覚',
+      senses:[
+        {scene:'clock',title:'期間',ja:'どれくらい続くかという長さを示す。',example:'We waited for thirty minutes.'},
+        {scene:'event',title:'目的・用途',ja:'何のためか、誰のためかを示す。',example:'This room is for meetings.'}
+      ]
+    },
+    {
+      key:'by',term:'by',core:'「そば」「期限」「手段」を文脈で切り替える重要前置詞',
+      senses:[
+        {scene:'next',title:'そば',ja:'基準物の近くに位置する。',example:'A man is standing by the door.'},
+        {scene:'clock',title:'期限までに',ja:'その時刻を超えない締切点を示す。',example:'Please finish the report by Friday.'},
+        {scene:'event',title:'手段',ja:'移動・連絡などの方法を示す。',example:'We traveled by train.'}
+      ]
+    },
+    {
+      key:'with',term:'with',core:'人・物・特徴を「一緒に伴う」感覚',
+      senses:[
+        {scene:'among',title:'一緒に',ja:'誰か・何かと共にあることを示す。',example:'A woman is talking with a customer.'},
+        {scene:'event',title:'特徴・道具',ja:'持っている特徴や使用する道具を添える。',example:'A man with a backpack is waiting.'}
+      ]
+    },
+    {
+      key:'without',term:'without',core:'本来あり得るものを「伴わない」感覚',
+      senses:[
+        {scene:'event',title:'〜なしで',ja:'人・物・条件が欠けた状態を示す。',example:'He left without his umbrella.'}
+      ]
+    },
+    {
+      key:'of',term:'of',core:'全体と部分・所属・内容を「結び付ける」感覚',
+      senses:[
+        {scene:'between',title:'所属・部分',ja:'A of B で、AがBに属する・Bの一部である関係を作る。',example:'The front of the building is crowded.'}
+      ]
+    },
+    {
+      key:'about-regarding',term:'about / regarding',core:'話題・対象へ「焦点を向ける」感覚',
+      senses:[
+        {scene:'event',title:'話題',ja:'会話・質問・文書が何を扱っているかを示す。',example:'I have a question about the schedule.'}
+      ]
+    },
+    {
+      key:'because-of',term:'because of / due to',core:'出来事の「原因」に矢印を戻す感覚',
+      senses:[
+        {scene:'event',title:'原因',ja:'名詞につなげて、結果を生んだ理由を示す。',example:'The flight was delayed because of bad weather.'}
+      ]
+    },
+    {
+      key:'despite',term:'despite / in spite of',core:'条件があっても「それを越えて結果が成立する」感覚',
+      senses:[
+        {scene:'overpass',title:'逆条件',ja:'普通なら妨げになる条件があっても結果が変わらない。',example:'Despite the rain, the event continued.'}
+      ]
+    },
+    {
+      key:'instead-of',term:'instead of',core:'Aではなく「Bへ置き換える」感覚',
+      senses:[
+        {scene:'between',title:'代替',ja:'選択肢の一方をやめ、別のものを選ぶ。',example:'We used a video call instead of a meeting.'}
+      ]
+    },
+    {
+      key:'according-to',term:'according to',core:'情報の根拠を「その情報源に置く」感覚',
+      senses:[
+        {scene:'event',title:'情報源',ja:'資料・人・ルールなどを根拠として示す。',example:'According to the schedule, the train leaves at noon.'}
+      ]
+    }
+  ];
+  const PREP_VISUAL_PHOTO_CORE_KEYS=new Set([
+    'at','on','in','between','among','under','over','next-to','in-front-of','behind',
+    'above','below','near','by-beside','across-from','around','along','toward',
+    'inside','outside','against','corner','middle-center','left-right',
+    'foreground-background','top-bottom','end-of','by'
+  ]);
+  const PREP_VISUAL_DIRECTION_KEYS=new Set([
+    'through','across','into','out-of','from','to','past','up-down','within','beyond'
+  ]);
+  const PREP_VISUAL_TIME_KEYS=new Set([
+    'before-after','during','until','since','for'
+  ]);
+  const PREP_VISUAL_COMPARE_NOTES={
+    at:'at＝一点／on＝接触する面・曜日／in＝内部・月・年。',
+    on:'at＝一点／on＝接触する面・曜日／in＝内部・月・年。',
+    in:'at＝一点／on＝接触面／in＝内部。in は「中にいる」、into は「中へ入る」。',
+    into:'in＝中にいる状態／into＝境界を越えて中へ入る動き。',
+    above:'above＝単に高い位置／over＝真上・覆う・越える感覚を含みやすい。',
+    over:'above＝単に高い位置／over＝真上・覆う・越える感覚を含みやすい。',
+    between:'between＝2つを基準／among＝3つ以上の集団の中。',
+    among:'between＝2つを基準／among＝3つ以上の集団の中。',
+    across:'across＝面を横断／through＝内部を通って抜ける。',
+    through:'across＝面を横断／through＝内部を通って抜ける。',
+    by:'by＝期限までに完了／until＝その時点まで状態・行為が継続。',
+    until:'by＝期限までに完了／until＝その時点まで状態・行為が継続。'
+  };
+  PREP_VISUAL_CARDS.forEach((card,index)=>{
+    if(PREP_VISUAL_PHOTO_CORE_KEYS.has(card.key)){
+      card.category='photo-core';
+      card.priority=1;
+    }else if(PREP_VISUAL_DIRECTION_KEYS.has(card.key)){
+      card.category='direction';
+      card.priority=2;
+    }else if(PREP_VISUAL_TIME_KEYS.has(card.key)){
+      card.category='time';
+      card.priority=3;
+    }else{
+      card.category='general';
+      card.priority=4;
+    }
+    card.sourceOrder=index;
+    card.compare=PREP_VISUAL_COMPARE_NOTES[card.key]||'';
+  });
+
+  let prepVisualIndex=0;
+  let prepVisualActive=false;
+  let prepVisualLevelObserver=null;
+  const PREP_VISUAL_SESSION={
+    turn:0,
+    seen:new Set(),
+    reviewQueue:[]
+  };
+
+  function resetPrepositionVisualSession(){
+    PREP_VISUAL_SESSION.turn=0;
+    PREP_VISUAL_SESSION.seen.clear();
+    PREP_VISUAL_SESSION.reviewQueue.length=0;
+    prepVisualIndex=0;
+  }
+
+  function prepVisualReviewWeight(index){
+    const card=PREP_VISUAL_CARDS[index];
+    if(!card) return 0;
+    const st=prepVisualAccuracy(card);
+    if(st.shown<=0) return 1;
+    const missRate=1-(st.got/st.shown);
+    const uncertainty=Math.min(.7,1/Math.sqrt(Math.max(1,st.shown)));
+    return Math.max(.35,.35+missRate*3+uncertainty);
+  }
+
+  function weightedPrepositionVisualIndex(indices){
+    const pool=(Array.isArray(indices)?indices:[])
+      .filter(index=>Number.isInteger(index)&&index>=0&&index<PREP_VISUAL_CARDS.length);
+    if(!pool.length) return -1;
+    const weights=pool.map(prepVisualReviewWeight);
+    const total=weights.reduce((sum,value)=>sum+value,0);
+    if(!(total>0)) return pool[0];
+    let point=Math.random()*total;
+    for(let i=0;i<pool.length;i++){
+      point-=weights[i];
+      if(point<=0) return pool[i];
+    }
+    return pool[pool.length-1];
+  }
+
+  function schedulePrepositionVisualReview(index){
+    const delay=3+Math.floor(Math.random()*4);
+    PREP_VISUAL_SESSION.reviewQueue=
+      PREP_VISUAL_SESSION.reviewQueue.filter(item=>item.index!==index);
+    PREP_VISUAL_SESSION.reviewQueue.push({
+      index,
+      dueTurn:PREP_VISUAL_SESSION.turn+delay
+    });
+  }
+
+  function takeDuePrepositionVisualReview(currentIndex){
+    const due=PREP_VISUAL_SESSION.reviewQueue
+      .filter(item=>item.dueTurn<=PREP_VISUAL_SESSION.turn&&item.index!==currentIndex)
+      .map(item=>item.index);
+    if(!due.length) return -1;
+    const chosen=weightedPrepositionVisualIndex([...new Set(due)]);
+    if(chosen>=0){
+      PREP_VISUAL_SESSION.reviewQueue=
+        PREP_VISUAL_SESSION.reviewQueue.filter(item=>item.index!==chosen);
+    }
+    return chosen;
+  }
+
+  function selectNextPrepositionVisualIndex(currentIndex,gotIt){
+    if(!PREP_VISUAL_CARDS.length) return 0;
+    PREP_VISUAL_SESSION.turn++;
+    PREP_VISUAL_SESSION.seen.add(currentIndex);
+    if(!gotIt) schedulePrepositionVisualReview(currentIndex);
+
+    const due=takeDuePrepositionVisualReview(currentIndex);
+    if(due>=0) return due;
+
+    const allIndices=PREP_VISUAL_CARDS.map((_,index)=>index);
+    const unseen=allIndices
+      .filter(index=>!PREP_VISUAL_SESSION.seen.has(index)&&index!==currentIndex)
+      .sort((a,b)=>{
+        const ca=PREP_VISUAL_CARDS[a], cb=PREP_VISUAL_CARDS[b];
+        return (ca.priority|0)-(cb.priority|0)||
+          (ca.sourceOrder|0)-(cb.sourceOrder|0);
+      });
+
+    // 初見カードを基本順に進めつつ、5枚ごとに既習カードを1枚だけ短く復習する。
+    if(
+      unseen.length&&
+      PREP_VISUAL_SESSION.turn%5===0&&
+      PREP_VISUAL_SESSION.seen.size>=3
+    ){
+      const reviewPool=allIndices.filter(index=>
+        index!==currentIndex&&PREP_VISUAL_SESSION.seen.has(index)
+      );
+      const review=weightedPrepositionVisualIndex(reviewPool);
+      if(review>=0) return review;
+    }
+
+    if(unseen.length) return unseen[0];
+
+    const reviewPool=allIndices.filter(index=>index!==currentIndex);
+    const review=weightedPrepositionVisualIndex(reviewPool);
+    return review>=0?review:currentIndex;
+  }
+
+  function prepVisualProgressText(){
+    const total=PREP_VISUAL_CARDS.length;
+    if(!total) return '0 / 0';
+    const currentAlreadySeen=PREP_VISUAL_SESSION.seen.has(prepVisualIndex);
+    const reached=Math.min(total,PREP_VISUAL_SESSION.seen.size+(currentAlreadySeen?0:1));
+    return `${reached} / ${total}`;
+  }
+
+  function isPrepositionVisualLevel(){
+    return !!levelSelect&&levelSelect.value===PREP_VISUAL_LEVEL;
+  }
+
+  function prepositionVisualWord(card){
+    return {
+      id:'prepvis:'+card.key,
+      level:PREP_VISUAL_LEVEL,
+      en:card.term,
+      ja:card.core,
+      pron:'',ex_en:'',ex_ja:'',syn:'',ant:''
+    };
+  }
+
+  function installPrepositionVisualStyles(){
+    if(document.getElementById('dejitanPrepositionVisualStyles')) return;
+    const style=document.createElement('style');
+    style.id='dejitanPrepositionVisualStyles';
+    style.textContent=`
+#display.prep-visual{padding:16px 14px 14px;overflow:hidden}
+#display.prep-visual .row,#display.prep-visual #quizPad,#display.prep-visual #btnBookmark{display:none!important}
+#prepVisualRoot{display:grid;gap:12px;width:100%;touch-action:pan-y;color:var(--ink)}
+.pv-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.pv-term{font-size:clamp(30px,9vw,46px);line-height:1;font-weight:900;letter-spacing:-.035em;color:var(--accent-strong)}
+.pv-core{margin-top:5px;font-size:13px;line-height:1.55;font-weight:700;color:var(--ink-muted)}
+.pv-compare{min-width:0;padding:8px 10px;border:1px solid color-mix(in srgb,var(--accent) 22%,var(--line));border-radius:11px;background:color-mix(in srgb,var(--accent) 7%,var(--surface-2));color:var(--ink-muted);font-size:11px;font-weight:750;line-height:1.5;overflow-wrap:anywhere}
+.pv-compare b{color:var(--accent-strong);font-weight:900}
+.pv-score{flex:0 0 auto;padding:6px 9px;border:1px solid var(--line);border-radius:999px;background:var(--surface-2);font-size:11px;font-weight:800;color:var(--ink-muted);white-space:nowrap}
+.pv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px}
+.pv-sense{min-width:0;padding:9px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2);box-shadow:var(--shadow-1)}
+.pv-sense-title{font-size:12px;font-weight:900;margin:7px 0 3px;color:var(--ink)}
+.pv-sense-ja{font-size:11px;line-height:1.5;color:var(--ink-muted)}
+.pv-example{margin-top:5px;padding-top:5px;border-top:1px solid var(--line);font-size:10px;line-height:1.4;font-weight:750;color:var(--accent-strong)}
+.pv-world{position:relative;height:82px;border-radius:11px;overflow:hidden;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 7%,var(--surface-1)),var(--surface-1));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--line))}
+.pv-world i,.pv-world span{position:absolute;display:block;box-sizing:border-box}
+.pv-dot{width:18px;height:18px;border-radius:50%;background:var(--accent);box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 35%,transparent);z-index:5}
+.pv-ring{width:38px;height:38px;border:2px solid var(--accent);border-radius:50%;opacity:.38;z-index:2}
+.pv-line{height:4px;border-radius:999px;background:color-mix(in srgb,var(--ink) 36%,var(--surface-2));z-index:3}
+.pv-zone{border:2px solid color-mix(in srgb,var(--accent) 42%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--accent) 7%,transparent);z-index:1}
+.pv-left,.pv-right{width:26px;height:42px;border-radius:7px;background:color-mix(in srgb,var(--ink) 22%,var(--surface-2));z-index:4}
+.pv-symbol{font-size:29px;line-height:1;z-index:4;white-space:pre;text-align:center}
+.pv-point .pv-ring{left:calc(50% - 19px);top:calc(50% - 19px);animation:pvPulse 1.6s ease-in-out infinite}
+.pv-point .pv-dot{left:calc(50% - 9px);top:calc(50% - 9px)}
+.pv-clock .pv-symbol,.pv-event .pv-symbol{left:50%;top:50%;transform:translate(-50%,-50%);animation:pvFloat 1.8s ease-in-out infinite}
+.pv-surface .pv-line{left:15%;right:15%;top:62%}
+.pv-surface .pv-dot{left:calc(50% - 9px);top:calc(62% - 18px);animation:pvSettle 1.8s ease-in-out infinite}
+.pv-wall .pv-line{width:4px;height:68%;left:68%;top:16%}
+.pv-wall .pv-dot{left:calc(68% - 18px);top:calc(50% - 9px);animation:pvPulseSmall 1.8s ease-in-out infinite}
+.pv-path .pv-line{left:10%;right:10%;top:calc(50% - 2px)}
+.pv-path .pv-dot{top:calc(50% - 9px);left:12%;animation:pvTravel 3s ease-in-out infinite}
+.pv-inside .pv-zone{left:22%;right:22%;top:17%;bottom:17%}
+.pv-inside .pv-dot{left:calc(50% - 9px);top:calc(50% - 9px);animation:pvFloat 2s ease-in-out infinite}
+.pv-area .pv-zone{left:10%;right:10%;top:13%;bottom:13%;border-style:dashed}
+.pv-area .pv-dot{left:28%;top:43%;animation:pvWander 3.2s ease-in-out infinite}
+.pv-between .pv-left,.pv-interval .pv-left{left:12%;top:24%}
+.pv-between .pv-right,.pv-interval .pv-right{right:12%;top:24%}
+.pv-between .pv-dot{left:calc(50% - 9px);top:calc(50% - 9px);animation:pvPulseSmall 1.6s ease-in-out infinite}
+.pv-interval .pv-dot{top:calc(50% - 9px);left:27%;animation:pvBetween 2.8s ease-in-out infinite}
+.pv-among .pv-symbol{left:50%;top:50%;transform:translate(-50%,-50%);font-size:18px;line-height:1.5;color:color-mix(in srgb,var(--ink) 42%,transparent)}
+.pv-among .pv-dot{left:calc(50% - 9px);top:calc(50% - 9px);animation:pvPulseSmall 1.5s ease-in-out infinite}
+.pv-below .pv-line{left:20%;right:20%;top:34%}
+.pv-below .pv-dot{left:calc(50% - 9px);top:56%;animation:pvFloat 2s ease-in-out infinite}
+.pv-over .pv-line{left:20%;right:20%;top:67%}
+.pv-over .pv-dot{left:calc(50% - 9px);top:24%;animation:pvFloat 2s ease-in-out infinite}
+.pv-overpass .pv-zone{left:18%;right:18%;bottom:10%;height:26px;border-width:1px}
+.pv-overpass .pv-dot{top:19%;left:8%;animation:pvTravelWide 3s ease-in-out infinite}
+.pv-through .pv-zone{left:29%;right:29%;top:19%;bottom:19%}
+.pv-through .pv-dot{top:calc(50% - 9px);left:5%;animation:pvTravelWide 3s linear infinite}
+.pv-across .pv-zone{left:9%;right:9%;top:19%;bottom:19%;border-style:dashed}
+.pv-across .pv-dot{top:calc(50% - 9px);left:7%;animation:pvTravelWide 3s ease-in-out infinite}
+.pv-next .pv-left{left:33%;top:24%}
+.pv-next .pv-dot{left:58%;top:calc(50% - 9px);animation:pvPulseSmall 1.7s ease-in-out infinite}
+.pv-front .pv-left,.pv-behind .pv-left{left:calc(50% - 13px);top:20%}
+.pv-front .pv-dot{left:calc(50% - 9px);top:61%;transform:scale(1.12);animation:pvPulseSmall 1.7s ease-in-out infinite}
+.pv-behind .pv-dot{left:calc(50% - 9px);top:27%;opacity:.42;z-index:2;animation:pvPulseSmall 1.7s ease-in-out infinite}
+.pv-behind .pv-left{z-index:5}
+.pv-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 2px 0;font-size:11px;font-weight:850;color:var(--ink-muted)}
+.pv-good{color:var(--accent-strong)}
+.pv-again{color:var(--ink-muted)}
+.pv-page{font-variant-numeric:tabular-nums}
+@keyframes pvPulse{0%,100%{transform:scale(.78);opacity:.2}50%{transform:scale(1.12);opacity:.65}}
+@keyframes pvPulseSmall{0%,100%{transform:scale(.9)}50%{transform:scale(1.12)}}
+@keyframes pvFloat{0%,100%{transform:translateY(-3px)}50%{transform:translateY(3px)}}
+@keyframes pvSettle{0%,100%{transform:translateY(-5px)}50%{transform:translateY(0)}}
+@keyframes pvTravel{0%,100%{left:12%}50%{left:78%}}
+@keyframes pvTravelWide{0%,100%{left:6%}50%{left:82%}}
+@keyframes pvWander{0%,100%{left:25%;top:35%}50%{left:66%;top:54%}}
+@keyframes pvBetween{0%,100%{left:28%}50%{left:61%}}
+@media(max-width:390px){.pv-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.pv-world{height:72px}.pv-sense{padding:7px}.pv-sense-ja{font-size:10px}}
+@media(prefers-reduced-motion:reduce){#prepVisualRoot *{animation:none!important;transition:none!important}}
+`;
+    document.head.appendChild(style);
+  }
+
+  function prepVisualSceneHtml(scene){
+    const parts={
+      point:'<i class="pv-ring"></i><i class="pv-dot"></i>',
+      clock:'<span class="pv-symbol">🕘</span>',
+      event:'<span class="pv-symbol">📍</span>',
+      surface:'<i class="pv-line"></i><i class="pv-dot"></i>',
+      wall:'<i class="pv-line"></i><i class="pv-dot"></i>',
+      path:'<i class="pv-line"></i><i class="pv-dot"></i>',
+      inside:'<i class="pv-zone"></i><i class="pv-dot"></i>',
+      area:'<i class="pv-zone"></i><i class="pv-dot"></i>',
+      between:'<i class="pv-left"></i><i class="pv-right"></i><i class="pv-dot"></i>',
+      interval:'<i class="pv-left"></i><i class="pv-right"></i><i class="pv-dot"></i>',
+      among:'<span class="pv-symbol">●   ●\n●   ●</span><i class="pv-dot"></i>',
+      below:'<i class="pv-line"></i><i class="pv-dot"></i>',
+      over:'<i class="pv-line"></i><i class="pv-dot"></i>',
+      overpass:'<i class="pv-zone"></i><i class="pv-dot"></i>',
+      through:'<i class="pv-zone"></i><i class="pv-dot"></i>',
+      across:'<i class="pv-zone"></i><i class="pv-dot"></i>',
+      next:'<i class="pv-left"></i><i class="pv-dot"></i>',
+      front:'<i class="pv-left"></i><i class="pv-dot"></i>',
+      behind:'<i class="pv-left"></i><i class="pv-dot"></i>'
+    };
+    const content=parts[scene]||'<i class="pv-dot"></i>';
+    return `<div class="pv-world pv-${scene}" aria-hidden="true">${content}</div>`;
+  }
+
+  function prepVisualAccuracy(card){
+    const st=readWordStatsSnapshot(prepositionVisualWord(card));
+    const shown=Math.max(0,st.shown|0);
+    const got=Math.max(0,Math.min(shown,st.got|0));
+    return {shown,got,pct:shown?Math.round(got/shown*100):null};
+  }
+
+  function prepVisualOverallAccuracy(){
+    let shown=0,got=0;
+    PREP_VISUAL_CARDS.forEach(card=>{
+      const st=prepVisualAccuracy(card);
+      shown+=st.shown;
+      got+=st.got;
+    });
+    return {shown,got,pct:shown?Math.round(got/shown*100):null};
+  }
+
+  function syncPrepositionVisualModeAvailability(){
+    const special=isPrepositionVisualLevel();
+    document.body.classList.toggle('prep-visual-level',special);
+    if(modeSelect) modeSelect.disabled=special;
+    document.querySelectorAll('#uxChips .ux-chip').forEach(btn=>{
+      btn.disabled=special;
+      btn.setAttribute('aria-disabled',special?'true':'false');
+      btn.style.opacity=special?'.42':'';
+      btn.style.pointerEvents=special?'none':'';
+    });
+    const trainProxy=document.getElementById('studyTrainProxy');
+    if(trainProxy){
+      trainProxy.disabled=special;
+      trainProxy.style.opacity=special?'.42':'';
+    }
+    const trainNative=document.getElementById('trainToggle');
+    if(trainNative) trainNative.disabled=special;
+    const srsCard=document.getElementById('srsTodayCard');
+    if(srsCard){
+      if(special) srsCard.style.display='none';
+      else if(typeof applyQuotaVisibility==='function') applyQuotaVisibility();
+      else srsCard.style.removeProperty('display');
+    }
+    const speed=document.getElementById('shadowSpeedButton');
+    if(speed){
+      if(special) speed.style.display='none';
+      else speed.style.removeProperty('display');
+    }
+  }
+
+  function teardownPrepositionVisual(){
+    prepVisualActive=false;
+    const display=document.getElementById('display');
+    if(display){
+      display.classList.remove('prep-visual');
+      if(display.dataset.qmode==='PREP_VIS') delete display.dataset.qmode;
+    }
+    const root=document.getElementById('prepVisualRoot');
+    if(root) root.remove();
+    ['btnGot','btnForgot'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.style.removeProperty('display');
+    });
+    syncPrepositionVisualModeAvailability();
+  }
+
+  function renderPrepositionVisualCard(){
+    installPrepositionVisualStyles();
+    syncPrepositionVisualModeAvailability();
+    prepVisualActive=true;
+    try{ forceStopShadowing(); }catch(_){ }
+    const shadow=document.getElementById('shadowCtrl');
+    if(shadow) shadow.classList.remove('on');
+    const list=document.getElementById('listViewRoot');
+    if(list) list.style.display='none';
+    const book=document.querySelector('#screen-study .book');
+    if(book) book.style.display='';
+    const indicatorNode=document.getElementById('indicator');
+    if(indicatorNode) indicatorNode.style.display='';
+    const quiz=document.getElementById('quizPad');
+    if(quiz) quiz.style.display='none';
+    ['btnGot','btnForgot'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.style.display='none';
+    });
+
+    const display=document.getElementById('display');
+    if(!display||!PREP_VISUAL_CARDS.length) return;
+    prepVisualIndex=((prepVisualIndex%PREP_VISUAL_CARDS.length)+PREP_VISUAL_CARDS.length)%PREP_VISUAL_CARDS.length;
+    const card=PREP_VISUAL_CARDS[prepVisualIndex];
+    const word=prepositionVisualWord(card);
+    currentWord=word;
+    currentPickKind='practice';
+    display.classList.remove('q-back');
+    display.classList.add('q-front','prep-visual');
+    display.dataset.qmode='PREP_VIS';
+
+    let root=document.getElementById('prepVisualRoot');
+    if(!root){
+      root=document.createElement('div');
+      root.id='prepVisualRoot';
+      display.appendChild(root);
+    }
+    const own=prepVisualAccuracy(card);
+    const total=prepVisualOverallAccuracy();
+    const ownText=own.pct==null?'未回答':`${own.pct}% (${own.got}/${own.shown})`;
+    const totalText=total.pct==null?'全体 未回答':`全体 ${total.pct}%`;
+    const compareNote=String(card.compare||'').trim();
+    root.innerHTML=`
+      <div class="pv-head">
+        <div><div class="pv-term">${escHtml(card.term)}</div><div class="pv-core">${escHtml(card.core)}</div></div>
+        <div class="pv-score">${ownText}<br>${totalText}</div>
+      </div>
+      ${compareNote?`<div class="pv-compare"><b>比較メモ</b> ${escHtml(compareNote)}</div>`:''}
+      <div class="pv-grid">
+        ${card.senses.map(sense=>`<section class="pv-sense">${prepVisualSceneHtml(sense.scene)}<div class="pv-sense-title">${escHtml(sense.title)}</div><div class="pv-sense-ja">${escHtml(sense.ja)}</div><div class="pv-example">${escHtml(sense.example)}</div></section>`).join('')}
+      </div>
+      <div class="pv-foot"><span class="pv-good">← わかった</span><span class="pv-page">${prepVisualProgressText()}</span><span class="pv-again">もう一度 →</span></div>`;
+
+    const title=document.getElementById('indicatorTitle');
+    if(title) title.textContent='前置詞ビジュアル解説';
+    const flag=document.getElementById('challengeFlag');
+    if(flag){flag.textContent='スワイプして次へ';flag.className='flag blue'}
+    const counter=document.getElementById('counterAbs');
+    if(counter) counter.textContent=`${prepVisualIndex+1} / ${PREP_VISUAL_CARDS.length}`;
+    const hint=document.getElementById('cardHint');
+    if(hint) hint.textContent='左：わかった ／ 右：もう一度';
+    try{ resetCard(false); }catch(_){ }
+  }
+
+  function recordPrepositionVisualAnswer(gotIt){
+    if(!isPrepositionVisualLevel()||!PREP_VISUAL_CARDS.length) return false;
+    const card=PREP_VISUAL_CARDS[prepVisualIndex];
+    const word=prepositionVisualWord(card);
+    try{
+      const before=readWordStatsSnapshot(word);
+      const next=normalizeWordStats(before);
+      next.shown=Math.max(0,(before.shown|0)+1);
+      next.got=Math.max(0,Math.min(next.shown,(before.got|0)+(gotIt?1:0)));
+      setStats(word,next,{persist:false});
+      commitLearningState({wordMapChanged:true});
+    }catch(error){
+      try{markSaveFailure('前置詞ビジュアル解説の学習結果を保存できませんでした。')}catch(_){ }
+    }
+    try{showAction(gotIt?'わかった！':'もう一度','flag '+(gotIt?'green':'blue'))}catch(_){ }
+    try{if(window.DEJITAN_UX) window.DEJITAN_UX.triggerHaptic(!!gotIt)}catch(_){ }
+    prepVisualIndex=selectNextPrepositionVisualIndex(prepVisualIndex,!!gotIt);
+    return true;
+  }
+
+  function mountPrepositionVisualLevel(){
+    installPrepositionVisualStyles();
+    const ensureOption=()=>{
+      if(!levelSelect) return;
+      if(!Array.from(levelSelect.options).some(option=>option.value===PREP_VISUAL_LEVEL)){
+        const option=document.createElement('option');
+        option.value=PREP_VISUAL_LEVEL;
+        option.textContent=PREP_VISUAL_LEVEL;
+        option.dataset.special='preposition-visual';
+        levelSelect.appendChild(option);
+      }
+      const proxy=document.getElementById('studyLevelProxy');
+      if(proxy&&!Array.from(proxy.options).some(option=>option.value===PREP_VISUAL_LEVEL)){
+        const option=document.createElement('option');
+        option.value=PREP_VISUAL_LEVEL;
+        option.textContent=PREP_VISUAL_LEVEL;
+        option.dataset.special='preposition-visual';
+        proxy.appendChild(option);
+      }
+    };
+    ensureOption();
+    if(!prepVisualLevelObserver&&levelSelect){
+      prepVisualLevelObserver=new MutationObserver(()=>ensureOption());
+      prepVisualLevelObserver.observe(levelSelect,{childList:true});
+    }
+  }
+
 function startInitialView(){
+  syncPrepositionVisualModeAvailability();
+  if(isPrepositionVisualLevel()){
+    if(typeof closeStudyBio === 'function') closeStudyBio();
+    if(!prepVisualActive) resetPrepositionVisualSession();
+    renderPrepositionVisualCard();
+    return;
+  }
+  teardownPrepositionVisual();
   if(typeof closeStudyBio === 'function') closeStudyBio();
   updateDailyGoalView();
   try{ renderStreakBadge(); }catch(_){ }
@@ -8817,6 +9652,12 @@ revealRest(currentWord);
       if(!swipe.on){swipe.drag=false;return}const dx=swipe.dx,drag=swipe.drag;swipe.on=false;swipe.drag=false;swipe.dx=0;
       if(drag) swipe.lastDragEnd=Date.now();
       if(!drag||Math.abs(dx)<SWIPE_TH){resetCard(true);return}
+      if(isPrepositionVisualLevel()){
+        const gotIt=dx<0;
+        recordPrepositionVisualAnswer(gotIt);
+        animateCardExit(gotIt?-1:1,()=>renderPrepositionVisualCard());
+        return;
+      }
       if(isInitial()||swipe.peek){swipe.peek=false;commitCardAnswer(dx<0,dx<0?-1:1);return}
       if(dx>0&&undoLastGot()){animateCardExit(1,()=>setTimeout(startInitialView,120));return}
       animateCardExit(dx<0?-1:1,startInitialView);
@@ -8824,12 +9665,14 @@ revealRest(currentWord);
     function cardInteractive(){
       if(!currentWord) return false;
       if(document.querySelector('#screen-study.bio-view')) return false;
+      if(isPrepositionVisualLevel()) return true;
       if(isListView()) return false;
       if(isQuizMode()&&!quizAnswered) return false;
       if(modeKey()==='SHD') return false;
       return true;
     }
     function peekReveal(){
+      if(isPrepositionVisualLevel()) return false;
       if(!cardInteractive()||!isInitial()) return false;
       swipe.peek=true;
       revealRest(currentWord);
@@ -8863,6 +9706,15 @@ revealRest(currentWord);
       const t=e.target, tag=((t&&t.tagName)||'').toLowerCase();
       if(tag==='input'||tag==='select'||tag==='textarea'||(t&&t.isContentEditable)) return;
       if(!cardInteractive()) return;
+      if(isPrepositionVisualLevel()){
+        if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
+          e.preventDefault();
+          const gotIt=e.key==='ArrowLeft';
+          recordPrepositionVisualAnswer(gotIt);
+          animateCardExit(gotIt?-1:1,()=>renderPrepositionVisualCard());
+        }
+        return;
+      }
       const ready=isInitial()||swipe.peek;
       if(e.key==='ArrowLeft'){
         e.preventDefault();
@@ -9818,9 +10670,8 @@ revealRest(currentWord);
         const resumed=loadMap(fixture.storage);
         const resumedShown=resumed.map['legacy-word']&&
           resumed.map['legacy-word'].shown;
-        const finished=finishPreparedStatsMigration(
-          resumed.preparedSerialized,
-          resumed.preparedOwner,
+        const finished=resumePreparedStatsMigration(
+          resumed,
           fixture.storage,
           ()=>{}
         );
@@ -9831,11 +10682,16 @@ revealRest(currentWord);
         return {
           passed:
             resumed.resumePrepared===true&&
+            resumed.preparedOwner===prepared.owner&&
             resumedShown===2&&
             finished.ok===true&&
             finalMap['legacy-word'].shown===2&&
             fixture.storage.getItem(fixture.legacyKey)===null,
-          detail:{resumedShown,finished}
+          detail:{
+            resumedShown,
+            preparedOwner:resumed.preparedOwner,
+            finished
+          }
         };
       });
 
@@ -10048,6 +10904,171 @@ revealRest(currentWord);
         return {
           passed:error===null,
           detail:error?String(error&&error.message||error):'ok'
+        };
+      });
+
+      add('非表示のビオトープは描画ループ開始経路へ入らない',()=>{
+        let sceneCalls=0;
+        const started=renderBiotopeSceneIfVisible({
+          visible:false,
+          renderScene:()=>{sceneCalls++}
+        });
+        return {
+          passed:started===false&&sceneCalls===0,
+          detail:{started,sceneCalls}
+        };
+      });
+
+      add('表示中のビオトープは描画開始を1回だけ行う',()=>{
+        let sceneCalls=0;
+        const started=renderBiotopeSceneIfVisible({
+          visible:true,
+          renderScene:()=>{sceneCalls++}
+        });
+        return {
+          passed:started===true&&sceneCalls===1,
+          detail:{started,sceneCalls}
+        };
+      });
+
+      add('ビオトープRAF停止判定は数値IDを0も含めて1回だけキャンセルしてnullを返す',()=>{
+        const liveRaf=window._bioRAF;
+        const wasLive=document.body.classList.contains('bio-live');
+        const cases=[731,0].map(rafId=>{
+          const cancelled=[];
+          const nextRaf=stopBioRenderLoopState(
+            rafId,
+            id=>cancelled.push(id)
+          );
+          return {
+            rafId,
+            cancelled:cancelled.slice(),
+            nextRaf,
+            passed:
+              cancelled.length===1&&
+              cancelled[0]===rafId&&
+              nextRaf===null
+          };
+        });
+        return {
+          passed:
+            cases.every(item=>item.passed)&&
+            window._bioRAF===liveRaf&&
+            document.body.classList.contains('bio-live')===wasLive,
+          detail:{
+            cases,
+            productionRafUnchanged:window._bioRAF===liveRaf,
+            productionLiveClassUnchanged:
+              document.body.classList.contains('bio-live')===wasLive
+          }
+        };
+      });
+
+      add('ビオトープRAF停止判定はnullまたはundefinedならcancelを呼ばない',()=>{
+        const liveRaf=window._bioRAF;
+        const wasLive=document.body.classList.contains('bio-live');
+        const cases=[null,undefined].map(rafId=>{
+          const cancelled=[];
+          const nextRaf=stopBioRenderLoopState(
+            rafId,
+            id=>cancelled.push(id)
+          );
+          return {
+            rafId:rafId===undefined?'undefined':rafId,
+            cancelled:cancelled.slice(),
+            nextRaf,
+            passed:
+              cancelled.length===0&&
+              nextRaf===null
+          };
+        });
+        return {
+          passed:
+            cases.every(item=>item.passed)&&
+            window._bioRAF===liveRaf&&
+            document.body.classList.contains('bio-live')===wasLive,
+          detail:{
+            cases,
+            productionRafUnchanged:window._bioRAF===liveRaf,
+            productionLiveClassUnchanged:
+              document.body.classList.contains('bio-live')===wasLive
+          }
+        };
+      });
+
+      add('餌ポイント計算は100ptごとに従来通り餌へ変換する',()=>{
+        const state=calculateFeedRewardState(98,2,3);
+        const writes=[];
+        const saved=addFeedPoints(3,{
+          getPoints:()=>98,
+          getStock:()=>2,
+          writer:(key,value)=>{
+            writes.push([key,value]);
+            return true;
+          },
+          reportFailure:()=>{},
+          skipUi:true
+        });
+        return {
+          passed:
+            state.pts===1&&
+            state.stock===3&&
+            state.gained===1&&
+            saved===true&&
+            writes.length===2&&
+            writes[0][0]==='biotope_feed_points'&&
+            writes[0][1]===1&&
+            writes[1][0]==='biotope_food_stock'&&
+            writes[1][1]===3,
+          detail:{state,writes,saved}
+        };
+      });
+
+      add('餌ポイント保存がfalseでも学習側へ例外を伝播しない',()=>{
+        let error=null;
+        let result=null;
+        try{
+          result=addFeedPoints(3,{
+            getPoints:()=>10,
+            getStock:()=>2,
+            writer:()=>false,
+            reportFailure:()=>{},
+            skipUi:true
+          });
+        }catch(caught){
+          error=caught;
+        }
+        return {
+          passed:error===null&&result===false,
+          detail:{result,error:error?String(error):null}
+        };
+      });
+
+      add('餌ポイント保存関数がthrowしても学習側へ例外を伝播しない',()=>{
+        let error=null;
+        let reported=0;
+        let result=null;
+        try{
+          result=addFeedPoints(3,{
+            getPoints:()=>10,
+            getStock:()=>2,
+            writer:()=>{throw new Error('feed-test-write-error')},
+            reportFailure:()=>{reported++},
+            skipUi:true
+          });
+        }catch(caught){
+          error=caught;
+        }
+        return {
+          passed:
+            error===null&&
+            result===false&&
+            reported===1,
+          detail:{
+            result,
+            reported,
+            error:error?String(error):null
+          }
         };
       });
 
@@ -11060,9 +12081,9 @@ place(rare,rarePos,true); place(normal,normalPos,false); }
     }
       function getFeedStock(){ return parseInt(localStorage.getItem('biotope_food_stock')||'0',10); }
   function getFeedPoints(){ return parseInt(localStorage.getItem('biotope_feed_points')||'0',10); }
-  function addFeedPoints(n){
-    let pts = getFeedPoints() + n;
-    let stock = getFeedStock();
+  function calculateFeedRewardState(currentPoints,currentStock,n){
+    let pts = currentPoints + n;
+    let stock = currentStock;
     const THRESHOLD = 100;
     let gained = 0;
     while(pts >= THRESHOLD){
@@ -11070,11 +12091,48 @@ place(rare,rarePos,true); place(normal,normalPos,false); }
       stock++;
       gained++;
     }
-    localStorage.setItem('biotope_feed_points', pts);
-    localStorage.setItem('biotope_food_stock', stock);
-    if(gained > 0){
-      showBioToast(`餌を${gained}個ゲット！`);
-      updateFeedUI();
+    return {pts,stock,gained};
+  }
+  function persistFeedRewardState(state,writer,onFailure){
+    const write = typeof writer === 'function' ? writer : safeSetItem;
+    try{
+      const pointsSaved = write('biotope_feed_points', state.pts);
+      const stockSaved = write('biotope_food_stock', state.stock);
+      return pointsSaved !== false && stockSaved !== false;
+    }catch(error){
+      try{ if(typeof onFailure === 'function') onFailure(error) }catch(_){ }
+      return false;
+    }
+  }
+  function addFeedPoints(n,options){
+    const opts = options || {};
+    try{
+      const readPoints = typeof opts.getPoints === 'function' ? opts.getPoints : getFeedPoints;
+      const readStock = typeof opts.getStock === 'function' ? opts.getStock : getFeedStock;
+      const state = calculateFeedRewardState(readPoints(), readStock(), n);
+      const saved = persistFeedRewardState(
+        state,
+        opts.writer,
+        error=>{
+          if(typeof opts.reportFailure === 'function'){
+            opts.reportFailure(error);
+            return;
+          }
+          markSaveFailure('ビオトープの餌ポイント保存に失敗しました。学習記録は継続します。');
+        }
+      );
+      if(!saved) return false;
+      if(state.gained > 0 && !opts.skipUi){
+        showBioToast(`餌を${state.gained}個ゲット！`);
+        updateFeedUI();
+      }
+      return true;
+    }catch(error){
+      try{
+        if(typeof opts.reportFailure === 'function') opts.reportFailure(error);
+        else markSaveFailure('ビオトープの餌ポイント処理に失敗しました。学習記録は継続します。');
+      }catch(_){ }
+      return false;
     }
   }
   function updateFeedUI(){
@@ -11357,14 +12415,14 @@ place(rare,rarePos,true); place(normal,normalPos,false); }
           btnBioToggle.textContent = '📚 学習カードに戻る';
           // UI更新（餌の数など）
           if(typeof updateFeedUI === 'function') updateFeedUI();
-          if(typeof renderBiotopeScene === 'function') renderBiotopeScene();
+          if(typeof renderBiotopeSceneIfVisible === 'function') renderBiotopeSceneIfVisible();
         } else {
           closeStudyBio();
         }
       });
     }
 
-    mountSrsUi(); applyQuotaVisibility(); ensureBiotopeSessionBaseline(); markBiotopeOpened(); initGrowthEmoji(); startInitialView(); updateStatsView(); refreshTrend(); drawSrsForecast(); renderBiotopeScene();
+    mountSrsUi(); applyQuotaVisibility(); ensureBiotopeSessionBaseline(); markBiotopeOpened(); initGrowthEmoji(); mountPrepositionVisualLevel(); startInitialView(); updateStatsView(); refreshTrend(); drawSrsForecast(); renderBiotopeSceneIfVisible();
   });
   </script>
 
