@@ -3389,36 +3389,159 @@ function isDetailSwipeIgnoredTarget(target){
     !!target.closest('button, input, select, textarea, a, audio, label');
 }
 
+function prefersReducedDetailMotion(){
+  return !!(
+    window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+/* ドラッグ中に付けた一時スタイルを必ず解除する */
+function clearDetailSwipeDrag(){
+  const dlg = $('#dlg-detail');
+  if(!dlg) return;
+  dlg.style.removeProperty('transform');
+  dlg.style.removeProperty('opacity');
+  delete dlg.dataset.swipeDragX;
+}
+
+/* スワイプが成立しなかったときは、カードを元の位置へ戻す */
+async function settleDetailSwipeBack(){
+  const dlg = $('#dlg-detail');
+  if(!dlg) return;
+
+  const dragX = Number(dlg.dataset.swipeDragX || 0);
+  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
+  clearDetailSwipeDrag();
+
+  if(
+    prefersReducedDetailMotion() ||
+    !dragX ||
+    typeof dlg.animate !== 'function'
+  ){
+    return;
+  }
+
+  const anim = dlg.animate([
+    {
+      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`,
+      opacity:startOpacity
+    },
+    {
+      transform:'translate3d(0,0,0) rotate(0deg)',
+      opacity:1
+    }
+  ],{
+    duration:180,
+    easing:'cubic-bezier(.2,.8,.2,1)'
+  });
+
+  try{ await anim.finished; }catch(_){}
+}
+
+/* 現在カードを退場させ、内容差し替え後に次カードを反対側から入れる */
+async function animateDetailPageTurn(delta, swapTask){
+  const dlg = $('#dlg-detail');
+  if(!dlg){
+    await swapTask();
+    return;
+  }
+
+  const dragX = Number(dlg.dataset.swipeDragX || 0);
+  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
+  clearDetailSwipeDrag();
+
+  if(
+    prefersReducedDetailMotion() ||
+    typeof dlg.animate !== 'function'
+  ){
+    await swapTask();
+    return;
+  }
+
+  // 次へは左へ退場、前へは右へ退場する
+  const exitDirection = delta > 0 ? -1 : 1;
+  const distance = Math.min(window.innerWidth * 0.42, 320);
+  const exitX = exitDirection * distance;
+
+  const outAnim = dlg.animate([
+    {
+      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg) scale(1)`,
+      opacity:startOpacity
+    },
+    {
+      transform:`translate3d(${exitX}px,0,0) rotate(${exitDirection * 2.2}deg) scale(.97)`,
+      opacity:0
+    }
+  ],{
+    duration:150,
+    easing:'cubic-bezier(.4,0,1,1)',
+    fill:'forwards'
+  });
+
+  try{ await outAnim.finished; }catch(_){}
+
+  await swapTask();
+  try{ outAnim.cancel(); }catch(_){}
+
+  // 次のカードは進行方向と反対側から入ってくる
+  const enterX = -exitX;
+  const inAnim = dlg.animate([
+    {
+      transform:`translate3d(${enterX}px,0,0) rotate(${-exitDirection * 1.8}deg) scale(.97)`,
+      opacity:0
+    },
+    {
+      transform:'translate3d(0,0,0) rotate(0deg) scale(1)',
+      opacity:1
+    }
+  ],{
+    duration:220,
+    easing:'cubic-bezier(.16,1,.3,1)'
+  });
+
+  try{ await inAnim.finished; }catch(_){}
+}
+
 /* 現在の一覧フィルタ結果の中で、前後の例文へ移動する */
 async function navigateDetailBySwipe(delta){
-  if(detailSwipeNavBusy || !currentDetailId) return;
+  if(detailSwipeNavBusy || !currentDetailId){
+    await settleDetailSwipeBack();
+    return;
+  }
 
   const currentIndex = detailBrowseIds.indexOf(currentDetailId);
   if(currentIndex < 0){
+    await settleDetailSwipeBack();
     notify('現在の一覧条件では前後移動できません。');
     return;
   }
 
   const nextIndex = currentIndex + delta;
   if(nextIndex < 0){
+    await settleDetailSwipeBack();
     notify('これが最初の例文です。');
     return;
   }
   if(nextIndex >= detailBrowseIds.length){
+    await settleDetailSwipeBack();
     notify('これが最後の例文です。');
     return;
   }
 
   detailSwipeNavBusy = true;
   try{
-    // 発話・録音を確実に止めてから次の詳細へ切り替える
+    // 発話・録音を確実に止めてから、ページ送りモーション中に内容を差し替える
     await speakEngine.stop();
     stopAllPlayback();
     clearRecAudio();
     recEngine.dispose();
 
-    await openDetail(detailBrowseIds[nextIndex]);
+    await animateDetailPageTurn(delta, async ()=>{
+      await openDetail(detailBrowseIds[nextIndex]);
+    });
   }catch(e){
+    clearDetailSwipeDrag();
     notifyError('前後の例文への移動に失敗しました。', e);
   }finally{
     detailSwipeNavBusy = false;
@@ -3433,6 +3556,7 @@ function bindDetailSwipeNavigation(){
   detailSwipeBound = true;
 
   let tracking = false;
+  let horizontalDrag = false;
   let startX = 0;
   let startY = 0;
   let startAt = 0;
@@ -3440,34 +3564,76 @@ function bindDetailSwipeNavigation(){
   dlg.addEventListener('touchstart', event=>{
     if(
       event.touches.length !== 1 ||
-      isDetailSwipeIgnoredTarget(event.target)
+      isDetailSwipeIgnoredTarget(event.target) ||
+      detailSwipeNavBusy
     ){
       tracking = false;
+      horizontalDrag = false;
       return;
     }
 
     const touch = event.touches[0];
     tracking = true;
+    horizontalDrag = false;
     startX = touch.clientX;
     startY = touch.clientY;
     startAt = performance.now();
+    clearDetailSwipeDrag();
   }, {passive:true});
 
+  dlg.addEventListener('touchmove', event=>{
+    if(!tracking || event.touches.length !== 1) return;
+
+    const touch = event.touches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+
+    // 数pxの揺れでは方向判定しない。縦操作なら通常スクロールへ任せる
+    if(!horizontalDrag){
+      if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      if(Math.abs(dx) <= Math.abs(dy) * 1.15){
+        tracking = false;
+        return;
+      }
+      horizontalDrag = true;
+    }
+
+    if(event.cancelable) event.preventDefault();
+
+    // 指に完全追従させず少し重みを付け、カードをめくっている感触にする
+    const dragX = dx * 0.42;
+    dlg.dataset.swipeDragX = String(dragX);
+    dlg.style.transform =
+      `translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`;
+    dlg.style.opacity = String(
+      Math.max(.82, 1 - Math.abs(dragX) / 700)
+    );
+  }, {passive:false});
+
   dlg.addEventListener('touchend', event=>{
-    if(!tracking || event.changedTouches.length !== 1) return;
+    if(!tracking || event.changedTouches.length !== 1){
+      if(horizontalDrag) void settleDetailSwipeBack();
+      tracking = false;
+      horizontalDrag = false;
+      return;
+    }
     tracking = false;
 
     const touch = event.changedTouches[0];
     const dx = touch.clientX - startX;
     const dy = touch.clientY - startY;
     const elapsed = performance.now() - startAt;
+    const wasHorizontalDrag = horizontalDrag;
+    horizontalDrag = false;
 
     // 誤反応防止：56px以上・横方向優勢・1秒以内だけをスワイプと判定
     if(
+      !wasHorizontalDrag ||
       Math.abs(dx) < 56 ||
       Math.abs(dx) < Math.abs(dy) * 1.35 ||
       elapsed > 1000
     ){
+      void settleDetailSwipeBack();
       return;
     }
 
@@ -3479,7 +3645,10 @@ function bindDetailSwipeNavigation(){
   }, {passive:false});
 
   dlg.addEventListener('touchcancel', ()=>{
+    const shouldRestore = horizontalDrag;
     tracking = false;
+    horizontalDrag = false;
+    if(shouldRestore) void settleDetailSwipeBack();
   }, {passive:true});
 }
 
