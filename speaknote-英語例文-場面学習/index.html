@@ -211,6 +211,40 @@ header nav button:hover{
   gap:14px;
   padding-top:8px;
 }
+.today-practice-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:8px;
+}
+.today-practice-count{
+  flex:0 0 auto;
+  font-size:30px;
+  line-height:1;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;
+}
+.today-practice-count span:last-child{
+  margin-left:3px;
+  font-size:12px;
+  font-weight:500;
+  color:var(--muted);
+}
+.today-practice-plan{
+  margin-top:3px;
+  font-size:13px;
+  color:#d9e5fb;
+}
+.today-practice-complete{
+  margin-top:8px;
+  padding:10px 12px;
+  border:1px solid rgba(23,201,100,.25);
+  border-radius:12px;
+  background:rgba(23,201,100,.07);
+  line-height:1.6;
+}
 .kpi-grid{
   display:grid;
   grid-template-columns:1fr 1fr;
@@ -766,6 +800,27 @@ header nav button:hover{
   <!-- 追加：ホーム（KPIダッシュボード） -->
   <section id="view-home" class="active">
     <div class="kpi-layout">
+      <!-- 今日の練習（復習導線） -->
+      <div class="card" id="today-practice" style="cursor:default">
+        <div class="today-practice-head">
+          <div>
+            <h3 style="margin:0;font-size:15px">今日の練習</h3>
+            <div class="today-practice-plan" id="today-practice-plan">今日やる内容を準備しています…</div>
+          </div>
+          <div class="today-practice-count"><span id="today-practice-count">0</span><span>件</span></div>
+        </div>
+        <div class="tiny" id="today-practice-summary">復習 0件 ＋ 新しい文 0件</div>
+        <div class="tiny" id="today-practice-remaining"></div>
+        <div class="tiny hidden" id="today-practice-mastery"></div>
+        <div class="today-practice-complete hidden" id="today-practice-complete">
+          🎉 今日の練習は完了しました<br>
+          <span class="tiny">今日は復習する例文はありません。また明日続けましょう。</span>
+        </div>
+        <div class="actions">
+          <button class="btn ok" type="button" id="btn-start-review">▶︎ 今日の練習を始める</button>
+        </div>
+      </div>
+
       <!-- KPIタイル（2列x2行） -->
       <div class="kpi-grid">
         <button class="kpi-tile active" data-metric="sentences" aria-pressed="true">
@@ -925,6 +980,16 @@ header nav button:hover{
       対象とする例文をカテゴリやタグで絞り込んでから、シャドーイングを開始できます。<br>
       何も指定しない場合は、登録済みのすべての英文が対象になります。
     </div>
+    <div class="row">
+      <div>
+        <label>練習モード</label>
+        <select id="sh-mode">
+          <option value="shadow">追唱（英文を見ながら音を追う）</option>
+          <option value="recall">想起（和訳だけ見て自力で言う）</option>
+        </select>
+        <div class="tiny">※ 想起では、和訳を見て自分で言ったあとに英文と音声が出ます。</div>
+      </div>
+    </div>
     <div class="row two">
       <div>
         <label>カテゴリで絞り込み</label>
@@ -1035,6 +1100,10 @@ header nav button:hover{
     <button class="btn ok" id="sh-toggle">⏸ 停止</button>
     <button class="btn" id="sh-pocket-lock" type="button" aria-pressed="false" title="誤操作を防ぎ、画面の消灯を抑止します">🔓 ロック</button>
     <button class="btn" id="sh-next">次へ ⏭</button>
+
+    <!-- 習熟度の自己評価 -->
+    <button class="btn ok" type="button" id="sh-grade-ok" title="言えたので次回は先送りします">👍 言えた</button>
+    <button class="btn warn" type="button" id="sh-grade-ng" title="まだなので当日中にもう一度出します">🔁 もう一度</button>
 
     <!-- 速度調整と終了 -->
     <button class="btn" id="sh-slower">− 速度</button>
@@ -1342,6 +1411,128 @@ function shuffleInPlace(array){
     array[j] = tmp;
   }
   return array;
+}
+
+/* =========================
+   習熟度・間隔反復（DB_VERは据え置き、フィールド追加のみ）
+========================= */
+const REVIEW_INTERVALS_DAYS = [1,2,4,7,14,30];
+const DAY_MS = 86400000;
+
+/* 新フィールドが無い既存データでも安全に扱えるよう既定値へ寄せる */
+function normalizeLearning(row){
+  const mastery = Number(row && row.mastery);
+  const reviewCount = Number(row && row.reviewCount);
+  const nextReviewAt = Number(row && row.nextReviewAt);
+  return {
+    mastery: Number.isFinite(mastery) ? Math.min(5, Math.max(0, Math.round(mastery))) : 0,
+    reviewCount: Number.isFinite(reviewCount) ? Math.max(0, Math.round(reviewCount)) : 0,
+    nextReviewAt: Number.isFinite(nextReviewAt) ? Math.max(0, nextReviewAt) : 0
+  };
+}
+function applyLearningDefaults(item){
+  return Object.assign(item, normalizeLearning(item));
+}
+
+/* 復習対象・未練習・習熟済みの件数をまとめる */
+function summarizeLearning(rows){
+  const t = now();
+  let due = 0, fresh = 0, mastered = 0;
+  for(const r of (rows || [])){
+    const l = normalizeLearning(r);
+    if(l.reviewCount === 0) fresh++;
+    else if(l.nextReviewAt <= t) due++;
+    if(l.mastery >= 2) mastered++;
+  }
+  return { due, fresh, mastered, total: (rows || []).length };
+}
+
+/* 期限到来 → 未練習 → 残り、の順に並べ替える */
+function buildReviewQueue(pool){
+  const t = now();
+  const due = [], fresh = [], rest = [];
+  for(const r of (pool || [])){
+    const l = normalizeLearning(r);
+    if(l.reviewCount === 0) fresh.push(r);
+    else if(l.nextReviewAt <= t) due.push(r);
+    else rest.push(r);
+  }
+  due.sort((a,b)=> normalizeLearning(a).nextReviewAt - normalizeLearning(b).nextReviewAt);
+  return due.concat(shuffleInPlace(fresh), shuffleInPlace(rest));
+}
+
+/* ホームの「今日の練習」専用キュー。期限到来を優先し、新規は最大3件、全体は最大10件に絞る */
+function buildTodayPracticeQueue(pool){
+  const t = now();
+  const due = [];
+  const fresh = [];
+
+  for(const r of (pool || [])){
+    if(!(r.english || '').trim()) continue;
+    const l = normalizeLearning(r);
+    if(l.reviewCount === 0) fresh.push(r);
+    else if(l.nextReviewAt <= t) due.push(r);
+  }
+
+  due.sort((a,b)=> normalizeLearning(a).nextReviewAt - normalizeLearning(b).nextReviewAt);
+  shuffleInPlace(fresh);
+
+  const queue = due.slice(0, 10);
+  const freshSlots = Math.min(3, Math.max(0, 10 - queue.length));
+  if(freshSlots > 0){
+    queue.push(...fresh.slice(0, freshSlots));
+  }
+  return queue;
+}
+
+/* 聞く＋自力発話＋自己評価の時間を含めた粗いセッション所要時間 */
+function estimateTodayPracticeMinutes(rows){
+  if(!rows || rows.length === 0) return 0;
+  const totalSec = rows.reduce((sum, row)=>{
+    const speakSec = estimateSpeakSeconds(row.english || '');
+    return sum + speakSec * 2 + 8;
+  }, 0);
+  return Math.max(1, Math.ceil(totalSec / 60));
+}
+
+/* 自己評価に応じて習熟度と次回出題日を更新する */
+async function gradeSentence(row, ok){
+  if(!row || !row.id) return;
+  try{
+    const full = await getOne(row.id);
+    if(!full) return;
+    const cur = normalizeLearning(full);
+    let mastery, nextReviewAt, label;
+    if(ok){
+      mastery = Math.min(5, cur.mastery + 1);
+      const days = REVIEW_INTERVALS_DAYS[Math.max(0, mastery - 1)] ||
+        REVIEW_INTERVALS_DAYS[REVIEW_INTERVALS_DAYS.length - 1];
+      nextReviewAt = now() + days * DAY_MS;
+      label = `習熟度 ${mastery} ／ 次回 ${days}日後`;
+    }else{
+      mastery = Math.max(0, cur.mastery - 1);
+      nextReviewAt = now() + 10 * 60000;
+      label = `習熟度 ${mastery} ／ 次回 10分後`;
+    }
+    full.mastery = mastery;
+    full.reviewCount = cur.reviewCount + 1;
+    full.nextReviewAt = nextReviewAt;
+    full.updatedAt = now();
+    await updateSentence(full);
+
+    // 出題中のリストにも反映しておく
+    if(Array.isArray(sh.list)){
+      const target = sh.list.find(r => r.id === full.id);
+      if(target){
+        target.mastery = mastery;
+        target.reviewCount = full.reviewCount;
+        target.nextReviewAt = nextReviewAt;
+      }
+    }
+    notify(label);
+  }catch(e){
+    notifyError('学習状況の保存に失敗しました。', e);
+  }
 }
 
 /* 開閉ボタンの状態（表示/非表示・ラベル・aria-expanded）をまとめて切り替える */
@@ -1664,9 +1855,65 @@ async function updateHomeKpi(){
   $('#kpi-today-play-sec').textContent    = t.playMin.toFixed(1);
   $('#kpi-today-rec-sec').textContent     = t.recMin.toFixed(1);
 
+  // 「今日の練習」カード（復習対象・未練習・習熟度）
+  try{
+    const rows = await getAllCached();
+    if(token !== homeKpiToken) return;
+    renderTodayPractice(rows);
+  }catch(_){}
+
   await renderHomeGraph();
   if(token !== homeKpiToken) return;
   renderHeatmap();
+}
+
+/* 今日の練習カードの表示更新 */
+function renderTodayPractice(rows){
+  const sum = $('#today-practice-summary');
+  const mas = $('#today-practice-mastery');
+  const btn = $('#btn-start-review');
+  const plan = $('#today-practice-plan');
+  const count = $('#today-practice-count');
+  const remaining = $('#today-practice-remaining');
+  const complete = $('#today-practice-complete');
+  if(!sum || !mas) return;
+
+  const eligibleRows = (rows || []).filter(r => (r.english || '').trim().length > 0);
+  const queue = buildTodayPracticeQueue(eligibleRows);
+  const queueStats = summarizeLearning(queue);
+  const allStats = summarizeLearning(eligibleRows);
+  const minutes = estimateTodayPracticeMinutes(queue);
+  const remainingFresh = Math.max(0, allStats.fresh - queueStats.fresh);
+
+  if(count) count.textContent = String(queue.length);
+  if(plan){
+    plan.textContent = queue.length
+      ? `${queue.length}件・約${minutes}分`
+      : '今日の対象はありません';
+  }
+
+  sum.textContent = `復習 ${queueStats.due}件 ＋ 新しい文 ${queueStats.fresh}件`;
+
+  if(remaining){
+    remaining.textContent = remainingFresh > 0
+      ? `あと${remainingFresh}件の新しい例文があります`
+      : '';
+  }
+
+  // 既存IDは互換性のため残すが、内部指標の習熟度表示はホームから外す
+  mas.textContent = '';
+  mas.classList.add('hidden');
+
+  if(complete){
+    complete.classList.toggle('hidden', queue.length !== 0);
+  }
+
+  if(btn){
+    btn.disabled = queue.length === 0;
+    btn.textContent = queue.length
+      ? `▶︎ ${queue.length}件を練習する`
+      : '今日の練習は完了';
+  }
 }
 
 function renderHeatmap(){
@@ -2010,7 +2257,7 @@ let sentenceCache = null;
 function invalidateSentenceCache(){ sentenceCache = null; }
 function toLightSentence(row){
   const { imageData, ...rest } = row || {};
-  return Object.assign(rest, { hasImage: !!imageData });
+  return Object.assign(rest, normalizeLearning(row), { hasImage: !!imageData });
 }
 /* 件数が変わらない更新はキャッシュを捨てずに該当行だけ差し替える */
 function patchSentenceCache(item){
@@ -2069,6 +2316,9 @@ async function ensureDefaultSentences(){
       imageData: row.imageData || '',
       favorite: false,
       playCount: 0,
+      mastery: 0,
+      reviewCount: 0,
+      nextReviewAt: 0,
       createdAt: now(),
       updatedAt: now()
     }));
@@ -2178,6 +2428,7 @@ function defaultSaveHandler(){
         const item = collectFormToItem();
         item.id = uid(); item.createdAt = now(); item.updatedAt = now();
         item.favorite=false; item.playCount=0;
+        applyLearningDefaults(item); // 習熟度フィールドの既定値を補完
         await addSentence(item);
         trackKpiAdd(1); // 今日の登録数に+1
 
@@ -2890,6 +3141,7 @@ $('#btn-pause-preview').onclick = ()=>{
    一覧とカード
 ========================= */
 const fCat=$('#f-cat'), fTag=$('#f-tag'), q=$('#q');
+let detailBrowseIds = []; // 現在の一覧フィルタ結果。詳細画面の前後移動に使う
 const refreshListDebounced = debounce(()=>refreshList(), 250);
 [fCat,fTag,q].forEach(el=> el.oninput = refreshListDebounced);
 async function fillCategoryFilter(){
@@ -2921,6 +3173,8 @@ async function refreshList(){
     }
     return true;
   }).sort((a,b)=> (b.updatedAt||0)-(a.updatedAt||0));
+  // ページ表示件数に関係なく、現在のフィルタ結果全体の順序を保持する
+  detailBrowseIds = list.map(r=>r.id);
   renderCards(list);
 }
 /* 一覧は一度に全件描画せず、ページ単位で追記する */
@@ -3126,6 +3380,109 @@ function renderDetailMeta(categories, playCount){
   $('#d-meta').innerHTML=meta.join(' ');
 }
 
+let detailSwipeBound = false;
+let detailSwipeNavBusy = false;
+
+/* 詳細画面のスワイプ対象から操作部品を除外する */
+function isDetailSwipeIgnoredTarget(target){
+  return target instanceof Element &&
+    !!target.closest('button, input, select, textarea, a, audio, label');
+}
+
+/* 現在の一覧フィルタ結果の中で、前後の例文へ移動する */
+async function navigateDetailBySwipe(delta){
+  if(detailSwipeNavBusy || !currentDetailId) return;
+
+  const currentIndex = detailBrowseIds.indexOf(currentDetailId);
+  if(currentIndex < 0){
+    notify('現在の一覧条件では前後移動できません。');
+    return;
+  }
+
+  const nextIndex = currentIndex + delta;
+  if(nextIndex < 0){
+    notify('これが最初の例文です。');
+    return;
+  }
+  if(nextIndex >= detailBrowseIds.length){
+    notify('これが最後の例文です。');
+    return;
+  }
+
+  detailSwipeNavBusy = true;
+  try{
+    // 発話・録音を確実に止めてから次の詳細へ切り替える
+    await speakEngine.stop();
+    stopAllPlayback();
+    clearRecAudio();
+    recEngine.dispose();
+
+    await openDetail(detailBrowseIds[nextIndex]);
+  }catch(e){
+    notifyError('前後の例文への移動に失敗しました。', e);
+  }finally{
+    detailSwipeNavBusy = false;
+  }
+}
+
+/* スマホの横スワイプだけを前後移動として扱い、縦スクロールは邪魔しない */
+function bindDetailSwipeNavigation(){
+  if(detailSwipeBound) return;
+  const dlg = $('#dlg-detail');
+  if(!dlg) return;
+  detailSwipeBound = true;
+
+  let tracking = false;
+  let startX = 0;
+  let startY = 0;
+  let startAt = 0;
+
+  dlg.addEventListener('touchstart', event=>{
+    if(
+      event.touches.length !== 1 ||
+      isDetailSwipeIgnoredTarget(event.target)
+    ){
+      tracking = false;
+      return;
+    }
+
+    const touch = event.touches[0];
+    tracking = true;
+    startX = touch.clientX;
+    startY = touch.clientY;
+    startAt = performance.now();
+  }, {passive:true});
+
+  dlg.addEventListener('touchend', event=>{
+    if(!tracking || event.changedTouches.length !== 1) return;
+    tracking = false;
+
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    const elapsed = performance.now() - startAt;
+
+    // 誤反応防止：56px以上・横方向優勢・1秒以内だけをスワイプと判定
+    if(
+      Math.abs(dx) < 56 ||
+      Math.abs(dx) < Math.abs(dy) * 1.35 ||
+      elapsed > 1000
+    ){
+      return;
+    }
+
+    // スワイプ直後の単語タップ等の疑似clickを発生させない
+    event.preventDefault();
+
+    // 左へスワイプ＝次、右へスワイプ＝前
+    void navigateDetailBySwipe(dx < 0 ? 1 : -1);
+  }, {passive:false});
+
+  dlg.addEventListener('touchcancel', ()=>{
+    tracking = false;
+  }, {passive:true});
+}
+
 async function openDetail(id){
   const row=await getOne(id); if(!row) return;
   currentDetailId=id;
@@ -3134,7 +3491,8 @@ async function openDetail(id){
   try { await ensureTtsUnlocked(); await loadVoices(); } catch(_){}
 
   renderDetailBody(row);
-  $('#dlg-detail').showModal();
+  const dlg = $('#dlg-detail');
+  if(dlg && !dlg.open) dlg.showModal();
 
   setPlayToggleLabel($('#d-toggle'),'idle');
   setRecButtonMode('idle');
@@ -3143,6 +3501,7 @@ async function openDetail(id){
   bindDetailPlayback(row);
   bindDetailRecording();
   bindDetailActions(id);
+  bindDetailSwipeNavigation();
 }
 
 /* 詳細ダイアログ：本文（場面・メタ・英文・和訳・画像）の描画 */
@@ -3227,15 +3586,20 @@ function bindDetailPlayback(row){
   $('#d-toggle').onclick = async ()=>{
     oneTimeWarmup();
     await ensureTtsUnlocked(); await loadVoices();
+    if(currentDetailId !== row.id) return;
 
     const btn = $('#d-toggle');
     if(speakEngine.state==='idle'){
       setPlayToggleLabel(btn,'playing');
       await playFrom(0);
+      // スワイプ移動後に古い再生処理が戻ってきても、新しい詳細を上書きしない
+      if(currentDetailId !== row.id) return;
       if(speakEngine.state!=='paused'){ setPlayToggleLabel(btn,'idle'); }
-      const fresh = await getOne(currentDetailId);
+      const fresh = await getOne(row.id);
+      if(currentDetailId !== row.id) return;
       if(fresh){
         fresh.playCount=(fresh.playCount||0)+1; fresh.updatedAt=now(); await updateSentence(fresh);
+        if(currentDetailId !== row.id) return;
         renderDetailMeta(fresh.categories, fresh.playCount);
       }
     }else if(speakEngine.state==='playing'){
@@ -3255,8 +3619,10 @@ function bindDetailPlayback(row){
     if(speakEngine.state==='playing' || speakEngine.state==='paused'){
       const resumeAt = Math.max(0, speakEngine.getLastBoundary());
       await speakEngine.stop();
+      if(currentDetailId !== row.id) return;
       setPlayToggleLabel($('#d-toggle'),'playing');
       await playFrom(resumeAt);
+      if(currentDetailId !== row.id) return;
       if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#d-toggle'),'idle'); }
     }
   };
@@ -3270,8 +3636,10 @@ function bindDetailPlayback(row){
     if(speakEngine.state==='playing' || speakEngine.state==='paused'){
       const resumeAt = Math.max(0, speakEngine.getLastBoundary());
       await speakEngine.stop();
+      if(currentDetailId !== row.id) return;
       setPlayToggleLabel($('#d-toggle'),'playing');
       await playFrom(resumeAt);
+      if(currentDetailId !== row.id) return;
       if(speakEngine.state!=='paused'){ setPlayToggleLabel($('#d-toggle'),'idle'); }
     }
   };
@@ -3924,7 +4292,8 @@ async function prepareSentenceZipImport(file){
       favorite:!!row.favorite,
       playCount:Number.isFinite(playCount) ? Math.max(0, playCount) : 0,
       createdAt:Number.isFinite(createdAt) ? createdAt : now(),
-      updatedAt:Number.isFinite(updatedAt) ? updatedAt : now()
+      updatedAt:Number.isFinite(updatedAt) ? updatedAt : now(),
+      ...normalizeLearning(row)
     });
   }
 
@@ -4102,7 +4471,8 @@ function jsonRowToSentenceItem(r){
     favorite: !!r.favorite,
     playCount: Number.isFinite(playCount) ? Math.max(0, playCount) : 0,
     createdAt: Number.isFinite(createdAt) ? createdAt : now(),
-    updatedAt: Number.isFinite(updatedAt) ? updatedAt : now()
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : now(),
+    ...normalizeLearning(r)
   };
 }
 
@@ -4204,6 +4574,7 @@ $('#reset-all-sentences').onclick = async (ev)=>{
 const sh = {
   list: [], index: 0, rate: 1.0, container: null,
   opened:false, auto:false,
+  sessionMode:'shadow', // shadow=通常連続再生 / review=ホームの今日の練習
   _endedHook:false
 };
 
@@ -4332,12 +4703,22 @@ async function prepareShadow(){
 
   sh.opened = false;
   sh.auto = false;
+  sh.sessionMode = 'shadow';
   setPlayToggleLabel($('#sh-toggle'),'idle');
 
   if(!sh._endedHook){
     speakEngine.on('ended', ()=>{
       if(!sh.opened || !sh.auto) return;
       if(!sh.list || sh.list.length === 0) return; // 対象未確定のときは進めない
+
+      // ホームから始めた「今日の練習」は、音声終了後に自己評価を待つ
+      if(sh.sessionMode === 'review'){
+        sh.auto = false;
+        setPlayToggleLabel($('#sh-toggle'),'idle');
+        return;
+      }
+
+      // 通常シャドーイングは従来通り自動で次へ進む
       sh.index = (sh.index + 1) % sh.list.length;
       setTimeout(()=>{
         if(!sh.opened || !sh.auto) return;
@@ -4347,6 +4728,53 @@ async function prepareShadow(){
     });
     sh._endedHook = true;
   }
+}
+
+/* 想起モードの待機は世代番号で中断できるようにする */
+let recallToken = 0;
+function cancelRecallPhase(){ recallToken++; }
+function currentShadowMode(){
+  const sel = $('#sh-mode');
+  return (sel && sel.value === 'recall') ? 'recall' : 'shadow';
+}
+/* 語数から自力発話に必要な秒数を見積もる（4〜60秒） */
+function estimateSpeakSeconds(text){
+  const words = tokenizeWords(text || '').length;
+  const sec = Math.round((words / 2.5) * 1.2);
+  return Math.min(60, Math.max(4, sec));
+}
+/* 想起モード：和訳だけ見せて準備→発話の無音時間を作り、最後に英文を出す */
+async function runRecallPhase(row){
+  const token = ++recallToken;
+  const sceneEl = $('#sh-scene');
+  const baseScene = '🔊 <strong>' + escapeHTML(row.scene || '(未設定)') + '</strong>';
+  const alive = ()=> (token === recallToken && sh.opened);
+
+  // 和訳を自動で開く
+  const jaWrap = $('#sh-text-ja-wrap');
+  const jaBtn  = $('#sh-toggle-ja');
+  if(jaWrap && jaBtn && !jaBtn.disabled){
+    applyToggleState(jaBtn, jaWrap, '和訳を表示', '和訳を隠す', false);
+  }
+
+  for(let s=3; s>0; s--){
+    if(!alive()) return false;
+    if(sceneEl) sceneEl.innerHTML = baseScene + ` <span class="tiny">準備… ${s}秒</span>`;
+    await sleep(1000);
+  }
+
+  const total = estimateSpeakSeconds(row.english || '');
+  for(let s=total; s>0; s--){
+    if(!alive()) return false;
+    if(sceneEl) sceneEl.innerHTML = baseScene + ` <span class="tiny">話す… ${s}秒</span>`;
+    await sleep(1000);
+  }
+
+  if(!alive()) return false;
+  if(sceneEl) sceneEl.innerHTML = baseScene + ' <span class="tiny">答え合わせ</span>';
+  renderSpeakText(sh.container, (row.english || '').trim());
+  sh.container.scrollTop = 0;
+  return true;
 }
 
 /* シャドー用の画像は「画像を表示」を押したときにだけ取得する（一覧データは画像を持たない） */
@@ -4382,8 +4810,9 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
   const text=(row.english||'').trim();
   $('#sh-scene').innerHTML = '🔊 <strong>' + escapeHTML(row.scene || '(未設定)') + '</strong>';
 
-  // 英文：これまで通り
-  renderSpeakText(sh.container, text);
+  // 追唱モードは即表示、想起モードは答え合わせまで英文を伏せる
+  const recallMode = currentShadowMode() === 'recall';
+  renderSpeakText(sh.container, recallMode ? '' : text);
   sh.container.scrollTop=0;
 
 // 和訳・画像
@@ -4423,15 +4852,67 @@ async function playCurrentShadow({ startCharIndex=0 } = {}){
   if (settings.keepAwake) {
     try{ await KeepAwake.enable(); }catch(e){}
   }
+
+  // 想起モードは、自力で言う時間を挟んでから答え合わせの再生に進む
+  if(recallMode){
+    const ready = await runRecallPhase(row);
+    if(!ready) return;
+  }
+
   await speakEngine.play(
     { en: row.english||'', ja: row.japanese||'', order: settings.speakTarget||'en', repeat: settings.repeat, gapSec: settings.gapSec, startCharIndex },
     { targetEl: sh.container, rate: sh.rate }
   );
 }
 
+/* 自己評価ボタン：採点してから次の文へ進む */
+async function handleShadowGrade(ok){
+  const row = shCurrentRow;
+  if(!row) return;
+  cancelRecallPhase();
 
-/* シャドーイング開始ボタン（カテゴリ・タグ適用） */
-$('#sh-start').onclick = async ()=>{
+  const reviewSession = sh.sessionMode === 'review';
+  sh.auto = false;
+  await speakEngine.stop();
+  await gradeSentence(row, ok);
+  if(!sh.list || sh.list.length === 0) return;
+
+  // 今日の練習は末尾まで評価したら、このセッションを終了する
+  if(reviewSession && sh.index >= sh.list.length - 1){
+    sh.auto = false;
+    shCurrentRow = null;
+    setPlayToggleLabel($('#sh-toggle'),'idle');
+
+    const sceneEl = $('#sh-scene');
+    if(sceneEl){
+      sceneEl.innerHTML = '🎉 <strong>このセッションが完了しました</strong>';
+    }
+    if(sh.container){
+      renderSpeakText(sh.container, '');
+      sh.container.scrollTop = 0;
+    }
+
+    const jaWrap = $('#sh-text-ja-wrap');
+    const imgWrap = $('#sh-image-wrap');
+    if(jaWrap) jaWrap.classList.add('hidden');
+    if(imgWrap) imgWrap.classList.add('hidden');
+
+    notify('🎉 今日の練習セッションが完了しました');
+    return;
+  }
+
+  sh.index = reviewSession
+    ? sh.index + 1
+    : (sh.index + 1) % sh.list.length;
+
+  sh.auto = true;
+  setPlayToggleLabel($('#sh-toggle'),'playing');
+  await playCurrentShadow({ startCharIndex: 0 });
+}
+
+
+/* シャドーイング開始（カテゴリ・タグ適用／復習のみ開始にも対応） */
+async function startShadowSession(reviewOnly){
   oneTimeWarmup();
   // ★ iOSではここで同期的に一度だけ「無音発話」を打つ
   forceIOSShadowClickWarmup();
@@ -4463,10 +4944,22 @@ $('#sh-start').onclick = async ()=>{
     return;
   }
 
-  sh.list = shuffleInPlace(pool);
+  if(reviewOnly){
+    const target = buildTodayPracticeQueue(pool);
+    if(target.length){
+      pool = target;
+    }else{
+      notify('🎉 今日の練習は完了しています。');
+      return;
+    }
+  }
+
+  const stats = summarizeLearning(pool);
+  sh.list = reviewOnly ? pool.slice() : buildReviewQueue(pool);
   sh.index = 0;
   sh.rate = settings.rate || 1.0;
   sh.container = $('#sh-text');
+  sh.sessionMode = reviewOnly ? 'review' : 'shadow';
   const badge = $('#rate-badge');
   if(badge){
     badge.textContent = (Math.round(sh.rate*10)/10).toFixed(1)+'×';
@@ -4475,6 +4968,7 @@ $('#sh-start').onclick = async ()=>{
   if(summary){
     const parts=[];
     parts.push(`対象：${pool.length}件`);
+    parts.push(`復習対象 ${stats.due}件 ／ 未練習 ${stats.fresh}件`);
     parts.push(cat ? `カテゴリ=${cat}` : 'カテゴリ=すべて');
     parts.push(tagkw ? `タグに「${tagkw}」を含む` : 'タグ=すべて');
     summary.textContent = parts.join(' ／ ');
@@ -4499,7 +4993,23 @@ $('#sh-start').onclick = async ()=>{
     setPlayToggleLabel($('#sh-toggle'),'playing');
     await playCurrentShadow();
   }
+}
+$('#sh-start').onclick = ()=> startShadowSession(false);
+
+/* ホームから「復習対象のみ」で即開始する */
+$('#btn-start-review').onclick = async ()=>{
+  setActiveNav('nav-shadow');
+  show('shadow');
+  try{
+    await prepareShadow();
+  }catch(e){
+    notifyError('シャドーイングの準備に失敗しました。時間をおいてもう一度お試しください。', e);
+    return;
+  }
+  await startShadowSession(true);
 };
+$('#sh-grade-ok').onclick = ()=> handleShadowGrade(true);
+$('#sh-grade-ng').onclick = ()=> handleShadowGrade(false);
 
 /* 専用ダイアログ内のボタン */
 $('#sh-toggle').onclick = async ()=>{
@@ -4537,6 +5047,7 @@ $('#sh-slower').onclick = async ()=>{
 // 「前へ」ボタン
 $('#sh-prev').onclick = async ()=>{
   if(!sh.list || sh.list.length === 0) return;
+  cancelRecallPhase();
 
   // 自動進行はオンにしておく（前の文からも連続再生）
   sh.auto = true;
@@ -4553,6 +5064,7 @@ $('#sh-prev').onclick = async ()=>{
 // 「次へ」ボタン
 $('#sh-next').onclick = async ()=>{
   if(!sh.list || sh.list.length === 0) return;
+  cancelRecallPhase();
 
   sh.auto = true;
 
@@ -4600,6 +5112,7 @@ function exitShadowDialog(){
   exitingShadow = true;
   sh.opened=false;
   sh.auto=false;
+  cancelRecallPhase();
   setPocketLock(false);
   speakEngine.stop(); stopAllPlayback(); KeepAwake.disable();
   clearHighlight($('#sh-text'));
