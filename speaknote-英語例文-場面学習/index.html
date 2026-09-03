@@ -1071,6 +1071,12 @@ header nav button:hover{
   </div>
 
   <audio id="d-rec-audio" class="hidden"></audio>
+
+  <div id="d-rec-history" style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+    <div class="tiny" style="margin-bottom:6px;font-weight:600">過去の録音</div>
+    <div id="d-rec-history-list" class="tiny">録音履歴はまだありません</div>
+  </div>
+  <audio id="d-rec-history-audio" class="hidden"></audio>
 </dialog>
 
 <!-- シャドーイング再生ダイアログ（本文を広く表示） -->
@@ -2202,7 +2208,7 @@ function saveSettings(){ localStorage.setItem(LS_SETTINGS, JSON.stringify(settin
 /* =========================
    IndexedDB
 ========================= */
-const DB_NAME='speakscene_db', DB_VER=1, STORE='sentences';
+const DB_NAME='speakscene_db', DB_VER=2, STORE='sentences', REC_STORE='recordings';
 let db;
 openDB();
 function openDB(){
@@ -2213,6 +2219,11 @@ function openDB(){
       const os = db.createObjectStore(STORE,{keyPath:'id'});
       os.createIndex('createdAt','createdAt'); os.createIndex('updatedAt','updatedAt');
       os.createIndex('english','english'); os.createIndex('playCount','playCount');
+    }
+    if(!db.objectStoreNames.contains(REC_STORE)){
+      const rs = db.createObjectStore(REC_STORE,{keyPath:'id'});
+      rs.createIndex('sentenceId','sentenceId',{unique:false});
+      rs.createIndex('createdAt','createdAt',{unique:false});
     }
   };
 req.onsuccess = async e=>{
@@ -2281,10 +2292,31 @@ const updateSentence = async item => {
   await runStoreRequest('readwrite', os=>os.put(item));
   patchSentenceCache(item);
 };
-const deleteSentence = async id => {
-  await runStoreRequest('readwrite', os=>os.delete(id));
-  invalidateSentenceCache();
-};
+const deleteSentence = id => new Promise((resolve, reject)=>{
+  if(!db){ reject(new Error('db_not_ready')); return; }
+  try{
+    const tx = db.transaction([STORE, REC_STORE], 'readwrite');
+    tx.objectStore(STORE).delete(id);
+
+    const recStore = tx.objectStore(REC_STORE);
+    const cursorReq = recStore.index('sentenceId').openCursor(IDBKeyRange.only(id));
+    cursorReq.onsuccess = ()=>{
+      const cursor = cursorReq.result;
+      if(!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+
+    tx.oncomplete = ()=>{
+      invalidateSentenceCache();
+      resolve();
+    };
+    tx.onerror = ()=>reject(tx.error || new Error('delete_failed'));
+    tx.onabort = ()=>reject(tx.error || new Error('delete_aborted'));
+  }catch(error){
+    reject(error);
+  }
+});
 const getAll = ()=> runStoreRequest('readonly', os=>os.getAll(), v=>v||[]);
 const countAllSentences = async ()=>{
   if(sentenceCache) return sentenceCache.length;
@@ -2292,6 +2324,145 @@ const countAllSentences = async ()=>{
   return runStoreRequest('readonly', os=>os.count(), v=>v||0);
 };
 const getOne = id => runStoreRequest('readonly', os=>os.get(id), v=>v||null);
+
+/* =========================
+   録音履歴（例文データとは別Store）
+========================= */
+const MAX_RECORDING_HISTORY_DAYS = 3;
+const RECORDING_CAPACITY_WARN_BYTES = 100 * 1024 * 1024;
+const LS_RECORDING_CAPACITY_WARNED = 'speaknote_recording_capacity_warned_v1';
+
+function runRecordingStoreRequest(mode, build, pick){
+  return new Promise((resolve, reject)=>{
+    if(!db){ reject(new Error('db_not_ready')); return; }
+    let tx;
+    try{
+      tx = db.transaction([REC_STORE], mode);
+      const req = build(tx.objectStore(REC_STORE));
+      req.onsuccess = ()=>resolve(pick ? pick(req.result) : undefined);
+      req.onerror = ()=>reject(req.error || new Error('recording_db_request_failed'));
+    }catch(error){
+      reject(error);
+      return;
+    }
+    tx.onerror = ()=>reject(tx.error || new Error('recording_db_transaction_failed'));
+    tx.onabort = ()=>reject(tx.error || new Error('recording_db_transaction_aborted'));
+  });
+}
+
+function recordingLocalDayKey(value){
+  const d = new Date(Number(value) || Date.now());
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getRecordingsBySentence(sentenceId){
+  return runRecordingStoreRequest(
+    'readonly',
+    store=>store.index('sentenceId').getAll(IDBKeyRange.only(sentenceId)),
+    rows=>(rows || []).sort((a,b)=>(b.createdAt || 0) - (a.createdAt || 0))
+  );
+}
+
+function deleteRecordingHistory(id){
+  return runRecordingStoreRequest('readwrite', store=>store.delete(id));
+}
+
+function saveRecordingHistory(sentenceId, result){
+  return new Promise((resolve, reject)=>{
+    if(!db){ reject(new Error('db_not_ready')); return; }
+    if(!sentenceId || !result?.blob || result.blob.size <= 0){
+      reject(new Error('invalid_recording'));
+      return;
+    }
+
+    const createdAt = now();
+    const dayKey = recordingLocalDayKey(createdAt);
+    const record = {
+      id: uid(),
+      sentenceId,
+      blob: result.blob,
+      mimeType: result.blob.type || 'audio/webm',
+      durationMs: Math.max(0, Number(result.durationMs) || 0),
+      size: result.blob.size,
+      createdAt
+    };
+
+    try{
+      const tx = db.transaction([REC_STORE], 'readwrite');
+      const store = tx.objectStore(REC_STORE);
+      const request = store.index('sentenceId').getAll(IDBKeyRange.only(sentenceId));
+
+      request.onsuccess = ()=>{
+        const existing = (request.result || [])
+          .slice()
+          .sort((a,b)=>(b.createdAt || 0) - (a.createdAt || 0));
+
+        // 同日の過去録音はすべて除去し、今回の録音へ置き換える
+        for(const row of existing){
+          if(recordingLocalDayKey(row.createdAt) === dayKey){
+            store.delete(row.id);
+          }
+        }
+
+        // 今回分を含め最大3日分にするため、別日の既存履歴は新しい2日分だけ残す
+        const otherDays = existing.filter(
+          row=>recordingLocalDayKey(row.createdAt) !== dayKey
+        );
+        for(let i=MAX_RECORDING_HISTORY_DAYS - 1;i<otherDays.length;i++){
+          store.delete(otherDays[i].id);
+        }
+
+        store.add(record);
+      };
+
+      tx.oncomplete = ()=>resolve(record);
+      tx.onerror = ()=>reject(tx.error || new Error('recording_save_failed'));
+      tx.onabort = ()=>reject(tx.error || new Error('recording_save_aborted'));
+    }catch(error){
+      reject(error);
+    }
+  });
+}
+
+function getRecordingTotalSize(){
+  return new Promise((resolve, reject)=>{
+    if(!db){ reject(new Error('db_not_ready')); return; }
+    let total = 0;
+    try{
+      const tx = db.transaction([REC_STORE], 'readonly');
+      const req = tx.objectStore(REC_STORE).openCursor();
+      req.onsuccess = ()=>{
+        const cursor = req.result;
+        if(!cursor){
+          resolve(total);
+          return;
+        }
+        const row = cursor.value || {};
+        total += Math.max(0, Number(row.size) || Number(row.blob?.size) || 0);
+        cursor.continue();
+      };
+      req.onerror = ()=>reject(req.error || new Error('recording_size_failed'));
+    }catch(error){
+      reject(error);
+    }
+  });
+}
+
+async function warnIfRecordingCapacityExceeded(){
+  try{
+    if(localStorage.getItem(LS_RECORDING_CAPACITY_WARNED) === '1') return;
+    const bytes = await getRecordingTotalSize();
+    if(bytes > RECORDING_CAPACITY_WARN_BYTES){
+      localStorage.setItem(LS_RECORDING_CAPACITY_WARNED, '1');
+      notify('録音履歴の保存容量が100MBを超えています。不要な録音履歴の削除をおすすめします。', 5000);
+    }
+  }catch(error){
+    console.warn('recording capacity check error', error);
+  }
+}
 
 async function ensureDefaultSentences(){
   try{
@@ -3535,6 +3706,126 @@ function clearRecAudio(){
   a.removeAttribute('src');
 }
 
+let detailRecHistoryObjectUrl = '';
+
+function clearDetailHistoryAudio(){
+  const audio = $('#d-rec-history-audio');
+  if(audio){
+    audio.onended = null;
+    try{ audio.pause(); }catch(_){}
+    audio.removeAttribute('src');
+  }
+  if(detailRecHistoryObjectUrl){
+    try{ URL.revokeObjectURL(detailRecHistoryObjectUrl); }catch(_){}
+    detailRecHistoryObjectUrl = '';
+  }
+}
+
+function formatRecordingHistoryDate(value){
+  const d = new Date(Number(value) || Date.now());
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+function formatRecordingHistoryDuration(ms){
+  const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  const min = Math.floor(total / 60);
+  const sec = String(total % 60).padStart(2, '0');
+  return `${min}:${sec}`;
+}
+
+async function renderRecordingHistory(sentenceId){
+  const root = $('#d-rec-history-list');
+  if(!root) return;
+
+  clearDetailHistoryAudio();
+  root.textContent = '読み込み中…';
+
+  try{
+    const rows = await getRecordingsBySentence(sentenceId);
+    if(currentDetailId !== sentenceId) return;
+
+    root.innerHTML = '';
+    if(rows.length === 0){
+      root.textContent = '録音履歴はまだありません';
+      return;
+    }
+
+    for(const row of rows.slice(0, MAX_RECORDING_HISTORY_DAYS)){
+      const line = document.createElement('div');
+      line.style.display = 'flex';
+      line.style.alignItems = 'center';
+      line.style.gap = '8px';
+      line.style.flexWrap = 'wrap';
+      line.style.padding = '5px 0';
+
+      const date = document.createElement('span');
+      date.textContent = formatRecordingHistoryDate(row.createdAt);
+      date.style.minWidth = '38px';
+
+      const duration = document.createElement('span');
+      duration.textContent = formatRecordingHistoryDuration(row.durationMs);
+      duration.style.minWidth = '38px';
+      duration.style.fontVariantNumeric = 'tabular-nums';
+
+      const play = document.createElement('button');
+      play.type = 'button';
+      play.className = 'btn mini';
+      play.textContent = '▶︎ 再生';
+      play.onclick = async ()=>{
+        try{
+          await speakEngine.stop();
+          stopAllPlayback();
+
+          const currentAudio = $('#d-rec-audio');
+          try{ currentAudio?.pause(); }catch(_){}
+          clearDetailHistoryAudio();
+
+          const audio = $('#d-rec-history-audio');
+          if(!audio || !row.blob) return;
+          detailRecHistoryObjectUrl = URL.createObjectURL(row.blob);
+          audio.src = detailRecHistoryObjectUrl;
+          audio.currentTime = 0;
+          audio.onended = ()=>clearDetailHistoryAudio();
+          await audio.play();
+        }catch(error){
+          clearDetailHistoryAudio();
+          notifyError('録音履歴を再生できませんでした。', error);
+        }
+      };
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn mini danger';
+      del.textContent = '削除';
+      del.onclick = async ()=>{
+        if(!confirm('この録音履歴を削除しますか？')) return;
+        await withBusy(del, '削除中…', async ()=>{
+          try{
+            clearDetailHistoryAudio();
+            await deleteRecordingHistory(row.id);
+            if(currentDetailId === sentenceId){
+              await renderRecordingHistory(sentenceId);
+            }
+          }catch(error){
+            notifyError('録音履歴の削除に失敗しました。', error);
+          }
+        });
+      };
+
+      line.appendChild(date);
+      line.appendChild(duration);
+      line.appendChild(play);
+      line.appendChild(del);
+      root.appendChild(line);
+    }
+  }catch(error){
+    console.error('recording history load error', error);
+    if(currentDetailId === sentenceId){
+      root.textContent = '録音履歴を読み込めませんでした';
+    }
+  }
+}
+
 /* 詳細ダイアログ：メタ表示（カテゴリ＋再生回数） */
 function renderDetailMeta(categories, playCount){
   const meta=[];
@@ -3699,6 +3990,7 @@ async function navigateDetailBySwipe(delta){
     await speakEngine.stop();
     stopAllPlayback();
     clearRecAudio();
+    clearDetailHistoryAudio();
     recEngine.dispose();
     setRecButtonMode('idle');
 
@@ -3831,6 +4123,8 @@ async function openDetail(id){
   setPlayToggleLabel($('#d-toggle'),'idle');
   setRecButtonMode('idle');
   clearRecAudio(); recEngine.dispose();
+  clearDetailHistoryAudio();
+  void renderRecordingHistory(id);
 
   bindDetailPlayback(row);
   bindDetailRecording();
@@ -3991,25 +4285,39 @@ function bindDetailRecording(){
   recBtn.onpointerleave = null;
   recBtn.oncontextmenu = null;
 
+  async function beginNewRecording(){
+    // ready状態から再録音する場合、直前の一時録音だけ破棄する。
+    // IndexedDBへ保存済みの履歴は残るため、同日履歴は次のSTOP時に置き換わる。
+    if(recEngine.state==='ready'){
+      recEngine.dispose();
+      clearRecAudio();
+    }
+
+    clearDetailHistoryAudio();
+    setRecButtonMode('idle');
+
+    try{
+      stopAllPlayback();
+      await speakEngine.stop();
+      await recEngine.start();
+
+      // 画面遷移などで開始処理が破棄された場合はUIを録音中へ戻さない
+      if(recEngine.state!=='recording') return;
+      setRecButtonMode('recording');
+    }catch(e){
+      setRecButtonMode('idle');
+      const message = e?.message === 'mic_denied'
+        ? 'マイクへのアクセスが許可されませんでした。ブラウザの権限設定をご確認ください。'
+        : '録音を開始できませんでした。端末またはブラウザの録音機能をご確認ください。';
+      alert(message);
+    }
+  }
+
   recBtn.onclick = async ()=>{
     if(recEngine.state==='stopping') return;
 
-    if(recEngine.state==='idle'){
-      try{
-        stopAllPlayback();
-        await speakEngine.stop();
-        await recEngine.start();
-
-        // 画面遷移などで開始処理が破棄された場合はUIを録音中へ戻さない
-        if(recEngine.state!=='recording') return;
-        setRecButtonMode('recording');
-      }catch(e){
-        setRecButtonMode('idle');
-        const message = e?.message === 'mic_denied'
-          ? 'マイクへのアクセスが許可されませんでした。ブラウザの権限設定をご確認ください。'
-          : '録音を開始できませんでした。端末またはブラウザの録音機能をご確認ください。';
-        alert(message);
-      }
+    if(recEngine.state==='idle' || recEngine.state==='ready'){
+      await beginNewRecording();
       return;
     }
 
@@ -4034,15 +4342,21 @@ function bindDetailRecording(){
       $('#d-rec-audio').src = result.url;
       setRecButtonMode('ready');
 
-      // ★ KPI：録音時間（ms）を記録
+      // ★ KPI：録音時間（ms）を記録。履歴保存とは独立させ、二重計上しない。
       if(result.durationMs){
         trackKpiRec(result.durationMs);
       }
-      return;
-    }
 
-    if(recEngine.state==='ready'){
-      // 再生は専用ボタンに任せる
+      try{
+        await saveRecordingHistory(detailIdAtStop, result);
+        if(currentDetailId === detailIdAtStop){
+          await renderRecordingHistory(detailIdAtStop);
+        }
+        void warnIfRecordingCapacityExceeded();
+      }catch(error){
+        console.error('recording history save error', error);
+        notify('録音履歴の保存に失敗しました。今回の録音はこの画面では再生できます。', 4000);
+      }
       return;
     }
 
@@ -4053,10 +4367,12 @@ function bindDetailRecording(){
 
   if(recPlayBtn){
     recPlayBtn.onclick = async ()=>{
-      stopAllPlayback();
+      clearDetailHistoryAudio();
       try{
+        await speakEngine.stop();
+        stopAllPlayback();
         const a=$('#d-rec-audio');
-        if(!a.src){ alert('録音データがありません'); return; }
+        if(!a.getAttribute('src')){ alert('録音データがありません'); return; }
         a.currentTime=0;
         await a.play();
       }catch(_){ alert('再生に失敗しました'); }
@@ -4130,6 +4446,7 @@ function bindDetailActions(id){
 $('#dlg-detail').addEventListener('close', ()=>{
   speakEngine.stop(); stopAllPlayback(); clearHighlight($('#d-en'));
   clearRecAudio();
+  clearDetailHistoryAudio();
   recEngine.dispose();
   setPlayToggleLabel($('#d-toggle'),'idle'); setRecButtonMode('idle');
 });
@@ -4657,13 +4974,25 @@ function saveImportedSentenceBatch(items, replace){
     }
 
     try{
-      const tx = db.transaction([STORE], 'readwrite');
+      // 入れ替え時は旧sentenceIdに紐づく録音を残さず、孤立Blobを防ぐ。
+      // 追加インポート時は既存録音履歴には触れない。
+      const stores = replace ? [STORE, REC_STORE] : [STORE];
+      const tx = db.transaction(stores, 'readwrite');
       const objectStore = tx.objectStore(STORE);
 
-      if(replace) objectStore.clear();
+      if(replace){
+        objectStore.clear();
+        tx.objectStore(REC_STORE).clear();
+      }
       for(const item of items) objectStore.add(item);
 
-      tx.oncomplete = ()=>{ invalidateSentenceCache(); resolve(); };
+      tx.oncomplete = ()=>{
+        invalidateSentenceCache();
+        if(replace){
+          try{ localStorage.removeItem(LS_RECORDING_CAPACITY_WARNED); }catch(_){}
+        }
+        resolve();
+      };
       tx.onerror = ()=>reject(tx.error || new Error('import_failed'));
       tx.onabort = ()=>reject(tx.error || new Error('import_aborted'));
     }catch(error){
