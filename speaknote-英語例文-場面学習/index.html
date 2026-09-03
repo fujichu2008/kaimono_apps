@@ -3241,8 +3241,21 @@ function renderCards(list){
    録音エンジン（単一ソース）
 ========================= */
 class RecEngine {
-  constructor(){ this.reset(); }
-  reset(){ this.mediaRecorder=null; this.stream=null; this.chunks=[]; this.url=null; this.startedAt=0; this.timerId=null; this.mime=''; this.state='idle'; }
+  constructor(){
+    this._generation = 0;
+    this.reset();
+  }
+  reset(){
+    this.mediaRecorder=null;
+    this.stream=null;
+    this.chunks=[];
+    this.url=null;
+    this.startedAt=0;
+    this.stoppedAt=0;
+    this.mime='';
+    this.state='idle';
+    this._stopPromise=null;
+  }
   pickAudioMime(){
     try{
       if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function'){
@@ -3254,70 +3267,178 @@ class RecEngine {
     return '';
   }
   async start(){
-    if(this.state==='recording') return;
+    if(this.state==='recording' || this.state==='stopping') return;
+    const generation = ++this._generation;
     let stream=null;
-    try{ stream = await navigator.mediaDevices.getUserMedia({ audio:true }); }
-    catch(e){ throw new Error('mic_denied'); }
-    const mime = this.pickAudioMime();
-    const mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
-    this.mediaRecorder = mr; this.stream=stream; this.chunks=[]; this.mime=mime; this.startedAt=performance.now(); this.state='recording';
-    const slice = isIOS ? 1000 : 250;
-    mr.ondataavailable = (ev)=>{ if(ev?.data && ev.data.size>0) this.chunks.push(ev.data); };
-    return new Promise((resolve)=>{
-      mr.onstart = ()=>{ this._tickStart(); resolve(); };
-      try{ mr.start(slice); }catch(e){ this.state='idle'; throw e; }
-    });
+    let mr=null;
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      if(generation !== this._generation){
+        try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
+        return;
+      }
+
+      const mime = this.pickAudioMime();
+      mr = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
+      this.mediaRecorder = mr;
+      this.stream = stream;
+      this.chunks = [];
+      this.mime = mime;
+      this.startedAt = 0;
+      this.stoppedAt = 0;
+      this.state = 'recording';
+
+      const slice = isIOS ? 1000 : 250;
+      mr.ondataavailable = (ev)=>{
+        if(generation !== this._generation) return;
+        if(ev?.data && ev.data.size>0) this.chunks.push(ev.data);
+      };
+
+      await new Promise((resolve, reject)=>{
+        let settled = false;
+        const finish = (error)=>{
+          if(settled) return;
+          settled = true;
+          if(error) reject(error);
+          else resolve();
+        };
+
+        mr.onstart = ()=>{
+          if(generation !== this._generation){
+            finish(new Error('recording_cancelled'));
+            return;
+          }
+          this.startedAt = performance.now();
+          finish();
+        };
+        mr.onerror = event=>{
+          finish(event?.error || new Error('media_recorder_start_failed'));
+        };
+
+        try{
+          mr.start(slice);
+        }catch(error){
+          finish(error);
+        }
+      });
+    }catch(error){
+      try{
+        if(mr && mr.state !== 'inactive') mr.stop();
+      }catch(_){}
+      try{ stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
+
+      if(generation === this._generation){
+        this.mediaRecorder=null;
+        this.stream=null;
+        this.chunks=[];
+        this.startedAt=0;
+        this.stoppedAt=0;
+        this.mime='';
+        this.state='idle';
+        this._stopPromise=null;
+      }
+
+      if(error?.message === 'recording_cancelled') return;
+      if(error?.name === 'NotAllowedError' || error?.name === 'SecurityError'){
+        throw new Error('mic_denied');
+      }
+      throw error;
+    }
   }
-  async stop(){
-    if(this.state!=='recording') return null;
+  stop(){
+    if(this.state==='stopping') return this._stopPromise;
+    if(this.state!=='recording') return Promise.resolve(null);
+
     this.state='stopping';
+    this.stoppedAt=performance.now();
+
+    const generation = this._generation;
     const mr=this.mediaRecorder;
-    return new Promise((resolve)=>{
-      const done = async ()=>{
-        this._tickStop();
-        try{ this.stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
-        this.stream=null; this.mediaRecorder=null;
-        let blob = null;
+    const stream=this.stream;
+    const durationMs=Math.max(0, this.stoppedAt - (this.startedAt || this.stoppedAt));
+
+    this._stopPromise = new Promise((resolve)=>{
+      let settled=false;
+      let watchdog=null;
+
+      const finishOnce = ()=>{
+        if(settled) return;
+        settled=true;
+        if(watchdog){ clearTimeout(watchdog); watchdog=null; }
+
+        try{ stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
+
+        if(generation !== this._generation){
+          resolve(null);
+          return;
+        }
+
+        this.stream=null;
+        this.mediaRecorder=null;
+
+        let blob=null;
         try{
           const type = this.mime || (mr?.mimeType || 'audio/webm');
           blob = new Blob(this.chunks, { type });
         }catch(_){}
         this.chunks=[];
+
         const finalize = ()=>{
+          if(generation !== this._generation){
+            resolve(null);
+            return;
+          }
+
           if(blob && blob.size>0){
             if(this.url){ try{ URL.revokeObjectURL(this.url); }catch(_){ } }
             this.url = URL.createObjectURL(blob);
             this.state='ready';
-            resolve({blob, url:this.url, durationMs: Math.max(0, performance.now()-this.startedAt)});
+            resolve({blob, url:this.url, durationMs});
           }else{
             this.state='idle';
             resolve(null);
           }
         };
-        if(isIOS){ setTimeout(finalize, 300); } else { finalize(); }
+
+        if(isIOS) setTimeout(finalize, 300);
+        else finalize();
       };
+
+      if(!mr){
+        finishOnce();
+        return;
+      }
+
+      mr.onstop = finishOnce;
+      mr.onerror = finishOnce;
+
+      // 一部WebViewでonstopが返らない場合でも、マイクとPromiseを残さない。
+      // 正常な停止を十分待つため6秒を保険上限とする。
+      watchdog = setTimeout(finishOnce, 6000);
+
       try{
-        mr.onstop = done;
-        mr.stop();
-      }catch(_){ done(); }
+        if(mr.state === 'inactive') finishOnce();
+        else mr.stop();
+      }catch(_){
+        finishOnce();
+      }
     });
+
+    return this._stopPromise;
   }
   dispose(){
-    try{ this._tickStop(); }catch(_){}
-    try{ this.mediaRecorder?.stop(); }catch(_){}
-    try{ this.stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
-    try{ if(this.url){ URL.revokeObjectURL(this.url); } }catch(_){}
+    ++this._generation;
+    const mr=this.mediaRecorder;
+    const stream=this.stream;
+    const url=this.url;
+
+    try{
+      if(mr && mr.state !== 'inactive') mr.stop();
+    }catch(_){}
+    try{ stream?.getTracks().forEach(t=>t.stop()); }catch(_){}
+    try{ if(url) URL.revokeObjectURL(url); }catch(_){}
+
     this.reset();
-  }
-    _tickStart(){
-    const t=$('#d-rec-timer'); if(!t) return; t.textContent='0:00';
-    this.timerId=setInterval(()=>{ const s=Math.floor((performance.now()-this.startedAt)/1000); const m=Math.floor(s/60); const ss=String(s%60).padStart(2,'0'); t.textContent=`${m}:${ss}`; }, 250);
-    const row=$('#row-rec-extra'); if(row) row.classList.remove('hidden');
-    const logo=document.querySelector('header .app-logo-dot'); if(logo) logo.classList.add('recording');
-  }
-  _tickStop(){
-    if(this.timerId){ clearInterval(this.timerId); this.timerId=null; }
-    const logo=document.querySelector('header .app-logo-dot'); if(logo) logo.classList.remove('recording');
   }
 }
 const recEngine = new RecEngine();
@@ -3333,6 +3454,37 @@ function setPlayToggleLabel(btn, state){
   else if(state==='paused'){ btn.textContent='▶︎ 再開'; btn.classList.remove('ok'); }
   else { btn.textContent='▶︎ 再生'; btn.classList.remove('ok'); }
 }
+let detailRecTimerId = null;
+
+function stopDetailRecTimer(){
+  if(detailRecTimerId){
+    clearInterval(detailRecTimerId);
+    detailRecTimerId = null;
+  }
+  const logo=document.querySelector('header .app-logo-dot');
+  if(logo) logo.classList.remove('recording');
+}
+
+function startDetailRecTimer(){
+  stopDetailRecTimer();
+  const timerEl = $('#d-rec-timer');
+  const rowExtra = $('#row-rec-extra');
+  const logo=document.querySelector('header .app-logo-dot');
+  if(rowExtra) rowExtra.classList.remove('hidden');
+  if(logo) logo.classList.add('recording');
+  if(!timerEl) return;
+
+  const startedAt = recEngine.startedAt || performance.now();
+  const render = ()=>{
+    const s=Math.max(0, Math.floor((performance.now()-startedAt)/1000));
+    const m=Math.floor(s/60);
+    const ss=String(s%60).padStart(2,'0');
+    timerEl.textContent=`${m}:${ss}`;
+  };
+  render();
+  detailRecTimerId=setInterval(render, 250);
+}
+
 function setRecButtonMode(mode){
   const b=$('#d-rec-main'); if(!b) return;
   const rowExtra = $('#row-rec-extra');
@@ -3341,25 +3493,37 @@ function setRecButtonMode(mode){
   const delBtn = $('#d-rec-delete');
 
   if(mode==='recording'){
+    b.disabled=false;
     b.textContent='■ STOP';
     b.classList.add('recording');
-    if(rowExtra) rowExtra.classList.remove('hidden');
-    if(timerEl) timerEl.textContent='0:00';
     if(playBtn) playBtn.classList.add('hidden');
     if(delBtn) delBtn.classList.add('hidden');
+    startDetailRecTimer();
+  }else if(mode==='stopping'){
+    b.disabled=true;
+    b.textContent='停止中…';
+    b.classList.add('recording');
+    if(rowExtra) rowExtra.classList.remove('hidden');
+    if(playBtn) playBtn.classList.add('hidden');
+    if(delBtn) delBtn.classList.add('hidden');
+    stopDetailRecTimer();
   }else if(mode==='ready'){
+    b.disabled=false;
     b.textContent='● REC';
     b.classList.remove('recording');
     if(rowExtra) rowExtra.classList.remove('hidden');
     if(playBtn) playBtn.classList.remove('hidden');
     if(delBtn) delBtn.classList.remove('hidden');
+    stopDetailRecTimer();
   }else{ // idle
+    b.disabled=false;
     b.textContent='● REC';
     b.classList.remove('recording');
     if(rowExtra) rowExtra.classList.add('hidden');
     if(timerEl) timerEl.textContent='';
     if(playBtn) playBtn.classList.add('hidden');
     if(delBtn) delBtn.classList.add('hidden');
+    stopDetailRecTimer();
   }
 }
 
@@ -3536,6 +3700,7 @@ async function navigateDetailBySwipe(delta){
     stopAllPlayback();
     clearRecAudio();
     recEngine.dispose();
+    setRecButtonMode('idle');
 
     await animateDetailPageTurn(delta, async ()=>{
       await openDetail(detailBrowseIds[nextIndex]);
@@ -3819,59 +3984,72 @@ function bindDetailRecording(){
   const recBtn = $('#d-rec-main');
   const recPlayBtn = $('#d-rec-play');
   const recDeleteBtn = $('#d-rec-delete');
-  let longPressTimer=null, longPressed=false;
+  if(!recBtn) return;
 
-  function bindRecHandlers(){
-    recBtn.onpointerdown = ()=>{ longPressed=false; longPressTimer=setTimeout(()=>{ longPressed=true; handleRecLongPress(); }, 700); };
-    recBtn.onpointerup = ()=>{ if(longPressTimer) clearTimeout(longPressTimer); if(!longPressed){ handleRecShortPress(); } };
-    recBtn.onpointerleave = ()=>{ if(longPressTimer) clearTimeout(longPressTimer); };
-    recBtn.oncontextmenu = (e)=>{ e.preventDefault(); };
-  }
+  recBtn.onpointerdown = null;
+  recBtn.onpointerup = null;
+  recBtn.onpointerleave = null;
+  recBtn.oncontextmenu = null;
 
-  async function handleRecShortPress(){
+  recBtn.onclick = async ()=>{
+    if(recEngine.state==='stopping') return;
+
     if(recEngine.state==='idle'){
       try{
-        stopAllPlayback(); speakEngine.stop?.();
+        stopAllPlayback();
+        await speakEngine.stop();
         await recEngine.start();
+
+        // 画面遷移などで開始処理が破棄された場合はUIを録音中へ戻さない
+        if(recEngine.state!=='recording') return;
         setRecButtonMode('recording');
       }catch(e){
-        alert('マイクへのアクセスが許可されませんでした。ブラウザの権限設定をご確認ください。');
         setRecButtonMode('idle');
+        const message = e?.message === 'mic_denied'
+          ? 'マイクへのアクセスが許可されませんでした。ブラウザの権限設定をご確認ください。'
+          : '録音を開始できませんでした。端末またはブラウザの録音機能をご確認ください。';
+        alert(message);
       }
-}else if(recEngine.state==='recording' || recEngine.state==='stopping'){
-  const result = await recEngine.stop();
-  if(!result || !result.blob || result.blob.size===0){
-    alert('録音に失敗しました'); setRecButtonMode('idle');
-  }else{
-    $('#d-rec-audio').src = result.url;
-    setRecButtonMode('ready');
-
-    // ★ KPI：録音時間（ms）を記録
-    if(result.durationMs){
-      trackKpiRec(result.durationMs);
+      return;
     }
-  }
-}
 
+    if(recEngine.state==='recording'){
+      const detailIdAtStop = currentDetailId;
+      const stopPromise = recEngine.stop();
+      setRecButtonMode('stopping');
 
+      const result = await stopPromise;
 
-else if(recEngine.state==='ready'){
+      // 停止待ちの間に別例文へ移動した場合は、古い画面の結果を反映しない
+      if(currentDetailId !== detailIdAtStop) return;
+
+      if(!result || !result.blob || result.blob.size===0){
+        if($('#dlg-detail')?.open){
+          alert('録音に失敗しました');
+        }
+        setRecButtonMode('idle');
+        return;
+      }
+
+      $('#d-rec-audio').src = result.url;
+      setRecButtonMode('ready');
+
+      // ★ KPI：録音時間（ms）を記録
+      if(result.durationMs){
+        trackKpiRec(result.durationMs);
+      }
+      return;
+    }
+
+    if(recEngine.state==='ready'){
       // 再生は専用ボタンに任せる
-    }else{
-      setRecButtonMode('idle');
-      recEngine.dispose();
+      return;
     }
-  }
 
-  function handleRecLongPress(){
-    if(recEngine.state==='ready' || recEngine.url){
-      recEngine.dispose();
-      clearRecAudio();
-      setRecButtonMode('idle');
-    }
-  }
-
-  bindRecHandlers();
+    recEngine.dispose();
+    clearRecAudio();
+    setRecButtonMode('idle');
+  };
 
   if(recPlayBtn){
     recPlayBtn.onclick = async ()=>{
@@ -3887,7 +4065,9 @@ else if(recEngine.state==='ready'){
 
   if(recDeleteBtn){
     recDeleteBtn.onclick = ()=>{
-      handleRecLongPress();
+      recEngine.dispose();
+      clearRecAudio();
+      setRecButtonMode('idle');
     };
   }
 }
