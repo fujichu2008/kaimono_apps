@@ -417,6 +417,29 @@
             text-overflow: ellipsis;
             padding: 0 4px;
         }
+        .run-verification-status {
+            flex: 0 0 auto;
+            padding: 3px 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            color: #888;
+            font-size: 9px;
+            font-weight: bold;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+        .run-verification-status[data-state="pending"] {
+            color: var(--warning-color);
+            border-color: var(--warning-color);
+        }
+        .run-verification-status[data-state="passed"] {
+            color: var(--success-color);
+            border-color: var(--success-color);
+        }
+        .run-verification-status[data-state="failed"] {
+            color: var(--danger-color);
+            border-color: var(--danger-color);
+        }
         .run-ctrl-btn {
             flex: 1;
             min-width: 0;
@@ -906,6 +929,7 @@
     <section id="view-run" class="view active">
         <div class="run-controls">
             <div id="run-app-name-display" class="run-app-name">(新規作成中)</div>
+            <div id="runtime-verification-status" class="run-verification-status" data-state="idle">○ 未確認</div>
             <button class="run-ctrl-btn" onclick="openPromptModal()">
                 <span class="run-ctrl-icon">🤖</span><span class="run-ctrl-label">指示</span>
             </button>
@@ -1452,9 +1476,14 @@
         let currentRunEffectiveMode = "compat";
         // AI反映の成否とは分離して、反映後の「次のiframe実行」だけを検証する状態。
         // runtimeTokenを正本にし、旧iframeの遅延エラーを現在の検証へ混ぜない。
+        const codeRevisionState = {
+            current: 0
+        };
         const runtimeVerification = {
             status: "idle",
             runtimeToken: "",
+            targetRevision: -1,
+            verifiedRevision: -1,
             completionTimer: null
         };
         const RUNTIME_VERIFICATION_DELAY_MS = 2000;
@@ -1466,7 +1495,8 @@
         localStorage.removeItem('gh_token');
 
                 // --- Editor Logic ---
-                editor.on('change', () => {
+                editor.on('change', (instance, change) => {
+            markCodeRevisionChanged(change);
             frameDirty = true;
             scheduleStatsUpdate();
             scheduleEditorDraftSave();
@@ -1527,6 +1557,8 @@
             if (popoutBtn) {
                 popoutBtn.style.display = editor.getValue().trim() ? '' : 'none';
             }
+
+            syncRuntimeVerificationStatus();
         }
 
         function pushReflectSnapshot(code) {
@@ -1604,31 +1636,111 @@
             runtimeVerification.completionTimer = null;
         }
 
+        function hasMeaningfulEditorChange(change) {
+            if (!change) return true;
+
+            let currentChange = change;
+            while (currentChange) {
+                const inserted = Array.isArray(currentChange.text)
+                    ? currentChange.text.join("\n")
+                    : "";
+                const removed = Array.isArray(currentChange.removed)
+                    ? currentChange.removed.join("\n")
+                    : "";
+                if (inserted !== removed) return true;
+                currentChange = currentChange.next || null;
+            }
+            return false;
+        }
+
+        function markCodeRevisionChanged(change) {
+            if (!hasMeaningfulEditorChange(change)) return false;
+            codeRevisionState.current++;
+            invalidateRuntimeVerificationForCodeChange();
+            return true;
+        }
+
+        function invalidateRuntimeVerificationForCodeChange() {
+            clearRuntimeVerificationTimer();
+            runtimeVerification.status = "idle";
+            runtimeVerification.runtimeToken = "";
+            runtimeVerification.targetRevision = -1;
+            runtimeVerification.verifiedRevision = -1;
+            syncRuntimeVerificationStatus();
+        }
+
+        function isCurrentCodeVerified() {
+            return runtimeVerification.status === "passed"
+                && runtimeVerification.verifiedRevision === codeRevisionState.current;
+        }
+
+        function syncRuntimeVerificationStatus() {
+            const statusElement = document.getElementById('runtime-verification-status');
+            if (!statusElement) return;
+
+            let state = "idle";
+            let label = "○ 未確認";
+
+            if (runtimeVerification.status === "pending"
+                && runtimeVerification.targetRevision === codeRevisionState.current) {
+                state = "pending";
+                label = "… 確認中";
+            } else if (isCurrentCodeVerified()) {
+                state = "passed";
+                label = "✓ 確認済";
+            } else if (runtimeVerification.status === "failed"
+                && runtimeVerification.targetRevision === codeRevisionState.current) {
+                state = "failed";
+                label = "! エラー";
+            }
+
+            statusElement.dataset.state = state;
+            statusElement.textContent = label;
+        }
+
         function beginReflectRuntimeVerification() {
             clearRuntimeVerificationTimer();
             runtimeVerification.status = "pending";
             runtimeVerification.runtimeToken = "";
+            runtimeVerification.targetRevision = codeRevisionState.current;
+            runtimeVerification.verifiedRevision = -1;
+            syncRuntimeVerificationStatus();
             showToast("✅ 反映成功 / 実行確認中...");
         }
 
         function bindRuntimeVerificationToRun(runtimeToken) {
             if (runtimeVerification.status !== "pending") return;
+            if (runtimeVerification.targetRevision !== codeRevisionState.current) {
+                invalidateRuntimeVerificationForCodeChange();
+                return;
+            }
+
             clearRuntimeVerificationTimer();
             runtimeVerification.runtimeToken = String(runtimeToken || "");
+            syncRuntimeVerificationStatus();
         }
 
         function scheduleRuntimeVerificationCompletion(runtimeToken) {
             if (runtimeVerification.status !== "pending") return;
             if (!runtimeToken || runtimeVerification.runtimeToken !== runtimeToken) return;
+            if (runtimeVerification.targetRevision !== codeRevisionState.current) {
+                invalidateRuntimeVerificationForCodeChange();
+                return;
+            }
 
+            const verificationRevision = runtimeVerification.targetRevision;
             clearRuntimeVerificationTimer();
             runtimeVerification.completionTimer = setTimeout(() => {
                 runtimeVerification.completionTimer = null;
                 if (runtimeVerification.status !== "pending") return;
                 if (runtimeVerification.runtimeToken !== runtimeToken) return;
                 if (currentRuntimeToken !== runtimeToken) return;
+                if (runtimeVerification.targetRevision !== verificationRevision) return;
+                if (codeRevisionState.current !== verificationRevision) return;
 
                 runtimeVerification.status = "passed";
+                runtimeVerification.verifiedRevision = verificationRevision;
+                syncRuntimeVerificationStatus();
                 showToast("✅ 実行エラーなし");
             }, RUNTIME_VERIFICATION_DELAY_MS);
         }
@@ -1636,9 +1748,15 @@
         function failRuntimeVerification(runtimeToken) {
             if (runtimeVerification.status !== "pending") return;
             if (!runtimeToken || runtimeVerification.runtimeToken !== runtimeToken) return;
+            if (runtimeVerification.targetRevision !== codeRevisionState.current) {
+                invalidateRuntimeVerificationForCodeChange();
+                return;
+            }
 
             runtimeVerification.status = "failed";
+            runtimeVerification.verifiedRevision = -1;
             clearRuntimeVerificationTimer();
+            syncRuntimeVerificationStatus();
             showToast("⚠ 実行エラーあり");
         }
 
