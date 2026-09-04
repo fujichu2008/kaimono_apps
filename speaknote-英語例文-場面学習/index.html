@@ -2040,6 +2040,21 @@ header nav button:hover{
   </div>
 </dialog>
 
+<!-- インポート方法の選択（入れ替え／追加／中止） -->
+<dialog id="dlg-import-mode" aria-labelledby="import-mode-title">
+  <h3 id="import-mode-title">インポート方法の選択</h3>
+  <div id="import-mode-message" class="tiny"></div>
+  <div class="tiny">
+    入れ替え：既存の例文をすべて削除してから読み込みます（元に戻せません）。<br>
+    追加：既存の例文を残したまま読み込みます。
+  </div>
+  <div class="actions">
+    <button class="btn danger" type="button" id="import-mode-replace">入れ替え</button>
+    <button class="btn ok" type="button" id="import-mode-add">追加</button>
+    <button class="btn right" type="button" id="import-mode-cancel">中止</button>
+  </div>
+</dialog>
+
 <!-- 単語ルックアップ -->
 <dialog id="dlg-lookup" aria-labelledby="lk-title">
   <h3 id="lk-title" style="margin:0 0 6px">単語検索</h3>
@@ -3739,9 +3754,12 @@ function pickRoleVoice(role){
   const list = (voices || []).filter(v => /^en(-|_)?/i.test(v.lang || '') || /English/i.test(v.name || ''));
   if (!list.length) return pickVoice();
 
+  // 素の正規表現は v.name を、{lang:...} 形式のパターンは v.lang を判定する
   const pickByPatterns = (patterns) => {
-    for (const re of patterns) {
-      const found = list.find(v => re.test(v.name || ''));
+    for (const pattern of patterns) {
+      const langPattern = pattern && pattern.lang;
+      const re = langPattern || pattern;
+      const found = list.find(v => re.test((langPattern ? v.lang : v.name) || ''));
       if (found) return found;
     }
     return null;
@@ -3759,7 +3777,7 @@ function pickRoleVoice(role){
     /Female/i,
     /Woman/i,
     /Google\s+US\s+English/i,
-    /en-US/i
+    {lang:/en-US/i}
   ];
 
   const malePatterns = [
@@ -3775,8 +3793,8 @@ function pickRoleVoice(role){
     /Man/i,
     /Google\s+UK\s+English\s+Male/i,
     /Google\s+US\s+English/i,
-    /en-GB/i,
-    /en-US/i
+    {lang:/en-GB/i},
+    {lang:/en-US/i}
   ];
 
   if (role === 'W') {
@@ -4024,13 +4042,65 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
       return {slice: text.slice(base), base};
     }
 
+    /* W:/M: 行ごとに声を切り替えて英文を読み上げる共通処理。
+       order==='en' と order==='both' の両方から呼ぶ。
+       セッションが有効なまま完走したら true、途中で世代が切り替わったら false を返し、
+       呼び出し側はその時点で doFlow を中断する。
+       en は呼び出し側と同じ引数構成を保つために受け取る（ロールループ内では未使用）。 */
+    const speakEnglishBody = async ({en, rep, gap, startAt, roleSegments, my})=>{
+      if(!roleSegments || !roleSegments.length) return true;
+
+      const startIndex = Math.max(0, Number(startAt) || 0);
+
+      // 再開位置に対応するセグメントを探す
+      let startSeg = 0;
+      for(let i=0;i<roleSegments.length;i++){
+        if(roleSegments[i].displayEnd <= startIndex){
+          startSeg = i + 1;
+        }else{
+          break;
+        }
+      }
+
+      for(let r=0;r<rep;r++){
+        if(my!==self.session) return false;
+        for(let i=0;i<roleSegments.length;i++){
+          const seg = roleSegments[i];
+
+          // 最初のループ＆再開位置がこの行の途中なら、その位置から開始
+          let localStart = 0;
+          if(r === 0 && i === startSeg && startIndex > seg.displayBase){
+            localStart = Math.max(0, startIndex - seg.displayBase);
+          }
+
+          const textForThis = localStart ? seg.spokenText.slice(localStart) : seg.spokenText;
+          if(textForThis.trim()){
+            const voiceOverride = pickRoleVoice(seg.role); // W は女性寄り、M は男性寄りの英語音声を優先
+
+            await speakOne(textForThis, 'en-US', {
+              baseOffset: seg.displayBase + localStart,  // ハイライトは元テキスト基準
+              voiceOverride
+            });
+            if(my!==self.session) return false;
+          }
+
+          // セグメント間／リピート間の間合い
+          if(gap && (i < roleSegments.length - 1 || r < rep - 1)){
+            await sleep(gap);
+            if(my!==self.session) return false;
+          }
+        }
+      }
+      return true;
+    };
+
     const doFlow = async ()=>{
       const en = (script.en || '').trim();
       const ja = (script.ja || '').trim();
       const rep = Math.max(1, parseInt(script.repeat || 1, 10));
       const gap = Math.max(0, Number(script.gapSec || 0)) * 1000;
 
-            // ★ 全プラットフォームで、行頭に W: / M: を含む英文なら「会話モード」を有効にする
+      // ★ 全プラットフォームで、行頭に W: / M: を含む英文なら「会話モード」を有効にする
       const hasRoleMarkers = /(^|\n)[WM]:/.test(en);
       const useRoleVoices  = hasRoleMarkers;
       const roleSegments   = useRoleVoices ? buildRoleSegments(en) : null;
@@ -4044,48 +4114,8 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
         const startAt = Number(startCharIndex || script.startCharIndex || 0);
 
         if(useRoleVoices && roleSegments && roleSegments.length){
-                    // ★ 全プラットフォーム対応：W:/M: 行ごとに声を切り替え、W:/M: は読まない
-          const startIndex = Math.max(0, startAt);
-
-          // 再開位置に対応するセグメントを探す
-          let startSeg = 0;
-          for(let i=0;i<roleSegments.length;i++){
-            if(roleSegments[i].displayEnd <= startIndex){
-              startSeg = i + 1;
-            }else{
-              break;
-            }
-          }
-
-          for(let r=0;r<rep;r++){
-            if(my!==self.session) return;
-            for(let i=0;i<roleSegments.length;i++){
-              const seg = roleSegments[i];
-
-              // 最初のループ＆再開位置がこの行の途中なら、その位置から開始
-              let localStart = 0;
-              if(r === 0 && i === startSeg && startIndex > seg.displayBase){
-                localStart = Math.max(0, startIndex - seg.displayBase);
-              }
-
-              const textForThis = localStart ? seg.spokenText.slice(localStart) : seg.spokenText;
-              if(textForThis.trim()){
-                                const voiceOverride = pickRoleVoice(seg.role); // W は女性寄り、M は男性寄りの英語音声を優先
-
-                await speakOne(textForThis, 'en-US', {
-                  baseOffset: seg.displayBase + localStart,  // ハイライトは元テキスト基準
-                  voiceOverride
-                });
-                if(my!==self.session) return;
-              }
-
-              // セグメント間／リピート間の間合い
-              if(gap && (i < roleSegments.length - 1 || r < rep - 1)){
-                await sleep(gap);
-                if(my!==self.session) return;
-              }
-            }
-          }
+          // ★ 全プラットフォーム対応：W:/M: 行ごとに声を切り替え、W:/M: は読まない
+          if(!(await speakEnglishBody({en, rep, gap, startAt, roleSegments, my}))) return;
 
         }else{
           // ★従来通り：1つの声で全文再生（Windows/Android もこちら）
@@ -4110,45 +4140,8 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
         const startAt = Number(startCharIndex || script.startCharIndex || 0);
 
         if(useRoleVoices && roleSegments && roleSegments.length){
-                    // ★ 全プラットフォーム対応：会話モードで英語 → そのあと和訳
-          const startIndex = Math.max(0, startAt);
-
-          let startSeg = 0;
-          for(let i=0;i<roleSegments.length;i++){
-            if(roleSegments[i].displayEnd <= startIndex){
-              startSeg = i + 1;
-            }else{
-              break;
-            }
-          }
-
-          for(let r=0;r<rep;r++){
-            if(my!==self.session) return;
-            for(let i=0;i<roleSegments.length;i++){
-              const seg = roleSegments[i];
-
-              let localStart = 0;
-              if(r === 0 && i === startSeg && startIndex > seg.displayBase){
-                localStart = Math.max(0, startIndex - seg.displayBase);
-              }
-
-              const textForThis = localStart ? seg.spokenText.slice(localStart) : seg.spokenText;
-              if(textForThis.trim()){
-                const voiceOverride = pickRoleVoice(seg.role);
-
-                await speakOne(textForThis, 'en-US', {
-                  baseOffset: seg.displayBase + localStart,
-                  voiceOverride
-                });
-                if(my!==self.session) return;
-              }
-
-              if(gap && (i < roleSegments.length - 1 || r < rep - 1)){
-                await sleep(gap);
-                if(my!==self.session) return;
-              }
-            }
-          }
+          // ★ 全プラットフォーム対応：会話モードで英語 → そのあと和訳
+          if(!(await speakEnglishBody({en, rep, gap, startAt, roleSegments, my}))) return;
 
           if(ja){
             await speakOne(ja, 'ja-JP');
@@ -4765,273 +4758,305 @@ function renderDetailMeta(categories, playCount){
   $('#d-meta').innerHTML=meta.join(' ');
 }
 
-let detailSwipeBound = false;
-let detailSwipeNavBusy = false;
+/* =========================
+   学習カードの左右スワイプ（詳細・シャドー共通実装）
+========================= */
+const SWIPE = {MIN_DX:56, RATIO:1.35, MAX_MS:1000, FOLLOW:0.42, OUT_MS:150, BACK_MS:180, IN_MS:220};
 
-/* 詳細画面のスワイプ対象から操作部品を除外する */
-function isDetailSwipeIgnoredTarget(target){
+/* ボタン・入力・音声プレイヤー上から始まった操作はスワイプ扱いにしない */
+function isSwipeIgnoredTarget(target){
   return target instanceof Element &&
     !!target.closest('button, input, select, textarea, a, audio, label');
 }
 
-function prefersReducedDetailMotion(){
+function prefersReducedSwipeMotion(){
   return !!(
     window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   );
 }
 
-/* ドラッグ中に付けた一時スタイルを必ず解除する */
-function clearDetailSwipeDrag(){
-  const dlg = $('#dlg-detail');
-  if(!dlg) return;
-  dlg.style.removeProperty('transform');
-  dlg.style.removeProperty('opacity');
-  delete dlg.dataset.swipeDragX;
-}
+/* 指追従ドラッグ・戻しアニメ・ページ送り・前後移動を1か所へ集約する。
+   画面固有の差分（移動可否・移動先の決定・差し替え処理）だけを受け取る。
+   resolveNext は 数値=移動先 / {message}=中止して通知 / null=黙って中止 を返す。 */
+function createCardSwipeNavigation({dialogId, canNavigate, resolveNext, onBeforeSwap, onSwap}){
+  let bound = false;
+  let busy = false;
 
-/* スワイプが成立しなかったときは、カードを元の位置へ戻す */
-async function settleDetailSwipeBack(){
-  const dlg = $('#dlg-detail');
-  if(!dlg) return;
+  const getDialog = ()=>$('#'+dialogId);
+  const allowed = ()=> !busy && (typeof canNavigate !== 'function' || !!canNavigate());
 
-  const dragX = Number(dlg.dataset.swipeDragX || 0);
-  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
-  clearDetailSwipeDrag();
-
-  if(
-    prefersReducedDetailMotion() ||
-    !dragX ||
-    typeof dlg.animate !== 'function'
-  ){
-    return;
+  /* ドラッグ中に付けた一時スタイルを必ず解除する */
+  function clearDrag(){
+    const dlg = getDialog();
+    if(!dlg) return;
+    dlg.style.removeProperty('transform');
+    dlg.style.removeProperty('opacity');
+    delete dlg.dataset.swipeDragX;
   }
 
-  const anim = dlg.animate([
-    {
-      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`,
-      opacity:startOpacity
-    },
-    {
-      transform:'translate3d(0,0,0) rotate(0deg)',
-      opacity:1
-    }
-  ],{
-    duration:180,
-    easing:'cubic-bezier(.2,.8,.2,1)'
-  });
+  /* スワイプが成立しなかったときは、カードを元の位置へ戻す */
+  async function settleBack(){
+    const dlg = getDialog();
+    if(!dlg) return;
 
-  try{ await anim.finished; }catch(_){}
-}
+    const dragX = Number(dlg.dataset.swipeDragX || 0);
+    const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
+    clearDrag();
 
-/* 現在カードを退場させ、内容差し替え後に次カードを反対側から入れる */
-async function animateDetailPageTurn(delta, swapTask){
-  const dlg = $('#dlg-detail');
-  if(!dlg){
-    await swapTask();
-    return;
-  }
-
-  const dragX = Number(dlg.dataset.swipeDragX || 0);
-  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
-  clearDetailSwipeDrag();
-
-  if(
-    prefersReducedDetailMotion() ||
-    typeof dlg.animate !== 'function'
-  ){
-    await swapTask();
-    return;
-  }
-
-  // 次へは左へ退場、前へは右へ退場する
-  const exitDirection = delta > 0 ? -1 : 1;
-  const distance = Math.min(window.innerWidth * 0.42, 320);
-  const exitX = exitDirection * distance;
-
-  const outAnim = dlg.animate([
-    {
-      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg) scale(1)`,
-      opacity:startOpacity
-    },
-    {
-      transform:`translate3d(${exitX}px,0,0) rotate(${exitDirection * 2.2}deg) scale(.97)`,
-      opacity:0
-    }
-  ],{
-    duration:150,
-    easing:'cubic-bezier(.4,0,1,1)',
-    fill:'forwards'
-  });
-
-  try{ await outAnim.finished; }catch(_){}
-
-  await swapTask();
-  try{ outAnim.cancel(); }catch(_){}
-
-  // 次のカードは進行方向と反対側から入ってくる
-  const enterX = -exitX;
-  const inAnim = dlg.animate([
-    {
-      transform:`translate3d(${enterX}px,0,0) rotate(${-exitDirection * 1.8}deg) scale(.97)`,
-      opacity:0
-    },
-    {
-      transform:'translate3d(0,0,0) rotate(0deg) scale(1)',
-      opacity:1
-    }
-  ],{
-    duration:220,
-    easing:'cubic-bezier(.16,1,.3,1)'
-  });
-
-  try{ await inAnim.finished; }catch(_){}
-}
-
-/* 現在の一覧フィルタ結果の中で、前後の例文へ移動する */
-async function navigateDetailBySwipe(delta){
-  if(detailSwipeNavBusy || !currentDetailId){
-    await settleDetailSwipeBack();
-    return;
-  }
-
-  const currentIndex = detailBrowseIds.indexOf(currentDetailId);
-  if(currentIndex < 0){
-    await settleDetailSwipeBack();
-    notify('現在の一覧条件では前後移動できません。');
-    return;
-  }
-
-  const nextIndex = currentIndex + delta;
-  if(nextIndex < 0){
-    await settleDetailSwipeBack();
-    notify('これが最初の例文です。');
-    return;
-  }
-  if(nextIndex >= detailBrowseIds.length){
-    await settleDetailSwipeBack();
-    notify('これが最後の例文です。');
-    return;
-  }
-
-  detailSwipeNavBusy = true;
-  try{
-    // 発話・録音・一時URLを確実に解放してから、ページ送りモーション中に内容を差し替える
-    cleanupDetailSession();
-
-    await animateDetailPageTurn(delta, async ()=>{
-      await openDetail(detailBrowseIds[nextIndex]);
-    });
-  }catch(e){
-    clearDetailSwipeDrag();
-    notifyError('前後の例文への移動に失敗しました。', e);
-  }finally{
-    detailSwipeNavBusy = false;
-  }
-}
-
-/* スマホの横スワイプだけを前後移動として扱い、縦スクロールは邪魔しない */
-function bindDetailSwipeNavigation(){
-  if(detailSwipeBound) return;
-  const dlg = $('#dlg-detail');
-  if(!dlg) return;
-  detailSwipeBound = true;
-
-  let tracking = false;
-  let horizontalDrag = false;
-  let startX = 0;
-  let startY = 0;
-  let startAt = 0;
-
-  dlg.addEventListener('touchstart', event=>{
     if(
-      event.touches.length !== 1 ||
-      isDetailSwipeIgnoredTarget(event.target) ||
-      detailSwipeNavBusy
+      prefersReducedSwipeMotion() ||
+      !dragX ||
+      typeof dlg.animate !== 'function'
     ){
-      tracking = false;
-      horizontalDrag = false;
       return;
     }
 
-    const touch = event.touches[0];
-    tracking = true;
-    horizontalDrag = false;
-    startX = touch.clientX;
-    startY = touch.clientY;
-    startAt = performance.now();
-    clearDetailSwipeDrag();
-  }, {passive:true});
+    const anim = dlg.animate([
+      {
+        transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`,
+        opacity:startOpacity
+      },
+      {
+        transform:'translate3d(0,0,0) rotate(0deg)',
+        opacity:1
+      }
+    ],{
+      duration:SWIPE.BACK_MS,
+      easing:'cubic-bezier(.2,.8,.2,1)'
+    });
 
-  dlg.addEventListener('touchmove', event=>{
-    if(!tracking || event.touches.length !== 1) return;
+    try{ await anim.finished; }catch(_){}
+  }
 
-    const touch = event.touches[0];
-    const dx = touch.clientX - startX;
-    const dy = touch.clientY - startY;
+  /* 現在カードを退場させ、内容差し替え後に次カードを反対側から入れる */
+  async function pageTurn(delta, swapTask){
+    const dlg = getDialog();
+    if(!dlg){
+      await swapTask();
+      return;
+    }
 
-    // 数pxの揺れでは方向判定しない。縦操作なら通常スクロールへ任せる
-    if(!horizontalDrag){
-      if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-      if(Math.abs(dx) <= Math.abs(dy) * 1.15){
+    const dragX = Number(dlg.dataset.swipeDragX || 0);
+    const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
+    clearDrag();
+
+    if(
+      prefersReducedSwipeMotion() ||
+      typeof dlg.animate !== 'function'
+    ){
+      await swapTask();
+      return;
+    }
+
+    // 次へは左へ退場、前へは右へ退場する
+    const exitDirection = delta > 0 ? -1 : 1;
+    const distance = Math.min(window.innerWidth * 0.42, 320);
+    const exitX = exitDirection * distance;
+
+    const outAnim = dlg.animate([
+      {
+        transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg) scale(1)`,
+        opacity:startOpacity
+      },
+      {
+        transform:`translate3d(${exitX}px,0,0) rotate(${exitDirection * 2.2}deg) scale(.97)`,
+        opacity:0
+      }
+    ],{
+      duration:SWIPE.OUT_MS,
+      easing:'cubic-bezier(.4,0,1,1)',
+      fill:'forwards'
+    });
+
+    try{ await outAnim.finished; }catch(_){}
+
+    await swapTask();
+    try{ outAnim.cancel(); }catch(_){}
+
+    // 次のカードは進行方向と反対側から入ってくる
+    const enterX = -exitX;
+    const inAnim = dlg.animate([
+      {
+        transform:`translate3d(${enterX}px,0,0) rotate(${-exitDirection * 1.8}deg) scale(.97)`,
+        opacity:0
+      },
+      {
+        transform:'translate3d(0,0,0) rotate(0deg) scale(1)',
+        opacity:1
+      }
+    ],{
+      duration:SWIPE.IN_MS,
+      easing:'cubic-bezier(.16,1,.3,1)'
+    });
+
+    try{ await inAnim.finished; }catch(_){}
+  }
+
+  async function navigate(delta){
+    if(!allowed()){
+      await settleBack();
+      return;
+    }
+
+    const resolved = (typeof resolveNext === 'function') ? resolveNext(delta) : null;
+    if(resolved === null || resolved === undefined){
+      await settleBack();
+      return;
+    }
+    if(typeof resolved === 'object'){
+      await settleBack();
+      if(resolved.message) notify(resolved.message);
+      return;
+    }
+
+    busy = true;
+    try{
+      if(typeof onBeforeSwap === 'function') await onBeforeSwap(delta);
+      await pageTurn(delta, async ()=>{
+        if(typeof onSwap === 'function') await onSwap(resolved, delta);
+      });
+    }catch(error){
+      clearDrag();
+      notifyError('前後の例文への移動に失敗しました。', error);
+    }finally{
+      busy = false;
+    }
+  }
+
+  /* スマホの横スワイプだけを前後移動として扱い、縦スクロールは邪魔しない */
+  function bind(){
+    if(bound) return;
+    const dlg = getDialog();
+    if(!dlg) return;
+    bound = true;
+
+    let tracking = false;
+    let horizontalDrag = false;
+    let startX = 0;
+    let startY = 0;
+    let startAt = 0;
+
+    dlg.addEventListener('touchstart', event=>{
+      if(
+        event.touches.length !== 1 ||
+        isSwipeIgnoredTarget(event.target) ||
+        !allowed()
+      ){
         tracking = false;
+        horizontalDrag = false;
         return;
       }
-      horizontalDrag = true;
-    }
 
-    if(event.cancelable) event.preventDefault();
+      const touch = event.touches[0];
+      tracking = true;
+      horizontalDrag = false;
+      startX = touch.clientX;
+      startY = touch.clientY;
+      startAt = performance.now();
+      clearDrag();
+    }, {passive:true});
 
-    // 指に完全追従させず少し重みを付け、カードをめくっている感触にする
-    const dragX = dx * 0.42;
-    dlg.dataset.swipeDragX = String(dragX);
-    dlg.style.transform =
-      `translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`;
-    dlg.style.opacity = String(
-      Math.max(.82, 1 - Math.abs(dragX) / 700)
-    );
-  }, {passive:false});
+    dlg.addEventListener('touchmove', event=>{
+      if(!tracking || event.touches.length !== 1) return;
 
-  dlg.addEventListener('touchend', event=>{
-    if(!tracking || event.changedTouches.length !== 1){
-      if(horizontalDrag) void settleDetailSwipeBack();
+      const touch = event.touches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+
+      // 数pxの揺れでは方向判定しない。縦操作なら通常スクロールへ任せる
+      if(!horizontalDrag){
+        if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        if(Math.abs(dx) <= Math.abs(dy) * 1.15){
+          tracking = false;
+          return;
+        }
+        horizontalDrag = true;
+      }
+
+      if(event.cancelable) event.preventDefault();
+
+      // 指に完全追従させず少し重みを付け、カードをめくっている感触にする
+      const dragX = dx * SWIPE.FOLLOW;
+      dlg.dataset.swipeDragX = String(dragX);
+      dlg.style.transform =
+        `translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`;
+      dlg.style.opacity = String(
+        Math.max(.82, 1 - Math.abs(dragX) / 700)
+      );
+    }, {passive:false});
+
+    dlg.addEventListener('touchend', event=>{
+      if(!tracking || event.changedTouches.length !== 1){
+        if(horizontalDrag) void settleBack();
+        tracking = false;
+        horizontalDrag = false;
+        return;
+      }
+      tracking = false;
+
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const elapsed = performance.now() - startAt;
+      const wasHorizontalDrag = horizontalDrag;
+      horizontalDrag = false;
+
+      // 誤反応防止：一定距離以上・横方向優勢・一定時間内だけをスワイプと判定
+      if(
+        !wasHorizontalDrag ||
+        Math.abs(dx) < SWIPE.MIN_DX ||
+        Math.abs(dx) < Math.abs(dy) * SWIPE.RATIO ||
+        elapsed > SWIPE.MAX_MS
+      ){
+        void settleBack();
+        return;
+      }
+
+      // スワイプ直後の単語タップ等の疑似clickを発生させない
+      event.preventDefault();
+
+      // 左へスワイプ＝次、右へスワイプ＝前
+      void navigate(dx < 0 ? 1 : -1);
+    }, {passive:false});
+
+    dlg.addEventListener('touchcancel', ()=>{
+      const shouldRestore = horizontalDrag;
       tracking = false;
       horizontalDrag = false;
-      return;
-    }
-    tracking = false;
+      if(shouldRestore) void settleBack();
+    }, {passive:true});
+  }
 
-    const touch = event.changedTouches[0];
-    const dx = touch.clientX - startX;
-    const dy = touch.clientY - startY;
-    const elapsed = performance.now() - startAt;
-    const wasHorizontalDrag = horizontalDrag;
-    horizontalDrag = false;
+  return { navigate, bind, clearDrag };
+}
 
-    // 誤反応防止：56px以上・横方向優勢・1秒以内だけをスワイプと判定
-    if(
-      !wasHorizontalDrag ||
-      Math.abs(dx) < 56 ||
-      Math.abs(dx) < Math.abs(dy) * 1.35 ||
-      elapsed > 1000
-    ){
-      void settleDetailSwipeBack();
-      return;
-    }
+/* 詳細画面：現在の一覧フィルタ結果の中で前後の例文へ移動する（共通スワイプ実装を使用） */
+const detailSwipeNav = createCardSwipeNavigation({
+  dialogId:'dlg-detail',
+  canNavigate: ()=> !!currentDetailId,
+  resolveNext: delta=>{
+    const currentIndex = detailBrowseIds.indexOf(currentDetailId);
+    if(currentIndex < 0) return { message:'現在の一覧条件では前後移動できません。' };
 
-    // スワイプ直後の単語タップ等の疑似clickを発生させない
-    event.preventDefault();
+    const nextIndex = currentIndex + delta;
+    if(nextIndex < 0) return { message:'これが最初の例文です。' };
+    if(nextIndex >= detailBrowseIds.length) return { message:'これが最後の例文です。' };
+    return nextIndex;
+  },
+  // 発話・録音・一時URLを確実に解放してから、ページ送りモーション中に内容を差し替える
+  onBeforeSwap: ()=>{ cleanupDetailSession(); },
+  onSwap: async nextIndex=>{
+    await openDetail(detailBrowseIds[nextIndex]);
+  }
+});
 
-    // 左へスワイプ＝次、右へスワイプ＝前
-    void navigateDetailBySwipe(dx < 0 ? 1 : -1);
-  }, {passive:false});
+function navigateDetailBySwipe(delta){
+  return detailSwipeNav.navigate(delta);
+}
 
-  dlg.addEventListener('touchcancel', ()=>{
-    const shouldRestore = horizontalDrag;
-    tracking = false;
-    horizontalDrag = false;
-    if(shouldRestore) void settleDetailSwipeBack();
-  }, {passive:true});
+function bindDetailSwipeNavigation(){
+  detailSwipeNav.bind();
 }
 
 async function openDetail(id){
@@ -5927,6 +5952,57 @@ function zipImportErrorMessage(error){
     'ZIPを読み込めませんでした。このSpeakNoteから出力したZIPか確認してください。';
 }
 
+/* インポート方法を「入れ替え／追加／中止」の3ボタンで選ばせる。
+   戻り値は 'replace' / 'add' / null（中止・Escでの終了を含む）。 */
+function askImportMode(message){
+  return new Promise(resolve=>{
+    const dlg = $('#dlg-import-mode');
+    const msgEl = $('#import-mode-message');
+    const replaceBtn = $('#import-mode-replace');
+    const addBtn = $('#import-mode-add');
+    const cancelBtn = $('#import-mode-cancel');
+
+    // dialog非対応環境では従来どおりの二段確認へ退避する
+    if(!dlg || !replaceBtn || !addBtn || !cancelBtn || typeof dlg.showModal !== 'function'){
+      const replace = confirm(
+        (message ? message + '\n\n' : '') +
+        '既存の例文をすべて削除して入れ替えますか？\n\n' +
+        'OK：入れ替え\n' +
+        'キャンセル：追加または中止を選択'
+      );
+      if(replace){ resolve('replace'); return; }
+      const add = confirm(
+        '既存の例文を残したまま追加しますか？\n\n' +
+        'OK：追加\n' +
+        'キャンセル：何も変更せず中止'
+      );
+      resolve(add ? 'add' : null);
+      return;
+    }
+
+    if(msgEl) msgEl.textContent = message || '';
+
+    let settled = false;
+    const onClose = ()=> finish(null);
+    function finish(value){
+      if(settled) return;
+      settled = true;
+      dlg.removeEventListener('close', onClose);
+      replaceBtn.onclick = null;
+      addBtn.onclick = null;
+      cancelBtn.onclick = null;
+      if(dlg.open){ try{ dlg.close(); }catch(_){} }
+      resolve(value);
+    }
+
+    replaceBtn.onclick = ()=> finish('replace');
+    addBtn.onclick = ()=> finish('add');
+    cancelBtn.onclick = ()=> finish(null);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
+
 $('#btn-export-zip').onclick = async (event)=>{
   event.preventDefault();
 
@@ -5972,21 +6048,11 @@ $('#file-import-zip').onchange = async (event)=>{
     await withBusy(label, 'ZIP確認中…', async ()=>{
       const prepared = await prepareSentenceZipImport(file);
 
-      const replace = confirm(
-        `ZIP内の例文${prepared.items.length}件を復元します。\n\n` +
-        '既存の例文をすべて削除して入れ替えますか？\n\n' +
-        'OK：入れ替え\n' +
-        'キャンセル：追加または中止を選択'
+      const mode = await askImportMode(
+        `ZIP内の例文${prepared.items.length}件を復元します。`
       );
-
-      if(!replace){
-        const add = confirm(
-          '既存の例文を残したまま、ZIP内の例文を追加しますか？\n\n' +
-          'OK：追加\n' +
-          'キャンセル：何も変更せず中止'
-        );
-        if(!add) return;
-      }
+      if(!mode) return;
+      const replace = (mode === 'replace');
 
       label.textContent = '復元中…';
       await saveImportedSentenceBatch(prepared.items, replace);
@@ -6067,13 +6133,17 @@ $('#file-import').onchange = async (e)=>{
     const json = JSON.parse(text);
     if(!json.sentences || Array.isArray(json.sentences)===false) throw new Error('format');
 
-    const replace = confirm(
-      'このファイルの内容で、既存の例文をすべて入れ替えますか？\n\n' +
-      'OK：既存の例文を削除してからインポート（入れ替え）\n' +
-      'キャンセル：既存の例文に追加してインポート'
-    );
+    const mode = await askImportMode('このファイルの内容をインポートします。');
+    if(!mode) return;
+    const replace = (mode === 'replace');
 
-    const items = json.sentences.map(jsonRowToSentenceItem);
+    // オブジェクト以外の要素は取り込まず、スキップ件数を結果に含める
+    const rawRows = json.sentences;
+    const validRows = rawRows.filter(r => r && typeof r === 'object' && !Array.isArray(r));
+    const skipped = rawRows.length - validRows.length;
+    if(rawRows.length > 0 && validRows.length === 0) throw new Error('format');
+
+    const items = validRows.map(jsonRowToSentenceItem);
 
     await withBusy(label, '読み込み中…', async ()=>{
       // 全削除と追加を1つのトランザクションで実行し、部分更新を防ぐ
@@ -6081,7 +6151,11 @@ $('#file-import').onchange = async (e)=>{
     });
 
     if(items.length > 0) trackKpiAdd(items.length);
-    alert(replace ? 'インポート（入れ替え）が完了しました。' : 'インポート（追加）が完了しました。');
+    alert(
+      (replace ? 'インポート（入れ替え）が完了しました。' : 'インポート（追加）が完了しました。') +
+      `\n例文：${items.length}件` +
+      (skipped > 0 ? `\n読み込めなかったデータ：${skipped}件（形式が不正のためスキップ）` : '')
+    );
 
     await fillCategoryFilter();
     await refreshList();
@@ -6820,285 +6894,47 @@ const shadowMoreMenu = bindDisclosure({ btnId:'sh-more-btn', panelId:'sh-more-pa
 
 /* =========================
    シャドー画面：左右スワイプによる前後移動
-   詳細画面と同じ指追従＋ページ送りモーションを使用する
+   詳細画面と共通の createCardSwipeNavigation を使用する
 ========================= */
-let shadowSwipeBound = false;
-let shadowSwipeNavBusy = false;
-
-/* ボタン・入力・音声プレイヤー上から始まった操作はスワイプ扱いにしない */
-function isShadowSwipeIgnoredTarget(target){
-  return target instanceof Element &&
-    !!target.closest('button, input, select, textarea, a, audio, label');
-}
-
-function prefersReducedShadowMotion(){
-  return !!(
-    window.matchMedia &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
-}
-
-/* ドラッグ中の一時スタイルを解除する */
-function clearShadowSwipeDrag(){
-  const dlg = $('#dlg-shadow');
-  if(!dlg) return;
-  dlg.style.removeProperty('transform');
-  dlg.style.removeProperty('opacity');
-  delete dlg.dataset.swipeDragX;
-}
-
-/* スワイプが成立しなかった場合は元位置へ戻す */
-async function settleShadowSwipeBack(){
-  const dlg = $('#dlg-shadow');
-  if(!dlg) return;
-
-  const dragX = Number(dlg.dataset.swipeDragX || 0);
-  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
-  clearShadowSwipeDrag();
-
-  if(
-    prefersReducedShadowMotion() ||
-    !dragX ||
-    typeof dlg.animate !== 'function'
-  ){
-    return;
-  }
-
-  const anim = dlg.animate([
-    {
-      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`,
-      opacity:startOpacity
-    },
-    {
-      transform:'translate3d(0,0,0) rotate(0deg)',
-      opacity:1
-    }
-  ],{
-    duration:180,
-    easing:'cubic-bezier(.2,.8,.2,1)'
-  });
-
-  try{ await anim.finished; }catch(_){}
-}
-
-/* 現在カードを退場させ、次カードを反対側から入場させる */
-async function animateShadowPageTurn(delta, swapTask){
-  const dlg = $('#dlg-shadow');
-  if(!dlg){
-    await swapTask();
-    return;
-  }
-
-  const dragX = Number(dlg.dataset.swipeDragX || 0);
-  const startOpacity = Math.max(.82, 1 - Math.abs(dragX) / 700);
-  clearShadowSwipeDrag();
-
-  if(
-    prefersReducedShadowMotion() ||
-    typeof dlg.animate !== 'function'
-  ){
-    await swapTask();
-    return;
-  }
-
-  const exitDirection = delta > 0 ? -1 : 1;
-  const distance = Math.min(window.innerWidth * 0.42, 320);
-  const exitX = exitDirection * distance;
-
-  const outAnim = dlg.animate([
-    {
-      transform:`translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg) scale(1)`,
-      opacity:startOpacity
-    },
-    {
-      transform:`translate3d(${exitX}px,0,0) rotate(${exitDirection * 2.2}deg) scale(.97)`,
-      opacity:0
-    }
-  ],{
-    duration:150,
-    easing:'cubic-bezier(.4,0,1,1)',
-    fill:'forwards'
-  });
-
-  try{ await outAnim.finished; }catch(_){}
-
-  await swapTask();
-  try{ outAnim.cancel(); }catch(_){}
-
-  const enterX = -exitX;
-  const inAnim = dlg.animate([
-    {
-      transform:`translate3d(${enterX}px,0,0) rotate(${-exitDirection * 1.8}deg) scale(.97)`,
-      opacity:0
-    },
-    {
-      transform:'translate3d(0,0,0) rotate(0deg) scale(1)',
-      opacity:1
-    }
-  ],{
-    duration:220,
-    easing:'cubic-bezier(.16,1,.3,1)'
-  });
-
-  try{ await inAnim.finished; }catch(_){}
-}
 
 /* 左＝次、右＝前。従来の前後ボタンと同じく通常セッションでは端から反対端へ循環する */
-async function navigateShadowBySwipe(delta){
-  if(
-    shadowSwipeNavBusy ||
-    !sh.opened ||
-    !sh.list ||
-    sh.list.length === 0 ||
-    pocketLocked
-  ){
-    await settleShadowSwipeBack();
-    return;
-  }
-
-  // 完了カードではスワイプによる意図しない再開を防ぐ
-  const done = $('#sh-done');
-  if(done && !done.classList.contains('hidden')){
-    await settleShadowSwipeBack();
-    return;
-  }
-
-  const nextIndex = (sh.index + delta + sh.list.length) % sh.list.length;
-  shadowSwipeNavBusy = true;
-
-  try{
+const shadowSwipeNav = createCardSwipeNavigation({
+  dialogId:'dlg-shadow',
+  canNavigate: ()=>{
+    if(!sh.opened || !sh.list || sh.list.length === 0 || pocketLocked) return false;
+    // 完了カードではスワイプによる意図しない再開を防ぐ
+    const done = $('#sh-done');
+    return !(done && !done.classList.contains('hidden'));
+  },
+  resolveNext: delta=> (sh.index + delta + sh.list.length) % sh.list.length,
+  onBeforeSwap: async ()=>{
     cancelRecallPhase();
     setGradeReady(false);
     setShadowPhase(SHADOW_PHASE.IDLE);
     sh.auto = true;
     await speakEngine.stop();
+  },
+  onSwap: nextIndex=>{
+    sh.index = nextIndex;
+    setPlayToggleLabel($('#sh-toggle'),'playing');
 
-    await animateShadowPageTurn(delta, async ()=>{
-      sh.index = nextIndex;
-      setPlayToggleLabel($('#sh-toggle'),'playing');
-
-      // playCurrentShadowは音声終了まで待つため、入場モーションを止めないよう非同期継続する
-      void playCurrentShadow({ startCharIndex: 0 }).catch(error=>{
-        console.error('shadow swipe playback error', error);
-        if(sh.opened){
-          notify('次の例文を再生できませんでした。');
-          setPlayToggleLabel($('#sh-toggle'),'idle');
-        }
-      });
+    // playCurrentShadowは音声終了まで待つため、入場モーションを止めないよう非同期継続する
+    void playCurrentShadow({ startCharIndex: 0 }).catch(error=>{
+      console.error('shadow swipe playback error', error);
+      if(sh.opened){
+        notify('次の例文を再生できませんでした。');
+        setPlayToggleLabel($('#sh-toggle'),'idle');
+      }
     });
-  }catch(error){
-    clearShadowSwipeDrag();
-    notifyError('前後の例文への移動に失敗しました。', error);
-  }finally{
-    shadowSwipeNavBusy = false;
   }
+});
+
+function navigateShadowBySwipe(delta){
+  return shadowSwipeNav.navigate(delta);
 }
 
 function bindShadowSwipeNavigation(){
-  if(shadowSwipeBound) return;
-  const dlg = $('#dlg-shadow');
-  if(!dlg) return;
-  shadowSwipeBound = true;
-
-  let tracking = false;
-  let horizontalDrag = false;
-  let startX = 0;
-  let startY = 0;
-  let startAt = 0;
-
-  dlg.addEventListener('touchstart', event=>{
-    if(
-      event.touches.length !== 1 ||
-      isShadowSwipeIgnoredTarget(event.target) ||
-      shadowSwipeNavBusy ||
-      pocketLocked
-    ){
-      tracking = false;
-      horizontalDrag = false;
-      return;
-    }
-
-    const done = $('#sh-done');
-    if(done && !done.classList.contains('hidden')){
-      tracking = false;
-      horizontalDrag = false;
-      return;
-    }
-
-    const touch = event.touches[0];
-    tracking = true;
-    horizontalDrag = false;
-    startX = touch.clientX;
-    startY = touch.clientY;
-    startAt = performance.now();
-    clearShadowSwipeDrag();
-  }, {passive:true});
-
-  dlg.addEventListener('touchmove', event=>{
-    if(!tracking || event.touches.length !== 1) return;
-
-    const touch = event.touches[0];
-    const dx = touch.clientX - startX;
-    const dy = touch.clientY - startY;
-
-    if(!horizontalDrag){
-      if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-      if(Math.abs(dx) <= Math.abs(dy) * 1.15){
-        tracking = false;
-        return;
-      }
-      horizontalDrag = true;
-    }
-
-    if(event.cancelable) event.preventDefault();
-
-    const dragX = dx * 0.42;
-    dlg.dataset.swipeDragX = String(dragX);
-    dlg.style.transform =
-      `translate3d(${dragX}px,0,0) rotate(${dragX * 0.015}deg)`;
-    dlg.style.opacity = String(
-      Math.max(.82, 1 - Math.abs(dragX) / 700)
-    );
-  }, {passive:false});
-
-  dlg.addEventListener('touchend', event=>{
-    if(!tracking || event.changedTouches.length !== 1){
-      if(horizontalDrag) void settleShadowSwipeBack();
-      tracking = false;
-      horizontalDrag = false;
-      return;
-    }
-    tracking = false;
-
-    const touch = event.changedTouches[0];
-    const dx = touch.clientX - startX;
-    const dy = touch.clientY - startY;
-    const elapsed = performance.now() - startAt;
-    const wasHorizontalDrag = horizontalDrag;
-    horizontalDrag = false;
-
-    if(
-      !wasHorizontalDrag ||
-      Math.abs(dx) < 56 ||
-      Math.abs(dx) < Math.abs(dy) * 1.35 ||
-      elapsed > 1000
-    ){
-      void settleShadowSwipeBack();
-      return;
-    }
-
-    event.preventDefault();
-
-    // 左スワイプ＝次、右スワイプ＝前
-    void navigateShadowBySwipe(dx < 0 ? 1 : -1);
-  }, {passive:false});
-
-  dlg.addEventListener('touchcancel', ()=>{
-    const shouldRestore = horizontalDrag;
-    tracking = false;
-    horizontalDrag = false;
-    if(shouldRestore) void settleShadowSwipeBack();
-  }, {passive:true});
+  shadowSwipeNav.bind();
 }
 
 bindShadowSwipeNavigation();
@@ -7166,6 +7002,28 @@ function setLookupLinks(word){
   $('#lk-cambridge').href= `https://dictionary.cambridge.org/dictionary/english/${q}`;
   $('#lk-longman').href  = `https://www.ldoceonline.com/dictionary/${q}`;
 }
+/* 外部APIが応答しないままボタンが張り付かないよう、共通のタイムアウトを付ける。
+   中断時は 'fetch_timeout' に正規化して呼び出し側へ渡す。 */
+async function fetchWithTimeout(url, options={}){
+  const { ms = 8000, ...rest } = options || {};
+  const controller = (typeof AbortController === 'function') ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(()=>{ try{ controller.abort(); }catch(_){} }, ms)
+    : null;
+  try{
+    return await fetch(url, Object.assign(
+      {mode:'cors'},
+      rest,
+      controller ? {signal:controller.signal} : {}
+    ));
+  }catch(error){
+    if(error?.name === 'AbortError') throw new Error('fetch_timeout');
+    throw error;
+  }finally{
+    if(timer) clearTimeout(timer);
+  }
+}
+
 /* 翻訳失敗の通知は1回の操作につき1度だけ出す */
 let translateIssueNotified = false;
 function beginTranslateSession(){ translateIssueNotified = false; }
@@ -7183,7 +7041,7 @@ async function translateJa(text){
   const req = async (q) => {
     try {
       const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en|ja`;
-      const res = await fetch(url, {mode:'cors'});
+      const res = await fetchWithTimeout(url, {ms:8000});
       if(!res.ok) throw new Error('status ' + res.status);
       const json = await res.json();
       // APIが200以外を返す場合(Limit到達など)もエラー扱い
@@ -7237,7 +7095,7 @@ async function translateBulkToJa(lines){
 async function fetchEnDict(word){
   try{
     const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`;
-    const res = await fetch(url, {mode:'cors'});
+    const res = await fetchWithTimeout(url, {ms:8000});
     if(!res.ok) throw new Error('bad');
     const json = await res.json();
     const head = Array.isArray(json) ? json[0] : null;
@@ -7251,12 +7109,15 @@ async function fetchEnDict(word){
       }
     }
     return { phonetic: phon, defs };
-  }catch(e){ return { phonetic:'', defs:[] }; }
+  }catch(e){
+    if(e?.message === 'fetch_timeout') reportTranslateIssue();
+    return { phonetic:'', defs:[] };
+  }
 }
 async function fetchJaWiktionarySnippet(word){
   try{
     const api = `https://ja.wiktionary.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&format=json&origin=*&titles=${encodeURIComponent(word)}`;
-    const res = await fetch(api, {mode:'cors'});
+    const res = await fetchWithTimeout(api, {ms:8000});
     if(!res.ok) throw new Error('bad');
     const json = await res.json();
     const pages = json?.query?.pages||{};
@@ -7264,7 +7125,10 @@ async function fetchJaWiktionarySnippet(word){
     const ex = (first?.extract||'').trim();
     if(!ex) return '';
     return ex.length>360 ? ex.slice(0,340)+'…' : ex;
-  }catch(e){ return ''; }
+  }catch(e){
+    if(e?.message === 'fetch_timeout') reportTranslateIssue();
+    return '';
+  }
 }
 function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, phonetic, jaWiki}){
   const body = $('#lk-body');
