@@ -2566,6 +2566,8 @@ W: それで大丈夫です。すぐに予定を更新します。`,
 
 /* =========================
    KPI ログ（ホームタブ用）
+   added は利用者が登録画面から新規登録した例文数のみを記録する。
+   Import・ZIP復元・既定例文シードは、ヒートマップを学習活動として扱うため含めない。
    days: {
      'YYYY-MM-DD': { added, playCount, playMs, recMs }
    }
@@ -3045,7 +3047,25 @@ const defaultSettings={
   lookup: { enDef:true, jaSum:true, jaDefList:false, jaEx:false, wiki:false }
 };
 let settings = loadSettings();
-function loadSettings(){ try{ return Object.assign({}, defaultSettings, JSON.parse(localStorage.getItem(LS_SETTINGS)||'{}')); }catch(e){ return {...defaultSettings}; } }
+function loadSettings(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(LS_SETTINGS)||'{}');
+    const savedLookup = (
+      saved &&
+      saved.lookup &&
+      typeof saved.lookup === 'object' &&
+      !Array.isArray(saved.lookup)
+    ) ? saved.lookup : {};
+    return Object.assign({}, defaultSettings, saved, {
+      lookup: Object.assign({}, defaultSettings.lookup, savedLookup)
+    });
+  }catch(e){
+    return {
+      ...defaultSettings,
+      lookup: {...defaultSettings.lookup}
+    };
+  }
+}
 function saveSettings(){ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); }
 
 /* =========================
@@ -3409,7 +3429,11 @@ async function ensureDefaultSentences(){
    画面遷移/ナビ
 ========================= */
 function stopAllPlayback(){
-  try { speechSynthesis.cancel(); } catch(_) {}
+  try{
+    return speakEngine.stop();
+  }catch(_){
+    return Promise.resolve();
+  }
 }
 const views = {
   home: $('#view-home'),
@@ -3800,6 +3824,53 @@ async function ensureTtsUnlocked(){
   } finally { ttsWarmed = true; }
 }
 
+/* W:/M: を含む行ごとの会話セグメントを作る純粋関数。
+   SpeakEngineとテスト公開APIの両方から参照する。
+   displayStart / displayEnd は元の英文中の位置、displayBase は W:/M: を除いた本文先頭位置。 */
+function buildRoleSegments(enText){
+  const segments = [];
+  if(!enText) return segments;
+
+  const len = enText.length;
+  let pos = 0;
+  while(pos < len){
+    const nl = enText.indexOf('\n', pos);
+    const lineEnd = (nl === -1) ? len : nl;
+    const line = enText.slice(pos, lineEnd);
+
+    const displayStart = pos;
+    const displayEnd   = lineEnd;
+
+    let role = null;
+    let prefixLen = 0;
+
+    if(line.startsWith('W:')){
+      role = 'W';
+      prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
+    }else if(line.startsWith('M:')){
+      role = 'M';
+      prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
+    }
+
+    if(prefixLen > line.length) prefixLen = line.length;
+
+    const spokenText  = line.slice(prefixLen);
+    const displayBase = displayStart + prefixLen;
+
+    segments.push({
+      role,
+      spokenText,
+      displayStart,
+      displayEnd,
+      displayBase
+    });
+
+    if(nl === -1) break;
+    pos = nl + 1;
+  }
+  return segments;
+}
+
 /* ---- 単一TTSエンジン（途中再開に対応） ---- */
 class SpeakEngine {
   constructor(){
@@ -3945,58 +4016,6 @@ async play(script, {targetEl, rate, startCharIndex=0}={}){
 
 
     // （sliceFromChar は重複定義されていたため、この位置の定義を削除。後方の定義を使用）
-
-  // ★追加：W:/M: を含む行ごとの会話セグメントを作る
-  //  - displayStart / displayEnd は「元の英文」中の位置
-  //  - displayBase は「W:/M: (＋スペース) を除いた先頭位置」
-  //  - spokenText は実際に読み上げる文字列（W:/M: をカット済み）
-  function buildRoleSegments(enText){
-    const segments = [];
-    if(!enText) return segments;
-
-    const len = enText.length;
-    let pos = 0;
-    while(pos < len){
-      const nl = enText.indexOf('\n', pos);
-      const lineEnd = (nl === -1) ? len : nl;
-      const line = enText.slice(pos, lineEnd);
-
-      const displayStart = pos;
-      const displayEnd   = lineEnd;
-
-      let role = null;
-      let prefixLen = 0;
-
-      if(line.startsWith('W:')){
-        role = 'W';
-        prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
-      }else if(line.startsWith('M:')){
-        role = 'M';
-        prefixLen = 2 + (line.charAt(2)===' ' ? 1 : 0);
-      }
-
-      if(prefixLen > line.length) prefixLen = line.length;
-
-      const spokenText  = line.slice(prefixLen);      // ★ W:/M: はここで削除
-      const displayBase = displayStart + prefixLen;   // ★ ハイライト用の基準位置
-
-      segments.push({
-        role,          // 'W' | 'M' | null
-        spokenText,    // 実際に読み上げるテキスト
-        displayStart,  // 元テキスト中の行の開始位置
-        displayEnd,    // 元テキスト中の行の終了位置（改行含まず）
-        displayBase    // W:/M: を除いた先頭位置
-      });
-
-      if(nl === -1) break;
-      pos = nl + 1; // 改行の次から次行
-    }
-    return segments;
-  }
-
-
-
-
 
     function sliceFromChar(text, charIndex){
       if(!text) return {slice:text, base:0};
@@ -4155,7 +4174,12 @@ if(my===self.session){
   }    // ← このカッコが抜けていた
   pause(){ try{ if(this.state==='playing'){ speechSynthesis.pause(); this.state='paused'; this._emit('state','paused'); } }catch(_){} }
   resume(){ try{ if(this.state==='paused'){ speechSynthesis.resume(); this.state='playing'; this._emit('state','playing'); } }catch(_){} }
-  async stop(){ try{ this.session++; speechSynthesis.cancel(); this.state='idle'; this._emit('state','idle'); }catch(_){} }
+  async stop(){
+    this.session++;
+    try{ speechSynthesis.cancel(); }catch(_){}
+    this.state='idle';
+    this._emit('state','idle');
+  }
   on(ev,fn){ (this._ev||(this._ev={}))[ev]=(this._ev[ev]||[]); this._ev[ev].push(fn); }
   _emit(ev,...a){ (this._ev?.[ev]||[]).forEach(f=>{ try{ f(...a);}catch(_){}}); }
 }
@@ -4606,8 +4630,7 @@ function clearDetailHistoryAudio(){
 /* 詳細画面固有の音声・録音・一時リソースを1か所で解放する。
    各処理は複数回実行しても安全なため、closeイベントとの二重経路でも問題ない。 */
 function cleanupDetailSession(){
-  void speakEngine.stop();
-  stopAllPlayback();
+  void stopAllPlayback();
   clearRecAudio();
   clearDetailHistoryAudio();
   stopDetailRecTimer();
@@ -4664,8 +4687,7 @@ async function renderRecordingHistory(sentenceId){
       play.textContent = '▶︎ 再生';
       play.onclick = async ()=>{
         try{
-          await speakEngine.stop();
-          stopAllPlayback();
+          await stopAllPlayback();
 
           const currentAudio = $('#d-rec-audio');
           try{ currentAudio?.pause(); }catch(_){}
@@ -5175,8 +5197,7 @@ function bindDetailRecording(){
     setRecButtonMode('idle');
 
     try{
-      stopAllPlayback();
-      await speakEngine.stop();
+      await stopAllPlayback();
       await recEngine.start();
 
       // 画面遷移などで開始処理が破棄された場合はUIを録音中へ戻さない
@@ -5247,8 +5268,7 @@ function bindDetailRecording(){
     recPlayBtn.onclick = async ()=>{
       clearDetailHistoryAudio();
       try{
-        await speakEngine.stop();
-        stopAllPlayback();
+        await stopAllPlayback();
         const a=$('#d-rec-audio');
         if(!a.getAttribute('src')){ alert('録音データがありません'); return; }
         a.currentTime=0;
@@ -6151,8 +6171,6 @@ $('#file-import-zip').onchange = async (event)=>{
       label.textContent = '復元中…';
       await saveImportedSentenceBatch(prepared.items, replace);
 
-      trackKpiAdd(prepared.items.length);
-
       // 学習記録は「入れ替え」のときだけ置き換える（追加では既存の記録に触れない）
       const kpiRestored = replace && !!prepared.kpiDays;
       if(kpiRestored){
@@ -6254,7 +6272,6 @@ $('#file-import').onchange = async (e)=>{
       await saveImportedSentenceBatch(items, replace);
     });
 
-    if(items.length > 0) trackKpiAdd(items.length);
     alert(
       (replace ? 'インポート（入れ替え）が完了しました。' : 'インポート（追加）が完了しました。') +
       `\n例文：${items.length}件` +
@@ -7079,8 +7096,7 @@ async function cleanupShadowSession(){
   cancelRecallPhase();
 
   await setPocketLock(false);
-  await speakEngine.stop();
-  stopAllPlayback();
+  await stopAllPlayback();
   await KeepAwake.disable();
 
   clearHighlight($('#sh-text'));
@@ -7244,42 +7260,71 @@ async function fetchJaWiktionarySnippet(word){
     return '';
   }
 }
-function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, phonetic, jaWiki}){
+function renderLookupContentRich({word, jaSummary, enDefs, jaDefs, jaExamples, phonetic, jaWiki, cfg}){
   const body = $('#lk-body');
   const safeWord = escapeHTML(word);
-  const hasDefs = enDefs.length>0;
+  const showEnDefs = !!cfg?.enDef;
+  const showJaSummary = !!cfg?.jaSum;
+  const showJaDefs = !!cfg?.jaDefList;
+  const showJaExamples = !!cfg?.jaEx;
+  const showWiki = !!cfg?.wiki;
+  const hasEnDefs = enDefs.length > 0;
+  const hasJaDefs = jaDefs.some(d => (d || '').trim());
+  const hasJaExamples = jaExamples.some(item => (item?.ja || '').trim());
   const head = `
     <div style="font-size:16px;margin-bottom:6px">
       <strong style="font-size:18px">${safeWord}</strong>
       ${phonetic ? `<span class="tiny" style="margin-left:8px">/${escapeHTML(phonetic)}/</span>` : ''}
     </div>`;
-  const summary = `
-    <div style="font-size:15px;line-height:1.9;margin:6px 0">
+
+  let summaryParts = '';
+  if(showJaSummary){
+    summaryParts += `
       <strong>日本語まとめ：</strong>
-      ${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}
-      ${jaWiki ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>` : ''}
-    </div>`;
-  const defsJa = hasDefs
-    ? `<div style="margin-top:8px">
+      ${jaSummary ? escapeHTML(jaSummary) : '（日本語サマリーを取得できませんでした）'}`;
+  }
+  if(showWiki){
+    summaryParts += jaWiki
+      ? `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>${escapeHTML(jaWiki)}</div>`
+      : `<div class="tiny" style="opacity:.9;margin-top:6px"><strong>Wiktionary補足：</strong>（取得できませんでした）</div>`;
+  }
+  const summary = summaryParts
+    ? `<div style="font-size:15px;line-height:1.9;margin:6px 0">${summaryParts}</div>`
+    : '';
+
+  const defsJa = showJaDefs
+    ? (hasJaDefs
+      ? `<div style="margin-top:8px">
          <div class="tiny" style="margin-bottom:4px"><strong>主な定義（日本語）</strong></div>
          <ol style="margin:0 0 6px 20px; line-height:1.85">
            ${jaDefs.map(d=>`<li>${escapeHTML(d||'(訳なし)')}</li>`).join('')}
          </ol>
-       </div>` : `<div class="tiny" style="margin-top:6px">定義の取得に失敗しました。</div>`;
-  const exJa = jaExamples.length
-    ? `<div style="margin-top:10px">
+       </div>`
+      : `<div class="tiny" style="margin-top:6px">主な定義（日本語）を取得できませんでした。</div>`)
+    : '';
+
+  const exJa = showJaExamples
+    ? (hasJaExamples
+      ? `<div style="margin-top:10px">
          <div class="tiny" style="margin-bottom:4px"><strong>例文（日本語訳付き）</strong></div>
          <ul style="margin:0 0 6px 18px; line-height:1.85">
            ${jaExamples.map(item=>`<li>${escapeHTML(item.ja)} <span class="tiny" style="opacity:.8">（原文：${escapeHTML(item.en)}）</span></li>`).join('')}
          </ul>
-       </div>` : '';
-  const defsEn = hasDefs
-    ? `<details style="margin-top:8px">
+       </div>`
+      : `<div class="tiny" style="margin-top:6px">例文の和訳を取得できませんでした。</div>`)
+    : '';
+
+  const defsEn = showEnDefs
+    ? (hasEnDefs
+      ? `<details style="margin-top:8px">
          <summary class="tiny">英英の原文を表示</summary>
          <ol style="margin:6px 0 6px 20px; line-height:1.8">
            ${enDefs.map(d=>`<li>${escapeHTML(d.pos ? `[${d.pos}] ` : '')}${escapeHTML(d.def)}</li>`).join('')}
          </ol>
-       </details>` : '';
+       </details>`
+      : `<div class="tiny" style="margin-top:6px">英英定義を取得できませんでした。</div>`)
+    : '';
+
   body.innerHTML = head + summary + defsJa + exJa + defsEn;
 }
 async function openLookup(word){
@@ -7345,7 +7390,8 @@ async function openLookup(word){
       jaDefs,
       jaExamples: cfg.jaEx ? jaExamples : [],
       phonetic: dict.phonetic,
-      jaWiki
+      jaWiki,
+      cfg
     });
   }catch(e){
     const ja = await translateJa(word);
