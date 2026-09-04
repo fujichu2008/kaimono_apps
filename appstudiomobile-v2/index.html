@@ -1450,6 +1450,14 @@
         // 現在のiframeが実際に使っている実行モード。恒久的なruntimeModeとは別に、
         // nextRunModeによる1回限りの安全実行も正しくエラーログへ記録するために保持する。
         let currentRunEffectiveMode = "compat";
+        // AI反映の成否とは分離して、反映後の「次のiframe実行」だけを検証する状態。
+        // runtimeTokenを正本にし、旧iframeの遅延エラーを現在の検証へ混ぜない。
+        const runtimeVerification = {
+            status: "idle",
+            runtimeToken: "",
+            completionTimer: null
+        };
+        const RUNTIME_VERIFICATION_DELAY_MS = 2000;
         let devStatsScope = 'all';
         let devStatsPeriod = 'all';
         const REFLECT_SNAPSHOT_LIMIT = 10;
@@ -1588,6 +1596,50 @@
             const btn = document.getElementById('runtime-mode-toggle-btn');
             if (!btn) return;
             btn.textContent = runtimeMode === "safe" ? "⚠ 互換実行へ戻す" : "🛡 安全実行へ切替";
+        }
+
+        function clearRuntimeVerificationTimer() {
+            if (!runtimeVerification.completionTimer) return;
+            clearTimeout(runtimeVerification.completionTimer);
+            runtimeVerification.completionTimer = null;
+        }
+
+        function beginReflectRuntimeVerification() {
+            clearRuntimeVerificationTimer();
+            runtimeVerification.status = "pending";
+            runtimeVerification.runtimeToken = "";
+            showToast("✅ 反映成功 / 実行確認中...");
+        }
+
+        function bindRuntimeVerificationToRun(runtimeToken) {
+            if (runtimeVerification.status !== "pending") return;
+            clearRuntimeVerificationTimer();
+            runtimeVerification.runtimeToken = String(runtimeToken || "");
+        }
+
+        function scheduleRuntimeVerificationCompletion(runtimeToken) {
+            if (runtimeVerification.status !== "pending") return;
+            if (!runtimeToken || runtimeVerification.runtimeToken !== runtimeToken) return;
+
+            clearRuntimeVerificationTimer();
+            runtimeVerification.completionTimer = setTimeout(() => {
+                runtimeVerification.completionTimer = null;
+                if (runtimeVerification.status !== "pending") return;
+                if (runtimeVerification.runtimeToken !== runtimeToken) return;
+                if (currentRuntimeToken !== runtimeToken) return;
+
+                runtimeVerification.status = "passed";
+                showToast("✅ 実行エラーなし");
+            }, RUNTIME_VERIFICATION_DELAY_MS);
+        }
+
+        function failRuntimeVerification(runtimeToken) {
+            if (runtimeVerification.status !== "pending") return;
+            if (!runtimeToken || runtimeVerification.runtimeToken !== runtimeToken) return;
+
+            runtimeVerification.status = "failed";
+            clearRuntimeVerificationTimer();
+            showToast("⚠ 実行エラーあり");
         }
 
         function toggleRuntimeMode() {
@@ -2232,9 +2284,9 @@
                 clearFixError();
                 recordDevLog('reflect_success', 'success', '', 'html_full');
                 closeModal('fix-modal');
-                showToast("HTMLフルコードを反映しました");
                 // 未確認フルHTMLの反映1回につき、初回安全実行の確認を1回だけ表示する
                 confirmSafeRunForUntrustedHtml();
+                beginReflectRuntimeVerification();
                 switchTab('run');
                 return true;
             }
@@ -2699,7 +2751,11 @@ ${currentCode}
                 document.getElementById('json-input').value = "";
                 recordDevLog('reflect_success', 'success', '', `json_patch:${resultSummary}`);
                 closeModal('fix-modal');
-                showToast(resultSummary);
+                if (appliedFixes.length > 0) {
+                    beginReflectRuntimeVerification();
+                } else {
+                    showToast(resultSummary);
+                }
                 switchTab('run');
                 return true;
 
@@ -2942,12 +2998,13 @@ nextBtn.onclick=nextStep;
             <script>
                 (function(){
                     const RUNTIME_TOKEN = ${JSON.stringify(currentRuntimeToken)};
-                    const send = (type, args) => {
+                    const send = (type, args, source = 'console') => {
                         try {
                             // targetOriginはsandbox互換性のため"*"のまま。runtimeTokenで実行単位を識別する。
                             window.parent.postMessage({
                                 type: 'console',
                                 level: type,
+                                source: source,
                                 runtimeToken: RUNTIME_TOKEN,
                                 args: Array.from(args).map(a => String(a))
                             }, '*');
@@ -2955,15 +3012,15 @@ nextBtn.onclick=nextStep;
                     };
                     const originalLog = console.log;
                     const originalError = console.error;
-                    console.log = function(...args) { originalLog.apply(console, args); send('log', args); };
-                    console.error = function(...args) { originalError.apply(console, args); send('error', args); };
+                    console.log = function(...args) { originalLog.apply(console, args); send('log', args, 'console'); };
+                    console.error = function(...args) { originalError.apply(console, args); send('error', args, 'console'); };
                     // window.onerrorの上書きは廃止。作成アプリ自身のerrorリスナーを壊さないaddEventListenerで取得する。
                     window.addEventListener('error', function(event) {
                         if (event && event.target && event.target !== window) {
                             const target = event.target;
                             const resourceUrl = target.currentSrc || target.src || target.href || '(URL不明)';
                             const resourceType = target.tagName ? String(target.tagName).toLowerCase() : 'resource';
-                            send('error', ['Resource load error [' + resourceType + ']: ' + resourceUrl]);
+                            send('error', ['Resource load error [' + resourceType + ']: ' + resourceUrl], 'resource');
                             return;
                         }
 
@@ -2978,11 +3035,19 @@ nextBtn.onclick=nextStep;
                         if (event && event.colno) details.push('Col: ' + event.colno);
                         if (error && error.stack) details.push('Stack: ' + error.stack);
 
-                        send('error', [details.join('\\n')]);
+                        send('error', [details.join('\\n')], 'javascript');
                     }, true);
                     window.addEventListener('unhandledrejection', function(event) {
                         const reason = event && event.reason ? event.reason : 'Unhandled Promise rejection';
-                        send('error', ['Unhandled Promise rejection: ' + String(reason)]);
+                        send('error', ['Unhandled Promise rejection: ' + String(reason)], 'unhandledrejection');
+                    });
+                    window.addEventListener('load', function() {
+                        try {
+                            window.parent.postMessage({
+                                type: 'runtime_ready',
+                                runtimeToken: RUNTIME_TOKEN
+                            }, '*');
+                        } catch(e) {}
                     });
                 })();
             <\/script>`;
@@ -3009,6 +3074,8 @@ nextBtn.onclick=nextStep;
             currentRunEffectiveMode = effectiveMode;
             // 3. 実行トークンを再生成
             currentRuntimeToken = createRuntimeToken();
+            // 反映後検証がpendingなら、この実行トークンへ検証対象を固定する。
+            bindRuntimeVerificationToRun(currentRuntimeToken);
             // 4. 実行コードを生成し、5. srcdocへ代入
             frame.srcdoc = getRunnableCode();
             frameDirty = false;
@@ -5848,8 +5915,14 @@ self.addEventListener("fetch", function (event) {
             // 危険な親操作を許可してはならない。
             if (event.source !== frame.contentWindow) return;
             if (!event.data || event.data.runtimeToken !== currentRuntimeToken) return;
+            if (event.data.type === 'runtime_ready') {
+                scheduleRuntimeVerificationCompletion(event.data.runtimeToken);
+                return;
+            }
+
             if (event.data.type === 'console') {
                 const level = String(event.data.level || 'log');
+                const source = String(event.data.source || 'console');
                 const args = Array.isArray(event.data.args) ? event.data.args : [];
                 const msg = `[${level.toUpperCase()}] ${args.join(' ')}`;
 
@@ -5859,6 +5932,13 @@ self.addEventListener("fetch", function (event) {
                 if (level === 'error') {
                     showToast(msg);
                     addIframeErrorLog(msg);
+
+                    // リソース読込失敗は従来どおりエラーログへ残すが、
+                    // 今回の実行確認ではconsole.error / JavaScript error /
+                    // unhandled rejectionだけを失敗として扱う。
+                    if (source !== 'resource') {
+                        failRuntimeVerification(event.data.runtimeToken);
+                    }
                 }
             }
         });
