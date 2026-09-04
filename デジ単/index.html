@@ -3797,6 +3797,7 @@ body #screen-ai #btnPasteJson:active{
           'dejitan_wakelock_pref',
           'dejitan_quota_visible',
           'dejitan_iv_instructions',
+          'dejitan_daily_goal',
           'dejitan_study_panel_collapsed'
         ];
         // 収集・復元の対象は必須＋任意。検証は REQUIRED_KEYS のみを見る。
@@ -7337,13 +7338,17 @@ function getBadge(stage){
       return normalizeWordStats(next);
     }
 
-    function recordSrsDailyProgress(word,pickKind,wasNew,persist){
+    function shouldCountSrsReview(pickKind,wasDue){
+      return wasDue===true;
+    }
+
+    function recordSrsDailyProgress(word,pickKind,wasDue,wasNew,persist){
       if(!word) return false;
       const shouldPersist=persist!==false;
       const level=String(word.level||levelSelect.value||'中級');
       const slot=ensureSrsDailySlot(level,undefined,false);
       const key=wordKey(word);
-      if(pickKind==='review'&&!slot.reviewDone.includes(key)){
+      if(shouldCountSrsReview(pickKind,wasDue)&&!slot.reviewDone.includes(key)){
         slot.reviewDone.push(key);
         slot.dueTarget=Math.max(slot.dueTarget|0,slot.reviewDone.length+srsDueWords(level).length);
       }
@@ -7508,6 +7513,15 @@ function getBadge(stage){
       barEl.style.width=Math.min(100,Math.round(done/total*100))+'%';
     }
 
+    function srsNewDoneCount(state,level,date){
+      const source=(state&&typeof state==='object'&&!Array.isArray(state))?state:null;
+      if(!source||String(source.date||'')!==String(date||'')) return 0;
+      const levels=(source.levels&&typeof source.levels==='object'&&!Array.isArray(source.levels))?source.levels:{};
+      const slot=levels[String(level||'')];
+      if(!slot||!Array.isArray(slot.newDone)) return 0;
+      return new Set(slot.newDone.map(String)).size;
+    }
+
     // インジケータ直下の1行セッション進捗
     function updateSessionProgress(){
       const el=document.getElementById('sessionProgress');
@@ -7516,12 +7530,12 @@ function getBadge(stage){
       try{ mk=modeKey(); }catch(_){ }
       if(mk==='SHD'||mk==='LIST'){ el.style.display='none'; el.textContent=''; return; }
       el.style.display='block';
-      let done=0;
-      try{ done=todayShownTotal()|0; }catch(_){ done=0 }
       const goal=readDailyGoal();
+      const level=String(levelSelect&&levelSelect.value||'中級');
+      const done=srsNewDoneCount(srsDailyState,level,todayStr());
       el.textContent=(done>=goal)
-        ? ('本日の目標達成 🎉 （'+done+'枚）')
-        : ('本日 '+done+'枚 / あと'+(goal-done)+'枚');
+        ? ('本日の新規目標達成 🎉 （'+done+'語）')
+        : ('本日 新規 '+done+'語 / あと'+Math.max(0,goal-done)+'語');
     }
 
     function drawSrsForecast(){
@@ -7870,10 +7884,15 @@ function getBadge(stage){
       bar.style.width=pct+'%'; counterAbs.textContent=`${st.got} / ${st.shown}`;
       const locked=(actionEl&&actionEl.dataset.lock==='1'); if(!locked){ if((st.streak|0)>=3){actionEl.textContent='チャレンジ問題！';actionEl.className='flag red'} else{actionEl.textContent='';actionEl.className='flag'} }
     }
+    function shouldCommitNormalAnswer(initial,peek){
+      return !!(initial||peek);
+    }
     if(btnGot && btnForgot){
       const handleBtn = (isGot) => {
         if(isQuizMode()) return;
-        if(isInitial()){
+        const peeked=!!swipe.peek;
+        if(shouldCommitNormalAnswer(isInitial(),peeked)){
+          if(peeked) swipe.peek=false;
           commitCardAnswer(isGot,isGot?-1:1);
         } else {
           animateCardExit(-1,startInitialView);
@@ -9728,7 +9747,8 @@ if(gotIt){
 }
 setStats(currentWord,nextStats,{persist:false});
 updateTableRow(lv,mk,currentWord);   // 全破棄せず、回答した1語だけを差分更新
-recordSrsDailyProgress(currentWord,srsPickKind,srsWasNew,false);
+const srsWasDue=(beforeStats.shown|0)>0&&String(beforeStats.srs.due)<=d;
+recordSrsDailyProgress(currentWord,srsPickKind,srsWasDue,srsWasNew,false);
 commitLearningState({wordMapChanged:true,dailyMapChanged:true,srsDailyChanged:true});
 if(showMiniNow){
   showMiniSessionSummary(lv);
@@ -10652,6 +10672,53 @@ revealRest(currentWord);
           results.push({name,passed:false,detail:String(error&&error.message||error)});
         }
       };
+
+      add('答え表示後の回答ボタンも回答確定対象になる',()=>{
+        const fromPeek=shouldCommitNormalAnswer(false,true);
+        const alreadyAnswered=shouldCommitNormalAnswer(false,false);
+        return {
+          passed:fromPeek===true&&alreadyAnswered===false,
+          detail:{fromPeek,alreadyAnswered}
+        };
+      });
+
+      add('weak出題でも回答前が期限到来なら復習完了対象になる',()=>{
+        const pickKind='weak';
+        const wasDue=true;
+        const counted=shouldCountSrsReview(pickKind,wasDue);
+        return {
+          passed:counted===true,
+          detail:{pickKind,wasDue,counted}
+        };
+      });
+
+      add('review出題でも回答前が期限前なら復習完了対象にしない',()=>{
+        const pickKind='review';
+        const wasDue=false;
+        const counted=shouldCountSrsReview(pickKind,wasDue);
+        return {
+          passed:counted===false,
+          detail:{pickKind,wasDue,counted}
+        };
+      });
+
+      add('新規目標進捗は総回答数ではなくnewDone件数を使う',()=>{
+        const state={
+          date:'2026-07-25',
+          levels:{
+            中級:{
+              reviewDone:['r1','r2','r3','r4'],
+              newDone:['n1','n2'],
+              totalShown:99
+            }
+          }
+        };
+        const done=srsNewDoneCount(state,'中級','2026-07-25');
+        return {
+          passed:done===2,
+          detail:{done,totalShown:99,reviewDone:4}
+        };
+      });
 
       add('ビオトープ劣化計算は同じ入力で変化しない',()=>{
         const first=calculateDegradedStage(12,'2026-07-01','2026-07-22');
