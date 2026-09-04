@@ -1379,6 +1379,10 @@ header nav button:hover{
   .help-callout strong{
     color:#fff;
   }
+  .confirm-text{
+    white-space:pre-wrap;
+    line-height:1.8;
+  }
   .help-note-list{
     display:grid;
     gap:8px;
@@ -2040,6 +2044,16 @@ header nav button:hover{
   </div>
 </dialog>
 
+<!-- 破壊的操作の確認（実行／中止） -->
+<dialog id="dlg-confirm" aria-labelledby="confirm-title">
+  <h3 id="confirm-title">確認</h3>
+  <div id="confirm-message" class="confirm-text"></div>
+  <div class="actions">
+    <button class="btn" type="button" id="confirm-ok">実行</button>
+    <button class="btn right" type="button" id="confirm-cancel">中止</button>
+  </div>
+</dialog>
+
 <!-- インポート方法の選択（入れ替え／追加／中止） -->
 <dialog id="dlg-import-mode" aria-labelledby="import-mode-title">
   <h3 id="import-mode-title">インポート方法の選択</h3>
@@ -2075,6 +2089,9 @@ header nav button:hover{
 /* =========================
    基本ユーティリティ
 ========================= */
+/* 開発時のみONにする診断フラグ。ONにすると学習カードの状態整合チェックが動く */
+const SPEAKNOTE_DEBUG = false;
+
 const $ = s=>document.querySelector(s);
 const $$ = s=>Array.from(document.querySelectorAll(s));
 /* crypto.randomUUID が使えない環境向けのフォールバック付きUUID */
@@ -3079,8 +3096,10 @@ req.onsuccess = async e=>{
   };
   req.onerror = e=>{ console.error('DB open error', e); alert('DB初期化に失敗しました'); };
 }
-/* IndexedDBリクエストを必ず解決または失敗させる共通ラッパー */
-function runStoreRequest(mode, build, pick){
+/* IndexedDBリクエストを必ず解決または失敗させる共通ラッパー。
+   例文ストアと録音ストアで共有し、errorPrefixだけを切り替える。
+   （db_not_ready は両ストア共通の文字列のため接頭辞を付けない） */
+function runIdbRequest(storeName, mode, build, pick, errorPrefix='db_'){
   return new Promise((resolve, reject)=>{
     if(!db){ reject(new Error('db_not_ready')); return; }
     let tx, req;
@@ -3100,8 +3119,8 @@ function runStoreRequest(mode, build, pick){
     };
 
     try{
-      tx = db.transaction([STORE], mode);
-      req = build(tx.objectStore(STORE));
+      tx = db.transaction([storeName], mode);
+      req = build(tx.objectStore(storeName));
 
       req.onsuccess = ()=>{
         try{
@@ -3119,7 +3138,7 @@ function runStoreRequest(mode, build, pick){
         }
       };
       req.onerror = ()=>{
-        rejectOnce(req.error || new Error('db_request_failed'));
+        rejectOnce(req.error || new Error(errorPrefix + 'request_failed'));
       };
 
       tx.oncomplete = ()=>{
@@ -3127,20 +3146,25 @@ function runStoreRequest(mode, build, pick){
           if(requestSucceeded){
             resolveOnce(requestValue);
           }else{
-            rejectOnce(new Error('db_request_incomplete'));
+            rejectOnce(new Error(errorPrefix + 'request_incomplete'));
           }
         }
       };
       tx.onerror = ()=>{
-        rejectOnce(tx.error || new Error('db_transaction_failed'));
+        rejectOnce(tx.error || new Error(errorPrefix + 'transaction_failed'));
       };
       tx.onabort = ()=>{
-        rejectOnce(tx.error || new Error('db_transaction_aborted'));
+        rejectOnce(tx.error || new Error(errorPrefix + 'transaction_aborted'));
       };
     }catch(e){
       rejectOnce(e);
     }
   });
+}
+
+/* 例文ストア用のラッパー（呼び出し規約は従来どおり） */
+function runStoreRequest(mode, build, pick){
+  return runIdbRequest(STORE, mode, build, pick, 'db_');
 }
 /* 一覧・シャドー用の軽量キャッシュ（画像データは保持しない） */
 let sentenceCache = null;
@@ -3212,65 +3236,9 @@ const RECORDING_CAPACITY_WARN_BYTES = 100 * 1024 * 1024;
 const RECORDING_CAPACITY_REARM_BYTES = 80 * 1024 * 1024;
 const LS_RECORDING_CAPACITY_WARNED = 'speaknote_recording_capacity_warned_v1';
 
+/* 録音ストア用のラッパー（呼び出し規約は従来どおり） */
 function runRecordingStoreRequest(mode, build, pick){
-  return new Promise((resolve, reject)=>{
-    if(!db){ reject(new Error('db_not_ready')); return; }
-    let tx, req;
-    let settled = false;
-    let requestSucceeded = false;
-    let requestValue;
-
-    const resolveOnce = value=>{
-      if(settled) return;
-      settled = true;
-      resolve(value);
-    };
-    const rejectOnce = error=>{
-      if(settled) return;
-      settled = true;
-      reject(error);
-    };
-
-    try{
-      tx = db.transaction([REC_STORE], mode);
-      req = build(tx.objectStore(REC_STORE));
-
-      req.onsuccess = ()=>{
-        try{
-          requestValue = pick ? pick(req.result) : undefined;
-          requestSucceeded = true;
-
-          if(mode === 'readonly'){
-            resolveOnce(requestValue);
-          }
-        }catch(error){
-          rejectOnce(error);
-          try{ tx.abort(); }catch(_){}
-        }
-      };
-      req.onerror = ()=>{
-        rejectOnce(req.error || new Error('recording_db_request_failed'));
-      };
-
-      tx.oncomplete = ()=>{
-        if(mode === 'readwrite'){
-          if(requestSucceeded){
-            resolveOnce(requestValue);
-          }else{
-            rejectOnce(new Error('recording_db_request_incomplete'));
-          }
-        }
-      };
-      tx.onerror = ()=>{
-        rejectOnce(tx.error || new Error('recording_db_transaction_failed'));
-      };
-      tx.onabort = ()=>{
-        rejectOnce(tx.error || new Error('recording_db_transaction_aborted'));
-      };
-    }catch(error){
-      rejectOnce(error);
-    }
-  });
+  return runIdbRequest(REC_STORE, mode, build, pick, 'recording_db_');
 }
 
 function recordingLocalDayKey(value){
@@ -4721,7 +4689,14 @@ async function renderRecordingHistory(sentenceId){
       del.className = 'btn mini danger';
       del.textContent = '削除';
       del.onclick = async ()=>{
-        if(!confirm('この録音履歴を削除しますか？')) return;
+        // 確認はwithBusyの外で取り、確認中にボタンが「削除中…」にならないようにする
+        const ok = await confirmDialog({
+          title:'録音履歴の削除',
+          message:'この録音履歴を削除しますか？',
+          okLabel:'削除',
+          okStyle:'danger'
+        });
+        if(!ok) return;
         await withBusy(del, '削除中…', async ()=>{
           try{
             clearDetailHistoryAudio();
@@ -5348,7 +5323,14 @@ function bindDetailActions(id){
     });
   };
   $('#d-del').onclick = async ()=>{
-    if(!confirm('削除しますか？')) return;
+    // 確認はwithBusyの外で取り、確認中にボタンが「削除中…」にならないようにする
+    const ok = await confirmDialog({
+      title:'例文の削除',
+      message:'削除しますか？',
+      okLabel:'削除',
+      okStyle:'danger'
+    });
+    if(!ok) return;
     await withBusy($('#d-del'), '削除中…', async ()=>{
       try{
         cleanupDetailSession();
@@ -5952,6 +5934,46 @@ function zipImportErrorMessage(error){
     'ZIPを読み込めませんでした。このSpeakNoteから出力したZIPか確認してください。';
 }
 
+/* 破壊的操作の確認ダイアログ。戻り値は true（実行）／ false（中止・Escでの終了を含む）。
+   okStyle に 'danger' を渡すと実行ボタンを警告色にする。
+   dialog非対応環境では従来のconfirmへ退避するため、messageは現行の文言をそのまま渡すこと。 */
+function confirmDialog({title='確認', message='', okLabel='実行', okStyle=''}={}){
+  return new Promise(resolve=>{
+    const dlg = $('#dlg-confirm');
+    const titleEl = $('#confirm-title');
+    const msgEl = $('#confirm-message');
+    const okBtn = $('#confirm-ok');
+    const cancelBtn = $('#confirm-cancel');
+
+    if(!dlg || !okBtn || !cancelBtn || typeof dlg.showModal !== 'function'){
+      resolve(confirm(message));
+      return;
+    }
+
+    if(titleEl) titleEl.textContent = title;
+    if(msgEl) msgEl.textContent = message;
+    okBtn.textContent = okLabel;
+    okBtn.className = okStyle ? ('btn ' + okStyle) : 'btn';
+
+    let settled = false;
+    const onClose = ()=> finish(false);
+    function finish(value){
+      if(settled) return;
+      settled = true;
+      dlg.removeEventListener('close', onClose);
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      if(dlg.open){ try{ dlg.close(); }catch(_){} }
+      resolve(value);
+    }
+
+    okBtn.onclick = ()=> finish(true);
+    cancelBtn.onclick = ()=> finish(false);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
+
 /* インポート方法を「入れ替え／追加／中止」の3ボタンで選ばせる。
    戻り値は 'replace' / 'add' / null（中止・Escでの終了を含む）。 */
 function askImportMode(message){
@@ -6207,7 +6229,14 @@ $('#save-settings').onclick = (ev)=>{
 $('#reset-all-sentences').onclick = async (ev)=>{
   ev.preventDefault();
   const button = ev.currentTarget;
-  if(!confirm('登録されている例文をすべて削除します。よろしいですか？\n\n※この操作は元に戻せません。')) return;
+  // 確認はwithBusyの外で取り、確認中にボタンが「削除中…」にならないようにする
+  const ok = await confirmDialog({
+    title:'例文の全削除',
+    message:'登録されている例文をすべて削除します。よろしいですか？\n\n※この操作は元に戻せません。',
+    okLabel:'すべて削除',
+    okStyle:'danger'
+  });
+  if(!ok) return;
   await withBusy(button, '削除中…', async ()=>{
     try{
       // 全削除も取り込みと同じ単一トランザクション処理に統一する
@@ -6458,8 +6487,11 @@ if(!SHADOW_PHASE_VALUES.has(sh.phase)){
   setShadowPhase(SHADOW_PHASE.IDLE);
 }
 
-/* phaseと実際のUI状態の矛盾を開発時に検出する。状態は一切変更しない。 */
+/* phaseと実際のUI状態の矛盾を開発時に検出する。状態は一切変更しない。
+   SPEAKNOTE_DEBUG が false のときは何も検査せず、正常扱いのtrueを返す。 */
 function checkShadowStateIntegrity(context=''){
+  if(!SPEAKNOTE_DEBUG) return true;
+
   const issues = [];
   const phase = sh.phase;
   const gradeRow = $('#sh-grade-row');
@@ -7313,6 +7345,28 @@ window.addEventListener('unhandledrejection', (event)=>{
 
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') loadVoices(); });
 window.addEventListener('pageshow', ()=> loadVoices());
+
+/* =========================
+   テスト用エクスポート
+   DOM・IndexedDB・localStorageに触れない純粋関数だけを公開し、
+   ブラウザのコンソールから直接検証できるようにする。
+   注意：buildReviewQueue / buildTodayPracticeQueue は現在時刻(now())に依存し、
+   未練習・残りの並びはシャッフルされるため、順序ではなく件数や先頭要素で検証すること。
+========================= */
+window.__SpeakNoteTest = {
+  normalizeLearning,
+  summarizeLearning,
+  buildReviewQueue,
+  buildTodayPracticeQueue,
+  estimateSpeakSeconds,
+  estimateTodayPracticeMinutes,
+  buildRoleSegments,
+  tokenizeWords,
+  zipCrc32,
+  normalizeZipPath,
+  imageExtensionFromMime,
+  importedImageMimeType
+};
 </script>
 
 
