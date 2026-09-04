@@ -5567,6 +5567,12 @@ function createSentenceTransferZip(rows){
     sentences
   };
 
+  const kpiManifest = {
+    format: 'speaknote_kpi',
+    schemaVersion: 1,
+    days: kpiData.days
+  };
+
   const readme = [
     'SpeakNote 例文・画像 移植用パッケージ',
     '',
@@ -5576,6 +5582,10 @@ function createSentenceTransferZip(rows){
     'images/',
     '  例文に登録されていた画像です。',
     '',
+    'kpi.json',
+    '  学習の記録（登録数・再生・録音の日次集計）です。',
+    '  「入れ替え」で復元したときだけ反映されます。',
+    '',
     '画像付き例文では、sentences.json内のimageFileが',
     'ZIP内の画像ファイルへの相対パスを示します。',
     'imageMimeTypeには画像のMIMEタイプが入ります。',
@@ -5583,13 +5593,17 @@ function createSentenceTransferZip(rows){
     '画像の変換に失敗した場合だけ、元のData URLを',
     'imageDataとしてsentences.json内に保持します。',
     '',
-    '録音データ、音声設定、学習実績は含まれません。'
+    '録音データと音声設定は含まれません。'
   ].join('\n');
 
   const blob = createStoreZip([
     {
       name:'sentences.json',
       bytes:zipTextEncoder.encode(JSON.stringify(manifest, null, 2))
+    },
+    {
+      name:'kpi.json',
+      bytes:zipTextEncoder.encode(JSON.stringify(kpiManifest, null, 2))
     },
     {
       name:'README.txt',
@@ -5784,6 +5798,64 @@ function bytesToDataUrl(bytes, mimeType){
   });
 }
 
+/* ZIP内のKPIは「おまけ」として扱い、壊れていても例文の復元は止めない。
+   キーはYYYY-MM-DD、値は4項目の非負数値だけを採用し、不正なものはスキップする。 */
+const KPI_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_IMPORTED_KPI_DAYS = 1000;
+
+function sanitizeImportedKpiDays(days){
+  if(!days || typeof days !== 'object' || Array.isArray(days)) return null;
+
+  const cleaned = {};
+  let count = 0;
+
+  for(const key of Object.keys(days)){
+    if(count >= MAX_IMPORTED_KPI_DAYS) break;
+    if(!KPI_DAY_KEY_PATTERN.test(key)) continue;
+
+    const row = days[key];
+    if(!row || typeof row !== 'object' || Array.isArray(row)) continue;
+
+    const pickNumber = value=>{
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+    };
+
+    const added = pickNumber(row.added);
+    const playCount = pickNumber(row.playCount);
+    const playMs = pickNumber(row.playMs);
+    const recMs = pickNumber(row.recMs);
+
+    // すべて0の日は記録として意味がないため保存しない
+    if(!added && !playCount && !playMs && !recMs) continue;
+
+    cleaned[key] = { added, playCount, playMs, recMs };
+    count++;
+  }
+
+  return count > 0 ? cleaned : null;
+}
+
+function readImportedKpiDays(entries){
+  const kpiBytes = entries.get('kpi.json');
+  if(!kpiBytes) return null;
+
+  try{
+    const kpiText = new TextDecoder('utf-8', {fatal:true}).decode(kpiBytes);
+    const kpiManifest = JSON.parse(kpiText);
+    if(
+      kpiManifest?.format !== 'speaknote_kpi' ||
+      Number(kpiManifest.schemaVersion) !== 1
+    ){
+      return null;
+    }
+    return sanitizeImportedKpiDays(kpiManifest.days);
+  }catch(error){
+    console.warn('kpi.jsonを読み込めなかったため学習記録は復元しません', error);
+    return null;
+  }
+}
+
 async function prepareSentenceZipImport(file){
   if(file.size > 256 * 1024 * 1024){
     throw new Error('zip_too_large');
@@ -5872,7 +5944,7 @@ async function prepareSentenceZipImport(file){
     });
   }
 
-  return {items, imageCount};
+  return {items, imageCount, kpiDays: readImportedKpiDays(entries)};
 }
 
 function saveImportedSentenceBatch(items, replace){
@@ -6080,6 +6152,15 @@ $('#file-import-zip').onchange = async (event)=>{
       await saveImportedSentenceBatch(prepared.items, replace);
 
       trackKpiAdd(prepared.items.length);
+
+      // 学習記録は「入れ替え」のときだけ置き換える（追加では既存の記録に触れない）
+      const kpiRestored = replace && !!prepared.kpiDays;
+      if(kpiRestored){
+        kpiData.days = prepared.kpiDays;
+        saveKpiData();
+        pruneKpiData();
+      }
+
       await fillCategoryFilter();
       await refreshList();
       await updateHomeKpi();
@@ -6087,7 +6168,8 @@ $('#file-import-zip').onchange = async (event)=>{
       alert(
         `${replace ? '入れ替え' : '追加'}が完了しました。\n` +
         `例文：${prepared.items.length}件\n` +
-        `画像：${prepared.imageCount}件`
+        `画像：${prepared.imageCount}件` +
+        (kpiRestored ? '\n学習記録：復元しました' : '')
       );
     });
   }catch(error){
