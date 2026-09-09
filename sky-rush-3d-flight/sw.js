@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-sky-rush-3d-flight-e95619f347231ca13594";
+const CACHE_NAME = "appstudio-pwa-sky-rush-3d-flight-8cb52159e06b1852d263";
 const CACHE_PREFIX = "appstudio-pwa-sky-rush-3d-flight-";
 const PRECACHE_URLS = [
     "./",
