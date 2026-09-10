@@ -419,8 +419,11 @@
         }
         .run-verification-status {
             position: absolute;
-            top: 48px;
+            top: 54px;
             right: 10px;
+            max-width: calc(100% - 20px);
+            overflow: hidden;
+            text-overflow: ellipsis;
             z-index: 30;
             padding: 4px 8px;
             border: 1px solid rgba(255,255,255,0.18);
@@ -1699,6 +1702,9 @@
 
         function isCurrentCodeVerified() {
             return runtimeVerification.status === "passed"
+                && Boolean(runtimeVerification.runtimeToken)
+                && runtimeVerification.runtimeToken === currentRuntimeToken
+                && runtimeVerification.targetRevision === codeRevisionState.current
                 && runtimeVerification.verifiedRevision === codeRevisionState.current;
         }
 
@@ -1712,14 +1718,16 @@
             if (runtimeVerification.status === "pending"
                 && runtimeVerification.targetRevision === codeRevisionState.current) {
                 state = "pending";
-                label = "… 確認中";
+                label = "… 起動チェック中";
             } else if (isCurrentCodeVerified()) {
                 state = "passed";
-                label = "✓ 確認済";
+                label = "✓ 起動時エラー未検出";
             } else if (runtimeVerification.status === "failed"
+                && Boolean(runtimeVerification.runtimeToken)
+                && runtimeVerification.runtimeToken === currentRuntimeToken
                 && runtimeVerification.targetRevision === codeRevisionState.current) {
                 state = "failed";
-                label = "! エラー";
+                label = "! 実行エラーあり";
             }
 
             statusElement.dataset.state = state;
@@ -1733,18 +1741,21 @@
             runtimeVerification.targetRevision = codeRevisionState.current;
             runtimeVerification.verifiedRevision = -1;
             syncRuntimeVerificationStatus();
-            showToast("✅ 反映成功 / 実行確認中...");
+            showToast("✅ 反映成功 / 起動チェック中...");
         }
 
         function bindRuntimeVerificationToRun(runtimeToken) {
-            if (runtimeVerification.status !== "pending") return;
-            if (runtimeVerification.targetRevision !== codeRevisionState.current) {
+            if (runtimeVerification.status === "idle") return;
+            if (!runtimeToken || runtimeVerification.targetRevision !== codeRevisionState.current) {
                 invalidateRuntimeVerificationForCodeChange();
                 return;
             }
 
+            // 検証対象コードの再実行では、前回の成否を引き継がず新しい実行をチェックする。
             clearRuntimeVerificationTimer();
-            runtimeVerification.runtimeToken = String(runtimeToken || "");
+            runtimeVerification.status = "pending";
+            runtimeVerification.verifiedRevision = -1;
+            runtimeVerification.runtimeToken = String(runtimeToken);
             syncRuntimeVerificationStatus();
         }
 
@@ -1769,18 +1780,22 @@
                 runtimeVerification.status = "passed";
                 runtimeVerification.verifiedRevision = verificationRevision;
                 syncRuntimeVerificationStatus();
-                showToast("✅ 実行エラーなし");
+                showToast("✓ 起動時エラー未検出（操作は未確認）");
             }, RUNTIME_VERIFICATION_DELAY_MS);
         }
 
         function failRuntimeVerification(runtimeToken) {
-            if (runtimeVerification.status !== "pending") return;
-            if (!runtimeToken || runtimeVerification.runtimeToken !== runtimeToken) return;
+            if (runtimeVerification.status !== "pending"
+                && runtimeVerification.status !== "passed") return;
+            if (!runtimeToken
+                || runtimeToken !== currentRuntimeToken
+                || runtimeVerification.runtimeToken !== runtimeToken) return;
             if (runtimeVerification.targetRevision !== codeRevisionState.current) {
                 invalidateRuntimeVerificationForCodeChange();
                 return;
             }
 
+            // 起動チェック通過後も、同じコード・同じ実行で発生した対象エラーを反映する。
             runtimeVerification.status = "failed";
             runtimeVerification.verifiedRevision = -1;
             clearRuntimeVerificationTimer();
@@ -1847,6 +1862,10 @@
 
         function advanceWorkspaceGeneration() {
             workspaceGeneration++;
+            // 確定したワークスペース切替では、前のアプリの反映履歴と検証結果を持ち越さない。
+            reflectSnapshots = [];
+            reflectRedoSnapshots = [];
+            invalidateRuntimeVerificationForCodeChange();
             return workspaceGeneration;
         }
 
@@ -2100,7 +2119,6 @@
                 advanceWorkspaceGeneration();
                 beginDraftSaveSuppression();
                 try {
-                    pushReflectSnapshot(editor.getValue());
                     editor.setValue("");
                     editorDraftDirty = false;
                                     currentAppName = "";
@@ -2127,7 +2145,6 @@
             advanceWorkspaceGeneration();
             beginDraftSaveSuppression();
             try {
-                pushReflectSnapshot(editor.getValue());
                 editor.setValue("");
                 editorDraftDirty = false;
                 currentAppName = "";
@@ -3269,7 +3286,7 @@ nextBtn.onclick=nextStep;
             currentRunEffectiveMode = effectiveMode;
             // 3. 実行トークンを再生成
             currentRuntimeToken = createRuntimeToken();
-            // 反映後検証がpendingなら、この実行トークンへ検証対象を固定する。
+            // 反映後の検証対象があれば、再実行も含めて新しいトークンでチェックを開始する。
             bindRuntimeVerificationToRun(currentRuntimeToken);
             // 4. 実行コードを生成し、5. srcdocへ代入
             frame.srcdoc = getRunnableCode();
