@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-sonicforge-ai-compose-0daafdef38972e090d47";
+const CACHE_NAME = "appstudio-pwa-sonicforge-ai-compose-0af4d1f8544625e514d3";
 const CACHE_PREFIX = "appstudio-pwa-sonicforge-ai-compose-";
 const PRECACHE_URLS = [
     "./",
