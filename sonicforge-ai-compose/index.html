@@ -415,20 +415,8 @@
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-slate-400 mb-1">パート数 (最大10)</label>
-                        <select id="part-count">
-                            <option value="指定なし">指定なし</option>
-                            <option value="1">1パート (単音)</option>
-                            <option value="2">2パート</option>
-                            <option value="3">3パート</option>
-                            <option value="4">4パート</option>
-                            <option value="5">5パート</option>
-                            <option value="6">6パート</option>
-                            <option value="7">7パート</option>
-                            <option value="8" selected>8パート (デフォルト)</option>
-                            <option value="9">9パート</option>
-                            <option value="10">10パート (フル)</option>
-                        </select>
+                        <label class="block text-xs text-slate-400 mb-1">パート数 (最大<span id="part-count-max-label"></span>)</label>
+                        <select id="part-count"></select>
                     </div>
                 </div>
 
@@ -589,7 +577,7 @@
                 <div class="mt-2">
                     <div id="instrument-panel" class="hidden p-3 bg-slate-900/80 rounded-xl border border-slate-700 space-y-3">
                         <p class="text-[11px] text-slate-400 leading-relaxed">各楽器のON/OFFと音量を調整できます。音量は演奏中にも現在位置を保って反映されます。</p>
-                        <div id="instrument-list" class="space-y-2 text-xs">
+                        <div id="instrument-list" class="space-y-2 text-xs max-h-80 overflow-y-auto pr-1">
                         </div>
                         <div class="grid grid-cols-2 gap-2">
                             <button onclick="resetPreviewTuning()" class="min-h-[44px] py-2 px-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-1.5 border border-slate-700">
@@ -778,6 +766,12 @@
             }
         };
         const INSTRUMENTS = ["Piano", "Pipe Organ", "Choir", "Violin", "Viola", "Cello", "Timpani", "Distortion Guitar", "Harp", "Flute", "Trumpet", "Drums", "Shakuhachi", "Koto"];
+        const SONICFORGE_LIMITS = Object.freeze({
+            MAX_PARTS: 16,
+            DEFAULT_PARTS: 8,
+            VISUALIZER_MAX_REPEAT_PASSES: 2,
+            RECOVERY_CHUNK_CHARS: 45000
+        });
 
         let originalABC = "";
         let currentABC = "";
@@ -1534,6 +1528,7 @@ V:8 nm="Timpani" snm="Timp"
                 setVisualizerIdle();
                 initPlaybackSeekControls();
                 initGenreSelect();
+                initPartCountSelect();
                 initInstrumentChips();
                 await loadLibraryFromDB();
 
@@ -1584,6 +1579,40 @@ V:8 nm="Timpani" snm="Timp"
                 safeCreateIcons();
             }
         };
+
+        function initPartCountSelect() {
+            const select = document.getElementById('part-count');
+            const maxLabel = document.getElementById('part-count-max-label');
+            if (!select) return;
+
+            select.replaceChildren();
+
+            const appendOption = (value, label, selected = false) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                option.selected = selected;
+                select.appendChild(option);
+            };
+
+            appendOption('指定なし', '指定なし');
+
+            for (let part = 1; part <= SONICFORGE_LIMITS.MAX_PARTS; part++) {
+                let label = `${part}パート`;
+                if (part === 1) label += ' (単音)';
+                if (part === SONICFORGE_LIMITS.DEFAULT_PARTS) label += ' (デフォルト)';
+                if (part === SONICFORGE_LIMITS.MAX_PARTS) label += ' (フル)';
+                appendOption(
+                    String(part),
+                    label,
+                    part === SONICFORGE_LIMITS.DEFAULT_PARTS
+                );
+            }
+
+            if (maxLabel) {
+                maxLabel.textContent = String(SONICFORGE_LIMITS.MAX_PARTS);
+            }
+        }
 
         function initGenreSelect() {
             const main = document.getElementById('genre-main');
@@ -1704,7 +1733,20 @@ V:8 nm="Timpani" snm="Timp"
                 density ? '- 音の厚み: ' + density : null
             ].filter(Boolean).map(line => line + '\n').join('');
 
-            const finalPrompt = `あなたはプロの作曲家であり、ABC記法のエキスパートです。以下の条件に基づいて、高品質な楽曲を作成してください。\n\n【楽曲の条件】\n- 大分類ジャンル: ${promptData.genre}\n- 中分類スタイル: ${promptData.style}\n- シチュエーション: ${promptData.situation}\n- 長さ: ${promptData.measures}小節${measureHint}\n- パート数: ${promptData.parts}重奏\n- 必須楽器: ${promptData.instruments}\n- エンドレスリピート: ${promptData.loop}\n${extraLines}- 追加のこだわり: ${promptData.memo}\n\n【作業の順序と制約】\n以下の順序を徹底して作曲を行ってください。\n1. まず、指定された条件に最適な「主旋律（メロディ）」を検討し、単音のABC記法として作成してください。\n2. 次に、その主旋律をベースにして、指定されたパート数・楽器を用いた「多重奏」へと拡張してください。多重奏の場合は V:1, V:2... を使用し、各パートに楽器名(nm)を設定するとともに、必ず各パートの定義部で '%%MIDI program [番号]' を記述し、対象の楽器に合致する「General MIDIのプログラム番号(0〜127)」を割り当ててください（例: バイオリンなら %%MIDI program 40）。この指定がないとWebアプリで全てピアノの音になってしまいます。\n3. 最後に、Webアプリでそのままプログラムに読み込ませるため、以下のJSON形式でのみ出力してください。\n\n【🚨最重要: JSON出力の厳格ルール（1つでも破るとアプリで読み込めません）🚨】\nR1. 出力は \`\`\`json と \`\`\` で囲んだコードブロック1個だけにする。コードブロックの前後に挨拶・解説・補足を一切書かない。\nR2. 引用符は半角ストレートの " のみ使用する。全角引用符やスマートクォートは禁止。\nR3. \`abc\` の値に実際の改行を入れない。改行はすべて2文字のエスケープ \\n（バックスラッシュ+小文字n）に置き換えて1行の文字列にする。\\\\n のような二重エスケープは禁止。\nR4. \`abc\` の値の中に二重引用符(")を一切含めないこと。楽器名は nm=Violin のように引用符なしの半角英字1単語で書く（スペースを含む名前は Violin1 のように連結する）。コードシンボル表記("C"や"Am7"など引用符で囲む記法)は使用禁止。これにより \\" エスケープ自体が不要になる。\nR5. 末尾カンマ・コメント・重複キーは禁止。キーは title / abc / description の3つのみで、値はすべて文字列にする。\nR6. 出力直前に次を順に確認する: (1)abc値の中に " が1つもないか (2)実際の改行が \\n に置換されているか (3)末尾カンマがないか (4)全体がJSON.parseを通るか。1つでも該当したら修正してから出力する。\n\n【出力JSONフォーマット】\n\`\`\`json\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\n...(実際の改行なし・\\n 区切りの1行文字列)",\n  "description": "解説"\n}\n\`\`\``;
+            const parsedPartCount = Number(promptData.parts);
+            const requestedPartCount = Number.isInteger(parsedPartCount)
+                && parsedPartCount >= 1
+                && parsedPartCount <= SONICFORGE_LIMITS.MAX_PARTS
+                    ? parsedPartCount
+                    : null;
+            const partConditionLabel = requestedPartCount
+                ? `${requestedPartCount}重奏`
+                : '指定なし（曲に最適な編成を決める）';
+            const orchestrationGuide = requestedPartCount
+                ? `\n- Voiceは V:1 から V:${requestedPartCount} まで連番で、欠番なくちょうど${requestedPartCount}個作成する。\n- 各Voiceには、主旋律・対旋律・和声・パッド・低音・リズム・打楽器・装飾など、他Voiceと区別できる明確な音楽的役割を先に割り当ててから音符を書く。\n- 全Voiceを常時鳴らす必要はない。役割のない区間は休符を積極的に使い、パート数が多いほど音数を増やすのではなく、音域・役割・登場タイミングを分散する。\n- V:1〜V:${requestedPartCount} の全Voiceを指定の${promptData.measures}小節に揃え、後半Voiceだけ途中で終わらせない。\n- 各Voice定義には nm と %%MIDI program を必ず1つずつ設定する。\n- 16パートを選んだ場合でも、出力JSONは従来どおり title / abc / description の3キーだけにする。\n`
+                : `\n- 多重奏にする場合は、各Voiceへ主旋律・対旋律・和声・パッド・低音・リズム・打楽器などの異なる役割を割り当て、必要のない区間では休符を使う。\n- 各Voiceの小節数を${promptData.measures}小節に揃え、各Voice定義には nm と %%MIDI program を必ず設定する。\n`;
+
+            const finalPrompt = `あなたはプロの作曲家であり、ABC記法のエキスパートです。以下の条件に基づいて、高品質な楽曲を作成してください。\n\n【楽曲の条件】\n- 大分類ジャンル: ${promptData.genre}\n- 中分類スタイル: ${promptData.style}\n- シチュエーション: ${promptData.situation}\n- 長さ: ${promptData.measures}小節${measureHint}\n- パート数: ${partConditionLabel}\n- 必須楽器: ${promptData.instruments}\n- エンドレスリピート: ${promptData.loop}\n${extraLines}- 追加のこだわり: ${promptData.memo}\n\n【作業の順序と制約】\n以下の順序を徹底して作曲を行ってください。\n1. まず、指定された条件に最適な「主旋律（メロディ）」を検討し、単音のABC記法として作成してください。\n2. 次に、主旋律を中心に各Voiceの音楽的役割を設計してから、指定されたパート数・楽器を用いた「多重奏」へ拡張してください。多重奏の場合は V:1, V:2... を使用し、各パートに楽器名(nm)を設定するとともに、必ず各パートの定義部で '%%MIDI program [番号]' を記述し、対象の楽器に合致する「General MIDIのプログラム番号(0〜127)」を割り当ててください（例: バイオリンなら %%MIDI program 40）。この指定がないとWebアプリで全てピアノの音になってしまいます。${orchestrationGuide}3. 最後に、Webアプリでそのままプログラムに読み込ませるため、以下のJSON形式でのみ出力してください。\n\n【🚨最重要: JSON出力の厳格ルール（1つでも破るとアプリで読み込めません）🚨】\nR1. 出力は \`\`\`json と \`\`\` で囲んだコードブロック1個だけにする。コードブロックの前後に挨拶・解説・補足を一切書かない。\nR2. 引用符は半角ストレートの " のみ使用する。全角引用符やスマートクォートは禁止。\nR3. \`abc\` の値に実際の改行を入れない。改行はすべて2文字のエスケープ \\n（バックスラッシュ+小文字n）に置き換えて1行の文字列にする。\\\\n のような二重エスケープは禁止。\nR4. \`abc\` の値の中に二重引用符(")を一切含めないこと。楽器名は nm=Violin のように引用符なしの半角英字1単語で書く（スペースを含む名前は Violin1 のように連結する）。コードシンボル表記("C"や"Am7"など引用符で囲む記法)は使用禁止。これにより \\" エスケープ自体が不要になる。\nR5. 末尾カンマ・コメント・重複キーは禁止。キーは title / abc / description の3つのみで、値はすべて文字列にする。\nR6. 出力直前に次を順に確認する: (1)abc値の中に " が1つもないか (2)実際の改行が \\n に置換されているか (3)末尾カンマがないか (4)全体がJSON.parseを通るか。1つでも該当したら修正してから出力する。\n\n【出力JSONフォーマット】\n\`\`\`json\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\n...(実際の改行なし・\\n 区切りの1行文字列)",\n  "description": "解説"\n}\n\`\`\``;
 
             copyTextToClipboard(finalPrompt, "作曲用プロンプトをコピーしました！\nお使いの生成AIに貼り付け、出力されたJSONをコピーしたら「再生」タブの読み込みボタンを押してください。");
             toggleView('player'); // プロンプトコピー後、自動的に再生タブへ遷移
@@ -1741,7 +1783,8 @@ V:8 nm="Timpani" snm="Timp"
                 return;
             }
             
-            const prompt = `以下のABC記法の楽曲データをベースに、次の修正指示に従って楽曲をアップデートしてください。\n\n【修正指示】\n${refineText}\n\n【現在のABCデータ】\n${currentABC}\n\n【作業の順序と制約】\n1. 修正指示に基づき、まず主旋律の調整を行い、その後多重奏全体のバランスを整えてください。その際、各パートに '%%MIDI program [番号]' が正しく設定されているか確認し、意図した楽器の音色になるよう維持・付与してください。\n2. 最終的な結果を、JSONフォーマットでのみ出力してください。解説テキストは不要です。\n\n【🚨最重要: JSON出力の厳格ルール（1つでも破るとアプリで読み込めません）🚨】\nR1. 出力は \`\`\`json と \`\`\` で囲んだコードブロック1個だけにする。コードブロックの前後に挨拶・解説・補足を一切書かない。\nR2. 引用符は半角ストレートの " のみ使用する。全角引用符やスマートクォートは禁止。\nR3. \`abc\` の値に実際の改行を入れない。改行はすべて2文字のエスケープ \\n（バックスラッシュ+小文字n）に置き換えて1行の文字列にする。\\\\n のような二重エスケープは禁止。\nR4. \`abc\` の値の中に二重引用符(")を一切含めないこと。楽器名は nm=Violin のように引用符なしの半角英字1単語で書く（スペースを含む名前は Violin1 のように連結する）。既存データに nm="Violin" 形式があれば nm=Violin へ書き換える。コードシンボル表記("C"や"Am7"など引用符で囲む記法)は使用禁止。これにより \\" エスケープ自体が不要になる。\nR5. 末尾カンマ・コメント・重複キーは禁止。キーは title / abc / description の3つのみで、値はすべて文字列にする。\nR6. 出力直前に次を順に確認する: (1)abc値の中に " が1つもないか (2)実際の改行が \\n に置換されているか (3)末尾カンマがないか (4)全体がJSON.parseを通るか。1つでも該当したら修正してから出力する。\n\n【出力JSONフォーマット】\n\`\`\`json\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\n...(実際の改行なし・\\n 区切りの1行文字列)",\n  "description": "解説"\n}\n\`\`\``;
+            const refineVoiceCount = countAbcVoicesForExport(currentABC);
+            const prompt = `以下のABC記法の楽曲データをベースに、次の修正指示に従って楽曲をアップデートしてください。\n\n【修正指示】\n${refineText}\n\n【現在のABCデータ】\n${currentABC}\n\n【作業の順序と制約】\n1. 修正指示に基づき、まず主旋律の調整を行い、その後多重奏全体のバランスを整えてください。\n2. 現在の楽曲は${refineVoiceCount}パートです。修正指示でパート数変更を明示していない限り、既存のVoice数とVoice IDを維持し、V:1から既存最終Voiceまで欠番を作らないでください。各Voiceの小節数を揃え、不要な区間は休符を使ってください。各Voiceの nm と '%%MIDI program [番号]' も維持・補完してください。\n3. 最終的な結果を、title / abc / description の3キーだけを持つ従来と同じJSONフォーマットでのみ出力してください。解説テキストは不要です。\n\n【🚨最重要: JSON出力の厳格ルール（1つでも破るとアプリで読み込めません）🚨】\nR1. 出力は \`\`\`json と \`\`\` で囲んだコードブロック1個だけにする。コードブロックの前後に挨拶・解説・補足を一切書かない。\nR2. 引用符は半角ストレートの " のみ使用する。全角引用符やスマートクォートは禁止。\nR3. \`abc\` の値に実際の改行を入れない。改行はすべて2文字のエスケープ \\n（バックスラッシュ+小文字n）に置き換えて1行の文字列にする。\\\\n のような二重エスケープは禁止。\nR4. \`abc\` の値の中に二重引用符(")を一切含めないこと。楽器名は nm=Violin のように引用符なしの半角英字1単語で書く（スペースを含む名前は Violin1 のように連結する）。既存データに nm="Violin" 形式があれば nm=Violin へ書き換える。コードシンボル表記("C"や"Am7"など引用符で囲む記法)は使用禁止。これにより \\" エスケープ自体が不要になる。\nR5. 末尾カンマ・コメント・重複キーは禁止。キーは title / abc / description の3つのみで、値はすべて文字列にする。\nR6. 出力直前に次を順に確認する: (1)abc値の中に " が1つもないか (2)実際の改行が \\n に置換されているか (3)末尾カンマがないか (4)全体がJSON.parseを通るか。1つでも該当したら修正してから出力する。\n\n【出力JSONフォーマット】\n\`\`\`json\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\n...(実際の改行なし・\\n 区切りの1行文字列)",\n  "description": "解説"\n}\n\`\`\``;
             
             copyTextToClipboard(prompt, "修正用プロンプトをコピーしました！\nお使いの生成AIに貼り付け、出力されたJSONをコピーしたら再度上部の読み込みボタンを押してください。");
             document.getElementById('refine-text').value = ''; // 入力欄をクリア
@@ -1778,9 +1821,31 @@ V:8 nm="Timpani" snm="Timp"
             }
         }
 
+        function buildJsonRecoverySource(rawText) {
+            const source = String(rawText || "");
+            const chunkSize = SONICFORGE_LIMITS.RECOVERY_CHUNK_CHARS;
+            if (source.length <= chunkSize) return source;
+
+            const chunks = [];
+            let start = 0;
+
+            while (start < source.length) {
+                let end = Math.min(source.length, start + chunkSize);
+                if (end < source.length && /[\uD800-\uDBFF]/.test(source[end - 1])) {
+                    end--;
+                }
+                chunks.push(source.slice(start, end));
+                start = end;
+            }
+
+            return chunks
+                .map((chunk, index) => `--- SONICFORGE RAW CHUNK ${index + 1}/${chunks.length} START ---\n${chunk}\n--- SONICFORGE RAW CHUNK ${index + 1}/${chunks.length} END ---`)
+                .join("\n");
+        }
+
         function buildJsonRecoveryPrompt(rawText, errorMessage) {
-            const safeRawText = String(rawText || "").slice(0, 60000);
-            return `あなたはABC記法とJSON修復の専門家です。以下のテキストは、SonicForgeというWebアプリに読み込ませようとして失敗したAI作曲JSONです。\n\n【発生したエラー】\n${errorMessage || "不明なエラー"}\n\n【修復してほしい内容】\n1. JSONとして正しくパースできる形に修正してください。\n2. 必ず title, abc, description の3項目を持つJSONにしてください。\n3. abc の値には、実際の改行を入れず、改行はすべて \\n にエスケープしてください。\n4. abc はABC記法として成立するようにしてください。\n5. abc の値の中に二重引用符(")を一切含めないでください。既存の二重引用符はエスケープではなく除去・書き換えで対処します: 楽器名は nm="Violin" → nm=Violin のように引用符なしの半角英字1単語へ書き換え、コードシンボル表記("C"等)は削除してください。JSONの構造部分の引用符は半角ストレートの " のみ使用し、全角引用符・スマートクォートは禁止です。\n6. 末尾カンマは禁止です。余計な説明文、Markdown、コードブロックは不要です。JSONだけを出力してください。\n\n【正しい出力形式】\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\nCDEF GABc|",\n  "description": "楽曲の説明"\n}\n\n【修復対象テキスト】\n${safeRawText}`;
+            const recoverySource = buildJsonRecoverySource(rawText);
+            return `あなたはABC記法とJSON修復の専門家です。以下のテキストは、SonicForgeというWebアプリに読み込ませようとして失敗したAI作曲JSONです。\n\n【発生したエラー】\n${errorMessage || "不明なエラー"}\n\n【修復してほしい内容】\n1. JSONとして正しくパースできる形に修正してください。\n2. 必ず title, abc, description の3項目を持つJSONにしてください。\n3. abc の値には、実際の改行を入れず、改行はすべて \\n にエスケープしてください。\n4. abc はABC記法として成立するようにしてください。\n5. abc の値の中に二重引用符(")を一切含めないでください。既存の二重引用符はエスケープではなく除去・書き換えで対処します: 楽器名は nm="Violin" → nm=Violin のように引用符なしの半角英字1単語へ書き換え、コードシンボル表記("C"等)は削除してください。JSONの構造部分の引用符は半角ストレートの " のみ使用し、全角引用符・スマートクォートは禁止です。\n6. 末尾カンマは禁止です。余計な説明文、Markdown、コードブロックは不要です。JSONだけを出力してください。\n7. 修復対象が複数の SONICFORGE RAW CHUNK に分割されている場合、START/END行そのものはデータではありません。CHUNK 1から順番に本文だけを連結したものが元の修復対象全文です。途中のVoiceや末尾を省略せず、全CHUNKを使って復元してください。\n\n【正しい出力形式】\n{\n  "title": "曲名",\n  "abc": "X:1\\nT:曲名\\nM:4/4\\nL:1/8\\nQ:1/4=120\\nK:C\\nCDEF GABc|",\n  "description": "楽曲の説明"\n}\n\n【修復対象テキスト】\n${recoverySource}`;
         }
 
         async function copyJsonRecoveryPrompt(rawText, errorMessage) {
@@ -2069,7 +2134,7 @@ V:8 nm="Timpani" snm="Timp"
                 hasMidiProgram: false,
                 noteCount: 0
             }));
-            const byId = new Map(parts.map(part => [part.id, part]));
+            const byId = new Map(parts.map(part => [String(part.id), part]));
             let currentVoice = null;
 
             const ensurePart = (id) => {
@@ -2105,20 +2170,18 @@ V:8 nm="Timpani" snm="Timp"
                 }
             });
 
-            const bodies = collectAbcVoiceBodies(abc);
-            if (!parts.length && bodies.length) ensurePart('1');
+            const voiceEntries = collectAbcVoiceEntries(abc);
+            if (!parts.length && voiceEntries.length) ensurePart(voiceEntries[0].id || '1');
 
-            bodies.forEach((body, index) => {
-                const part = parts[index] || ensurePart(String(index + 1));
-                part.noteCount = countApproximateNotes(body);
+            voiceEntries.forEach(entry => {
+                ensurePart(entry.id).noteCount = countApproximateNotes(entry.body);
             });
 
             return parts;
         }
 
-        function estimateGameReadyMeasures(abc = "") {
-            const body = collectAbcVoiceBodies(abc)[0] || "";
-            const bars = body.match(/\|:|:\||\|\]|\[\||\|\||\|/g) || [];
+        function estimateMeasuresFromVoiceBody(abc = "", body = "") {
+            const bars = String(body || "").match(/\|:|:\||\|\]|\[\||\|\||\|/g) || [];
             if (bars.length) return bars.length;
 
             const meter = String(abc).match(/^M:\s*(\d+)\s*\/\s*(\d+)/mi);
@@ -2126,6 +2189,40 @@ V:8 nm="Timpani" snm="Timp"
             const events = parseAbcEventsFromVoice(body, parseAbcBaseUnit(abc));
             const beats = events.reduce((sum, event) => sum + event.durationBeats, 0);
             return beats > 0 ? Math.max(1, Math.round(beats / beatsPerMeasure)) : 0;
+        }
+
+        function estimateGameReadyVoiceMeasures(abc = "") {
+            const entries = collectAbcVoiceEntries(abc);
+            const bodyById = new Map(entries.map(entry => [String(entry.id), entry.body]));
+            const voiceIds = collectAbcVoiceDefinitions(abc).map(definition => String(definition.id));
+
+            entries.forEach(entry => {
+                const id = String(entry.id);
+                if (!voiceIds.includes(id)) voiceIds.push(id);
+            });
+
+            if (!voiceIds.length && entries.length) {
+                voiceIds.push(String(entries[0].id || '1'));
+            }
+
+            return voiceIds.map(id => ({
+                id,
+                measures: estimateMeasuresFromVoiceBody(abc, bodyById.get(id) || "")
+            }));
+        }
+
+        function estimateGameReadyMeasures(abc = "") {
+            const values = estimateGameReadyVoiceMeasures(abc)
+                .map(item => item.measures)
+                .filter(value => value > 0)
+                .sort((a, b) => a - b);
+
+            if (!values.length) return 0;
+
+            const middle = Math.floor(values.length / 2);
+            return values.length % 2
+                ? values[middle]
+                : Math.round((values[middle - 1] + values[middle]) / 2);
         }
 
         function estimateGameReadyDuration(abc = "", bpm = 120) {
@@ -2148,6 +2245,7 @@ V:8 nm="Timpani" snm="Timp"
             const bpm = parseTempoFromABC(safeAbc);
             const parts = collectGameReadyParts(safeAbc);
             const partCount = countAbcVoicesForExport(safeAbc);
+            const voiceMeasures = estimateGameReadyVoiceMeasures(safeAbc);
             const measures = estimateGameReadyMeasures(safeAbc);
             const duration = runtime.durationSec > 0
                 ? runtime.durationSec
@@ -2167,6 +2265,37 @@ V:8 nm="Timpani" snm="Timp"
                 runtime.primeOk ? 'ABCJS Synthのprimeに成功しました。' : `prime失敗: ${runtime.primeError || '音源またはABC記法を確認してください。'}`
             );
             add('実際のパート数', partCount > 0 ? 'ok' : 'error', `${partCount}パートを検出しました。`);
+
+            const voiceMeasureText = voiceMeasures.length
+                ? voiceMeasures.map(item => `V:${item.id}=${item.measures > 0 ? `約${item.measures}` : '不明'}`).join(' / ')
+                : 'Voice本文を検出できませんでした。';
+            const unknownMeasureVoices = voiceMeasures.filter(item => item.measures <= 0);
+            add(
+                'Voice別推定小節数',
+                voiceMeasures.length && !unknownMeasureVoices.length ? 'ok' : 'warning',
+                voiceMeasureText
+            );
+
+            const measurableVoiceMeasures = voiceMeasures.filter(item => item.measures > 0);
+            const minVoiceMeasures = measurableVoiceMeasures.length
+                ? Math.min(...measurableVoiceMeasures.map(item => item.measures))
+                : 0;
+            const maxVoiceMeasures = measurableVoiceMeasures.length
+                ? Math.max(...measurableVoiceMeasures.map(item => item.measures))
+                : 0;
+            const voiceMeasureTolerance = Math.max(1, Math.round(Math.max(1, measures || maxVoiceMeasures) * 0.15));
+            const voiceMeasureSpread = maxVoiceMeasures - minVoiceMeasures;
+            const voiceMeasureMismatch = unknownMeasureVoices.length > 0
+                || (measurableVoiceMeasures.length > 1 && voiceMeasureSpread > voiceMeasureTolerance);
+            add(
+                'Voice間の小節整合',
+                voiceMeasureMismatch ? 'warning' : 'ok',
+                unknownMeasureVoices.length
+                    ? `小節数を推定できないVoiceがあります: ${unknownMeasureVoices.map(item => `V:${item.id}`).join('、')}`
+                    : (measurableVoiceMeasures.length > 1
+                        ? `最短約${minVoiceMeasures} / 最長約${maxVoiceMeasures}小節です。`
+                        : '比較対象のVoiceは1つです。')
+            );
 
             const noProgram = parts.filter(part => !part.hasMidiProgram);
             add(
@@ -2213,15 +2342,33 @@ V:8 nm="Timpani" snm="Timp"
                         requestedParts === partCount ? 'ok' : 'warning',
                         `指定${requestedParts} / 実際${partCount}パートです。`
                     );
+
+                    const actualVoiceIds = new Set(parts.map(part => String(part.id)));
+                    const missingVoices = Array.from(
+                        { length: requestedParts },
+                        (_, index) => String(index + 1)
+                    ).filter(id => !actualVoiceIds.has(id));
+                    add(
+                        'Voice欠番',
+                        missingVoices.length ? 'error' : 'ok',
+                        missingVoices.length
+                            ? `不足: ${missingVoices.map(id => `V:${id}`).join('、')}`
+                            : `V:1〜V:${requestedParts} が欠番なく存在します。`
+                    );
                 }
 
                 const requestedMeasures = Number(requested.measures);
-                if (requestedMeasures > 0 && measures > 0) {
+                if (requestedMeasures > 0) {
                     const tolerance = Math.max(1, Math.round(requestedMeasures * 0.15));
+                    const mismatchedVoices = voiceMeasures.filter(item =>
+                        item.measures <= 0 || Math.abs(requestedMeasures - item.measures) > tolerance
+                    );
                     add(
                         '指定小節数との比較',
-                        Math.abs(requestedMeasures - measures) <= tolerance ? 'ok' : 'warning',
-                        `指定${requestedMeasures} / 推定約${measures}小節です。`
+                        voiceMeasures.length && !mismatchedVoices.length ? 'ok' : 'warning',
+                        mismatchedVoices.length
+                            ? `指定${requestedMeasures}小節から外れるVoice: ${mismatchedVoices.map(item => `V:${item.id}=${item.measures > 0 ? `約${item.measures}` : '不明'}`).join('、')}`
+                            : `全Voiceが指定${requestedMeasures}小節の許容範囲内です（代表値 約${measures}小節）。`
                     );
                 }
 
@@ -2566,24 +2713,33 @@ V:8 nm="Timpani" snm="Timp"
             const baseUnit = parseAbcBaseUnit(abc);
             const bodies = collectAbcVoiceBodies(abc);
             const secPerBeat = 60 / visualizerTempoBpm;
+            const hasRepeatMarks = /(?:\|:|:\|)/.test(String(abc || ""));
+            const repeatPasses = hasRepeatMarks
+                ? SONICFORGE_LIMITS.VISUALIZER_MAX_REPEAT_PASSES
+                : 1;
 
             bodies.forEach((body, vIdx) => {
                 const events = parseAbcEventsFromVoice(body, baseUnit);
                 if (!events.length) return;
-                let trackNotes = [];
-                let currentTime = 0;
-                let loopCount = 0;
 
-                while (loopCount < 20 && currentTime < 1200) {
+                const trackNotes = [];
+                let currentTime = 0;
+
+                for (let pass = 0; pass < repeatPasses; pass++) {
                     events.forEach(ev => {
                         const dur = ev.durationBeats * secPerBeat;
                         if (ev.freqs && ev.freqs.length > 0) {
-                            trackNotes.push({ start: currentTime, end: currentTime + dur, freqs: ev.freqs, voice: vIdx });
+                            trackNotes.push({
+                                start: currentTime,
+                                end: currentTime + dur,
+                                freqs: ev.freqs,
+                                voice: vIdx
+                            });
                         }
                         currentTime += dur;
                     });
-                    loopCount++;
                 }
+
                 window.dotTracks.push(trackNotes);
             });
         }
@@ -4096,7 +4252,7 @@ V:8 nm="Timpani" snm="Timp"
             };
         }
 
-        function collectAbcVoiceBodies(abc = "") {
+        function collectAbcVoiceEntries(abc = "") {
             const voices = new Map();
             let currentVoice = "default";
             let inBody = false;
@@ -4104,12 +4260,13 @@ V:8 nm="Timpani" snm="Timp"
             const addLine = (voice, line) => {
                 const cleanLine = line.trim();
                 if (!cleanLine) return;
-                if (!voices.has(voice)) voices.set(voice, []);
-                voices.get(voice).push(cleanLine);
+                const voiceId = String(voice || "default");
+                if (!voices.has(voiceId)) voices.set(voiceId, []);
+                voices.get(voiceId).push(cleanLine);
             };
 
-            abc.replace(/\r/g, "").split("\n").forEach((rawLine) => {
-                let line = rawLine.trim();
+            String(abc || "").replace(/\r/g, "").split("\n").forEach((rawLine) => {
+                const line = rawLine.trim();
                 if (!line || line.startsWith("%")) return;
 
                 if (/^K:/i.test(line)) {
@@ -4137,9 +4294,16 @@ V:8 nm="Timpani" snm="Timp"
                 addLine(currentVoice, line);
             });
 
-            return Array.from(voices.values())
-                .map(lines => lines.join(" "))
-                .filter(Boolean);
+            return Array.from(voices.entries())
+                .map(([id, lines]) => ({
+                    id,
+                    body: lines.join(" ")
+                }))
+                .filter(entry => entry.body);
+        }
+
+        function collectAbcVoiceBodies(abc = "") {
+            return collectAbcVoiceEntries(abc).map(entry => entry.body);
         }
 
         function parseAbcEventsFromVoice(voiceText, baseUnit) {
