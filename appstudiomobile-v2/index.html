@@ -765,6 +765,36 @@
             box-shadow: 0 -10px 32px rgba(0,0,0,0.58);
         }
 
+        /* AI指示・相談中も実行画面を暗くしない。背面操作は誤操作防止のため従来どおりロックする。 */
+        #prompt-modal,
+        #consult-modal {
+            background: transparent;
+        }
+        #prompt-modal > .modal,
+        #consult-modal > .modal {
+            will-change: transform;
+        }
+        #prompt-modal > .modal > h2,
+        #consult-modal > .modal > h2 {
+            cursor: grab;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #prompt-modal > .modal > h2:active,
+        #consult-modal > .modal > h2:active {
+            cursor: grabbing;
+        }
+        #prompt-modal > .modal > h2::after,
+        #consult-modal > .modal > h2::after {
+            content: "↕ 移動";
+            float: right;
+            margin-left: 10px;
+            color: #888;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
         /* --- GitHub Publish --- */
         .github-publish-modal {
             width: min(90%, 640px);
@@ -2708,8 +2738,158 @@
         // (ヘルプはタブ化されました)
 
         // --- New: AI & Fix Logic ---
+        const draggableAiModalStates = new Map();
+
+        function getAiModalViewportBounds() {
+            const viewport = window.visualViewport;
+            const left = viewport ? viewport.offsetLeft : 0;
+            const top = viewport ? viewport.offsetTop : 0;
+            const width = viewport ? viewport.width : window.innerWidth;
+            const height = viewport ? viewport.height : window.innerHeight;
+            return {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height
+            };
+        }
+
+        function applyDraggableAiModalTransform(modalId) {
+            const overlay = document.getElementById(modalId);
+            const modal = overlay?.querySelector('.modal');
+            const state = draggableAiModalStates.get(modalId);
+            if (!modal || !state) return;
+            modal.style.transform = `translate3d(${state.x}px, ${state.y}px, 0)`;
+        }
+
+        function clampDraggableAiModal(modalId) {
+            const overlay = document.getElementById(modalId);
+            const modal = overlay?.querySelector('.modal');
+            const handle = modal?.querySelector('h2');
+            const state = draggableAiModalStates.get(modalId);
+            if (!overlay || !modal || !handle || !state || overlay.style.display !== 'flex') return;
+
+            // モーダル本体は画面外へ移動可能にする。
+            // ただし見出しの一部だけは画面内に残し、指示・相談ウィンドウを必ずドラッグで戻せるようにする。
+            const keepVisibleX = 56;
+            const keepVisibleY = 28;
+            const bounds = getAiModalViewportBounds();
+            const handleRect = handle.getBoundingClientRect();
+            let adjustX = 0;
+            let adjustY = 0;
+
+            if (handleRect.right < bounds.left + keepVisibleX) {
+                adjustX = bounds.left + keepVisibleX - handleRect.right;
+            } else if (handleRect.left > bounds.right - keepVisibleX) {
+                adjustX = bounds.right - keepVisibleX - handleRect.left;
+            }
+
+            if (handleRect.bottom < bounds.top + keepVisibleY) {
+                adjustY = bounds.top + keepVisibleY - handleRect.bottom;
+            } else if (handleRect.top > bounds.bottom - keepVisibleY) {
+                adjustY = bounds.bottom - keepVisibleY - handleRect.top;
+            }
+
+            if (adjustX || adjustY) {
+                state.x += adjustX;
+                state.y += adjustY;
+                applyDraggableAiModalTransform(modalId);
+            }
+        }
+
+        function ensureDraggableAiModal(modalId) {
+            const overlay = document.getElementById(modalId);
+            const modal = overlay?.querySelector('.modal');
+            const handle = modal?.querySelector('h2');
+            if (!overlay || !modal || !handle || draggableAiModalStates.has(modalId)) return;
+
+            const state = {
+                x: 0,
+                y: 0,
+                dragging: false,
+                pointerId: null,
+                startX: 0,
+                startY: 0,
+                startLeft: 0,
+                startTop: 0,
+                width: 0,
+                height: 0,
+                baseX: 0,
+                baseY: 0
+            };
+            draggableAiModalStates.set(modalId, state);
+            handle.title = "ここをドラッグして移動";
+
+            handle.addEventListener('pointerdown', event => {
+                if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+                const rect = modal.getBoundingClientRect();
+                state.dragging = true;
+                state.pointerId = event.pointerId;
+                state.startX = event.clientX;
+                state.startY = event.clientY;
+                state.startLeft = rect.left;
+                state.startTop = rect.top;
+                state.width = rect.width;
+                state.height = rect.height;
+                state.baseX = state.x;
+                state.baseY = state.y;
+
+                try {
+                    handle.setPointerCapture(event.pointerId);
+                } catch (error) {}
+                event.preventDefault();
+            });
+
+            handle.addEventListener('pointermove', event => {
+                if (!state.dragging || event.pointerId !== state.pointerId) return;
+
+                const rawDx = event.clientX - state.startX;
+                const rawDy = event.clientY - state.startY;
+
+                // ドラッグ中は画面端で止めず、そのまま画面外まで移動できるようにする。
+                // pointerup時のclampDraggableAiModal()で、戻すための見出し領域だけを画面内へ残す。
+                state.x = state.baseX + rawDx;
+                state.y = state.baseY + rawDy;
+                applyDraggableAiModalTransform(modalId);
+                event.preventDefault();
+            });
+
+            const finishDrag = event => {
+                if (!state.dragging || event.pointerId !== state.pointerId) return;
+                state.dragging = false;
+                try {
+                    handle.releasePointerCapture(event.pointerId);
+                } catch (error) {}
+                state.pointerId = null;
+                clampDraggableAiModal(modalId);
+            };
+
+            handle.addEventListener('pointerup', finishDrag);
+            handle.addEventListener('pointercancel', finishDrag);
+        }
+
+        function openDraggableAiModal(modalId) {
+            const overlay = document.getElementById(modalId);
+            if (!overlay) return;
+            ensureDraggableAiModal(modalId);
+            overlay.style.display = 'flex';
+            requestAnimationFrame(() => clampDraggableAiModal(modalId));
+        }
+
+        window.addEventListener('resize', () => {
+            clampDraggableAiModal('prompt-modal');
+            clampDraggableAiModal('consult-modal');
+        });
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => {
+                clampDraggableAiModal('prompt-modal');
+                clampDraggableAiModal('consult-modal');
+            });
+        }
+
         function openConsultModal() {
-            document.getElementById('consult-modal').style.display = 'flex';
+            openDraggableAiModal('consult-modal');
         }
        
                 function copyConsultPrompt() {
@@ -2733,7 +2913,7 @@
         }
 
                         function openPromptModal() {
-            document.getElementById('prompt-modal').style.display = 'flex';
+            openDraggableAiModal('prompt-modal');
             setPromptCodeAttachMode(getPromptCodeAttachMode(), { silent: true });
             updatePromptSplitButtons();
         }
