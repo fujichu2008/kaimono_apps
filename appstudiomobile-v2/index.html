@@ -197,6 +197,86 @@
         .step-text { font-size: 13px; line-height: 1.5; }
 
         /* --- Editor Styles --- */
+        .editor-search-bar {
+            flex-shrink: 0;
+            padding: 6px 8px;
+            background: var(--surface-color);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .editor-search-bar[hidden] {
+            display: none !important;
+        }
+        .editor-search-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .editor-search-row + .editor-search-row {
+            margin-top: 4px;
+        }
+        .editor-search-input {
+            flex: 1;
+            min-width: 0;
+            height: 44px;
+            padding: 0 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 7px;
+            background: var(--bg-color);
+            color: var(--text-color);
+            font-size: 13px;
+        }
+        .editor-search-count {
+            flex: 0 0 50px;
+            text-align: center;
+            color: #aaa;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .editor-search-icon-btn,
+        .editor-search-action-btn {
+            min-height: 44px;
+            border: 1px solid var(--border-color);
+            border-radius: 7px;
+            background: #333;
+            color: var(--text-color);
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+        .editor-search-icon-btn {
+            flex: 0 0 44px;
+            width: 44px;
+            padding: 0;
+            font-size: 17px;
+        }
+        .editor-search-action-btn {
+            flex: 0 0 auto;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .editor-search-action-btn.primary {
+            border-color: var(--accent-color);
+            background: var(--accent-color);
+            color: #fff;
+        }
+        .editor-search-action-btn.secondary {
+            background: transparent;
+            color: #aaa;
+        }
+        .editor-search-icon-btn:active,
+        .editor-search-action-btn:active {
+            transform: scale(0.97);
+        }
+        .cm-quick-search-match {
+            background: rgba(255, 193, 7, 0.22);
+            border-bottom: 1px solid rgba(255, 193, 7, 0.65);
+        }
+        .cm-quick-search-current {
+            background: rgba(0, 122, 204, 0.75) !important;
+            color: #fff !important;
+            outline: 1px solid rgba(255,255,255,0.65);
+        }
+
                 .editor-container {
             flex: 1;
             position: relative;
@@ -961,12 +1041,29 @@
             <button class="tool-btn" onclick="pasteCode()" title="全コード上書きペースト">
                 <span>📋 ペースト</span>
             </button>
+            <button class="tool-btn" onclick="toggleEditorSearchBar()" title="文字列を検索・置換" aria-label="文字列を検索・置換" style="min-width:44px; width:44px; height:44px; padding:0;">
+                <span>🔎</span>
+            </button>
             <button class="tool-btn primary" onclick="runCode()">
                 <span>▶ 実行</span>
             </button>
                         <button id="save-status-btn" class="tool-btn" onclick="openSaveModal()">
                 <span>💾 保存</span>
             </button>
+        </div>
+        <div id="editor-search-bar" class="editor-search-bar" hidden>
+            <div class="editor-search-row">
+                <input type="text" id="editor-search-query" class="editor-search-input" placeholder="検索文字列" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="handleEditorSearchQueryInput(this.value)">
+                <span id="editor-search-count" class="editor-search-count">0 / 0</span>
+                <button type="button" class="editor-search-icon-btn" onclick="moveEditorSearch(-1)" title="前の一致" aria-label="前の一致">↑</button>
+                <button type="button" class="editor-search-icon-btn" onclick="moveEditorSearch(1)" title="次の一致" aria-label="次の一致">↓</button>
+                <button type="button" class="editor-search-icon-btn" onclick="closeEditorSearchBar()" title="検索・置換を閉じる" aria-label="検索・置換を閉じる">✕</button>
+            </div>
+            <div class="editor-search-row">
+                <input type="text" id="editor-search-replace" class="editor-search-input" placeholder="置換文字列" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="handleEditorSearchReplacementInput(this.value)">
+                <button type="button" class="editor-search-action-btn primary" onclick="replaceCurrentEditorSearchMatch()">この1件を置換</button>
+                <button type="button" class="editor-search-action-btn secondary" onclick="replaceAllEditorSearchMatches()">すべて置換</button>
+            </div>
         </div>
                 <div class="editor-container">
             <div id="code-stats">0行 / 0文字</div>
@@ -1469,6 +1566,22 @@
         });
         editor.setSize("100%", "100%");
 
+        const EDITOR_SEARCH_MARK_LIMIT = 200;
+        const EDITOR_SEARCH_DEBOUNCE_MS = 180;
+        const editorSearchState = {
+            isOpen: false,
+            query: "",
+            searchedQuery: "",
+            replacement: "",
+            matches: [],
+            currentIndex: -1,
+            marks: [],
+            currentMark: null,
+            refreshTimer: null,
+            codeRevision: -1,
+            mutating: false
+        };
+
                 const stats = document.getElementById('code-stats');
         const frame = document.getElementById('app-frame');
         const filenameInput = document.getElementById('filename-input');
@@ -1566,6 +1679,7 @@
             markCodeRevisionChanged(change);
             frameDirty = true;
             scheduleStatsUpdate();
+            scheduleEditorSearchRefreshFromEditorChange();
             scheduleEditorDraftSave();
             if (!isDraftSaveSuppressed()) {
                 editorDraftDirty = true;
@@ -1576,6 +1690,392 @@
 
         function undo() { editor.undo(); }
         function redo() { editor.redo(); }
+
+        function findLiteralMatchIndexes(baseText, query) {
+            const text = String(baseText ?? "");
+            const needle = String(query ?? "");
+            if (!needle) return [];
+
+            const matches = [];
+            let searchFrom = 0;
+            while (searchFrom <= text.length - needle.length) {
+                const index = text.indexOf(needle, searchFrom);
+                if (index === -1) break;
+                matches.push(index);
+                searchFrom = index + needle.length;
+            }
+            return matches;
+        }
+
+        function clearEditorSearchMarks() {
+            editorSearchState.marks.forEach(mark => {
+                try {
+                    mark.clear();
+                } catch (error) {}
+            });
+            editorSearchState.marks = [];
+
+            if (editorSearchState.currentMark) {
+                try {
+                    editorSearchState.currentMark.clear();
+                } catch (error) {}
+                editorSearchState.currentMark = null;
+            }
+        }
+
+        function syncEditorSearchCount() {
+            const count = document.getElementById('editor-search-count');
+            if (!count) return;
+
+            const total = editorSearchState.matches.length;
+            const current = total > 0 && editorSearchState.currentIndex >= 0
+                ? editorSearchState.currentIndex + 1
+                : 0;
+            count.textContent = `${current} / ${total}`;
+        }
+
+        function getEditorSearchRange(matchIndex) {
+            const startIndex = editorSearchState.matches[matchIndex];
+            if (!Number.isInteger(startIndex) || !editorSearchState.query) return null;
+
+            return {
+                startIndex,
+                from: editor.posFromIndex(startIndex),
+                to: editor.posFromIndex(startIndex + editorSearchState.query.length)
+            };
+        }
+
+        function renderEditorSearchMarks() {
+            clearEditorSearchMarks();
+            if (!editorSearchState.query || !editorSearchState.matches.length) return;
+
+            if (editorSearchState.matches.length <= EDITOR_SEARCH_MARK_LIMIT) {
+                editorSearchState.matches.forEach((startIndex, index) => {
+                    const range = getEditorSearchRange(index);
+                    if (!range) return;
+                    editorSearchState.marks.push(
+                        editor.markText(range.from, range.to, { className: 'cm-quick-search-match' })
+                    );
+                });
+            }
+        }
+
+        function selectEditorSearchMatch(index, options = {}) {
+            const total = editorSearchState.matches.length;
+            if (!total) {
+                editorSearchState.currentIndex = -1;
+                syncEditorSearchCount();
+                return false;
+            }
+
+            const normalizedIndex = ((index % total) + total) % total;
+            editorSearchState.currentIndex = normalizedIndex;
+
+            if (editorSearchState.currentMark) {
+                try {
+                    editorSearchState.currentMark.clear();
+                } catch (error) {}
+                editorSearchState.currentMark = null;
+            }
+
+            const range = getEditorSearchRange(normalizedIndex);
+            if (!range) {
+                syncEditorSearchCount();
+                return false;
+            }
+
+            const currentText = editor.getRange(range.from, range.to);
+            if (currentText !== editorSearchState.query) {
+                refreshEditorSearch({ scroll: options.scroll !== false, preservePosition: true });
+                return false;
+            }
+
+            editorSearchState.currentMark = editor.markText(
+                range.from,
+                range.to,
+                { className: 'cm-quick-search-current' }
+            );
+
+            syncEditorSearchCount();
+            if (options.scroll !== false) {
+                editor.scrollIntoView({ from: range.from, to: range.to }, 60);
+            }
+            return true;
+        }
+
+        function refreshEditorSearch(options = {}) {
+            clearTimeout(editorSearchState.refreshTimer);
+            editorSearchState.refreshTimer = null;
+
+            const query = editorSearchState.query;
+            const previousStart = editorSearchState.currentIndex >= 0
+                ? editorSearchState.matches[editorSearchState.currentIndex]
+                : -1;
+
+            clearEditorSearchMarks();
+            editorSearchState.matches = query
+                ? findLiteralMatchIndexes(editor.getValue(), query)
+                : [];
+            editorSearchState.searchedQuery = query;
+            editorSearchState.codeRevision = codeRevisionState.current;
+
+            if (!editorSearchState.matches.length) {
+                editorSearchState.currentIndex = -1;
+                syncEditorSearchCount();
+                return;
+            }
+
+            let nextIndex = 0;
+            const preferredStart = Number.isInteger(options.preferredStart)
+                ? options.preferredStart
+                : (options.preservePosition ? previousStart : -1);
+
+            if (preferredStart >= 0) {
+                const forwardIndex = editorSearchState.matches.findIndex(start => start >= preferredStart);
+                nextIndex = forwardIndex === -1 ? 0 : forwardIndex;
+            }
+
+            renderEditorSearchMarks();
+            selectEditorSearchMatch(nextIndex, { scroll: options.scroll !== false });
+        }
+
+        function scheduleEditorSearchRefresh(options = {}) {
+            clearTimeout(editorSearchState.refreshTimer);
+            editorSearchState.refreshTimer = setTimeout(() => {
+                editorSearchState.refreshTimer = null;
+                refreshEditorSearch(options);
+            }, EDITOR_SEARCH_DEBOUNCE_MS);
+        }
+
+        function scheduleEditorSearchRefreshFromEditorChange() {
+            if (!editorSearchState.isOpen
+                || !editorSearchState.query
+                || editorSearchState.mutating) {
+                return;
+            }
+            scheduleEditorSearchRefresh({ scroll: false, preservePosition: true });
+        }
+
+        function handleEditorSearchQueryInput(value) {
+            editorSearchState.query = String(value ?? "");
+            editorSearchState.currentIndex = -1;
+            editorSearchState.matches = [];
+            clearEditorSearchMarks();
+            syncEditorSearchCount();
+            scheduleEditorSearchRefresh({ scroll: true });
+        }
+
+        function handleEditorSearchReplacementInput(value) {
+            editorSearchState.replacement = String(value ?? "");
+        }
+
+        function openEditorSearchBar() {
+            const bar = document.getElementById('editor-search-bar');
+            const queryInput = document.getElementById('editor-search-query');
+            const replaceInput = document.getElementById('editor-search-replace');
+            if (!bar || !queryInput || !replaceInput) return;
+
+            editorSearchState.isOpen = true;
+            bar.hidden = false;
+            queryInput.value = editorSearchState.query;
+            replaceInput.value = editorSearchState.replacement;
+
+            if (editorSearchState.query) {
+                refreshEditorSearch({ scroll: false, preservePosition: true });
+            } else {
+                editorSearchState.searchedQuery = "";
+                editorSearchState.codeRevision = codeRevisionState.current;
+                syncEditorSearchCount();
+            }
+
+            setTimeout(() => {
+                queryInput.focus();
+                queryInput.select();
+            }, 0);
+        }
+
+        function closeEditorSearchBar() {
+            const bar = document.getElementById('editor-search-bar');
+            const queryInput = document.getElementById('editor-search-query');
+            const replaceInput = document.getElementById('editor-search-replace');
+
+            clearTimeout(editorSearchState.refreshTimer);
+            editorSearchState.refreshTimer = null;
+            clearEditorSearchMarks();
+            editorSearchState.isOpen = false;
+            editorSearchState.query = "";
+            editorSearchState.searchedQuery = "";
+            editorSearchState.replacement = "";
+            editorSearchState.matches = [];
+            editorSearchState.currentIndex = -1;
+            editorSearchState.codeRevision = -1;
+
+            if (queryInput) queryInput.value = "";
+            if (replaceInput) replaceInput.value = "";
+            if (bar) bar.hidden = true;
+            syncEditorSearchCount();
+        }
+
+        function toggleEditorSearchBar() {
+            if (editorSearchState.isOpen) {
+                closeEditorSearchBar();
+            } else {
+                openEditorSearchBar();
+            }
+        }
+
+        function moveEditorSearch(direction) {
+            if (!editorSearchState.query) {
+                showToast("検索文字列を入力してください");
+                return;
+            }
+
+            if (editorSearchState.codeRevision !== codeRevisionState.current
+                || editorSearchState.searchedQuery !== editorSearchState.query) {
+                refreshEditorSearch({ scroll: false, preservePosition: true });
+            }
+            if (!editorSearchState.matches.length) {
+                showToast("一致する文字列がありません");
+                return;
+            }
+
+            const step = direction < 0 ? -1 : 1;
+            selectEditorSearchMatch(editorSearchState.currentIndex + step);
+        }
+
+        function ensureEditorSearchTargetIsFresh() {
+            if (editorSearchState.codeRevision !== codeRevisionState.current) {
+                refreshEditorSearch({ scroll: true, preservePosition: true });
+                showToast("コード変更を検出したため検索結果を更新しました");
+                return false;
+            }
+
+            if (editorSearchState.searchedQuery !== editorSearchState.query) {
+                refreshEditorSearch({ scroll: true });
+            }
+
+            const range = getEditorSearchRange(editorSearchState.currentIndex);
+            if (!range || editor.getRange(range.from, range.to) !== editorSearchState.query) {
+                refreshEditorSearch({ scroll: true, preservePosition: true });
+                showToast("検索結果を更新しました。置換対象を確認してください");
+                return false;
+            }
+            return true;
+        }
+
+        function replaceCurrentEditorSearchMatch() {
+            if (!editorSearchState.query) {
+                showToast("検索文字列を入力してください");
+                return;
+            }
+            if (editorSearchState.query === editorSearchState.replacement) {
+                showToast("検索文字列と置換文字列が同じです");
+                return;
+            }
+            if (!ensureEditorSearchTargetIsFresh()) return;
+            if (!editorSearchState.matches.length || editorSearchState.currentIndex < 0) {
+                showToast("置換できる一致箇所がありません");
+                return;
+            }
+
+            const range = getEditorSearchRange(editorSearchState.currentIndex);
+            if (!range) return;
+
+            const preferredStart = range.startIndex + editorSearchState.replacement.length;
+            editorSearchState.mutating = true;
+            try {
+                editor.operation(() => {
+                    if (editor.getRange(range.from, range.to) !== editorSearchState.query) {
+                        throw new Error("search_target_changed");
+                    }
+                    editor.replaceRange(
+                        editorSearchState.replacement,
+                        range.from,
+                        range.to,
+                        "+quick-replace"
+                    );
+                });
+            } catch (error) {
+                refreshEditorSearch({ scroll: true, preservePosition: true });
+                showToast("対象が変化したため置換せず検索結果を更新しました");
+                return;
+            } finally {
+                editorSearchState.mutating = false;
+            }
+
+            refreshEditorSearch({ scroll: true, preferredStart });
+            showToast("1件を置換しました");
+        }
+
+        function formatEditorSearchConfirmText(value) {
+            const oneLine = String(value ?? "").replace(/\s+/g, " ");
+            return oneLine.length > 32 ? oneLine.slice(0, 32) + "…" : oneLine;
+        }
+
+        function replaceAllEditorSearchMatches() {
+            if (!editorSearchState.query) {
+                showToast("検索文字列を入力してください");
+                return;
+            }
+            if (editorSearchState.query === editorSearchState.replacement) {
+                showToast("検索文字列と置換文字列が同じです");
+                return;
+            }
+            if (!ensureEditorSearchTargetIsFresh()) return;
+            if (!editorSearchState.matches.length) {
+                showToast("置換できる一致箇所がありません");
+                return;
+            }
+
+            const matchCount = editorSearchState.matches.length;
+            if (matchCount > 1) {
+                const beforeLabel = formatEditorSearchConfirmText(editorSearchState.query);
+                const afterLabel = formatEditorSearchConfirmText(editorSearchState.replacement);
+                if (!confirm(`「${beforeLabel}」を「${afterLabel}」に\n${matchCount}箇所すべて置換しますか？`)) {
+                    return;
+                }
+            }
+
+            const ranges = editorSearchState.matches.map((startIndex, index) => {
+                const range = getEditorSearchRange(index);
+                return range ? { ...range, startIndex } : null;
+            }).filter(Boolean);
+
+            const allTargetsStillMatch = ranges.length === matchCount
+                && ranges.every(range => editor.getRange(range.from, range.to) === editorSearchState.query);
+            if (!allTargetsStillMatch) {
+                refreshEditorSearch({ scroll: true, preservePosition: true });
+                showToast("対象が変化したため置換せず検索結果を更新しました");
+                return;
+            }
+
+            editorSearchState.mutating = true;
+            try {
+                editor.operation(() => {
+                    for (let index = ranges.length - 1; index >= 0; index--) {
+                        const range = ranges[index];
+                        if (editor.getRange(range.from, range.to) !== editorSearchState.query) {
+                            throw new Error("search_target_changed");
+                        }
+                        editor.replaceRange(
+                            editorSearchState.replacement,
+                            range.from,
+                            range.to,
+                            "+quick-replace-all"
+                        );
+                    }
+                });
+            } catch (error) {
+                refreshEditorSearch({ scroll: true, preservePosition: true });
+                showToast("対象が変化したため全置換を中止しました");
+                return;
+            } finally {
+                editorSearchState.mutating = false;
+            }
+
+            refreshEditorSearch({ scroll: true });
+            showToast(`${matchCount}件を置換しました`);
+        }
 
                 function scheduleStatsUpdate() {
             clearTimeout(statsUpdateTimer);
@@ -3031,19 +3531,8 @@ ${currentCode}
 
             if (!findText) return showToast("検索文字列を入力してください");
 
-            const countOccurrences = (base, needle) => {
-                if (!needle) return 0;
-                let index = 0;
-                let found = 0;
-                while ((index = base.indexOf(needle, index)) !== -1) {
-                    found++;
-                    index += needle.length;
-                }
-                return found;
-            };
-
             let code = editor.getValue();
-            const matchCount = countOccurrences(code, findText);
+            const matchCount = findLiteralMatchIndexes(code, findText).length;
 
             if (matchCount === 0) {
                 showToast("対象文字列が見つかりませんでした");
