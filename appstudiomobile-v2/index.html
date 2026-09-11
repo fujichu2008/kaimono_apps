@@ -2974,7 +2974,9 @@
             const modal = overlay?.querySelector('.modal');
             const state = draggableAiModalStates.get(modalId);
             if (!modal || !state) return;
-            modal.style.transform = `translate3d(${state.x}px, ${state.y}px, 0)`;
+
+            const keyboardOffsetY = Number(state.keyboardOffsetY) || 0;
+            modal.style.transform = `translate3d(${state.x}px, ${state.y + keyboardOffsetY}px, 0)`;
         }
 
         function clampDraggableAiModal(modalId) {
@@ -3021,6 +3023,7 @@
             const state = {
                 x: 0,
                 y: 0,
+                keyboardOffsetY: 0,
                 dragging: false,
                 pointerId: null,
                 startX: 0,
@@ -3103,72 +3106,184 @@
                 overlay.style.height = '100%';
                 modal.style.maxHeight = '';
             }
+        }
 
-            clampDraggableAiModal(modalId);
+        function getAiModalTextField(target) {
+            const field = target instanceof HTMLElement ? target : null;
+            if (!field) return null;
+            if (field.matches('textarea')) return field;
+            if (!field.matches('input')) return null;
+
+            const type = String(field.getAttribute('type') || 'text').toLowerCase();
+            return ['text', 'search', 'url', 'email', 'tel', 'password', 'number'].includes(type)
+                ? field
+                : null;
+        }
+
+        function getFocusedAiModalField(modalId) {
+            const field = getAiModalTextField(document.activeElement);
+            if (!field) return null;
+            return field.closest(`#${modalId}`) ? field : null;
+        }
+
+        function resetAiModalKeyboardOffset(modalId) {
+            const state = draggableAiModalStates.get(modalId);
+            if (!state || !state.keyboardOffsetY) return;
+            state.keyboardOffsetY = 0;
+            applyDraggableAiModalTransform(modalId);
+        }
+
+        function adjustAiModalFieldVisibility(target) {
+            const field = getAiModalTextField(target);
+            const overlay = field?.closest('#prompt-modal, #consult-modal');
+            if (!field || !overlay || overlay.style.display !== 'flex') return;
+
+            const modalId = overlay.id;
+            const modal = overlay.querySelector('.modal');
+            const state = draggableAiModalStates.get(modalId);
+            if (!modal || !state || document.activeElement !== field) return;
+
+            syncDraggableAiModalViewport(modalId);
+
+            requestAnimationFrame(() => {
+                if (document.activeElement !== field || overlay.style.display !== 'flex') return;
+
+                const bounds = getAiModalViewportBounds();
+                const currentOffsetY = Number(state.keyboardOffsetY) || 0;
+                const currentModalRect = modal.getBoundingClientRect();
+                const currentFieldRect = field.getBoundingClientRect();
+
+                // 現在の一時補正を測定値から差し引き、常にユーザー位置state.yを基準に再計算する。
+                // resize/scrollが何度発生してもkeyboardOffsetYを累積させない。
+                const modalRect = {
+                    top: currentModalRect.top - currentOffsetY,
+                    bottom: currentModalRect.bottom - currentOffsetY,
+                    height: currentModalRect.height
+                };
+                const fieldRect = {
+                    top: currentFieldRect.top - currentOffsetY,
+                    bottom: currentFieldRect.bottom - currentOffsetY
+                };
+                const margin = 8;
+                const visibleTop = bounds.top + margin;
+                const visibleBottom = bounds.bottom - margin;
+                const availableHeight = Math.max(0, visibleBottom - visibleTop);
+
+                let desiredOffsetY = 0;
+                if (fieldRect.bottom > visibleBottom) {
+                    desiredOffsetY = visibleBottom - fieldRect.bottom;
+                } else if (fieldRect.top < visibleTop) {
+                    desiredOffsetY = visibleTop - fieldRect.top;
+                }
+
+                if (modalRect.height <= availableHeight) {
+                    const minOffsetY = visibleTop - modalRect.top;
+                    const maxOffsetY = visibleBottom - modalRect.bottom;
+                    desiredOffsetY = Math.min(maxOffsetY, Math.max(minOffsetY, desiredOffsetY));
+                }
+
+                state.keyboardOffsetY = desiredOffsetY;
+                applyDraggableAiModalTransform(modalId);
+
+                requestAnimationFrame(() => {
+                    if (document.activeElement !== field || overlay.style.display !== 'flex') return;
+
+                    const adjustedBounds = getAiModalViewportBounds();
+                    const adjustedModalRect = modal.getBoundingClientRect();
+                    const adjustedFieldRect = field.getBoundingClientRect();
+                    const contentMargin = 12;
+                    const fieldVisibleTop = Math.max(
+                        adjustedBounds.top + contentMargin,
+                        adjustedModalRect.top + contentMargin
+                    );
+                    const fieldVisibleBottom = Math.min(
+                        adjustedBounds.bottom - contentMargin,
+                        adjustedModalRect.bottom - contentMargin
+                    );
+
+                    // ページ全体は動かさず、必要な場合だけモーダル内部を最小限スクロールする。
+                    if (adjustedFieldRect.bottom > fieldVisibleBottom) {
+                        modal.scrollTop += adjustedFieldRect.bottom - fieldVisibleBottom;
+                    } else if (adjustedFieldRect.top < fieldVisibleTop) {
+                        modal.scrollTop -= fieldVisibleTop - adjustedFieldRect.top;
+                    }
+                });
+            });
         }
 
         function keepAiModalFieldVisible(target) {
-            const field = target instanceof HTMLElement ? target : null;
+            const field = getAiModalTextField(target);
             const overlay = field?.closest('#prompt-modal, #consult-modal');
-            if (!field || !overlay || !field.matches('input, textarea')) return;
+            if (!field || !overlay) return;
 
-            const modalId = overlay.id;
             const adjust = () => {
-                syncDraggableAiModalViewport(modalId);
-                field.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-
-                requestAnimationFrame(() => {
-                    const bounds = getAiModalViewportBounds();
-                    const rect = field.getBoundingClientRect();
-                    const state = draggableAiModalStates.get(modalId);
-                    if (!state) return;
-
-                    const margin = 12;
-                    let adjustY = 0;
-                    if (rect.bottom > bounds.bottom - margin) {
-                        adjustY = bounds.bottom - margin - rect.bottom;
-                    } else if (rect.top < bounds.top + margin) {
-                        adjustY = bounds.top + margin - rect.top;
-                    }
-
-                    if (adjustY) {
-                        state.y += adjustY;
-                        applyDraggableAiModalTransform(modalId);
-                        clampDraggableAiModal(modalId);
-                    }
-                });
+                if (document.activeElement === field) {
+                    adjustAiModalFieldVisibility(field);
+                }
             };
 
             // iOSではキーボード表示に伴うVisual Viewportの変化がfocus直後より少し遅れて確定する。
+            adjust();
             setTimeout(adjust, 80);
             setTimeout(adjust, 320);
+        }
+
+        function refreshAiModalForViewport(modalId) {
+            syncDraggableAiModalViewport(modalId);
+
+            const field = getFocusedAiModalField(modalId);
+            if (field) {
+                requestAnimationFrame(() => adjustAiModalFieldVisibility(field));
+            } else {
+                resetAiModalKeyboardOffset(modalId);
+            }
         }
 
         function openDraggableAiModal(modalId) {
             const overlay = document.getElementById(modalId);
             if (!overlay) return;
+
             ensureDraggableAiModal(modalId);
+            const state = draggableAiModalStates.get(modalId);
+            if (state) state.keyboardOffsetY = 0;
+
             overlay.style.display = 'flex';
-            requestAnimationFrame(() => syncDraggableAiModalViewport(modalId));
+            applyDraggableAiModalTransform(modalId);
+            requestAnimationFrame(() => {
+                syncDraggableAiModalViewport(modalId);
+                clampDraggableAiModal(modalId);
+            });
         }
 
         window.addEventListener('resize', () => {
-            syncDraggableAiModalViewport('prompt-modal');
-            syncDraggableAiModalViewport('consult-modal');
+            refreshAiModalForViewport('prompt-modal');
+            refreshAiModalForViewport('consult-modal');
         });
         if (window.visualViewport) {
             window.visualViewport.addEventListener('resize', () => {
-                syncDraggableAiModalViewport('prompt-modal');
-                syncDraggableAiModalViewport('consult-modal');
+                refreshAiModalForViewport('prompt-modal');
+                refreshAiModalForViewport('consult-modal');
             });
             window.visualViewport.addEventListener('scroll', () => {
-                syncDraggableAiModalViewport('prompt-modal');
-                syncDraggableAiModalViewport('consult-modal');
+                refreshAiModalForViewport('prompt-modal');
+                refreshAiModalForViewport('consult-modal');
             });
         }
 
         document.addEventListener('focusin', event => {
             keepAiModalFieldVisible(event.target);
+        });
+
+        document.addEventListener('focusout', event => {
+            const field = getAiModalTextField(event.target);
+            const overlay = field?.closest('#prompt-modal, #consult-modal');
+            if (!field || !overlay) return;
+
+            setTimeout(() => {
+                if (!getFocusedAiModalField(overlay.id)) {
+                    resetAiModalKeyboardOffset(overlay.id);
+                }
+            }, 0);
         });
 
         function openConsultModal() {
