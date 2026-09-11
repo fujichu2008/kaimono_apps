@@ -57,6 +57,8 @@
             z-index: 120;
             box-shadow: 0 4px 14px rgba(0,0,0,0.30);
             backdrop-filter: blur(10px);
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         body:has(#view-run.active) .view-switcher,
@@ -66,6 +68,34 @@
 
         body:has(#view-run.active) .view-switcher {
             bottom: calc(60px + env(safe-area-inset-bottom));
+        }
+
+        .view-switcher.is-snapping {
+            transition: left 0.16s ease, top 0.16s ease;
+        }
+
+        .view-switcher-drag-handle {
+            flex: 0 0 34px;
+            width: 34px;
+            min-height: var(--switcher-height);
+            padding: 0;
+            border: none;
+            border-right: 1px solid rgba(255,255,255,0.10);
+            border-radius: 999px 6px 6px 999px;
+            background: transparent;
+            color: #777;
+            font-size: 17px;
+            line-height: 1;
+            cursor: grab;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .view-switcher.is-dragging .view-switcher-drag-handle {
+            cursor: grabbing;
+            color: #bbb;
+            background: rgba(255,255,255,0.06);
         }
 
         .tab-btn {
@@ -443,7 +473,7 @@
 
         .run-controls {
             position: relative;
-            height: 50px;
+            height: 58px;
             background-color: var(--surface-color);
             display: flex;
             align-items: stretch;
@@ -452,7 +482,7 @@
             border-bottom: 1px solid var(--border-color);
         }
         .run-app-name {
-            flex: 1;
+            flex: 0 1 90px;
             min-width: 0;
             display: flex;
             align-items: center;
@@ -505,23 +535,24 @@
         }
         .run-ctrl-btn {
             flex: 1;
-            min-width: 0;
-            height: 50px;
+            min-width: 48px;
+            height: 58px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 1px;
+            gap: 3px;
             background: none;
             border: none;
             color: var(--text-color);
             cursor: pointer;
-            padding: 4px 0;
+            padding: 5px 2px;
+            touch-action: manipulation;
         }
         .run-ctrl-btn:active { background: rgba(255,255,255,0.08); }
         .run-ctrl-btn.saved { color: var(--success-color); }
-        .run-ctrl-icon { font-size: 18px; line-height: 1; }
-        .run-ctrl-label { font-size: 10px; line-height: 1; }
+        .run-ctrl-icon { font-size: 21px; line-height: 1; }
+        .run-ctrl-label { font-size: 11px; line-height: 1; font-weight: 600; }
         .run-menu {
             display: none;
             position: absolute;
@@ -554,21 +585,22 @@
         @media (max-width: 359px) {
             .run-controls {
                 padding: 0 2px;
-                gap: 1px;
+                gap: 0;
             }
             .run-app-name {
-                flex: 1 1 auto;
+                flex: 0 1 48px;
                 min-width: 0;
-                font-size: 10px;
-                padding: 0 3px;
+                font-size: 9px;
+                padding: 0 2px;
             }
             .run-ctrl-btn {
-                flex: 0 0 44px;
-                min-width: 44px;
-                padding: 4px 0;
+                flex: 1 1 0;
+                min-width: 0;
+                padding: 5px 1px;
             }
             .run-ctrl-label {
-                display: none;
+                display: block;
+                font-size: 9px;
             }
             .run-ctrl-icon {
                 font-size: 20px;
@@ -941,6 +973,7 @@
 <body>
 
         <nav class="view-switcher" aria-label="実行画面とライブラリの切り替え">
+        <button type="button" class="view-switcher-drag-handle" aria-label="画面切替を移動" title="ドラッグして移動">⋮</button>
         <button class="tab-btn active" onclick="switchTab('run')" aria-label="実行画面を表示">▶ 実行</button>
         <button class="tab-btn" onclick="switchTab('library')" aria-label="ライブラリを表示">📚 ライブラリ</button>
     </nav>
@@ -1687,6 +1720,223 @@
         function closeRunMenu() {
             const menu = document.getElementById('run-menu');
             if (menu) menu.classList.remove('open');
+        }
+
+        function initializeViewSwitcherDrag() {
+            const switcher = document.querySelector('.view-switcher');
+            const handle = document.querySelector('.view-switcher-drag-handle');
+            if (!switcher || !handle) return;
+
+            const STORAGE_KEY = 'appstudio_view_switcher_position_v1';
+            const EDGE_GAP = 10;
+            let dragState = null;
+            let snapTimer = null;
+            let safeInsets = readSafeAreaInsets();
+
+            function readSafeAreaInsets() {
+                const probe = document.createElement('div');
+                probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);';
+                document.body.appendChild(probe);
+                const style = getComputedStyle(probe);
+                const result = {
+                    top: parseFloat(style.paddingTop) || 0,
+                    right: parseFloat(style.paddingRight) || 0,
+                    bottom: parseFloat(style.paddingBottom) || 0,
+                    left: parseFloat(style.paddingLeft) || 0
+                };
+                probe.remove();
+                return result;
+            }
+
+            function clamp(value, min, max) {
+                return Math.min(max, Math.max(min, value));
+            }
+
+            function getSwitcherBounds() {
+                const rect = switcher.getBoundingClientRect();
+                const width = rect.width || switcher.offsetWidth || 1;
+                const height = rect.height || switcher.offsetHeight || 1;
+                const minX = safeInsets.left + EDGE_GAP;
+                const maxX = Math.max(minX, window.innerWidth - safeInsets.right - EDGE_GAP - width);
+                const minY = safeInsets.top + EDGE_GAP;
+                let maxY = Math.max(minY, window.innerHeight - safeInsets.bottom - EDGE_GAP - height);
+
+                const runView = document.getElementById('view-run');
+                if (runView && runView.classList.contains('active')) {
+                    const runControls = runView.querySelector('.run-controls');
+                    const controlsHeight = runControls
+                        ? runControls.getBoundingClientRect().height
+                        : 50;
+                    maxY = Math.max(
+                        minY,
+                        Math.min(
+                            maxY,
+                            window.innerHeight - safeInsets.bottom - controlsHeight - EDGE_GAP - height
+                        )
+                    );
+                }
+
+                return { minX, maxX, minY, maxY, width, height };
+            }
+
+            function loadSavedPosition() {
+                try {
+                    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+                    if (!parsed || typeof parsed !== 'object') return null;
+                    if (parsed.side !== 'left' && parsed.side !== 'right') return null;
+                    const y = Number(parsed.y);
+                    if (!Number.isFinite(y)) return null;
+                    return { side: parsed.side, y };
+                } catch (error) {
+                    return null;
+                }
+            }
+
+            function savePosition(side, y) {
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify({ side, y: Math.round(y) }));
+                } catch (error) {
+                    console.warn('画面切替位置の保存に失敗しました:', error);
+                }
+            }
+
+            function setSwitcherPosition(side, y, options = {}) {
+                const bounds = getSwitcherBounds();
+                const normalizedSide = side === 'left' ? 'left' : 'right';
+                const normalizedY = clamp(
+                    Number.isFinite(Number(y)) ? Number(y) : bounds.maxY,
+                    bounds.minY,
+                    bounds.maxY
+                );
+                const x = normalizedSide === 'left' ? bounds.minX : bounds.maxX;
+
+                clearTimeout(snapTimer);
+                switcher.classList.toggle('is-snapping', options.animate === true);
+                switcher.style.right = 'auto';
+                switcher.style.bottom = 'auto';
+                switcher.style.left = `${Math.round(x)}px`;
+                switcher.style.top = `${Math.round(normalizedY)}px`;
+
+                if (options.save === true) {
+                    savePosition(normalizedSide, normalizedY);
+                }
+
+                if (options.animate === true) {
+                    snapTimer = setTimeout(() => {
+                        switcher.classList.remove('is-snapping');
+                    }, 180);
+                }
+            }
+
+            function restorePosition() {
+                safeInsets = readSafeAreaInsets();
+                const saved = loadSavedPosition();
+                if (saved) {
+                    setSwitcherPosition(saved.side, saved.y);
+                } else {
+                    setSwitcherPosition('right', Number.POSITIVE_INFINITY);
+                }
+            }
+
+            function finishDrag(event) {
+                if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+                const rect = switcher.getBoundingClientRect();
+                const bounds = getSwitcherBounds();
+                const distanceToLeft = Math.abs(rect.left - bounds.minX);
+                const distanceToRight = Math.abs(rect.left - bounds.maxX);
+                const side = distanceToLeft <= distanceToRight ? 'left' : 'right';
+                const y = clamp(rect.top, bounds.minY, bounds.maxY);
+
+                try {
+                    if (handle.hasPointerCapture(event.pointerId)) {
+                        handle.releasePointerCapture(event.pointerId);
+                    }
+                } catch (error) {}
+
+                dragState = null;
+                switcher.classList.remove('is-dragging');
+                setSwitcherPosition(side, y, { animate: true, save: true });
+            }
+
+            handle.addEventListener('pointerdown', event => {
+                if (event.button !== undefined && event.button !== 0) return;
+
+                event.preventDefault();
+                safeInsets = readSafeAreaInsets();
+                clearTimeout(snapTimer);
+                switcher.classList.remove('is-snapping');
+
+                const rect = switcher.getBoundingClientRect();
+                dragState = {
+                    pointerId: event.pointerId,
+                    offsetX: event.clientX - rect.left,
+                    offsetY: event.clientY - rect.top
+                };
+
+                switcher.style.right = 'auto';
+                switcher.style.bottom = 'auto';
+                switcher.style.left = `${Math.round(rect.left)}px`;
+                switcher.style.top = `${Math.round(rect.top)}px`;
+                switcher.classList.add('is-dragging');
+
+                try {
+                    handle.setPointerCapture(event.pointerId);
+                } catch (error) {
+                    console.warn('画面切替のPointer Captureを開始できませんでした:', error);
+                }
+            });
+
+            handle.addEventListener('pointermove', event => {
+                if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+                event.preventDefault();
+                const bounds = getSwitcherBounds();
+                const x = clamp(
+                    event.clientX - dragState.offsetX,
+                    bounds.minX,
+                    bounds.maxX
+                );
+                const y = clamp(
+                    event.clientY - dragState.offsetY,
+                    bounds.minY,
+                    bounds.maxY
+                );
+
+                switcher.style.left = `${Math.round(x)}px`;
+                switcher.style.top = `${Math.round(y)}px`;
+            });
+
+            handle.addEventListener('pointerup', finishDrag);
+            handle.addEventListener('pointercancel', finishDrag);
+
+            window.addEventListener('resize', () => {
+                if (dragState) return;
+                requestAnimationFrame(restorePosition);
+            });
+
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener('resize', () => {
+                    if (dragState) return;
+                    requestAnimationFrame(restorePosition);
+                });
+            }
+
+            const viewObserver = new MutationObserver(() => {
+                if (dragState) return;
+                const runActive = document.getElementById('view-run')?.classList.contains('active');
+                const libraryActive = document.getElementById('view-library')?.classList.contains('active');
+                if (runActive || libraryActive) {
+                    requestAnimationFrame(restorePosition);
+                }
+            });
+
+            const runView = document.getElementById('view-run');
+            const libraryView = document.getElementById('view-library');
+            if (runView) viewObserver.observe(runView, { attributes: true, attributeFilter: ['class'] });
+            if (libraryView) viewObserver.observe(libraryView, { attributes: true, attributeFilter: ['class'] });
+
+            restorePosition();
         }
 
         function createRuntimeToken() {
@@ -6205,6 +6455,7 @@ self.addEventListener("fetch", function (event) {
         });
 
                 // Initialize
+        initializeViewSwitcherDrag();
         updateStats();
         Promise.allSettled([
             ensureAppRecordIdInitialized(),
