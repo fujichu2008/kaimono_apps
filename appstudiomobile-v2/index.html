@@ -7367,6 +7367,694 @@ self.addEventListener("fetch", function (event) {
             return `${(hashA >>> 0).toString(16).padStart(8, "0")}${(hashB >>> 0).toString(16).padStart(8, "0")}`;
         }
 
+        // --- GitHub公開済状態 ---
+        // 通常HTMLとPWAを独立管理し、「現在内容」と「最後に公開成功した内容」が
+        // 一致するときだけ公開済として扱う。Personal Access Tokenは保存しない。
+        const GITHUB_PUBLISHED_STATE_KEY = "appstudio_github_published_state_v1";
+        let githubPublishedStateSyncTimer = null;
+        let pendingGitHubPublishSnapshot = null;
+        let githubPublishedTrackingInstalled = false;
+
+        function fastStableFingerprint(value) {
+            const source = String(value ?? "");
+            let hashA = 2166136261;
+            let hashB = 2246822519;
+
+            for (let index = 0; index < source.length; index++) {
+                const code = source.charCodeAt(index);
+                hashA = Math.imul(hashA ^ code, 16777619);
+                hashB = Math.imul(hashB ^ code, 3266489917);
+            }
+
+            return `${(hashA >>> 0).toString(16).padStart(8, "0")}${(hashB >>> 0).toString(16).padStart(8, "0")}`;
+        }
+
+        function readGitHubPublishedStateStore() {
+            try {
+                const parsed = JSON.parse(localStorage.getItem(GITHUB_PUBLISHED_STATE_KEY) || "{}");
+                return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? parsed
+                    : {};
+            } catch (error) {
+                console.warn("GitHub公開済状態の読み込みに失敗しました:", error);
+                return {};
+            }
+        }
+
+        function writeGitHubPublishedStateStore(store) {
+            try {
+                localStorage.setItem(
+                    GITHUB_PUBLISHED_STATE_KEY,
+                    JSON.stringify(store && typeof store === "object" ? store : {})
+                );
+                return true;
+            } catch (error) {
+                console.warn("GitHub公開済状態の保存に失敗しました:", error);
+                return false;
+            }
+        }
+
+        function extractCurrentSourceAppId() {
+            try {
+                const source = String(editor?.getValue?.() || "");
+                const match = source.match(
+                    /<script\b[^>]*\bid\s*=\s*["']lfs-meta["'][^>]*>([\s\S]*?)<\/script\s*>/i
+                );
+                if (!match) return "";
+
+                const meta = JSON.parse(match[1]);
+                return String(meta?.appId || "").trim();
+            } catch (error) {
+                return "";
+            }
+        }
+
+        function getGitHubPublishedAppKey() {
+            try {
+                if (typeof appRecordId !== "undefined"
+                    && appRecordId !== null
+                    && String(appRecordId).trim()) {
+                    return `record:${String(appRecordId).trim()}`;
+                }
+            } catch (error) {}
+
+            try {
+                if (typeof currentAppRecordId !== "undefined"
+                    && currentAppRecordId !== null
+                    && String(currentAppRecordId).trim()) {
+                    return `record:${String(currentAppRecordId).trim()}`;
+                }
+            } catch (error) {}
+
+            const sourceAppId = extractCurrentSourceAppId();
+            if (sourceAppId) return `app:${sourceAppId}`;
+
+            const name = String(
+                typeof currentAppName !== "undefined" ? currentAppName || "" : ""
+            ).trim();
+
+            if (name) return `name:${name}`;
+
+            return "draft:current";
+        }
+
+        function getGitHubPublishModalElement() {
+            return document.getElementById("github-publish-modal")
+                || document.querySelector('[id*="github"][id*="publish"].modal')
+                || document.querySelector('[id*="github"][id*="publish"][class*="modal"]');
+        }
+
+        function isVisiblePublishControl(element) {
+            if (!element) return false;
+            if (element.type === "hidden") return false;
+            if (element.closest('[style*="display: none"]')) return false;
+
+            const style = window.getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden";
+        }
+
+        function getPublishFormControls() {
+            const modal = getGitHubPublishModalElement();
+            const root = modal || document;
+
+            return Array.from(root.querySelectorAll("input, select, textarea"))
+                .filter(element => {
+                    const id = String(element.id || "").toLowerCase();
+                    const name = String(element.name || "").toLowerCase();
+                    const autocomplete = String(element.autocomplete || "").toLowerCase();
+                    const type = String(element.type || "").toLowerCase();
+
+                    if (type === "password") return false;
+                    if (autocomplete.includes("password")) return false;
+                    if (/(token|pat|authorization|auth-token|access-token)/.test(`${id} ${name}`)) {
+                        return false;
+                    }
+                    return true;
+                });
+        }
+
+        function readPublishControlValue(hints, fallback = "") {
+            const normalizedHints = (Array.isArray(hints) ? hints : [hints])
+                .map(value => String(value || "").toLowerCase())
+                .filter(Boolean);
+
+            const controls = getPublishFormControls()
+                .map((element, index) => ({
+                    element,
+                    index,
+                    key: `${String(element.id || "").toLowerCase()} ${String(element.name || "").toLowerCase()}`,
+                    visible: isVisiblePublishControl(element)
+                }))
+                .filter(item => normalizedHints.some(hint => item.key.includes(hint)))
+                .sort((a, b) => {
+                    if (a.visible !== b.visible) return a.visible ? -1 : 1;
+
+                    const aExact = normalizedHints.some(hint =>
+                        String(a.element.id || "").toLowerCase() === hint
+                        || String(a.element.name || "").toLowerCase() === hint
+                    );
+                    const bExact = normalizedHints.some(hint =>
+                        String(b.element.id || "").toLowerCase() === hint
+                        || String(b.element.name || "").toLowerCase() === hint
+                    );
+
+                    if (aExact !== bExact) return aExact ? -1 : 1;
+                    return a.index - b.index;
+                });
+
+            const element = controls[0]?.element;
+            if (!element) return String(fallback || "");
+
+            if ((element.type === "checkbox" || element.type === "radio") && !element.checked) {
+                return String(fallback || "");
+            }
+
+            return String(element.value ?? fallback ?? "").trim();
+        }
+
+        function detectGitHubPublishMode(result = null) {
+            try {
+                if (typeof githubPublishMode !== "undefined") {
+                    const mode = String(githubPublishMode || "").toLowerCase();
+                    if (mode.includes("pwa")) return "pwa";
+                    if (mode.includes("html")) return "html";
+                }
+            } catch (error) {}
+
+            try {
+                if (typeof githubPublishType !== "undefined") {
+                    const mode = String(githubPublishType || "").toLowerCase();
+                    if (mode.includes("pwa")) return "pwa";
+                    if (mode.includes("html")) return "html";
+                }
+            } catch (error) {}
+
+            const modal = getGitHubPublishModalElement();
+            const root = modal || document;
+
+            const checkedMode = Array.from(
+                root.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked, select')
+            ).find(element => {
+                const key = `${element.id || ""} ${element.name || ""} ${element.value || ""}`.toLowerCase();
+                return key.includes("pwa") || key.includes("html");
+            });
+
+            if (checkedMode) {
+                const key = `${checkedMode.id || ""} ${checkedMode.name || ""} ${checkedMode.value || ""}`.toLowerCase();
+                if (key.includes("pwa")) return "pwa";
+                if (key.includes("html")) return "html";
+            }
+
+            const activeMode = Array.from(
+                root.querySelectorAll(
+                    '[data-mode].active, [data-publish-mode].active, button.active, .active[role="button"]'
+                )
+            ).find(element => {
+                const text = `${element.dataset?.mode || ""} ${element.dataset?.publishMode || ""} ${element.textContent || ""}`.toLowerCase();
+                return text.includes("pwa") || text.includes("html") || text.includes("通常");
+            });
+
+            if (activeMode) {
+                const text = `${activeMode.dataset?.mode || ""} ${activeMode.dataset?.publishMode || ""} ${activeMode.textContent || ""}`.toLowerCase();
+                if (text.includes("pwa")) return "pwa";
+                if (text.includes("html") || text.includes("通常")) return "html";
+            }
+
+            const publicUrl = String(result?.publicUrl || "").trim();
+            if (publicUrl) {
+                try {
+                    const pathname = new URL(publicUrl, location.href).pathname;
+                    if (/\.html?$/i.test(pathname)) return "html";
+                    if (pathname.endsWith("/")) return "pwa";
+                } catch (error) {}
+            }
+
+            return "html";
+        }
+
+        function getCurrentGitHubTarget(mode) {
+            const repo = readPublishControlValue(["github-repo", "repository", "repo"]);
+            const branch = readPublishControlValue(["github-branch", "branch"], "main") || "main";
+
+            if (mode === "pwa") {
+                const folder = readPublishControlValue(
+                    ["pwa-folder", "folder-name", "folder", "directory"]
+                );
+                return {
+                    repo,
+                    branch,
+                    path: "",
+                    folder
+                };
+            }
+
+            const path = readPublishControlValue(
+                ["github-path", "html-path", "file-path", "filename", "path"]
+            );
+
+            return {
+                repo,
+                branch,
+                path,
+                folder: ""
+            };
+        }
+
+        function collectPwaUiRevisionSnapshot() {
+            try {
+                const modal = getGitHubPublishModalElement();
+                const root = modal || document;
+
+                const controls = Array.from(
+                    root.querySelectorAll('input, select, textarea, img[id*="pwa"], img[class*="pwa"]')
+                ).filter(element => {
+                    const id = String(element.id || "").toLowerCase();
+                    const name = String(element.name || "").toLowerCase();
+                    const type = String(element.type || "").toLowerCase();
+                    const key = `${id} ${name}`;
+
+                    if (!key.includes("pwa") && !key.includes("icon")) return false;
+                    if (type === "password") return false;
+                    if (/(token|pat|authorization|access-token)/.test(key)) return false;
+                    return true;
+                });
+
+                return controls.map((element, index) => {
+                    const key = String(element.id || element.name || `control-${index}`);
+
+                    if (element.tagName === "IMG") {
+                        return `${key}:src=${String(element.getAttribute("src") || "")}`;
+                    }
+
+                    if (element.type === "file") {
+                        const files = Array.from(element.files || []);
+                        const fileSummary = files.map(file =>
+                            `${file.name}:${file.size}:${file.lastModified}:${file.type}`
+                        ).join(",");
+                        return `${key}:files=${fileSummary}`;
+                    }
+
+                    if (element.type === "checkbox" || element.type === "radio") {
+                        return `${key}:checked=${element.checked ? "1" : "0"}:value=${element.value || ""}`;
+                    }
+
+                    return `${key}:value=${String(element.value || "")}`;
+                }).join("\n");
+            } catch (error) {
+                return "";
+            }
+        }
+
+        function collectPwaPublishedStateConfig(sourceCode) {
+            const title = extractHtmlTitle(sourceCode);
+            const uiRevision = collectPwaUiRevisionSnapshot();
+
+            return {
+                name: readPublishControlValue(
+                    ["pwa-name", "app-name", "display-name"],
+                    title || "App"
+                ),
+                shortName: readPublishControlValue(
+                    ["pwa-short-name", "short-name", "shortname"],
+                    title || "App"
+                ),
+                themeColor: readPublishControlValue(
+                    ["pwa-theme-color", "theme-color", "themecolor"],
+                    extractThemeColor(sourceCode) || "#111111"
+                ),
+                backgroundColor: readPublishControlValue(
+                    ["pwa-background-color", "background-color", "backgroundcolor"],
+                    "#111111"
+                ),
+                iconText: readPublishControlValue(
+                    ["pwa-icon-text", "icon-text", "icontext"],
+                    ""
+                ),
+                iconRevision: `ui-${fastStableFingerprint(uiRevision)}`,
+                folderName: readPublishControlValue(
+                    ["pwa-folder", "folder-name", "folder", "directory"],
+                    ""
+                )
+            };
+        }
+
+        function createGitHubPublishSnapshot(mode = detectGitHubPublishMode()) {
+            const normalizedMode = mode === "pwa" ? "pwa" : "html";
+            const source = String(editor?.getValue?.() || "");
+            const target = getCurrentGitHubTarget(normalizedMode);
+
+            return {
+                mode: normalizedMode,
+                appKey: getGitHubPublishedAppKey(),
+                source,
+                target,
+                pwaConfig: normalizedMode === "pwa"
+                    ? collectPwaPublishedStateConfig(source)
+                    : null,
+                capturedAt: new Date().toISOString()
+            };
+        }
+
+        async function buildGitHubPublishedFingerprint(snapshot) {
+            const safeSnapshot = snapshot || createGitHubPublishSnapshot();
+            const mode = safeSnapshot.mode === "pwa" ? "pwa" : "html";
+            const target = safeSnapshot.target || {};
+
+            if (mode === "pwa") {
+                const config = safeSnapshot.pwaConfig
+                    || collectPwaPublishedStateConfig(safeSnapshot.source || "");
+                const buildId = await createPwaBuildId(
+                    String(safeSnapshot.source || ""),
+                    config
+                );
+
+                const targetFingerprint = fastStableFingerprint([
+                    String(target.repo || ""),
+                    String(target.branch || ""),
+                    String(target.folder || config.folderName || "")
+                ].join("\n"));
+
+                return `pwa:${buildId}:${targetFingerprint}`;
+            }
+
+            return `html:${fastStableFingerprint([
+                String(safeSnapshot.source || ""),
+                String(target.repo || ""),
+                String(target.branch || ""),
+                String(target.path || "")
+            ].join("\n---APPSTUDIO-GITHUB-PUBLISH---\n"))}`;
+        }
+
+        function getGitHubPublishedRecord(appKey, mode) {
+            const store = readGitHubPublishedStateStore();
+            const appState = store[String(appKey || "")];
+
+            if (!appState || typeof appState !== "object") return null;
+
+            const record = appState[mode === "pwa" ? "pwa" : "html"];
+            return record && typeof record === "object" ? record : null;
+        }
+
+        function saveGitHubPublishedRecord(appKey, mode, record) {
+            const safeAppKey = String(appKey || "").trim();
+            if (!safeAppKey) return false;
+
+            const store = readGitHubPublishedStateStore();
+            const currentAppState = store[safeAppKey] && typeof store[safeAppKey] === "object"
+                ? store[safeAppKey]
+                : {};
+
+            // html / pwaは相互に上書きしない。
+            store[safeAppKey] = {
+                ...currentAppState,
+                [mode === "pwa" ? "pwa" : "html"]: {
+                    fingerprint: String(record?.fingerprint || ""),
+                    publishedAt: String(record?.publishedAt || new Date().toISOString()),
+                    repo: String(record?.repo || ""),
+                    branch: String(record?.branch || ""),
+                    path: String(record?.path || ""),
+                    folder: String(record?.folder || ""),
+                    publicUrl: String(record?.publicUrl || "")
+                }
+            };
+
+            return writeGitHubPublishedStateStore(store);
+        }
+
+        function getGitHubPublishButton() {
+            const knownIds = [
+                "github-publish-btn",
+                "github-publish-button",
+                "github-publish-submit",
+                "publish-github-btn"
+            ];
+
+            for (const id of knownIds) {
+                const button = document.getElementById(id);
+                if (button) return button;
+            }
+
+            const modal = getGitHubPublishModalElement();
+            if (!modal) return null;
+
+            return Array.from(modal.querySelectorAll("button")).find(button => {
+                if (button.closest("#github-publish-result-modal")) return false;
+
+                const id = String(button.id || "").toLowerCase();
+                const text = String(button.textContent || "");
+
+                return (
+                    id.includes("publish")
+                    || id.includes("github")
+                    || text.includes("公開")
+                    || text.includes("アップロード")
+                ) && !text.includes("URL");
+            }) || null;
+        }
+
+        function ensureGitHubPublishedStateStyle() {
+            if (document.getElementById("github-published-state-style")) return;
+
+            const style = document.createElement("style");
+            style.id = "github-published-state-style";
+            style.textContent = `
+                .github-published-state {
+                    background: #198754 !important;
+                    border-color: #27a765 !important;
+                    color: #fff !important;
+                    box-shadow: 0 0 0 1px rgba(39, 167, 101, 0.25) !important;
+                    font-size: 0 !important;
+                }
+                .github-published-state::after {
+                    content: attr(data-github-published-label);
+                    display: inline-block;
+                    color: #fff;
+                    font-size: 13px;
+                    font-weight: 700;
+                    line-height: 1.2;
+                }
+                .github-published-state > * {
+                    display: none !important;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        function clearGitHubPublishedButtonState() {
+            const button = getGitHubPublishButton();
+            if (!button) return;
+
+            button.classList.remove("github-published-state");
+            button.removeAttribute("data-github-published-label");
+            button.removeAttribute("data-github-published-mode");
+        }
+
+        function setGitHubPublishedButtonState(mode) {
+            const button = getGitHubPublishButton();
+            if (!button) return;
+
+            ensureGitHubPublishedStateStyle();
+            button.classList.add("github-published-state");
+            button.dataset.githubPublishedMode = mode === "pwa" ? "pwa" : "html";
+            button.dataset.githubPublishedLabel = mode === "pwa"
+                ? "✓ PWA公開済"
+                : "✓ 公開済";
+            button.title = mode === "pwa"
+                ? "現在のPWA内容はGitHubへ公開済みです。タップすると再公開できます。"
+                : "現在のHTMLはGitHubへ公開済みです。タップすると再公開できます。";
+        }
+
+        async function syncGitHubPublishedStateUi() {
+            clearGitHubPublishedButtonState();
+
+            try {
+                const mode = detectGitHubPublishMode();
+                const snapshot = createGitHubPublishSnapshot(mode);
+                const record = getGitHubPublishedRecord(snapshot.appKey, mode);
+
+                if (!record?.fingerprint) return;
+
+                const currentFingerprint = await buildGitHubPublishedFingerprint(snapshot);
+
+                // 非同期fingerprint計算中に別アプリや別モードへ切り替わった場合は表示しない。
+                if (snapshot.appKey !== getGitHubPublishedAppKey()) return;
+                if (mode !== detectGitHubPublishMode()) return;
+
+                if (record.fingerprint === currentFingerprint) {
+                    setGitHubPublishedButtonState(mode);
+                }
+            } catch (error) {
+                console.warn("GitHub公開済状態の判定に失敗しました:", error);
+            }
+        }
+
+        function scheduleGitHubPublishedStateSync(delay = 450) {
+            clearGitHubPublishedButtonState();
+
+            if (githubPublishedStateSyncTimer) {
+                clearTimeout(githubPublishedStateSyncTimer);
+            }
+
+            githubPublishedStateSyncTimer = setTimeout(() => {
+                githubPublishedStateSyncTimer = null;
+                syncGitHubPublishedStateUi();
+            }, Math.max(0, Number(delay) || 0));
+        }
+
+        function isLikelyGitHubPublishActionButton(button) {
+            if (!(button instanceof Element)) return false;
+            if (button.closest("#github-publish-result-modal")) return false;
+
+            const modal = getGitHubPublishModalElement();
+            if (modal && !modal.contains(button)) return false;
+
+            const id = String(button.id || "").toLowerCase();
+            const text = String(button.textContent || "");
+
+            return id.includes("github-publish")
+                || id.includes("publish-github")
+                || text.includes("GitHubへ公開")
+                || text.includes("PWA公開")
+                || text.includes("公開する")
+                || text.includes("アップロード")
+                || button.classList.contains("github-published-state");
+        }
+
+        function capturePendingGitHubPublishSnapshot(event) {
+            const button = event.target?.closest?.("button");
+            if (!button || !isLikelyGitHubPublishActionButton(button)) return;
+
+            try {
+                const snapshot = createGitHubPublishSnapshot();
+                pendingGitHubPublishSnapshot = {
+                    ...snapshot,
+                    fingerprintPromise: buildGitHubPublishedFingerprint(snapshot)
+                };
+            } catch (error) {
+                pendingGitHubPublishSnapshot = null;
+                console.warn("GitHub公開開始状態の取得に失敗しました:", error);
+            }
+        }
+
+        async function recordGitHubPublishSuccess(result) {
+            try {
+                let snapshot = pendingGitHubPublishSnapshot;
+
+                if (!snapshot) {
+                    snapshot = createGitHubPublishSnapshot(
+                        detectGitHubPublishMode(result)
+                    );
+                }
+
+                pendingGitHubPublishSnapshot = null;
+
+                const mode = snapshot.mode === "pwa" ? "pwa" : "html";
+                const fingerprint = snapshot.fingerprintPromise
+                    ? await snapshot.fingerprintPromise
+                    : await buildGitHubPublishedFingerprint(snapshot);
+
+                if (!fingerprint) return;
+
+                const target = snapshot.target || {};
+                const saved = saveGitHubPublishedRecord(snapshot.appKey, mode, {
+                    fingerprint,
+                    publishedAt: new Date().toISOString(),
+                    repo: target.repo,
+                    branch: target.branch,
+                    path: mode === "html" ? target.path : "",
+                    folder: mode === "pwa" ? target.folder : "",
+                    publicUrl: String(result?.publicUrl || "")
+                });
+
+                if (!saved) return;
+
+                // 公開中にコードや設定を変更した場合、過去スナップショットは記録するが
+                // 現在内容と一致しないため公開済表示にはならない。
+                scheduleGitHubPublishedStateSync(0);
+            } catch (error) {
+                console.warn("GitHub公開済状態の記録に失敗しました:", error);
+            }
+        }
+
+        function isGitHubPublishedRelevantControl(element) {
+            if (!(element instanceof Element)) return false;
+
+            const id = String(element.id || "").toLowerCase();
+            const name = String(element.name || "").toLowerCase();
+            const key = `${id} ${name}`;
+
+            if (/(token|pat|authorization|access-token)/.test(key)) return false;
+
+            return key.includes("github")
+                || key.includes("pwa")
+                || key.includes("repo")
+                || key.includes("branch")
+                || key.includes("path")
+                || key.includes("folder")
+                || key.includes("icon");
+        }
+
+        function installGitHubPublishedStateTracking() {
+            if (githubPublishedTrackingInstalled) return;
+            githubPublishedTrackingInstalled = true;
+
+            ensureGitHubPublishedStateStyle();
+
+            if (editor && typeof editor.on === "function") {
+                editor.on("change", () => {
+                    scheduleGitHubPublishedStateSync(700);
+                });
+            }
+
+            document.addEventListener("click", event => {
+                capturePendingGitHubPublishSnapshot(event);
+
+                const target = event.target?.closest?.(
+                    "button, input, select, label, [role='button']"
+                );
+                if (target && isGitHubPublishedRelevantControl(target)) {
+                    scheduleGitHubPublishedStateSync(0);
+                }
+            }, true);
+
+            document.addEventListener("input", event => {
+                if (isGitHubPublishedRelevantControl(event.target)) {
+                    scheduleGitHubPublishedStateSync(500);
+                }
+            }, true);
+
+            document.addEventListener("change", event => {
+                if (isGitHubPublishedRelevantControl(event.target)) {
+                    scheduleGitHubPublishedStateSync(0);
+                }
+            }, true);
+
+            const modal = getGitHubPublishModalElement();
+            if (modal && typeof MutationObserver !== "undefined") {
+                const observer = new MutationObserver(mutations => {
+                    const relevant = mutations.some(mutation => {
+                        const target = mutation.target;
+                        return mutation.type === "childList"
+                            || (
+                                mutation.type === "attributes"
+                                && isGitHubPublishedRelevantControl(target)
+                            );
+                    });
+
+                    if (relevant) scheduleGitHubPublishedStateSync(250);
+                });
+
+                observer.observe(modal, {
+                    subtree: true,
+                    childList: true,
+                    attributes: true,
+                    attributeFilter: ["value", "checked", "src"]
+                });
+            }
+
+            scheduleGitHubPublishedStateSync(0);
+        }
+
         function escapeHtmlAttribute(value) {
             return String(value ?? "")
                 .replace(/&/g, "&amp;")
@@ -7387,6 +8075,12 @@ self.addEventListener("fetch", function (event) {
         }
 
         function showGitHubPublishResult(result) {
+            // この関数は既存公開処理が正常完了した後だけ呼ばれるため、
+            // ここを公開済状態の確定点とする。途中失敗では記録しない。
+            recordGitHubPublishSuccess(result).catch(error => {
+                console.warn("GitHub公開済状態の更新に失敗しました:", error);
+            });
+
             githubPublishResult = {
                 publicUrl: String(result?.publicUrl || ""),
                 githubUrl: String(result?.githubUrl || ""),
@@ -8127,6 +8821,8 @@ self.addEventListener("fetch", function (event) {
             restoreEditorDraftOnStartup()
         ]).then(() => {
             syncRunBarState();
+            installGitHubPublishedStateTracking();
+            scheduleGitHubPublishedStateSync(0);
             reloadFrame();
         });
     </script>
