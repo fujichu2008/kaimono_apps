@@ -4202,10 +4202,9 @@
                     const closing = line.trim();
                     if (/^\x60+$/.test(closing) && closing.length >= fenceLength) {
                         const candidate = classifyReflectCandidate(body.join('\n'));
-                        if (!candidate) {
-                            throw new Error('未対応のコードブロックが含まれています。反映するコードを1形式だけ貼り付けてください。');
+                        if (candidate) {
+                            candidates.push(candidate);
                         }
-                        candidates.push(candidate);
                         fenceLength = 0;
                     } else {
                         body.push(line);
@@ -4317,7 +4316,53 @@
 
             if (candidate.format === 'html') {
                 if (editor.getValue().trim().length > 0) {
-                    if (!confirm("【警告】\n現在のアプリを破棄し、HTMLフルコードで差し替えますか？")) return false;
+                    const currentCode = editor.getValue();
+                    const newCode = String(candidate.html || "");
+                    const currentCharCount = currentCode.length;
+                    const newCharCount = newCode.length;
+                    const currentLineCount = currentCode.length
+                        ? currentCode.split(/\r\n|\r|\n/).length
+                        : 0;
+                    const newLineCount = newCode.length
+                        ? newCode.split(/\r\n|\r|\n/).length
+                        : 0;
+                    const charDifference = newCharCount - currentCharCount;
+                    const charDifferenceLabel =
+                        `${charDifference >= 0 ? "+" : ""}${charDifference.toLocaleString()}字`;
+                    const warnings = [];
+
+                    if (currentCharCount >= 1000 && newCharCount < currentCharCount * 0.7) {
+                        const sizePercentage = Math.round(
+                            (newCharCount / currentCharCount) * 100
+                        );
+                        warnings.push(
+                            `⚠ 新しいコードが現在の${sizePercentage}%しかありません。AIの出力が途中で切れている可能性があります。`
+                        );
+                    }
+
+                    const omissionMarkerPattern = /(?:\.\.\.|…)\s*(?:以下|省略|同様|変更なし|略)|\/\/\s*(?:既存|以下|省略|中略|変更なし)|\/\*\s*(?:既存|以下|省略|中略)|<!--\s*(?:既存|以下|省略|中略)/i;
+                    const omissionMatch = newCode.match(omissionMarkerPattern);
+                    if (omissionMatch) {
+                        const matchedMarker = omissionMatch[0]
+                            .replace(/\s+/g, " ")
+                            .trim();
+                        warnings.push(
+                            `⚠ 省略記法（${matchedMarker}）が含まれています。完全なコードではない可能性があります。`
+                        );
+                    }
+
+                    const warningText = warnings.length
+                        ? warnings.join("\n") + "\n\n"
+                        : "";
+                    const confirmMessage =
+                        warningText
+                        + "【警告】\n"
+                        + "現在のアプリを破棄し、HTMLフルコードで差し替えますか？\n\n"
+                        + `現在のコード: ${currentCharCount.toLocaleString()}字 / ${currentLineCount.toLocaleString()}行\n`
+                        + `新しいコード: ${newCharCount.toLocaleString()}字 / ${newLineCount.toLocaleString()}行\n`
+                        + `差分: ${charDifferenceLabel}`;
+
+                    if (!confirm(confirmMessage)) return false;
                 }
 
                 pushReflectSnapshot(editor.getValue());
@@ -6067,8 +6112,8 @@ nextBtn.onclick=nextStep;
 
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
-                closeGitHubPublishModal();
                 showGitHubPublishResult(result);
+                closeGitHubPublishModal();
                 showToast("GitHubへの公開が完了しました");
             } catch (error) {
                 githubPublishBusy = false;
@@ -7488,6 +7533,20 @@ self.addEventListener("fetch", function (event) {
             return String(path || "").split("/").map(segment => encodeURIComponent(segment)).join("/");
         }
 
+        function buildGitHubPagesUrl(repo, path, isPwa) {
+            const [username, repository] = String(repo || "")
+                .split("/")
+                .map(part => part.trim());
+            const targetPath = String(path || "").trim();
+
+            if (!username || !repository || !targetPath) return "";
+
+            const encodedPath = encodeGitHubPath(targetPath);
+            return isPwa
+                ? `https://${username}.github.io/${repository}/${encodedPath}/`
+                : `https://${username}.github.io/${repository}/${encodedPath}`;
+        }
+
         function encodeGitHubRef(branch) {
             return String(branch || "").split("/").map(segment => encodeURIComponent(segment)).join("/");
         }
@@ -7966,6 +8025,7 @@ self.addEventListener("fetch", function (event) {
             button.classList.remove("github-published-state");
             button.removeAttribute("data-github-published-label");
             button.removeAttribute("data-github-published-mode");
+            button.title = "";
         }
 
         function setGitHubPublishedButtonState(mode) {
@@ -8136,6 +8196,26 @@ self.addEventListener("fetch", function (event) {
                 g: parseInt(hex.slice(2, 4), 16),
                 b: parseInt(hex.slice(4, 6), 16)
             };
+        }
+
+        function normalizePwaColor(value, fallback) {
+            const normalizeCandidate = candidate => {
+                let color = String(candidate ?? "").trim();
+                const shortMatch = color.match(/^#([0-9a-fA-F]{3})$/);
+                if (shortMatch) {
+                    color = "#" + shortMatch[1]
+                        .split("")
+                        .map(character => character + character)
+                        .join("");
+                }
+                return /^#[0-9a-fA-F]{6}$/.test(color)
+                    ? color.toLowerCase()
+                    : "";
+            };
+
+            return normalizeCandidate(value)
+                || normalizeCandidate(fallback)
+                || "#000000";
         }
 
         function showGitHubPublishResult(result) {
