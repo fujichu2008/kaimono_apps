@@ -576,6 +576,19 @@
             opacity: 0.5;
             transition: opacity 0.2s, color 0.2s, border-color 0.2s, background 0.2s;
         }
+        .run-verification-status .rv-count {
+            color: inherit;
+            opacity: 0.92;
+        }
+        .run-verification-status .rv-count:empty {
+            display: none;
+        }
+        /* 反映済みだが、まだ今回のコードを実行していない状態 */
+        .run-verification-status[data-state="staged"] {
+            color: var(--accent-color);
+            border-color: rgba(0,122,204,0.7);
+            opacity: 0.78;
+        }
         .run-verification-status[data-state="pending"] {
             color: var(--warning-color);
             border-color: var(--warning-color);
@@ -586,11 +599,24 @@
             border-color: rgba(76,175,80,0.7);
             opacity: 0.72;
         }
+        /* 起動エラー時だけ、件数と結果を欠落させずに2行まで折り返す。
+           タップ操作もこの状態だけで有効化し、実行中アプリの操作を奪わない。 */
         .run-verification-status[data-state="failed"] {
             color: #ff8a80;
             border-color: var(--danger-color);
             background: rgba(60, 24, 24, 0.88);
             opacity: 1;
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            text-align: right;
+            line-height: 1.35;
+            max-width: calc(100% - 20px);
+            pointer-events: auto;
+            cursor: pointer;
+        }
+        .run-verification-status[data-state="failed"]:active {
+            background: rgba(80, 30, 30, 0.95);
         }
         .run-ctrl-btn {
             flex: 1;
@@ -1244,7 +1270,7 @@
             </div>
         </div>
         <div class="run-frame-wrap">
-            <div id="runtime-verification-status" class="run-verification-status" data-state="idle">○ 未確認</div>
+            <div id="runtime-verification-status" class="run-verification-status" data-state="idle" onclick="handleRuntimeVerificationStatusTap()"><span id="runtime-verification-count" class="rv-count"></span><span id="runtime-verification-label" class="rv-label">○ 未確認</span></div>
             <iframe id="app-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"></iframe>
         </div>
     </section>
@@ -1799,12 +1825,18 @@
         const codeRevisionState = {
             current: 0
         };
+        // appliedCount/totalCount/failedCountは「今回の反映」由来の起動検証だけに使う最小限の状態。
+        // 表示はこの状態から組み立て、DOMの表示文字列から逆算しない。
         const runtimeVerification = {
             status: "idle",
             runtimeToken: "",
             targetRevision: -1,
             verifiedRevision: -1,
-            completionTimer: null
+            completionTimer: null,
+            appliedCount: 0,
+            totalCount: 0,
+            failedCount: 0,
+            failurePhase: ""
         };
         const RUNTIME_VERIFICATION_DELAY_MS = 2000;
         let devStatsScope = 'all';
@@ -2368,6 +2400,11 @@
             runtimeVerification.runtimeToken = "";
             runtimeVerification.targetRevision = -1;
             runtimeVerification.verifiedRevision = -1;
+            runtimeVerification.failurePhase = "";
+            // 通常実行・再読み込み・別アプリ実行で、以前の反映件数を引き継がない。
+            runtimeVerification.appliedCount = 0;
+            runtimeVerification.totalCount = 0;
+            runtimeVerification.failedCount = 0;
             syncRuntimeVerificationStatus();
         }
 
@@ -2379,30 +2416,60 @@
                 && runtimeVerification.verifiedRevision === codeRevisionState.current;
         }
 
+        // 今回の反映件数は状態から組み立てる。部分適用を件数だけで誤認しない表記にする。
+        function buildReflectVerificationPrefix() {
+            const total = Math.max(0, Number(runtimeVerification.totalCount) || 0);
+            const applied = Math.max(0, Number(runtimeVerification.appliedCount) || 0);
+            const failed = Math.max(0, Number(runtimeVerification.failedCount) || 0);
+            if (!total) return "";
+            if (failed > 0 || applied !== total) {
+                return `反映${applied}/${total}件・${failed}件未適用｜`;
+            }
+            return `反映${applied}件｜`;
+        }
+
         function syncRuntimeVerificationStatus() {
             const statusElement = document.getElementById('runtime-verification-status');
             if (!statusElement) return;
 
+            const countElement = document.getElementById('runtime-verification-count');
+            const labelElement = document.getElementById('runtime-verification-label');
+
             let state = "idle";
             let label = "○ 未確認";
 
-            if (runtimeVerification.status === "pending"
+            if (runtimeVerification.status === "staged"
+                && runtimeVerification.targetRevision === codeRevisionState.current) {
+                // 反映済みだが、まだこのコードでiframeを実行していない。
+                state = "staged";
+                label = "未実行";
+            } else if (runtimeVerification.status === "pending"
                 && runtimeVerification.targetRevision === codeRevisionState.current) {
                 state = "pending";
-                label = "… 起動チェック中";
+                label = "起動チェック中…";
             } else if (isCurrentCodeVerified()) {
                 state = "passed";
-                label = "✓ 起動時エラー未検出";
+                // 起動時にエラーが出なかっただけで、操作確認済みという意味ではない。
+                label = "起動時エラー未検出（操作は未確認）";
             } else if (runtimeVerification.status === "failed"
                 && Boolean(runtimeVerification.runtimeToken)
                 && runtimeVerification.runtimeToken === currentRuntimeToken
                 && runtimeVerification.targetRevision === codeRevisionState.current) {
                 state = "failed";
-                label = "! 実行エラーあり";
+                label = runtimeVerification.failurePhase === "interaction"
+                    ? "操作中エラー検出"
+                    : "起動エラー検出";
             }
 
             statusElement.dataset.state = state;
-            statusElement.textContent = label;
+            const prefix = state === "idle" ? "" : buildReflectVerificationPrefix();
+
+            if (countElement && labelElement) {
+                countElement.textContent = prefix;
+                labelElement.textContent = label;
+            } else {
+                statusElement.textContent = prefix + label;
+            }
         }
 
         function flashReflectSuccess() {
@@ -2420,13 +2487,30 @@
             });
         }
 
-        function beginReflectRuntimeVerification() {
+        // 今回の反映情報は呼び出し側から直接受け取る。HTMLフルコード反映は件数なしで呼ぶ。
+        function beginReflectRuntimeVerification(summary = {}) {
+            const applied = Math.max(0, Number(summary.appliedCount) || 0);
+            const total = Math.max(0, Number(summary.totalCount) || 0);
+            const failed = Math.max(0, Number(summary.failedCount) || 0);
+
             clearRuntimeVerificationTimer();
-            runtimeVerification.status = "pending";
+            // 反映直後はまだ実行していないため"staged"。
+            // 次のreloadFrame()でbindRuntimeVerificationToRun()が"pending"へ昇格させる。
+            runtimeVerification.status = "staged";
             runtimeVerification.runtimeToken = "";
             runtimeVerification.targetRevision = codeRevisionState.current;
             runtimeVerification.verifiedRevision = -1;
+            runtimeVerification.failurePhase = "";
+            runtimeVerification.appliedCount = applied;
+            runtimeVerification.totalCount = total;
+            runtimeVerification.failedCount = failed;
             syncRuntimeVerificationStatus();
+
+            if (failed > 0) {
+                showToast(`${buildReflectVerificationPrefix()}起動は未実行`);
+                return;
+            }
+
             flashReflectSuccess();
             showToast("✅ 反映成功 / 起動チェック中...");
         }
@@ -2442,6 +2526,7 @@
             clearRuntimeVerificationTimer();
             runtimeVerification.status = "pending";
             runtimeVerification.verifiedRevision = -1;
+            runtimeVerification.failurePhase = "";
             runtimeVerification.runtimeToken = String(runtimeToken);
             syncRuntimeVerificationStatus();
         }
@@ -2482,12 +2567,37 @@
                 return;
             }
 
-            // 起動チェック通過後も、同じコード・同じ実行で発生した対象エラーを反映する。
+            // 起動チェック中の失敗と、正常起動後の操作中エラーを分離して記録する。
+            runtimeVerification.failurePhase = runtimeVerification.status === "passed"
+                ? "interaction"
+                : "startup";
             runtimeVerification.status = "failed";
             runtimeVerification.verifiedRevision = -1;
             clearRuntimeVerificationTimer();
             syncRuntimeVerificationStatus();
-            showToast("⚠ 実行エラーあり");
+            showToast(
+                runtimeVerification.failurePhase === "interaction"
+                    ? "⚠ 操作中エラー検出（コード反映・起動確認は完了）"
+                    : "⚠ 起動エラー検出（コード反映は完了）"
+            );
+        }
+
+        // 起動エラー表示のタップ。表示文字列ではなく状態で判定し、
+        // 新しいUIを増やさず既存のエラー相談・反映前復元だけを呼ぶ。
+        function handleRuntimeVerificationStatusTap() {
+            if (runtimeVerification.status !== "failed") return;
+
+            const isInteractionError = runtimeVerification.failurePhase === "interaction";
+            const msg = isInteractionError
+                ? "正常起動後の操作中にエラーを検出しました。コードの反映と起動確認は完了しています。\nOK: このエラーをAIに相談\nキャンセル: 反映前に戻すか選ぶ"
+                : "起動エラーを検出しました。コードの反映自体は完了しています。\nOK: このエラーをAIに相談\nキャンセル: 反映前に戻すか選ぶ";
+            if (confirm(msg)) {
+                consultIframeErrorLogs();
+                return;
+            }
+            if (confirm("反映前の状態に戻しますか？")) {
+                restoreReflectSnapshot();
+            }
         }
 
         function toggleRuntimeMode() {
@@ -4465,114 +4575,6 @@ ${currentCode}
             };
         }
 
-        let reflectVerificationSummaryObserver = null;
-        let reflectVerificationSummaryTimer = null;
-
-        function clearReflectVerificationSummary() {
-            if (reflectVerificationSummaryObserver) {
-                reflectVerificationSummaryObserver.disconnect();
-                reflectVerificationSummaryObserver = null;
-            }
-            if (reflectVerificationSummaryTimer) {
-                clearTimeout(reflectVerificationSummaryTimer);
-                reflectVerificationSummaryTimer = null;
-            }
-        }
-
-        function findRuntimeVerificationStatusElement() {
-            const selectors = [
-                '#runtime-verification-status',
-                '#run-verification-status',
-                '#verification-status',
-                '.runtime-verification-status',
-                '.run-verification-status',
-                '.verification-status'
-            ];
-
-            for (const selector of selectors) {
-                const element = document.querySelector(selector);
-                if (element && /起動チェック|起動時エラー未検出|起動エラー|エラー検出/.test(String(element.textContent || ''))) {
-                    return element;
-                }
-            }
-
-            return Array.from(document.querySelectorAll('[role="status"], [aria-live]'))
-                .find(element =>
-                    /起動チェック|起動時エラー未検出|起動エラー|エラー検出/.test(
-                        String(element.textContent || '')
-                    )
-                ) || null;
-        }
-
-        function armReflectVerificationSummary(appliedCount, runtimeToken) {
-            clearReflectVerificationSummary();
-
-            const count = Math.max(0, Number(appliedCount) || 0);
-            if (!count) return;
-
-            const expectedRuntimeToken = runtimeToken;
-            const prefix = `反映${count}件｜`;
-            let verificationStarted = false;
-
-            const syncStatus = () => {
-                // 別の通常実行・再読み込みへ移った場合は今回の反映結果との関連付けを終了する。
-                if (
-                    expectedRuntimeToken
-                    && currentRuntimeToken
-                    && currentRuntimeToken !== expectedRuntimeToken
-                ) {
-                    clearReflectVerificationSummary();
-                    return;
-                }
-
-                const status = findRuntimeVerificationStatusElement();
-                if (!status) return;
-
-                const currentText = String(status.textContent || '');
-                const baseText = currentText.replace(/^反映\d+件｜\s*/, '');
-
-                if (/起動チェック中/.test(baseText)) {
-                    verificationStarted = true;
-                    const nextText = prefix + baseText;
-                    if (currentText !== nextText) {
-                        status.textContent = nextText;
-                    }
-                    return;
-                }
-
-                // 古い完了表示を今回の反映結果と誤って結び付けない。
-                if (!verificationStarted) return;
-
-                const verificationFinished =
-                    /起動時エラー未検出/.test(baseText)
-                    || /起動(?:時)?エラー検出/.test(baseText)
-                    || /エラー検出/.test(baseText);
-
-                if (!verificationFinished) return;
-
-                const nextText = prefix + baseText;
-                if (currentText !== nextText) {
-                    status.textContent = nextText;
-                }
-                clearReflectVerificationSummary();
-            };
-
-            reflectVerificationSummaryObserver = new MutationObserver(syncStatus);
-            reflectVerificationSummaryObserver.observe(document.body, {
-                subtree: true,
-                childList: true,
-                characterData: true
-            });
-
-            // beginReflectRuntimeVerification()直後ですでに表示が更新済みでも拾う。
-            syncStatus();
-
-            // 起動完了通知が来ないケースでも監視を残し続けない。
-            reflectVerificationSummaryTimer = setTimeout(() => {
-                clearReflectVerificationSummary();
-            }, 10000);
-        }
-
         function applyNormalizedPatches(fixes, options = {}) {
             const fromLongPress = options.fromLongPress === true;
             clearFixError();
@@ -4659,7 +4661,17 @@ ${currentCode}
                         );
                     });
 
-                    showToast(resultSummary);
+                    // 部分適用でも、今回の反映情報を起動検証へ直接渡して関連付ける。
+                    // 未適用リカバリー(fix modal)は従来どおり開いたままにする。
+                    if (appliedFixes.length > 0) {
+                        beginReflectRuntimeVerification({
+                            appliedCount: appliedFixes.length,
+                            totalCount: fixes.length,
+                            failedCount: failedFixes.length
+                        });
+                    } else {
+                        showToast(resultSummary);
+                    }
                     return false;
                 }
 
@@ -4668,11 +4680,11 @@ ${currentCode}
                 closeModal('fix-modal');
 
                 if (appliedFixes.length > 0) {
-                    beginReflectRuntimeVerification();
-                    armReflectVerificationSummary(
-                        appliedFixes.length,
-                        currentRuntimeToken
-                    );
+                    beginReflectRuntimeVerification({
+                        appliedCount: appliedFixes.length,
+                        totalCount: fixes.length,
+                        failedCount: failedFixes.length
+                    });
                 } else {
                     showToast(resultSummary);
                 }
