@@ -1925,7 +1925,21 @@
         localStorage.removeItem('gh_token');
 
                 // --- Editor Logic ---
+        let cachedEditorCode = null;
+
+        function getEditorCode() {
+            if (cachedEditorCode === null) {
+                cachedEditorCode = editor.getValue();
+            }
+            return cachedEditorCode;
+        }
+
+        function invalidateEditorCodeCache() {
+            cachedEditorCode = null;
+        }
+
                 editor.on('change', (instance, change) => {
+            invalidateEditorCodeCache();
             markCodeRevisionChanged(change);
             frameDirty = true;
             scheduleStatsUpdate();
@@ -2064,7 +2078,7 @@
 
             clearEditorSearchMarks();
             editorSearchState.matches = query
-                ? findLiteralMatchIndexes(editor.getValue(), query)
+                ? findLiteralMatchIndexes(getEditorCode(), query)
                 : [];
             editorSearchState.searchedQuery = query;
             editorSearchState.codeRevision = codeRevisionState.current;
@@ -2333,7 +2347,7 @@
         }
 
         function updateStats() {
-            const text = editor.getValue();
+            const text = getEditorCode();
             const lines = editor.lineCount();
             const chars = text.length;
             stats.textContent = `${lines}行 / ${chars}文字`;
@@ -2968,7 +2982,9 @@
             const instructionInput = document.getElementById('ai-instruction');
             if (instructionInput) instructionInput.value = "";
             syncPreviousAiInstructionButton();
-            setPromptCodeAttachMode('attach', { silent: true });
+            promptCopiedChunkIndexes.clear();
+            promptSplitCodeSignature = "";
+            setPromptCodeAttachMode('attach');
             clearAiRoundTripState();
             invalidateRuntimeVerificationForCodeChange();
 
@@ -3301,7 +3317,7 @@
 
         // --- New: Copy Function ---
                                 function copyFullCode() {
-            const code = editor.getValue();
+            const code = getEditorCode();
             if(!code) {
                 showToast("コピーするコードがありません");
                 return;
@@ -3807,8 +3823,8 @@
                 function copyConsultPrompt() {
             const categories = Array.from(document.querySelectorAll('input[name="consult-cat"]:checked')).map(cb => cb.value).join(', ');
             const details = document.getElementById('consult-text').value;
-            const currentCode = editor.getValue();
             const omitCode = document.getElementById('consult-code-none')?.checked === true;
+            const currentCode = omitCode ? "" : getEditorCode();
             const rememberedCodePrefix = omitCode
                 ? `あなたは、直前までの会話で分割して渡された対象コードをすでに記憶しています。もし直前にJSON修正コードが提示されている場合は、そのJSON修正を反映した最新版コードを前提にしてください。\n\n`
                 : "";
@@ -3825,7 +3841,7 @@
         }
 
                         function syncAiPromptActionUi() {
-            const hasCode = Boolean(editor.getValue().trim());
+            const hasCode = Boolean(getEditorCode().trim());
             const title = document.getElementById('ai-prompt-action-title');
             const primaryButton = document.getElementById('ai-prompt-primary-action');
             const rebuildRow = document.getElementById('ai-prompt-rebuild-row');
@@ -3853,12 +3869,12 @@
         }
 
         function copyPrimaryAiPrompt() {
-            const promptType = editor.getValue().trim() ? "auto" : "full";
+            const promptType = getEditorCode().trim() ? "auto" : "full";
             copyPrompt(promptType);
         }
 
         function copyRebuildAiPrompt() {
-            if (!editor.getValue().trim()) {
+            if (!getEditorCode().trim()) {
                 copyPrompt("full");
                 return;
             }
@@ -3872,8 +3888,7 @@
                         function openPromptModal() {
             openDraggableAiModal('prompt-modal');
             syncPreviousAiInstructionButton();
-            setPromptCodeAttachMode(getPromptCodeAttachMode(), { silent: true });
-            updatePromptSplitButtons();
+            setPromptCodeAttachMode(getPromptCodeAttachMode());
             syncAiPromptActionUi();
         }
 
@@ -4566,7 +4581,20 @@
             return promptCodeAttachMode === 'split' ? 'split' : 'attach';
         }
 
-        function setPromptCodeAttachMode(mode, options = {}) {
+        function getPromptSplitCodeSignature() {
+            return `${getPromptCodeChunkSize()}:${codeRevisionState.current}`;
+        }
+
+        function syncPromptSplitCodeState() {
+            const codeSignature = getPromptSplitCodeSignature();
+            if (promptSplitCodeSignature !== codeSignature) {
+                promptCopiedChunkIndexes.clear();
+                promptSplitCodeSignature = codeSignature;
+            }
+            return codeSignature;
+        }
+
+        function setPromptCodeAttachMode(mode) {
             promptCodeAttachMode = mode === 'split' ? 'split' : 'attach';
 
             const attach = document.getElementById('prompt-code-attach');
@@ -4579,8 +4607,8 @@
             if (promptCodeAttachMode === 'split') updatePromptSplitButtons();
         }
 
-        function getPromptCodeChunks() {
-            const code = editor.getValue();
+        function getPromptCodeChunks(currentCode = getEditorCode()) {
+            const code = String(currentCode ?? "");
             const chunkSize = getPromptCodeChunkSize();
             const chunks = [];
             for (let i = 0; i < code.length; i += chunkSize) {
@@ -4601,20 +4629,16 @@
             }
 
             panel.style.display = 'block';
-            const currentCode = editor.getValue();
+            const currentCode = getEditorCode();
             const chunkSize = getPromptCodeChunkSize();
             const chunkSizeSelect = document.getElementById('prompt-chunk-size-select');
             if (chunkSizeSelect && chunkSizeSelect.value !== String(chunkSize)) {
                 chunkSizeSelect.value = String(chunkSize);
             }
 
-            const codeSignature = `${chunkSize}:${currentCode.length}:${currentCode.slice(0, 80)}:${currentCode.slice(-80)}`;
-            if (promptSplitCodeSignature !== codeSignature) {
-                promptCopiedChunkIndexes.clear();
-                promptSplitCodeSignature = codeSignature;
-            }
+            syncPromptSplitCodeState();
 
-            const chunks = getPromptCodeChunks();
+            const chunks = getPromptCodeChunks(currentCode);
             const codeLength = currentCode.length;
             const chunkSizeLabel = `${Math.round(chunkSize / 10000)}万字`;
             info.textContent = `コード ${codeLength.toLocaleString()}文字を ${chunks.length} 分割。1から順番にコピーしてAIへ送ってください。`;
@@ -4672,8 +4696,17 @@
         }
 
         function copyPromptCodeChunk(index) {
-            const chunks = getPromptCodeChunks();
+            const currentCode = getEditorCode();
+            const splitSignatureAtCopy = syncPromptSplitCodeState();
+            const chunks = getPromptCodeChunks(currentCode);
             const total = chunks.length;
+
+            if (!Number.isInteger(index) || index < 0 || index >= total) {
+                updatePromptSplitButtons();
+                showToast("コード変更を検出したため分割一覧を更新しました");
+                return;
+            }
+
             const chunk = chunks[index] || "";
             const isFirst = index === 0;
             const isLast = index === total - 1;
@@ -4693,6 +4726,11 @@ ${chunk}
 \`\`\``;
 
                         writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`, () => {
+                if (getPromptSplitCodeSignature() !== splitSignatureAtCopy) {
+                    updatePromptSplitButtons();
+                    return;
+                }
+
                 promptCopiedChunkIndexes.add(index);
                 const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
                 if (selectedBtn) {
@@ -4727,9 +4765,23 @@ ${currentCode}
 
         function copyPrompt(type) {
             let prompt = "";
-            const currentCode = editor.getValue();
+            const currentCode = getEditorCode();
             const hasCurrentCode = Boolean(currentCode.trim());
             const codeAttachMode = getPromptCodeAttachMode();
+
+            if (hasCurrentCode && codeAttachMode === 'split') {
+                syncPromptSplitCodeState();
+                const chunks = getPromptCodeChunks(currentCode);
+                const missingChunkNumbers = chunks
+                    .map((chunk, index) => promptCopiedChunkIndexes.has(index) ? null : index + 1)
+                    .filter(index => index !== null);
+
+                if (missingChunkNumbers.length) {
+                    updatePromptSplitButtons();
+                    showToast(`未送信のコードがあります: ${missingChunkNumbers.join(", ")}`);
+                    return;
+                }
+            }
 
             // 新規作成では、以前選ばれていたattach/split状態をプロンプトへ持ち込まない。
             // コードが存在する修正フェーズだけ、従来のコード添付方式を使用する。
@@ -5308,7 +5360,7 @@ nextBtn.onclick=nextStep;
         }
 
         function getRunnableCode() {
-            let code = editor.getValue();
+            let code = getEditorCode();
             if(!code.trim()) {
                 return buildLandingPage();
             }
@@ -5318,7 +5370,11 @@ nextBtn.onclick=nextStep;
             <script>
                 (function(){
                     const RUNTIME_TOKEN = ${JSON.stringify(currentRuntimeToken)};
-                    const send = (type, args, source = 'console') => {
+                    const SEND_LIMIT_PER_SECOND = 30;
+                    let sendWindowStart = 0;
+                    let sendWindowCount = 0;
+                    let sendSuppressed = false;
+                    const rawSend = (type, args, source) => {
                         try {
                             // targetOriginはsandbox互換性のため"*"のまま。runtimeTokenで実行単位を識別する。
                             window.parent.postMessage({
@@ -5330,9 +5386,27 @@ nextBtn.onclick=nextStep;
                             }, '*');
                         } catch(e) {}
                     };
-                    const originalLog = console.log;
+                    // 直近1秒の送信が上限を超えたら送信を停止し、抑制開始時に1回だけ通知する。
+                    // 1秒経過でカウンタをリセットして送信を再開する。
+                    const send = (type, args, source = 'console') => {
+                        const now = Date.now();
+                        if (now - sendWindowStart >= 1000) {
+                            sendWindowStart = now;
+                            sendWindowCount = 0;
+                            sendSuppressed = false;
+                        }
+                        if (sendSuppressed) return;
+                        sendWindowCount++;
+                        if (sendWindowCount > SEND_LIMIT_PER_SECOND) {
+                            sendSuppressed = true;
+                            rawSend('error', ['[AppStudio] エラー送信を抑制しました（1秒あたり30件超過）'], 'appstudio');
+                            return;
+                        }
+                        rawSend(type, args, source);
+                    };
+                    // console.logは親側で破棄されるためpostMessageしない。
+                    // console.log自体の出力動作は上書きせず、そのまま維持する。
                     const originalError = console.error;
-                    console.log = function(...args) { originalLog.apply(console, args); send('log', args, 'console'); };
                     console.error = function(...args) { originalError.apply(console, args); send('error', args, 'console'); };
                     // window.onerrorの上書きは廃止。作成アプリ自身のerrorリスナーを壊さないaddEventListenerで取得する。
                     window.addEventListener('error', function(event) {
@@ -5760,7 +5834,7 @@ nextBtn.onclick=nextStep;
         }
 
         async function openGitHubPublishModal() {
-            const sourceCode = editor.getValue();
+            const sourceCode = getEditorCode();
             if (!sourceCode.trim()) {
                 showToast("公開するコードがありません");
                 return;
@@ -7635,14 +7709,14 @@ self.addEventListener("fetch", function (event) {
         }
 
         function extractCurrentSourceAppId() {
-            return extractSourceAppId(editor?.getValue?.() || "");
+            return extractSourceAppId(getEditorCode());
         }
 
-        function getGitHubPublishedAppKey() {
+        function getGitHubPublishedAppKey(sourceCode) {
             // HTML内のlfs-meta.appIdはアプリの版が変わっても維持される安定IDなので最優先する。
             // 別アプリ読込時に旧ワークスペースのrecord IDが残っていても、
             // 公開状態が混ざらないよう現在コード自身のIDを基準にする。
-            const sourceAppId = extractCurrentSourceAppId();
+            const sourceAppId = extractSourceAppId(sourceCode);
             if (sourceAppId) return `app:${sourceAppId}`;
 
             const name = String(
@@ -7733,12 +7807,12 @@ self.addEventListener("fetch", function (event) {
 
         function createGitHubPublishSnapshot(mode = detectGitHubPublishMode()) {
             const normalizedMode = mode === "pwa" ? "pwa" : "html";
-            const source = String(editor?.getValue?.() || "");
+            const source = getEditorCode();
             const target = getCurrentGitHubTarget(normalizedMode);
 
             return {
                 mode: normalizedMode,
-                appKey: getGitHubPublishedAppKey(),
+                appKey: getGitHubPublishedAppKey(source),
                 source,
                 target,
                 pwaConfig: normalizedMode === "pwa"
@@ -7988,10 +8062,16 @@ self.addEventListener("fetch", function (event) {
                 : "現在のHTMLはGitHubへ公開済みです。タップすると再公開できます。";
         }
 
+        function isGitHubPublishModalVisible() {
+            const modal = document.getElementById("github-publish-modal");
+            return Boolean(modal && modal.style.display === "flex");
+        }
+
         async function syncGitHubPublishedStateUi(
             syncGeneration = githubPublishedStateSyncGeneration
         ) {
             clearGitHubPublishedButtonState();
+            if (!isGitHubPublishModalVisible()) return;
 
             try {
                 const mode = detectGitHubPublishMode();
@@ -8005,7 +8085,8 @@ self.addEventListener("fetch", function (event) {
                 // アイコン読込などの非同期処理中に設定変更・アプリ切替・モード変更が
                 // 発生した場合、古い判定結果から公開済み表示を復活させない。
                 if (syncGeneration !== githubPublishedStateSyncGeneration) return;
-                if (snapshot.appKey !== getGitHubPublishedAppKey()) return;
+                if (!isGitHubPublishModalVisible()) return;
+                if (snapshot.appKey !== getGitHubPublishedAppKey(getEditorCode())) return;
                 if (mode !== detectGitHubPublishMode()) return;
 
                 if (record.fingerprint === currentFingerprint) {
@@ -8022,10 +8103,14 @@ self.addEventListener("fetch", function (event) {
 
             if (githubPublishedStateSyncTimer) {
                 clearTimeout(githubPublishedStateSyncTimer);
+                githubPublishedStateSyncTimer = null;
             }
+
+            if (!isGitHubPublishModalVisible()) return;
 
             githubPublishedStateSyncTimer = setTimeout(() => {
                 githubPublishedStateSyncTimer = null;
+                if (!isGitHubPublishModalVisible()) return;
                 syncGitHubPublishedStateUi(syncGeneration);
             }, Math.max(0, Number(delay) || 0));
         }
@@ -8107,7 +8192,10 @@ self.addEventListener("fetch", function (event) {
             // PWAアイコン更新処理から明示的に再判定する。
             if (editor && typeof editor.on === "function") {
                 editor.on("change", () => {
-                    scheduleGitHubPublishedStateSync(700);
+                    clearGitHubPublishedButtonState();
+                    if (isGitHubPublishModalVisible()) {
+                        scheduleGitHubPublishedStateSync(700);
+                    }
                 });
             }
 
@@ -8415,6 +8503,10 @@ self.addEventListener("fetch", function (event) {
 
         // --- iframeエラーの集約(エラーストーム対策) ---
         const IFRAME_ERROR_DEDUP_MS = 2000;
+        // エラー多発時にトーストが消えなくなるのを防ぐ最短表示間隔。
+        // ログ保存・開発統計・起動検証には一切影響させない。
+        const IFRAME_ERROR_TOAST_MIN_INTERVAL_MS = 1500;
+        let lastIframeErrorToastTime = 0;
         // 1実行あたりに個別追跡するユニークエラーメッセージ数の上限(メモリ保護)
         const IFRAME_ERROR_UNIQUE_CAP = 200;
         let errorLogRenderTimer = null;
@@ -8427,9 +8519,12 @@ self.addEventListener("fetch", function (event) {
 
         // 直近2秒以内に同じ実行モード・同じメッセージのエラーが連続した場合は、
         // 新しい行を追加せず直前ログのcountを加算する。
+        // 戻り値: 新しいログ行を追加した場合はtrue、既存行へ集約した場合はfalse。
+        // 呼び出し側のトースト表示制御にだけ使用し、集約ロジック自体は変更しない。
         function addIframeErrorLog(message) {
             const now = Date.now();
             const last = iframeErrorLogs[iframeErrorLogs.length - 1];
+            let isNewEntry = false;
             if (last
                 && last.message === message
                 && last.runtimeMode === currentRunEffectiveMode
@@ -8445,9 +8540,11 @@ self.addEventListener("fetch", function (event) {
                     lastTime: now
                 });
                 if (iframeErrorLogs.length > 100) iframeErrorLogs.shift();
+                isNewEntry = true;
             }
             bufferIframeErrorForStats(message);
             scheduleErrorLogRender();
+            return isNewEntry;
         }
 
         // エラーログモーダルが開いているときだけ、描画をデバウンスして更新する
@@ -8468,12 +8565,13 @@ self.addEventListener("fetch", function (event) {
             let entry = iframeErrorStatsBuffer[tokenKey];
             if (!entry) {
                 const nowIso = new Date().toISOString();
+                const currentCode = getEditorCode();
                 entry = iframeErrorStatsBuffer[tokenKey] = {
                     runtimeToken: currentRuntimeToken,
                     runtimeMode: currentRunEffectiveMode,
                     appName: getCurrentDevLogAppName(),
                     projectName: currentAppName || getCurrentDevLogAppName() || "未保存ドラフト",
-                    codeLength: editor.getValue().length,
+                    codeLength: currentCode.length,
                     lineCount: editor.lineCount(),
                     firstTime: nowIso,
                     lastTime: nowIso,
@@ -8668,6 +8766,7 @@ self.addEventListener("fetch", function (event) {
                 const safeDetail = String(detail || "").slice(0, 200);
                 const appName = getCurrentDevLogAppName();
                 const logs = getDevLogs();
+                const currentCode = getEditorCode();
 
                 logs.push({
                     id: Date.now() + "_" + Math.random().toString(36).slice(2),
@@ -8678,7 +8777,7 @@ self.addEventListener("fetch", function (event) {
                     result: String(result || ""),
                     reason: safeReason,
                     detail: safeDetail,
-                    codeLength: editor.getValue().length,
+                    codeLength: currentCode.length,
                     lineCount: editor.lineCount()
                 });
 
@@ -8915,8 +9014,16 @@ self.addEventListener("fetch", function (event) {
                 // エラーログへは集約処理(addIframeErrorLog)経由で保存する。
                 // SecurityErrorが発生しても自動的に互換実行へは切り替えない。
                 if (level === 'error') {
-                    showToast(msg);
-                    addIframeErrorLog(msg);
+                    // 集約後に新規行となったエラーだけを、最短間隔を空けてトースト表示する。
+                    // 抑制中もaddIframeErrorLog(内部でbufferIframeErrorForStats)と
+                    // failRuntimeVerificationは必ず実行し、ログ・統計の件数は減らさない。
+                    const isNewIframeError = addIframeErrorLog(msg);
+                    const iframeErrorToastNow = Date.now();
+                    if (isNewIframeError
+                        && (iframeErrorToastNow - lastIframeErrorToastTime) >= IFRAME_ERROR_TOAST_MIN_INTERVAL_MS) {
+                        lastIframeErrorToastTime = iframeErrorToastNow;
+                        showToast(msg);
+                    }
 
                     // リソース読込失敗は従来どおりエラーログへ残すが、
                     // 今回の実行確認ではconsole.error / JavaScript error /
