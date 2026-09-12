@@ -844,9 +844,48 @@
         #consult-modal {
             background: transparent;
         }
-        #prompt-modal > .modal,
-        #consult-modal > .modal {
+        #prompt-modal > .modal {
             will-change: transform;
+        }
+
+        /* 相談画面は可視領域内の固定シート。ドラッグ座標を使用しない。 */
+        #consult-modal {
+            overflow: hidden;
+            padding-top: max(8px, env(safe-area-inset-top));
+        }
+        #consult-modal > .modal {
+            width: min(100%, 440px);
+            min-width: 0;
+            min-height: 0;
+            max-height: 100%;
+            padding: var(--consult-panel-padding, 20px);
+            transform: none;
+            will-change: auto;
+            overflow-x: hidden;
+            overflow-y: auto;
+            overflow-anchor: none;
+            scroll-behavior: auto;
+        }
+        #consult-modal #consult-text {
+            display: block;
+            min-height: 0;
+            max-height: var(--consult-field-height, 140px);
+            font-size: 16px;
+            line-height: 1.5;
+            resize: none;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            scroll-behavior: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        #consult-modal button {
+            min-width: 44px;
+            min-height: 44px;
+            touch-action: manipulation;
+        }
+        #consult-modal label {
+            min-height: 44px;
+            touch-action: manipulation;
         }
 
         /* ドラッグ移動はAI指示だけで使用する。AI相談は従来どおり固定表示する。 */
@@ -3014,6 +3053,7 @@
         }
 
         function ensureDraggableAiModal(modalId) {
+            if (modalId !== 'prompt-modal') return;
             const overlay = document.getElementById(modalId);
             const modal = overlay?.querySelector('.modal');
             const handle = modal?.querySelector('h2');
@@ -3036,12 +3076,7 @@
             };
             draggableAiModalStates.set(modalId, state);
 
-            // AI相談はドラッグさせず、キーボード表示時の位置補正用stateだけを保持する。
-            if (modalId === 'consult-modal') {
-                handle.removeAttribute('title');
-                return;
-            }
-
+            // ドラッグ用stateはAI指示画面だけが保持する。
             handle.title = "ここをドラッグして移動";
 
             handle.addEventListener('pointerdown', event => {
@@ -3094,6 +3129,7 @@
         }
 
         function syncDraggableAiModalViewport(modalId) {
+            if (modalId !== 'prompt-modal') return;
             const overlay = document.getElementById(modalId);
             const modal = overlay?.querySelector('.modal');
             if (!overlay || !modal || overlay.style.display !== 'flex') return;
@@ -3141,7 +3177,7 @@
 
         function adjustAiModalFieldVisibility(target) {
             const field = getAiModalTextField(target);
-            const overlay = field?.closest('#prompt-modal, #consult-modal');
+            const overlay = field?.closest('#prompt-modal');
             if (!field || !overlay || overlay.style.display !== 'flex') return;
 
             const modalId = overlay.id;
@@ -3219,7 +3255,7 @@
 
         function keepAiModalFieldVisible(target) {
             const field = getAiModalTextField(target);
-            const overlay = field?.closest('#prompt-modal, #consult-modal');
+            const overlay = field?.closest('#prompt-modal');
             if (!field || !overlay) return;
 
             const adjust = () => {
@@ -3235,6 +3271,7 @@
         }
 
         function refreshAiModalForViewport(modalId) {
+            if (modalId !== 'prompt-modal') return;
             syncDraggableAiModalViewport(modalId);
 
             const field = getFocusedAiModalField(modalId);
@@ -3246,6 +3283,7 @@
         }
 
         function openDraggableAiModal(modalId) {
+            if (modalId !== 'prompt-modal') return;
             const overlay = document.getElementById(modalId);
             if (!overlay) return;
 
@@ -3261,28 +3299,164 @@
             });
         }
 
+        // 相談画面の更新予約とライフサイクルはここだけで管理する。
+        const consultViewportState = {
+            frameId: null,
+            generation: 0,
+            revealFocus: false,
+            width: null,
+            height: null
+        };
+
+        function cancelConsultViewportUpdate() {
+            consultViewportState.generation++;
+            if (consultViewportState.frameId !== null) {
+                cancelAnimationFrame(consultViewportState.frameId);
+            }
+            consultViewportState.frameId = null;
+            consultViewportState.revealFocus = false;
+            consultViewportState.width = null;
+            consultViewportState.height = null;
+        }
+
+        function resetConsultViewportStyles() {
+            const overlay = document.getElementById('consult-modal');
+            const modal = overlay?.querySelector('.modal');
+            if (!overlay || !modal) return;
+
+            ['left', 'top', 'width', 'height', 'transform'].forEach(property => {
+                overlay.style.removeProperty(property);
+            });
+            ['transform', 'max-height', '--consult-panel-padding', '--consult-field-height'].forEach(property => {
+                modal.style.removeProperty(property);
+            });
+        }
+
+        function revealConsultFocusedField(modal) {
+            const field = getFocusedAiModalField('consult-modal');
+            if (!field) return;
+
+            const modalRect = modal.getBoundingClientRect();
+            const fieldRect = field.getBoundingClientRect();
+            const margin = Math.min(8, modal.clientHeight / 8);
+            const visibleTop = modalRect.top + modal.clientTop + margin;
+            const visibleBottom = modalRect.top + modal.clientTop + modal.clientHeight - margin;
+            if (visibleBottom <= visibleTop) return;
+
+            let delta = 0;
+            if (fieldRect.height <= visibleBottom - visibleTop) {
+                if (fieldRect.top < visibleTop) {
+                    delta = fieldRect.top - visibleTop;
+                } else if (fieldRect.bottom > visibleBottom) {
+                    delta = fieldRect.bottom - visibleBottom;
+                }
+            } else if (fieldRect.bottom <= visibleTop || fieldRect.top >= visibleBottom) {
+                // 極端に狭い領域でも上下補正を交互に繰り返さない。
+                delta = fieldRect.top - visibleTop;
+            }
+
+            if (Math.abs(delta) > 1) {
+                const maxScroll = Math.max(0, modal.scrollHeight - modal.clientHeight);
+                modal.scrollTop = Math.min(maxScroll, Math.max(0, modal.scrollTop + delta));
+            }
+            // textareaのvalue・選択範囲・内部スクロールは変更しない。
+            // 入力行の追従と日本語変換はブラウザ標準動作に任せる。
+        }
+
+        function updateConsultViewport(revealFocus) {
+            const overlay = document.getElementById('consult-modal');
+            const modal = overlay?.querySelector('.modal');
+            if (!overlay || !modal || overlay.style.display !== 'flex') return;
+
+            const viewport = window.visualViewport;
+            const width = Math.max(0, viewport ? viewport.width : window.innerWidth);
+            const height = Math.max(0, viewport ? viewport.height : window.innerHeight);
+            const left = viewport ? viewport.offsetLeft : 0;
+            const top = viewport ? viewport.offsetTop : 0;
+            const sizeChanged = consultViewportState.width === null
+                || Math.abs(width - consultViewportState.width) > 1
+                || Math.abs(height - consultViewportState.height) > 1;
+
+            overlay.style.left = left + 'px';
+            overlay.style.top = top + 'px';
+            overlay.style.width = width + 'px';
+            overlay.style.height = height + 'px';
+
+            // 親のpaddingにはセーフエリアも含まれる。実際の計算値を差し引く。
+            const overlayStyle = getComputedStyle(overlay);
+            const paddingTop = parseFloat(overlayStyle.paddingTop) || 0;
+            const paddingBottom = parseFloat(overlayStyle.paddingBottom) || 0;
+            const availableHeight = Math.max(0, height - paddingTop - paddingBottom);
+            const panelPadding = Math.min(20, availableHeight / 8);
+            modal.style.maxHeight = availableHeight + 'px';
+            modal.style.setProperty('--consult-panel-padding', panelPadding + 'px');
+
+            const modalStyle = getComputedStyle(modal);
+            const borderHeight = (parseFloat(modalStyle.borderTopWidth) || 0)
+                + (parseFloat(modalStyle.borderBottomWidth) || 0);
+            const fieldHeight = Math.min(140, Math.max(0,
+                availableHeight - panelPadding * 2 - borderHeight - 16
+            ));
+            modal.style.setProperty('--consult-field-height', fieldHeight + 'px');
+
+            consultViewportState.width = width;
+            consultViewportState.height = height;
+
+            // スクロールだけのviewport通知では入力欄へ引き戻さない。
+            // フォーカス移動またはサイズ変更時に限り、必要最小限だけ補正する。
+            if (revealFocus || sizeChanged) {
+                revealConsultFocusedField(modal);
+            }
+        }
+
+        function scheduleConsultViewportUpdate(revealFocus = false) {
+            const overlay = document.getElementById('consult-modal');
+            if (!overlay || overlay.style.display !== 'flex') return;
+
+            consultViewportState.revealFocus = consultViewportState.revealFocus || revealFocus;
+            if (consultViewportState.frameId !== null) return;
+
+            const generation = consultViewportState.generation;
+            consultViewportState.frameId = requestAnimationFrame(() => {
+                if (generation !== consultViewportState.generation) return;
+                consultViewportState.frameId = null;
+                const shouldReveal = consultViewportState.revealFocus;
+                consultViewportState.revealFocus = false;
+                updateConsultViewport(shouldReveal);
+            });
+        }
+
         window.addEventListener('resize', () => {
             refreshAiModalForViewport('prompt-modal');
-            refreshAiModalForViewport('consult-modal');
+            scheduleConsultViewportUpdate();
         });
         if (window.visualViewport) {
             window.visualViewport.addEventListener('resize', () => {
                 refreshAiModalForViewport('prompt-modal');
-                refreshAiModalForViewport('consult-modal');
+                scheduleConsultViewportUpdate();
             });
             window.visualViewport.addEventListener('scroll', () => {
                 refreshAiModalForViewport('prompt-modal');
-                refreshAiModalForViewport('consult-modal');
+                scheduleConsultViewportUpdate();
             });
         }
 
         document.addEventListener('focusin', event => {
+            const field = getAiModalTextField(event.target);
+            if (field?.closest('#consult-modal')) {
+                scheduleConsultViewportUpdate(true);
+                return;
+            }
             keepAiModalFieldVisible(event.target);
         });
 
         document.addEventListener('focusout', event => {
             const field = getAiModalTextField(event.target);
-            const overlay = field?.closest('#prompt-modal, #consult-modal');
+            if (field?.closest('#consult-modal')) {
+                scheduleConsultViewportUpdate();
+                return;
+            }
+            const overlay = field?.closest('#prompt-modal');
             if (!field || !overlay) return;
 
             setTimeout(() => {
@@ -3293,7 +3467,19 @@
         });
 
         function openConsultModal() {
-            openDraggableAiModal('consult-modal');
+            const overlay = document.getElementById('consult-modal');
+            const modal = overlay?.querySelector('.modal');
+            if (!overlay || !modal) return;
+            if (overlay.style.display === 'flex') {
+                scheduleConsultViewportUpdate();
+                return;
+            }
+
+            cancelConsultViewportUpdate();
+            resetConsultViewportStyles();
+            overlay.style.display = 'flex';
+            modal.scrollTop = 0;
+            scheduleConsultViewportUpdate(true);
         }
        
                 function copyConsultPrompt() {
@@ -4472,6 +4658,10 @@ nextBtn.onclick=nextStep;
 
                 function closeModal(id) {
             document.getElementById(id).style.display = 'none';
+            if (id === 'consult-modal') {
+                cancelConsultViewportUpdate();
+                resetConsultViewportStyles();
+            }
         }
 
         // --- IndexedDB Wrapper ---
