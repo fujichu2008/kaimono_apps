@@ -1856,6 +1856,20 @@
 
             const changeListeners = [];
 
+            const posFromIndexInValue = (sourceValue, index) => {
+                const value = String(sourceValue ?? "");
+                const targetIndex = Math.max(
+                    0,
+                    Math.min(value.length, Number(index) || 0)
+                );
+                const before = value.slice(0, targetIndex);
+                const lines = before.split("\n");
+                return {
+                    line: lines.length - 1,
+                    ch: lines[lines.length - 1].length
+                };
+            };
+
             const indexFromPos = position => {
                 const value = textareaElement.value;
                 const lines = value.split("\n");
@@ -1893,12 +1907,18 @@
                 setValue(value) {
                     const nextValue = String(value ?? "");
                     const previousValue = textareaElement.value;
+                    const changeFrom = posFromIndexInValue(previousValue, 0);
+                    const changeTo = posFromIndexInValue(
+                        previousValue,
+                        previousValue.length
+                    );
+
                     textareaElement.value = nextValue;
 
                     if (previousValue !== nextValue) {
                         notifyChange({
-                            from: { line: 0, ch: 0 },
-                            to: adapter.posFromIndex(previousValue.length),
+                            from: changeFrom,
+                            to: changeTo,
                             text: nextValue.split("\n"),
                             removed: previousValue.split("\n"),
                             origin: "setValue"
@@ -1967,17 +1987,7 @@
                 },
 
                 posFromIndex(index) {
-                    const value = textareaElement.value;
-                    const targetIndex = Math.max(
-                        0,
-                        Math.min(value.length, Number(index) || 0)
-                    );
-                    const before = value.slice(0, targetIndex);
-                    const lines = before.split("\n");
-                    return {
-                        line: lines.length - 1,
-                        ch: lines[lines.length - 1].length
-                    };
+                    return posFromIndexInValue(textareaElement.value, index);
                 },
 
                 replaceRange(replacement, from, to, origin = "+input") {
@@ -1988,6 +1998,8 @@
                     const rangeEnd = Math.max(start, end);
                     const removedText = value.slice(rangeStart, rangeEnd);
                     const replacementText = String(replacement ?? "");
+                    const changeFrom = posFromIndexInValue(value, rangeStart);
+                    const changeTo = posFromIndexInValue(value, rangeEnd);
 
                     textareaElement.value =
                         value.slice(0, rangeStart)
@@ -1998,8 +2010,8 @@
                     textareaElement.setSelectionRange(nextCursor, nextCursor);
 
                     notifyChange({
-                        from: adapter.posFromIndex(rangeStart),
-                        to: adapter.posFromIndex(rangeStart + removedText.length),
+                        from: changeFrom,
+                        to: changeTo,
                         text: replacementText.split("\n"),
                         removed: removedText.split("\n"),
                         origin
@@ -2152,7 +2164,11 @@
         const DEV_LOG_LIMIT = 1000;
         let devLogQueue = [];
         let devLogFlushTimer = null;
-        localStorage.removeItem('gh_token');
+        try {
+            localStorage.removeItem('gh_token');
+        } catch (error) {
+            console.warn("旧GitHubトークン情報の削除に失敗しました。AppStudioの起動を継続します:", error);
+        }
 
                 // --- Editor Logic ---
         let cachedEditorCode = null;
@@ -4665,6 +4681,7 @@
             const ok = applyNormalizedPatches(candidate.patches, { fromLongPress: true });
             if (!ok) {
                 document.getElementById('fix-modal').style.display = 'flex';
+                pushOpenModal('fix-modal');
             }
             return ok;
         }
@@ -5821,8 +5838,12 @@ nextBtn.onclick=nextStep;
             closeModal(modalId);
         });
 
+        // 実行画面を覗かせる透明オーバーレイのため、入力中の誤タップで閉じない。
+        const OVERLAY_CLOSE_EXCLUDED_MODAL_IDS = ['prompt-modal', 'consult-modal'];
+
         document.querySelectorAll('.modal-overlay').forEach(overlay => {
             overlay.addEventListener('click', event => {
+                if (OVERLAY_CLOSE_EXCLUDED_MODAL_IDS.includes(overlay.id)) return;
                 if (event.target !== overlay || githubPublishBusy) return;
                 closeModal(overlay.id);
             });
@@ -6214,7 +6235,12 @@ nextBtn.onclick=nextStep;
                 legacyPreferenceKey
             );
 
-            githubPublishState.repo = localStorage.getItem('gh_repo') || "";
+            try {
+                githubPublishState.repo = localStorage.getItem('gh_repo') || "";
+            } catch (error) {
+                console.warn("GitHubリポジトリ設定の読み込みに失敗しました:", error);
+                githubPublishState.repo = "";
+            }
             githubPublishState.htmlFileName = sanitizeGitHubFileName(filenameInput.value || baseName || "index");
             githubPublishState.pwa.folderName = savedPwaPreferences?.folderName
                 ? sanitizeGitHubFolderName(savedPwaPreferences.folderName)
@@ -6497,7 +6523,11 @@ nextBtn.onclick=nextStep;
 
             githubPublishBusy = true;
             syncGitHubPublishModal();
-            localStorage.setItem('gh_repo', options.repo);
+            try {
+                localStorage.setItem('gh_repo', options.repo);
+            } catch (error) {
+                console.warn("GitHubリポジトリ設定の保存に失敗しました。公開処理は継続します:", error);
+            }
 
             try {
                 const result = options.mode === "pwa"
