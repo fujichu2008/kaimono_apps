@@ -4356,7 +4356,116 @@ ${currentCode}
             clearFixError();
         }
 
-                function applyNormalizedPatches(fixes, options = {}) {
+        function buildPatchApplicationPlan(originalCode, fixes) {
+            const normalizedCode = String(originalCode || "").replace(/\r\n/g, '\n');
+            const failedReasonsByIndex = new Map();
+            const candidates = [];
+
+            const countOccurrences = (base, needle) => {
+                if (!needle) return 0;
+                let index = 0;
+                let found = 0;
+                while ((index = base.indexOf(needle, index)) !== -1) {
+                    found++;
+                    index += needle.length;
+                }
+                return found;
+            };
+
+            fixes.forEach((fix, fixIndex) => {
+                const beforeText = fix.before !== undefined ? fix.before : fix.search;
+                const afterText = fix.after !== undefined ? fix.after : fix.replace;
+
+                if (!beforeText || afterText === undefined) {
+                    failedReasonsByIndex.set(
+                        fixIndex,
+                        "before/search または after/replace が不足"
+                    );
+                    return;
+                }
+
+                const target = String(beforeText).replace(/\r\n/g, '\n');
+                const replacement = String(afterText).replace(/\r\n/g, '\n');
+                const totalFound = countOccurrences(normalizedCode, target);
+
+                if (totalFound === 0) {
+                    const replacementFound = replacement
+                        ? countOccurrences(normalizedCode, replacement)
+                        : 0;
+
+                    failedReasonsByIndex.set(
+                        fixIndex,
+                        replacementFound > 0
+                            ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
+                            : "対象コードが見つかりません。after/replaceの完全一致も確認できません"
+                    );
+                    return;
+                }
+
+                if (totalFound > 1) {
+                    failedReasonsByIndex.set(
+                        fixIndex,
+                        `対象コードが${totalFound}箇所見つかったため安全のため未適用`
+                    );
+                    return;
+                }
+
+                const startIndex = normalizedCode.indexOf(target);
+                candidates.push({
+                    fixIndex,
+                    fix,
+                    startIndex,
+                    endIndex: startIndex + target.length,
+                    replacement
+                });
+            });
+
+            for (let leftIndex = 0; leftIndex < candidates.length; leftIndex++) {
+                const left = candidates[leftIndex];
+
+                for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex++) {
+                    const right = candidates[rightIndex];
+                    const overlaps =
+                        left.startIndex < right.endIndex
+                        && right.startIndex < left.endIndex;
+
+                    if (!overlaps) continue;
+
+                    if (!failedReasonsByIndex.has(left.fixIndex)) {
+                        failedReasonsByIndex.set(
+                            left.fixIndex,
+                            `他のパッチ（${right.fixIndex + 1}件目）と置換範囲が重複するため未適用`
+                        );
+                    }
+                    if (!failedReasonsByIndex.has(right.fixIndex)) {
+                        failedReasonsByIndex.set(
+                            right.fixIndex,
+                            `他のパッチ（${left.fixIndex + 1}件目）と置換範囲が重複するため未適用`
+                        );
+                    }
+                }
+            }
+
+            const failedFixes = [];
+            fixes.forEach((fix, fixIndex) => {
+                const reason = failedReasonsByIndex.get(fixIndex);
+                if (reason) {
+                    failedFixes.push({ reason, fix });
+                }
+            });
+
+            const safeCandidates = candidates.filter(
+                candidate => !failedReasonsByIndex.has(candidate.fixIndex)
+            );
+
+            return {
+                normalizedCode,
+                safeCandidates,
+                failedFixes
+            };
+        }
+
+        function applyNormalizedPatches(fixes, options = {}) {
             const fromLongPress = options.fromLongPress === true;
             clearFixError();
 
@@ -4366,125 +4475,16 @@ ${currentCode}
                 }
 
                 const snapshotBeforeAutoFix = editor.getValue();
-                const originalCode = snapshotBeforeAutoFix.replace(/\r\n/g, '\n');
-                let code = originalCode;
+                const {
+                    normalizedCode,
+                    safeCandidates,
+                    failedFixes
+                } = buildPatchApplicationPlan(snapshotBeforeAutoFix, fixes);
 
-                const appliedFixes = [];
-                const failedFixes = [];
-                const failedReasonsByIndex = new Map();
-                const candidates = [];
+                let code = normalizedCode;
 
-                const countOccurrences = (base, needle) => {
-                    if (!needle) return 0;
-                    let index = 0;
-                    let found = 0;
-                    while ((index = base.indexOf(needle, index)) !== -1) {
-                        found++;
-                        index += needle.length;
-                    }
-                    return found;
-                };
-
-                const buildResultSummary = () => {
-                    const parts = [];
-                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
-                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
-                    return parts.length ? parts.join(" / ") : "適用0件";
-                };
-
-                // 第1段階:
-                // すべてのパッチを「反映開始時の元コード」だけを基準に事前検証する。
-                // 先行パッチの置換結果によって後続パッチの一致件数や位置を変化させない。
-                fixes.forEach((fix, fixIndex) => {
-                    const beforeText = fix.before !== undefined ? fix.before : fix.search;
-                    const afterText = fix.after !== undefined ? fix.after : fix.replace;
-
-                    if (!beforeText || afterText === undefined) {
-                        failedReasonsByIndex.set(
-                            fixIndex,
-                            "before/search または after/replace が不足"
-                        );
-                        return;
-                    }
-
-                    const target = String(beforeText).replace(/\r\n/g, '\n');
-                    const replacement = String(afterText).replace(/\r\n/g, '\n');
-                    const totalFound = countOccurrences(originalCode, target);
-
-                    if (totalFound === 0) {
-                        const replacementFound = replacement
-                            ? countOccurrences(originalCode, replacement)
-                            : 0;
-
-                        failedReasonsByIndex.set(
-                            fixIndex,
-                            replacementFound > 0
-                                ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
-                                : "対象コードが見つかりません。after/replaceの完全一致も確認できません"
-                        );
-                        return;
-                    }
-
-                    if (totalFound > 1) {
-                        failedReasonsByIndex.set(
-                            fixIndex,
-                            `対象コードが${totalFound}箇所見つかったため安全のため未適用`
-                        );
-                        return;
-                    }
-
-                    const startIndex = originalCode.indexOf(target);
-                    candidates.push({
-                        fixIndex,
-                        fix,
-                        startIndex,
-                        endIndex: startIndex + target.length,
-                        replacement
-                    });
-                });
-
-                // 元コード上で置換範囲が重なる候補は、順序や意図を推測せず双方を未適用にする。
-                for (let leftIndex = 0; leftIndex < candidates.length; leftIndex++) {
-                    const left = candidates[leftIndex];
-
-                    for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex++) {
-                        const right = candidates[rightIndex];
-                        const overlaps =
-                            left.startIndex < right.endIndex
-                            && right.startIndex < left.endIndex;
-
-                        if (!overlaps) continue;
-
-                        if (!failedReasonsByIndex.has(left.fixIndex)) {
-                            failedReasonsByIndex.set(
-                                left.fixIndex,
-                                `他のパッチ（${right.fixIndex + 1}件目）と置換範囲が重複するため未適用`
-                            );
-                        }
-                        if (!failedReasonsByIndex.has(right.fixIndex)) {
-                            failedReasonsByIndex.set(
-                                right.fixIndex,
-                                `他のパッチ（${left.fixIndex + 1}件目）と置換範囲が重複するため未適用`
-                            );
-                        }
-                    }
-                }
-
-                // 未適用項目は元のパッチ順を維持してリカバリーへ渡す。
-                fixes.forEach((fix, fixIndex) => {
-                    const reason = failedReasonsByIndex.get(fixIndex);
-                    if (reason) {
-                        failedFixes.push({ reason, fix });
-                    }
-                });
-
-                const safeCandidates = candidates.filter(
-                    candidate => !failedReasonsByIndex.has(candidate.fixIndex)
-                );
-
-                // 第2段階:
                 // 元コード上で確定したindexを使い、後方から前方へ適用する。
-                // 後方の文字数が変化しても、未処理の前方indexには影響しない。
+                // 安全性判定はbuildPatchApplicationPlan()だけが担当する。
                 safeCandidates
                     .slice()
                     .sort((a, b) => b.startIndex - a.startIndex)
@@ -4495,12 +4495,17 @@ ${currentCode}
                             + code.slice(candidate.endIndex);
                     });
 
-                safeCandidates
+                const appliedFixes = safeCandidates
                     .slice()
                     .sort((a, b) => a.fixIndex - b.fixIndex)
-                    .forEach(candidate => {
-                        appliedFixes.push(candidate.fix);
-                    });
+                    .map(candidate => candidate.fix);
+
+                const buildResultSummary = () => {
+                    const parts = [];
+                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
+                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
+                    return parts.length ? parts.join(" / ") : "適用0件";
+                };
 
                 if (appliedFixes.length > 0) {
                     pushReflectSnapshot(snapshotBeforeAutoFix);
