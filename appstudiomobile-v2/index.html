@@ -5380,6 +5380,11 @@ nextBtn.onclick=nextStep;
                     let sendWindowStart = 0;
                     let sendWindowCount = 0;
                     let sendSuppressed = false;
+                    // 抑制通知は1回のiframe実行につき最大1回。
+                    // 1秒ごとのウィンドウリセットでは絶対にfalseへ戻さない。
+                    // 毎秒通知すると、親のエラーログで実エラーと通知が交互に並び、
+                    // 直前1件比較による ×N件 の集約が壊れるため。
+                    let sendSuppressNotified = false;
                     const rawSend = (type, args, source) => {
                         try {
                             // targetOriginはsandbox互換性のため"*"のまま。runtimeTokenで実行単位を識別する。
@@ -5405,7 +5410,10 @@ nextBtn.onclick=nextStep;
                         sendWindowCount++;
                         if (sendWindowCount > SEND_LIMIT_PER_SECOND) {
                             sendSuppressed = true;
-                            rawSend('error', ['[AppStudio] エラー送信を抑制しました（1秒あたり30件超過）'], 'appstudio');
+                            if (!sendSuppressNotified) {
+                                sendSuppressNotified = true;
+                                rawSend('error', ['[AppStudio] エラー送信を抑制しました（1秒あたり30件超過）'], 'appstudio');
+                            }
                             return;
                         }
                         rawSend(type, args, source);
@@ -6167,6 +6175,7 @@ nextBtn.onclick=nextStep;
                 closeGitHubPublishModal();
                 showToast("GitHubへの公開が完了しました");
             } catch (error) {
+                pendingGitHubPublishSnapshot = null;
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
 
@@ -8145,6 +8154,7 @@ self.addEventListener("fetch", function (event) {
                 pendingGitHubPublishSnapshot = {
                     ...snapshot,
                     fingerprintPromise: buildGitHubPublishedFingerprint(snapshot)
+                        .catch(() => null)
                 };
             } catch (error) {
                 pendingGitHubPublishSnapshot = null;
@@ -8154,13 +8164,8 @@ self.addEventListener("fetch", function (event) {
 
         async function recordGitHubPublishSuccess(result) {
             try {
-                let snapshot = pendingGitHubPublishSnapshot;
-
-                if (!snapshot) {
-                    snapshot = createGitHubPublishSnapshot(
-                        detectGitHubPublishMode(result)
-                    );
-                }
+                const snapshot = pendingGitHubPublishSnapshot;
+                if (!snapshot) return;
 
                 pendingGitHubPublishSnapshot = null;
 
