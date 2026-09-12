@@ -769,14 +769,20 @@
         }
         .lib-history {
             margin-top: 4px;
-            padding: 4px 8px;
+            min-height: 44px;
+            padding: 8px 10px;
             background: rgba(0, 122, 204, 0.1);
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 11px;
+            line-height: 1.5;
             color: #aaa;
-            white-space: nowrap;
+            white-space: pre-wrap;
             overflow: hidden;
-            text-overflow: ellipsis;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
             cursor: pointer;
             width: 100%;
         }
@@ -5643,12 +5649,22 @@ nextBtn.onclick=nextStep;
             const versionSuffix = `${yyyy}${mm}${dd}${hh}${min}${ss}`;
             const appName = `${projectNameAtSaveStart}_${versionSuffix}`;
 
+            const versionChangesForSave = pendingInstructionsAtSaveStart
+                .slice()
+                .reverse()
+                .map(entry => ({
+                    text: String(entry?.text || ""),
+                    createdAt: String(entry?.createdAt || "")
+                }));
+
             const appData = {
                 id: createAppRecordId(),
                 name: appName,
                 projectName: projectNameAtSaveStart,
                 code: codeAtSaveStart,
                 date: now.toLocaleString(),
+                savedAt: now.toISOString(),
+                versionChanges: versionChangesForSave,
                 history: historyForSave
             };
 
@@ -8289,6 +8305,67 @@ self.addEventListener("fetch", function (event) {
             window.open(githubPublishResult.githubUrl, "_blank", "noopener");
         }
 
+        function getVersionChanges(app) {
+            if (!app || !Object.prototype.hasOwnProperty.call(app, "versionChanges")) {
+                return null;
+            }
+
+            if (!Array.isArray(app.versionChanges)) {
+                return [];
+            }
+
+            return app.versionChanges
+                .map(entry => {
+                    if (typeof entry === "string") {
+                        return {
+                            text: entry,
+                            createdAt: ""
+                        };
+                    }
+
+                    return {
+                        text: String(entry?.text || ""),
+                        createdAt: String(entry?.createdAt || "")
+                    };
+                })
+                .filter(entry => entry.text.trim());
+        }
+
+        function formatLibrarySavedAt(app) {
+            const savedAt = String(app?.savedAt || "").trim();
+            if (savedAt) {
+                const parsed = new Date(savedAt);
+                if (!Number.isNaN(parsed.getTime())) {
+                    return parsed.toLocaleString();
+                }
+            }
+
+            const legacyDate = String(app?.date || "").trim();
+            return legacyDate || "保存日時不明";
+        }
+
+        function getVersionChangePreview(app) {
+            const versionChanges = getVersionChanges(app);
+
+            if (versionChanges === null) {
+                const legacyHistory = Array.isArray(app?.history)
+                    ? app.history.filter(entry => String(entry || "").trim())
+                    : [];
+
+                return legacyHistory.length
+                    ? `旧形式の累積履歴: ${String(legacyHistory[0])}`
+                    : "旧形式データ：累積履歴はありません";
+            }
+
+            if (!versionChanges.length) {
+                return "今回の更新理由は記録されていません";
+            }
+
+            return versionChanges
+                .map(change => `・${change.text}`)
+                .join("\n");
+        }
+
                         async function renderLibrary(selectedProject = null) {
             libraryContainer.innerHTML = '';
             let library = [];
@@ -8314,7 +8391,8 @@ self.addEventListener("fetch", function (event) {
                 // プロジェクト一覧表示
                 for (const pName in projects) {
                     const latestApp = projects[pName][0];
-                    const historyText = latestApp.history && latestApp.history.length > 0 ? latestApp.history[0] : '履歴なし';
+                    const latestSavedAt = formatLibrarySavedAt(latestApp);
+                    const latestChangeText = getVersionChangePreview(latestApp);
                     const published = getLibraryGitHubPublishedRecords(latestApp);
                    
                     const el = document.createElement('div');
@@ -8327,8 +8405,9 @@ self.addEventListener("fetch", function (event) {
                                 <button class="btn-del" onclick="deleteProject(\`${escapeForTemplate(pName)}\`)" title="プロジェクトを一括削除">🗑️</button>
                             </div>
                         </div>
-                        <div class="lib-meta" style="margin-bottom: 4px;">最新更新: ${latestApp.date}</div>
-                        <div class="lib-history" style="pointer-events: none; cursor: default; background: rgba(255,255,255,0.05);">💡 ${escapeHtml(historyText)}</div>
+                        <div class="lib-meta" style="margin-bottom: 4px;">最新保存: ${escapeHtml(latestSavedAt)}</div>
+                        <div class="lib-history" style="pointer-events: none; cursor: default; background: rgba(255,255,255,0.05);">💡 今回の更新
+${escapeHtml(latestChangeText)}</div>
                     `;
                     libraryContainer.appendChild(el);
                 }
@@ -8351,12 +8430,14 @@ self.addEventListener("fetch", function (event) {
 
                 const appList = projects[selectedProject] || [];
                 appList.forEach(app => {
+                    const savedAtLabel = formatLibrarySavedAt(app);
+                    const versionChangeText = getVersionChangePreview(app);
                     const el = document.createElement('div');
                     el.className = 'lib-item';
                     el.style.marginLeft = '10px';
                     el.innerHTML = `
                         <div class="lib-header">
-                            <div class="lib-title" style="font-size: 13px; color: #ccc;">📄 ${escapeHtml(app.name)}</div>
+                            <div class="lib-title" style="font-size: 13px; color: #ccc;">🕒 ${escapeHtml(savedAtLabel)}</div>
                             <div class="lib-actions">
                                 <button class="btn-load" onclick="loadApp(${app.id})">読込</button>
                                 <button class="btn-action" onclick="shareApp(${app.id})">✉️</button>
@@ -8364,11 +8445,10 @@ self.addEventListener("fetch", function (event) {
                             </div>
                         </div>
                         <div class="lib-meta">
-                            ${app.date} | ${app.code.length} chars
+                            内部名: ${escapeHtml(app.name)} | ${app.code.length} chars
                         </div>
-                        ${ app.history && app.history.length > 0
-                            ? `<div class="lib-history" onclick="showHistoryModal(${app.id})">💡 ${escapeHtml(app.history[0])}</div>`
-                            : '' }
+                        <div class="lib-history" onclick="showHistoryModal(${app.id})">💡 今回の更新
+${escapeHtml(versionChangeText)}</div>
                     `;
                     libraryContainer.appendChild(el);
                 });
@@ -8435,11 +8515,102 @@ self.addEventListener("fetch", function (event) {
 
         async function showHistoryModal(id) {
             const app = await idb.get(id);
-            if(app && app.history) {
-                const content = app.history.join('\n\n');
-                document.getElementById('history-content').textContent = content;
-                document.getElementById('history-modal').style.display = 'flex';
+            if (!app) {
+                showToast("更新履歴を取得できませんでした");
+                return;
             }
+
+            const content = document.getElementById('history-content');
+            if (!content) return;
+
+            content.replaceChildren();
+
+            const createSection = (title, values, options = {}) => {
+                const section = document.createElement('section');
+                section.style.marginBottom = '18px';
+                section.style.padding = '12px';
+                section.style.border = '1px solid var(--border-color)';
+                section.style.borderRadius = '8px';
+                section.style.background = 'rgba(255,255,255,0.035)';
+
+                const heading = document.createElement('div');
+                heading.textContent = title;
+                heading.style.marginBottom = '8px';
+                heading.style.color = options.accent || 'var(--accent-color)';
+                heading.style.fontSize = '12px';
+                heading.style.fontWeight = 'bold';
+                section.appendChild(heading);
+
+                const lines = Array.isArray(values) ? values : [values];
+                lines.forEach((value, index) => {
+                    const row = document.createElement('div');
+                    row.textContent = String(value || "");
+                    row.style.whiteSpace = 'pre-wrap';
+                    row.style.overflowWrap = 'anywhere';
+                    row.style.wordBreak = 'break-word';
+                    row.style.lineHeight = '1.6';
+                    row.style.color = options.muted ? '#aaa' : '#ddd';
+
+                    if (index > 0) {
+                        row.style.marginTop = '8px';
+                        row.style.paddingTop = '8px';
+                        row.style.borderTop = '1px solid rgba(255,255,255,0.08)';
+                    }
+
+                    section.appendChild(row);
+                });
+
+                content.appendChild(section);
+            };
+
+            createSection(
+                "保存日時",
+                formatLibrarySavedAt(app),
+                { accent: 'var(--success-color)' }
+            );
+
+            const versionChanges = getVersionChanges(app);
+            if (versionChanges === null) {
+                createSection(
+                    "このバージョンでの変更",
+                    "旧形式データのため、このバージョン固有の変更理由は判別できません。",
+                    { muted: true }
+                );
+            } else if (!versionChanges.length) {
+                createSection(
+                    "このバージョンでの変更",
+                    "今回の更新理由は記録されていません。",
+                    { muted: true }
+                );
+            } else {
+                createSection(
+                    "このバージョンでの変更",
+                    versionChanges.map(change => {
+                        const createdAt = String(change.createdAt || "").trim();
+                        if (!createdAt) return change.text;
+
+                        const parsed = new Date(createdAt);
+                        const timeLabel = Number.isNaN(parsed.getTime())
+                            ? createdAt
+                            : parsed.toLocaleString();
+                        return `${timeLabel}\n${change.text}`;
+                    })
+                );
+            }
+
+            const cumulativeHistory = Array.isArray(app.history)
+                ? app.history.filter(entry => String(entry || "").trim())
+                : [];
+
+            createSection(
+                "累積履歴",
+                cumulativeHistory.length
+                    ? cumulativeHistory
+                    : ["累積履歴はありません。"],
+                { muted: !cumulativeHistory.length }
+            );
+
+            document.getElementById('history-modal').style.display = 'flex';
         }
 
                 async function deleteApp(id, currentProjectName = null) {
