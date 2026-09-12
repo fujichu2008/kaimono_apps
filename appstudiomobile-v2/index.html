@@ -3795,7 +3795,12 @@
             if (text.split('\n')[0].trim() === APPSTUDIO_PATCH_MARKERS.start) {
                 return { format: 'appstudio', patches: parseAppStudioPatch(text) };
             }
-            if (/^[\[{]/.test(text)) {
+
+            // AppStudioが受理するJSONパッチはオブジェクト配列なので、
+            // 単に "[" で始まる日本語見出し等はJSON候補にしない。
+            // 一方、"[" の後に空白・改行を挟んで "{" が続く壊れたパッチは
+            // JSON構文エラーとして扱い、説明文として黙って無視しない。
+            if (/^\[\s*\{/.test(text)) {
                 throw new Error('JSON構文エラーです。回答全体を有効なJSON配列にしてください。');
             }
             if (/^(?:<!doctype\s+html\b|<html\b|<!--)/i.test(text)) {
@@ -3848,7 +3853,7 @@
 
                 return Object.values(APPSTUDIO_PATCH_MARKERS).some(marker => value.includes(marker))
                     || /^(?:<!doctype\s+html\b|<html\b)/i.test(value)
-                    || /(?:^|[:：]\s*)(?:\[\s*(?:\{|")|\{\s*")/.test(value);
+                    || /(?:^|[:：]\s*)\[\s*\{/.test(value);
             });
 
             if (candidates.length) {
@@ -3878,7 +3883,7 @@
 
                     return Object.values(APPSTUDIO_PATCH_MARKERS).some(marker => value.includes(marker))
                         || /^(?:<!doctype\s+html\b|<html\b)/i.test(value)
-                        || /(?:^|[:：]\s*)(?:\[\s*(?:\{|")|\{\s*")/.test(value);
+                        || /(?:^|[:：]\s*)\[\s*\{/.test(value);
                 });
 
                 // HTMLの外側にPatch/JSON/別HTMLが残る場合は、
@@ -3961,10 +3966,9 @@
                 return true;
             }
 
-            // 専用形式もJSONも、正規化した同じ配列を既存エンジンへ渡す。
-            // 部分適用後の未適用項目も従来どおりJSONとして保持する。
-            if (jsonInput) jsonInput.value = JSON.stringify(candidate.patches, null, 2);
-            const ok = applyAutoFix({ fromLongPress: true });
+            // AppStudio PatchとJSONは、形式判定・正規化後は同じ適用エンジンへ直接渡す。
+            // JSON文字列への再変換・再parseは行わず、未適用項目だけを必要時にJSON欄へ残す。
+            const ok = applyNormalizedPatches(candidate.patches, { fromLongPress: true });
             if (!ok) {
                 document.getElementById('fix-modal').style.display = 'flex';
             }
@@ -3997,7 +4001,7 @@
             if (jump) jump.style.display = 'block';
         }
 
-                function displayFixRecovery(failedFixes, appliedCount, alreadyAppliedCount = 0) {
+                function displayFixRecovery(failedFixes, appliedCount) {
             lastFailedAutoFixes = Array.isArray(failedFixes) ? failedFixes : [];
             lastInvalidReflectText = "";
             lastInvalidReflectReason = "";
@@ -4008,7 +4012,6 @@
 
             const resultParts = [];
             if (appliedCount > 0) resultParts.push(`適用${appliedCount}件`);
-            if (alreadyAppliedCount > 0) resultParts.push(`適用済み${alreadyAppliedCount}件`);
             if (!resultParts.length) resultParts.push("適用0件");
 
             text.textContent = `${resultParts.join(" / ")}です。\nJSON入力欄には、未適用の${lastFailedAutoFixes.length}件だけを残しています。\nリカバリープロンプトはフルコードを添付せず、AIが最新版コードを記憶している前提で作成します。`;
@@ -4353,7 +4356,228 @@ ${currentCode}
             clearFixError();
         }
 
-                function applyAutoFix(options = {}) {
+                function applyNormalizedPatches(fixes, options = {}) {
+            const fromLongPress = options.fromLongPress === true;
+            clearFixError();
+
+            try {
+                if (!Array.isArray(fixes) || !fixes.length) {
+                    throw new Error("空でないパッチ配列が必要です");
+                }
+
+                const snapshotBeforeAutoFix = editor.getValue();
+                const originalCode = snapshotBeforeAutoFix.replace(/\r\n/g, '\n');
+                let code = originalCode;
+
+                const appliedFixes = [];
+                const failedFixes = [];
+                const failedReasonsByIndex = new Map();
+                const candidates = [];
+
+                const countOccurrences = (base, needle) => {
+                    if (!needle) return 0;
+                    let index = 0;
+                    let found = 0;
+                    while ((index = base.indexOf(needle, index)) !== -1) {
+                        found++;
+                        index += needle.length;
+                    }
+                    return found;
+                };
+
+                const buildResultSummary = () => {
+                    const parts = [];
+                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
+                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
+                    return parts.length ? parts.join(" / ") : "適用0件";
+                };
+
+                // 第1段階:
+                // すべてのパッチを「反映開始時の元コード」だけを基準に事前検証する。
+                // 先行パッチの置換結果によって後続パッチの一致件数や位置を変化させない。
+                fixes.forEach((fix, fixIndex) => {
+                    const beforeText = fix.before !== undefined ? fix.before : fix.search;
+                    const afterText = fix.after !== undefined ? fix.after : fix.replace;
+
+                    if (!beforeText || afterText === undefined) {
+                        failedReasonsByIndex.set(
+                            fixIndex,
+                            "before/search または after/replace が不足"
+                        );
+                        return;
+                    }
+
+                    const target = String(beforeText).replace(/\r\n/g, '\n');
+                    const replacement = String(afterText).replace(/\r\n/g, '\n');
+                    const totalFound = countOccurrences(originalCode, target);
+
+                    if (totalFound === 0) {
+                        const replacementFound = replacement
+                            ? countOccurrences(originalCode, replacement)
+                            : 0;
+
+                        failedReasonsByIndex.set(
+                            fixIndex,
+                            replacementFound > 0
+                                ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
+                                : "対象コードが見つかりません。after/replaceの完全一致も確認できません"
+                        );
+                        return;
+                    }
+
+                    if (totalFound > 1) {
+                        failedReasonsByIndex.set(
+                            fixIndex,
+                            `対象コードが${totalFound}箇所見つかったため安全のため未適用`
+                        );
+                        return;
+                    }
+
+                    const startIndex = originalCode.indexOf(target);
+                    candidates.push({
+                        fixIndex,
+                        fix,
+                        startIndex,
+                        endIndex: startIndex + target.length,
+                        replacement
+                    });
+                });
+
+                // 元コード上で置換範囲が重なる候補は、順序や意図を推測せず双方を未適用にする。
+                for (let leftIndex = 0; leftIndex < candidates.length; leftIndex++) {
+                    const left = candidates[leftIndex];
+
+                    for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex++) {
+                        const right = candidates[rightIndex];
+                        const overlaps =
+                            left.startIndex < right.endIndex
+                            && right.startIndex < left.endIndex;
+
+                        if (!overlaps) continue;
+
+                        if (!failedReasonsByIndex.has(left.fixIndex)) {
+                            failedReasonsByIndex.set(
+                                left.fixIndex,
+                                `他のパッチ（${right.fixIndex + 1}件目）と置換範囲が重複するため未適用`
+                            );
+                        }
+                        if (!failedReasonsByIndex.has(right.fixIndex)) {
+                            failedReasonsByIndex.set(
+                                right.fixIndex,
+                                `他のパッチ（${left.fixIndex + 1}件目）と置換範囲が重複するため未適用`
+                            );
+                        }
+                    }
+                }
+
+                // 未適用項目は元のパッチ順を維持してリカバリーへ渡す。
+                fixes.forEach((fix, fixIndex) => {
+                    const reason = failedReasonsByIndex.get(fixIndex);
+                    if (reason) {
+                        failedFixes.push({ reason, fix });
+                    }
+                });
+
+                const safeCandidates = candidates.filter(
+                    candidate => !failedReasonsByIndex.has(candidate.fixIndex)
+                );
+
+                // 第2段階:
+                // 元コード上で確定したindexを使い、後方から前方へ適用する。
+                // 後方の文字数が変化しても、未処理の前方indexには影響しない。
+                safeCandidates
+                    .slice()
+                    .sort((a, b) => b.startIndex - a.startIndex)
+                    .forEach(candidate => {
+                        code =
+                            code.slice(0, candidate.startIndex)
+                            + candidate.replacement
+                            + code.slice(candidate.endIndex);
+                    });
+
+                safeCandidates
+                    .slice()
+                    .sort((a, b) => a.fixIndex - b.fixIndex)
+                    .forEach(candidate => {
+                        appliedFixes.push(candidate.fix);
+                    });
+
+                if (appliedFixes.length > 0) {
+                    pushReflectSnapshot(snapshotBeforeAutoFix);
+                    editor.setValue(code);
+                    frameDirty = true;
+                }
+
+                const resultSummary = buildResultSummary();
+
+                if (failedFixes.length > 0) {
+                    document.getElementById('fix-modal').style.display = 'flex';
+                    switchFixTab('auto');
+                    document.getElementById('json-input').value = JSON.stringify(
+                        failedFixes.map(item => item.fix),
+                        null,
+                        2
+                    );
+
+                    const firstFailed = failedFixes[0].fix || {};
+                    const firstBefore = firstFailed.before !== undefined
+                        ? firstFailed.before
+                        : firstFailed.search;
+                    const firstAfter = firstFailed.after !== undefined
+                        ? firstFailed.after
+                        : firstFailed.replace;
+
+                    document.getElementById('manual-find').value =
+                        firstBefore ? String(firstBefore) : "";
+                    document.getElementById('manual-replace').value =
+                        firstAfter !== undefined ? String(firstAfter) : "";
+
+                    displayFixError(
+                        `${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`
+                    );
+                    displayFixRecovery(failedFixes, appliedFixes.length);
+
+                    failedFixes.forEach((item, itemIndex) => {
+                        recordDevLog(
+                            itemIndex === 0 ? 'reflect_failed' : 'reflect_failed_item',
+                            'failed',
+                            item.reason || 'パッチ反映失敗',
+                            resultSummary
+                        );
+                    });
+
+                    showToast(resultSummary);
+                    return false;
+                }
+
+                document.getElementById('json-input').value = "";
+                recordDevLog('reflect_success', 'success', '', `json_patch:${resultSummary}`);
+                closeModal('fix-modal');
+
+                if (appliedFixes.length > 0) {
+                    beginReflectRuntimeVerification();
+                } else {
+                    showToast(resultSummary);
+                }
+
+                switchTab('run');
+                return true;
+            } catch (e) {
+                console.error(e);
+                const msg = "反映エラー: " + e.message;
+                recordDevLog('reflect_failed', 'failed', '反映エラー', msg);
+
+                if (fromLongPress) {
+                    openFixModal();
+                    displayFixError(msg);
+                } else {
+                    alert(msg);
+                }
+                return false;
+            }
+        }
+
+        function applyAutoFix(options = {}) {
             const fromLongPress = options.fromLongPress === true;
             clearFixError();
 
@@ -4380,116 +4604,7 @@ ${currentCode}
 
             try {
                 const fixes = normalizeReflectPatchArray(JSON.parse(jsonStr));
-                let code = editor.getValue();
-                const snapshotBeforeAutoFix = code;
-                code = code.replace(/\r\n/g, '\n'); // 改行正規化
-
-                const appliedFixes = [];
-                const alreadyAppliedFixes = [];
-                const failedFixes = [];
-
-                if (!Array.isArray(fixes)) throw new Error("配列ではありません");
-
-                const countOccurrences = (base, needle) => {
-                    if (!needle) return 0;
-                    let index = 0;
-                    let found = 0;
-                    while ((index = base.indexOf(needle, index)) !== -1) {
-                        found++;
-                        index += needle.length;
-                    }
-                    return found;
-                };
-
-                const buildResultSummary = () => {
-                    const parts = [];
-                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
-                    if (alreadyAppliedFixes.length > 0) parts.push(`適用済み${alreadyAppliedFixes.length}件`);
-                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
-                    return parts.length ? parts.join(" / ") : "適用0件";
-                };
-
-                for (const fix of fixes) {
-                    const beforeText = fix.before !== undefined ? fix.before : fix.search;
-                    const afterText = fix.after !== undefined ? fix.after : fix.replace;
-                    if (!beforeText || afterText === undefined) {
-                        failedFixes.push({ reason: "before/search または after/replace が不足", fix });
-                        continue;
-                    }
-
-                    let target = String(beforeText).replace(/\r\n/g, '\n');
-                    let replacement = String(afterText).replace(/\r\n/g, '\n');
-
-                    // LF正規化後の完全一致だけを許可する。
-                    // trimやHTMLエンティティ変換は別箇所への誤適用を招くため自動では行わない。
-                    const totalFound = countOccurrences(code, target);
-
-                    if (totalFound === 0) {
-                        const replacementFound = replacement
-                            ? countOccurrences(code, replacement)
-                            : 0;
-
-                        failedFixes.push({
-                            reason: replacementFound > 0
-                                ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
-                                : "対象コードが見つかりません。after/replaceの完全一致も確認できません",
-                            fix
-                        });
-                        continue;
-                    }
-
-                    if (totalFound > 1) {
-                        failedFixes.push({
-                            reason: `対象コードが${totalFound}箇所見つかったため安全のため未適用`,
-                            fix
-                        });
-                        continue;
-                    }
-
-                                            // 置換文字列中の $& や $1 等が特殊パターン解釈されコード破損するのを防ぐため、関数で渡す
-                    code = code.replace(target, () => replacement);
-                    appliedFixes.push(fix);
-                }
-
-                if (appliedFixes.length > 0) {
-                    pushReflectSnapshot(snapshotBeforeAutoFix);
-                    editor.setValue(code);
-                    frameDirty = true;
-                }
-
-                const resultSummary = buildResultSummary();
-
-                if (failedFixes.length > 0) {
-                    document.getElementById('fix-modal').style.display = 'flex';
-                    switchFixTab('auto');
-                    document.getElementById('json-input').value = JSON.stringify(failedFixes.map(item => item.fix), null, 2);
-
-                    const firstFailed = failedFixes[0].fix || {};
-                    const firstBefore = firstFailed.before !== undefined ? firstFailed.before : firstFailed.search;
-                    const firstAfter = firstFailed.after !== undefined ? firstFailed.after : firstFailed.replace;
-                    document.getElementById('manual-find').value = firstBefore ? String(firstBefore) : "";
-                    document.getElementById('manual-replace').value = firstAfter !== undefined ? String(firstAfter) : "";
-
-                    displayFixError(`${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`);
-                    displayFixRecovery(failedFixes, appliedFixes.length, alreadyAppliedFixes.length);
-                    failedFixes.forEach((item, itemIndex) => {
-                        recordDevLog(itemIndex === 0 ? 'reflect_failed' : 'reflect_failed_item', 'failed', item.reason || 'JSON反映失敗', resultSummary);
-                    });
-                    showToast(resultSummary);
-                    return false;
-                }
-
-                document.getElementById('json-input').value = "";
-                recordDevLog('reflect_success', 'success', '', `json_patch:${resultSummary}`);
-                closeModal('fix-modal');
-                if (appliedFixes.length > 0) {
-                    beginReflectRuntimeVerification();
-                } else {
-                    showToast(resultSummary);
-                }
-                switchTab('run');
-                return true;
-
+                return applyNormalizedPatches(fixes, { fromLongPress });
             } catch (e) {
                 console.error(e);
                 const msg = "JSONエラー: " + e.message;
