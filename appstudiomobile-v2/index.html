@@ -2149,6 +2149,8 @@
         const REFLECT_SNAPSHOT_LIMIT = 10;
         const DEV_LOG_KEY = 'appstudio_dev_logs';
         const DEV_LOG_LIMIT = 1000;
+        let devLogQueue = [];
+        let devLogFlushTimer = null;
         localStorage.removeItem('gh_token');
 
                 // --- Editor Logic ---
@@ -2163,6 +2165,12 @@
 
         function invalidateEditorCodeCache() {
             cachedEditorCode = null;
+        }
+
+        function setEditorCode(code) {
+            editor.setValue(String(code ?? ""));
+            invalidateEditorCodeCache();
+            frameDirty = true;
         }
 
                 editor.on('change', (instance, change) => {
@@ -2755,11 +2763,11 @@
                 return;
             }
 
-            const currentCode = editor.getValue();
+            const currentCode = getEditorCode();
             const restoreCode = reflectSnapshots.pop();
             reflectRedoSnapshots.push(currentCode);
             if (reflectRedoSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectRedoSnapshots.shift();
-            editor.setValue(restoreCode);
+            setEditorCode(restoreCode);
             reloadFrame();
             showToast("反映前の状態に戻しました");
         }
@@ -2769,11 +2777,11 @@
                 showToast("やり直せる反映履歴がありません");
                 return;
             }
-            const currentCode = editor.getValue();
+            const currentCode = getEditorCode();
             const restoreCode = reflectRedoSnapshots.pop();
             reflectSnapshots.push(currentCode);
             if (reflectSnapshots.length > REFLECT_SNAPSHOT_LIMIT) reflectSnapshots.shift();
-            editor.setValue(restoreCode);
+            setEditorCode(restoreCode);
             reloadFrame();
             showToast("反映後の状態へやり直しました");
         }
@@ -3092,7 +3100,7 @@
         }
 
         function isEditorCodeUnchanged(code) {
-            return editor.getValue() === String(code || "");
+            return getEditorCode() === String(code || "");
         }
 
         function normalizePendingAiInstructions(value) {
@@ -3294,7 +3302,7 @@
             const draftData = {
                 id: DRAFT_ID,
                 type: 'draft',
-                code: editor.getValue(),
+                code: getEditorCode(),
                 currentAppName: currentAppName,
                 currentAppHistory: Array.isArray(currentAppHistory) ? [...currentAppHistory] : [],
                 pendingAiInstructions: clonePendingAiInstructions(),
@@ -3309,7 +3317,7 @@
                         await idb.delete(DRAFT_ID);
                         draftCleanupPending = false;
                         if (generationAtStart === draftGeneration
-                            && !editor.getValue().trim()
+                            && !getEditorCode().trim()
                             && isPendingAiInstructionsUnchanged([])) {
                             editorDraftDirty = false;
                         }
@@ -3324,7 +3332,7 @@
                     }
 
                     draftCleanupPending = false;
-                    if (editor.getValue() === draftData.code
+                    if (getEditorCode() === draftData.code
                         && currentAppName === draftData.currentAppName
                         && isPendingAiInstructionsUnchanged(draftData.pendingAiInstructions)) {
                         editorDraftDirty = false;
@@ -3344,7 +3352,7 @@
             draftSaveTimer = null;
 
             const generationAtFlush = draftGeneration;
-            const codeAtFlush = editor.getValue();
+            const codeAtFlush = getEditorCode();
             const pendingSignatureAtFlush = pendingAiInstructionsSignature();
             if (draftFlushPromise
                 && draftFlushGeneration === generationAtFlush
@@ -3372,6 +3380,7 @@
             flushEditorDraftSave();
             retryPendingDraftCleanup();
             flushIframeErrorStats();
+            flushDevLogQueue();
         });
 
         document.addEventListener('visibilitychange', () => {
@@ -3379,6 +3388,7 @@
                 flushEditorDraftSave();
                 retryPendingDraftCleanup();
                 flushIframeErrorStats();
+                flushDevLogQueue();
             } else {
                 // 外部AIから戻ったことだけを案内する。
                 // ユーザー操作なしでClipboard APIは読み取らない。
@@ -3390,6 +3400,7 @@
             flushEditorDraftSave();
             retryPendingDraftCleanup();
             flushIframeErrorStats();
+            flushDevLogQueue();
         });
 
         async function deleteEditorDraft() {
@@ -3439,7 +3450,7 @@
                         : []);
                 const hasRestorableCode = Boolean(draft && String(draft.code || "").length);
                 const hasRestorableInstruction = restoredPendingInstructions.length > 0;
-                if (!draft || (!hasRestorableCode && !hasRestorableInstruction) || editor.getValue().trim()) return;
+                if (!draft || (!hasRestorableCode && !hasRestorableInstruction) || getEditorCode().trim()) return;
 
                 if (!confirm("前回の未保存編集を復元しますか？")) {
                     const deleted = await deleteEditorDraft();
@@ -3451,7 +3462,7 @@
                 advanceWorkspaceGeneration();
                 beginDraftSaveSuppression();
                 try {
-                    editor.setValue(String(draft.code || ""));
+                    setEditorCode(String(draft.code || ""));
                     currentAppName = draft.currentAppName || "";
                     currentAppHistory = Array.isArray(draft.currentAppHistory) ? draft.currentAppHistory : [];
                     pendingAiInstructions = restoredPendingInstructions;
@@ -3474,11 +3485,11 @@
             try {
                 const text = await navigator.clipboard.readText();
                 if (!text) return showToast("クリップボードが空です");
-                if(editor.getValue().trim().length > 0) {
+                if(getEditorCode().trim().length > 0) {
                       if(!confirm("【警告】\n現在のアプリを破棄し、クリップボードの内容で上書きしますか？")) return;
                 }
-                pushReflectSnapshot(editor.getValue());
-                editor.setValue(text);
+                pushReflectSnapshot(getEditorCode());
+                setEditorCode(text);
                 showToast("全コードを貼り付けました");
                 // 未確認フルHTMLの貼り付け1回につき、初回安全実行の確認を1回だけ表示する。
                 // 反映経路と異なり、生テキストのまま判定する(コードフェンス除去は行わない)。
@@ -3498,7 +3509,7 @@
                 advanceWorkspaceGeneration();
                 beginDraftSaveSuppression();
                 try {
-                    editor.setValue("");
+                    setEditorCode("");
                     editorDraftDirty = false;
                                     currentAppName = "";
                     appNameDisplay.textContent = "(新規作成中)";
@@ -3525,7 +3536,7 @@
             advanceWorkspaceGeneration();
             beginDraftSaveSuppression();
             try {
-                editor.setValue("");
+                setEditorCode("");
                 editorDraftDirty = false;
                 currentAppName = "";
                 currentAppHistory = [];
@@ -4582,8 +4593,8 @@
             }
 
             if (candidate.format === 'html') {
-                if (editor.getValue().trim().length > 0) {
-                    const currentCode = editor.getValue();
+                if (getEditorCode().trim().length > 0) {
+                    const currentCode = getEditorCode();
                     const newCode = String(candidate.html || "");
                     const currentCharCount = currentCode.length;
                     const newCharCount = newCode.length;
@@ -4632,9 +4643,8 @@
                     if (!confirm(confirmMessage)) return false;
                 }
 
-                pushReflectSnapshot(editor.getValue());
-                editor.setValue(candidate.html);
-                frameDirty = true;
+                pushReflectSnapshot(getEditorCode());
+                setEditorCode(candidate.html);
                 clearAiRoundTripState();
                 if (jsonInput) jsonInput.value = "";
                 clearFixError();
@@ -5223,7 +5233,7 @@ ${currentCode}
                     throw new Error("空でないパッチ配列が必要です");
                 }
 
-                const snapshotBeforeAutoFix = editor.getValue();
+                const snapshotBeforeAutoFix = getEditorCode();
                 const {
                     normalizedCode,
                     safeCandidates,
@@ -5260,8 +5270,7 @@ ${currentCode}
 
                 if (appliedFixes.length > 0) {
                     pushReflectSnapshot(snapshotBeforeAutoFix);
-                    editor.setValue(code);
-                    frameDirty = true;
+                    setEditorCode(code);
                 }
 
                 const resultSummary = buildResultSummary();
@@ -5406,7 +5415,7 @@ ${currentCode}
 
             if (!findText) return showToast("検索文字列を入力してください");
 
-            let code = editor.getValue();
+            let code = getEditorCode();
             const matchCount = findLiteralMatchIndexes(code, findText).length;
 
             if (matchCount === 0) {
@@ -5421,8 +5430,7 @@ ${currentCode}
 
             pushReflectSnapshot(code);
             const newCode = code.split(findText).join(replaceText);
-            editor.setValue(newCode);
-            frameDirty = true;
+            setEditorCode(newCode);
             showToast(`${matchCount}箇所を置換しました`);
             closeModal('fix-modal');
         }
@@ -5863,7 +5871,7 @@ nextBtn.onclick=nextStep;
             }
 
             const projectNameAtSaveStart = filenameInput.value || "Untitled";
-            const codeAtSaveStart = editor.getValue();
+            const codeAtSaveStart = getEditorCode();
             const workspaceGenerationAtSaveStart = workspaceGeneration;
             const pendingInstructionsAtSaveStart = clonePendingAiInstructions();
            
@@ -6000,7 +6008,7 @@ nextBtn.onclick=nextStep;
 
                                 async function downloadHTML() {
             const name = filenameInput.value || "index";
-            const code = editor.getValue();
+            const code = getEditorCode();
             const blob = new Blob([code], { type: 'text/html' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -6492,7 +6500,7 @@ nextBtn.onclick=nextStep;
         }
 
         async function publishSingleHtmlToGitHub(options) {
-            const sourceCode = editor.getValue();
+            const sourceCode = getEditorCode();
             if (!sourceCode.trim()) throw createPublishValidationError("公開するコードがありません。");
 
             const path = sanitizeGitHubFileName(options.htmlFileName);
@@ -6530,7 +6538,7 @@ nextBtn.onclick=nextStep;
         }
 
         async function publishPwaToGitHub(options) {
-            const sourceCode = editor.getValue();
+            const sourceCode = getEditorCode();
             if (!sourceCode.trim()) throw createPublishValidationError("公開するコードがありません。");
 
             setGitHubPublishProgress("PWA公開用ファイルを生成しています...");
@@ -7588,7 +7596,7 @@ self.addEventListener("fetch", function (event) {
             if (!icon512Base64) fail("512pxアイコンのBase64が空です。");
             if (!icon192Base64.startsWith("iVBORw0KGgo")) fail("192pxアイコンがPNG Base64ではありません。");
             if (!icon512Base64.startsWith("iVBORw0KGgo")) fail("512pxアイコンがPNG Base64ではありません。");
-            if (editor.getValue() !== String(sourceCodeBeforeBuild || "")) {
+            if (getEditorCode() !== String(sourceCodeBeforeBuild || "")) {
                 fail("PWA生成中にeditor.getValue()が変更されました。");
             }
             return true;
@@ -8806,13 +8814,13 @@ ${escapeHtml(versionChangeText)}</div>
                 return;
             }
 
-            if(editor.getValue().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
+            if(getEditorCode().length > 0 && !confirm("現在のコードは失われます。ロードしますか？")) return;
             if (requestId !== latestLoadRequestId) return;
 
             const appliedWorkspaceGeneration = advanceWorkspaceGeneration();
             beginDraftSaveSuppression();
             try {
-                editor.setValue(app.code);
+                setEditorCode(app.code);
                 editorDraftDirty = false;
                 // メタ情報復元
                                 currentAppName = app.projectName || app.name;
@@ -9262,15 +9270,38 @@ ${escapeHtml(versionChangeText)}</div>
             }
         }
 
+        function flushDevLogQueue() {
+            if (devLogFlushTimer) {
+                clearTimeout(devLogFlushTimer);
+                devLogFlushTimer = null;
+            }
+
+            if (!devLogQueue.length) return true;
+
+            try {
+                const logs = getDevLogs();
+                logs.push(...devLogQueue);
+
+                if (saveDevLogs(logs)) {
+                    devLogQueue = [];
+                    return true;
+                }
+
+                return false;
+            } catch (e) {
+                console.warn("開発ログキューの保存に失敗しました:", e);
+                return false;
+            }
+        }
+
         function recordDevLog(type, result, reason, detail) {
             try {
                 const safeReason = String(reason || "").slice(0, 200);
                 const safeDetail = String(detail || "").slice(0, 200);
                 const appName = getCurrentDevLogAppName();
-                const logs = getDevLogs();
                 const currentCode = getEditorCode();
 
-                logs.push({
+                devLogQueue.push({
                     id: Date.now() + "_" + Math.random().toString(36).slice(2),
                     time: new Date().toISOString(),
                     appName: appName,
@@ -9283,7 +9314,9 @@ ${escapeHtml(versionChangeText)}</div>
                     lineCount: editor.lineCount()
                 });
 
-                saveDevLogs(logs);
+                if (!devLogFlushTimer) {
+                    devLogFlushTimer = setTimeout(flushDevLogQueue, 300);
+                }
             } catch (e) {
                 console.warn("開発ログの記録に失敗しました:", e);
             }
@@ -9459,6 +9492,12 @@ ${escapeHtml(versionChangeText)}</div>
 
         function clearDevStatsLogs() {
             if (!confirm("開発統計ログをすべて削除しますか？\nこの操作は元に戻せません。")) return;
+
+            if (devLogFlushTimer) {
+                clearTimeout(devLogFlushTimer);
+                devLogFlushTimer = null;
+            }
+            devLogQueue = [];
 
             if (iframeErrorStatsFlushTimer) {
                 clearTimeout(iframeErrorStatsFlushTimer);
