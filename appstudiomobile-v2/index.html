@@ -424,7 +424,9 @@
             align-items: center;
             justify-content: center;
             min-width: 60px;
-            height: 32px;
+            min-height: 44px;
+            height: 44px;
+            touch-action: manipulation;
         }
 
         .tool-btn span {
@@ -802,11 +804,18 @@
             color: white;
         }
         .lib-actions button {
-            padding: 6px 10px;
+            min-width: 44px;
+            min-height: 44px;
+            padding: 8px 10px;
             border-radius: 4px;
             border: none;
             cursor: pointer;
             font-size: 12px;
+            touch-action: manipulation;
+        }
+        .library-list > .btn-action {
+            min-height: 44px;
+            touch-action: manipulation;
         }
         .btn-load { background-color: var(--accent-color); color: white; }
         .btn-del { background-color: var(--danger-color); border: 1px solid var(--danger-color); color: white; font-weight: bold; font-size: 16px; }
@@ -1617,7 +1626,7 @@
 
             <div id="history-modal" class="modal-overlay">
         <div class="modal">
-            <h2>更新履歴</h2>
+            <h2>保存・AI指示履歴</h2>
             <div id="history-content" style="white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: #ddd; max-height: 60vh; overflow-y: auto;"></div>
             <div class="modal-buttons" style="margin-top:20px;">
                 <button class="btn-cancel" onclick="closeModal('history-modal')">閉じる</button>
@@ -5840,46 +5849,99 @@ nextBtn.onclick=nextStep;
             currentPwaPreferenceKey = "";
         }
 
-        function createPwaPreferenceKey(sourceCode) {
-            const extractedTitle = extractHtmlTitle(sourceCode);
-            const identity = currentAppName || extractedTitle || filenameInput.value || "default";
-            return String(identity)
+        function normalizePwaPreferenceIdentity(value) {
+            return String(value || "")
                 .normalize("NFKC")
                 .trim()
                 .toLowerCase() || "default";
         }
 
-        function loadPwaPublishPreferences(preferenceKey) {
-            if (!preferenceKey) return null;
+        function createLegacyPwaPreferenceKey(sourceCode) {
+            const extractedTitle = extractHtmlTitle(sourceCode);
+            const identity = currentAppName || extractedTitle || filenameInput.value || "default";
+            return normalizePwaPreferenceIdentity(identity);
+        }
 
+        function createPwaPreferenceKey(sourceCode) {
+            const sourceAppId = extractSourceAppId(sourceCode);
+            if (sourceAppId) {
+                return `app:${String(sourceAppId).trim()}`;
+            }
+            return createLegacyPwaPreferenceKey(sourceCode);
+        }
+
+        function readPwaPublishPreferenceStore() {
             try {
                 const parsed = JSON.parse(localStorage.getItem(PWA_PUBLISH_PREFS_KEY) || "{}");
-                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-
-                const saved = parsed[preferenceKey];
-                return saved && typeof saved === "object" && !Array.isArray(saved)
-                    ? saved
-                    : null;
+                return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? parsed
+                    : Object.create(null);
             } catch (error) {
                 console.warn("PWA公開設定の読み込みに失敗しました:", error);
+                return Object.create(null);
+            }
+        }
+
+        function getOwnPwaPublishPreference(preferences, preferenceKey) {
+            if (!preferenceKey
+                || !preferences
+                || !Object.prototype.hasOwnProperty.call(preferences, preferenceKey)) {
                 return null;
             }
+
+            const saved = preferences[preferenceKey];
+            return saved && typeof saved === "object" && !Array.isArray(saved)
+                ? saved
+                : null;
+        }
+
+        function setOwnPwaPublishPreference(preferences, preferenceKey, value) {
+            Object.defineProperty(preferences, preferenceKey, {
+                value,
+                enumerable: true,
+                configurable: true,
+                writable: true
+            });
+        }
+
+        function loadPwaPublishPreferences(preferenceKey, legacyPreferenceKey = "") {
+            if (!preferenceKey) return null;
+
+            const preferences = readPwaPublishPreferenceStore();
+            const current = getOwnPwaPublishPreference(preferences, preferenceKey);
+            if (current) return current;
+
+            const legacyKey = String(legacyPreferenceKey || "");
+            if (!legacyKey || legacyKey === preferenceKey) return null;
+
+            const legacy = getOwnPwaPublishPreference(preferences, legacyKey);
+            if (!legacy) return null;
+
+            const migrated = { ...legacy };
+            try {
+                setOwnPwaPublishPreference(preferences, preferenceKey, migrated);
+                localStorage.setItem(PWA_PUBLISH_PREFS_KEY, JSON.stringify(preferences));
+            } catch (error) {
+                console.warn("旧PWA公開設定の引き継ぎ保存に失敗しました:", error);
+            }
+
+            return migrated;
         }
 
         function savePwaPublishPreferences() {
             if (!currentPwaPreferenceKey) return;
 
             try {
-                const parsed = JSON.parse(localStorage.getItem(PWA_PUBLISH_PREFS_KEY) || "{}");
-                const preferences = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-                    ? parsed
-                    : {};
-
-                preferences[currentPwaPreferenceKey] = {
-                    folderName: sanitizeGitHubFolderName(githubPublishState.pwa.folderName),
-                    iconText: String(githubPublishState.pwa.iconText || ""),
-                    updatedAt: new Date().toISOString()
-                };
+                const preferences = readPwaPublishPreferenceStore();
+                setOwnPwaPublishPreference(
+                    preferences,
+                    currentPwaPreferenceKey,
+                    {
+                        folderName: sanitizeGitHubFolderName(githubPublishState.pwa.folderName),
+                        iconText: String(githubPublishState.pwa.iconText || ""),
+                        updatedAt: new Date().toISOString()
+                    }
+                );
 
                 localStorage.setItem(PWA_PUBLISH_PREFS_KEY, JSON.stringify(preferences));
             } catch (error) {
@@ -5901,9 +5963,13 @@ nextBtn.onclick=nextStep;
             const safeFolder = sanitizeGitHubFolderName(pwaAppName);
             const detectedTheme = extractThemeColor(sourceCode);
             const preferenceKey = createPwaPreferenceKey(sourceCode);
+            const legacyPreferenceKey = createLegacyPwaPreferenceKey(sourceCode);
 
             currentPwaPreferenceKey = preferenceKey;
-            const savedPwaPreferences = loadPwaPublishPreferences(preferenceKey);
+            const savedPwaPreferences = loadPwaPublishPreferences(
+                preferenceKey,
+                legacyPreferenceKey
+            );
 
             githubPublishState.repo = localStorage.getItem('gh_repo') || "";
             githubPublishState.htmlFileName = sanitizeGitHubFileName(filenameInput.value || baseName || "index");
@@ -5932,7 +5998,10 @@ nextBtn.onclick=nextStep;
             syncGitHubPublishModal();
 
             try {
-                const savedIcon = await loadPwaIconImage(preferenceKey);
+                const savedIcon = await loadPwaIconImageWithMigration(
+                    preferenceKey,
+                    legacyPreferenceKey
+                );
                 if (currentPwaPreferenceKey !== preferenceKey) return;
 
                 if (savedIcon && savedIcon.blob instanceof Blob) {
@@ -7053,6 +7122,29 @@ self.addEventListener("fetch", function (event) {
 
         async function loadPwaIconImage(appKey) {
             return appKey ? pwaIconDb.get(createPwaIconRecordId(appKey)) : null;
+        }
+
+        async function loadPwaIconImageWithMigration(appKey, legacyAppKey = "") {
+            if (!appKey) return null;
+
+            const current = await loadPwaIconImage(appKey);
+            if (current) return current;
+
+            const legacyKey = String(legacyAppKey || "");
+            if (!legacyKey || legacyKey === appKey) return null;
+
+            const legacy = await loadPwaIconImage(legacyKey);
+            if (!legacy) return null;
+
+            const migrated = {
+                ...legacy,
+                id: createPwaIconRecordId(appKey),
+                appKey: String(appKey)
+            };
+
+            // 旧レコードは削除せず、新しいappIdベースのキーへ複製する。
+            await pwaIconDb.put(migrated);
+            return migrated;
         }
 
         async function deletePwaIconImage(appKey) {
@@ -8388,15 +8480,16 @@ self.addEventListener("fetch", function (event) {
                     : [];
 
                 return legacyHistory.length
-                    ? `旧形式の累積履歴: ${String(legacyHistory[0])}`
-                    : "旧形式データ：累積履歴はありません";
+                    ? `旧形式の累積AI指示履歴: ${String(legacyHistory[0])}`
+                    : "旧形式データ：累積AI指示履歴はありません";
             }
 
             if (!versionChanges.length) {
-                return "今回の更新理由は記録されていません";
+                return "今回のAI指示はありません";
             }
 
-            // ライブラリ一覧のプレビューだけ40字で切り詰める。履歴モーダルは全文表示のまま。
+            // versionChangesは保存までに記録されたAI指示。
+            // ライブラリ一覧のプレビューだけ40字で切り詰め、履歴モーダルでは全文表示する。
             return versionChanges
                 .map(change => {
                     const text = String(change.text || "");
@@ -8449,7 +8542,7 @@ self.addEventListener("fetch", function (event) {
                             </div>
                         </div>
                         <div class="lib-meta" style="margin-bottom: 4px;">最新保存: ${escapeHtml(latestSavedAt)}</div>
-                        <div class="lib-history" style="pointer-events: none; cursor: default; background: rgba(255,255,255,0.05);">💡 今回の更新
+                        <div class="lib-history" style="pointer-events: none; cursor: default; background: rgba(255,255,255,0.05);">💡 今回のAI指示
 ${escapeHtml(latestChangeText)}</div>
                     `;
                     libraryContainer.appendChild(el);
@@ -8490,7 +8583,7 @@ ${escapeHtml(latestChangeText)}</div>
                         <div class="lib-meta">
                             内部名: ${escapeHtml(app.name)} | ${app.code.length} chars
                         </div>
-                        <div class="lib-history" onclick="showHistoryModal(${app.id})">💡 今回の更新
+                        <div class="lib-history" onclick="showHistoryModal(${app.id})">💡 今回のAI指示
 ${escapeHtml(versionChangeText)}</div>
                     `;
                     libraryContainer.appendChild(el);
@@ -8615,19 +8708,19 @@ ${escapeHtml(versionChangeText)}</div>
             const versionChanges = getVersionChanges(app);
             if (versionChanges === null) {
                 createSection(
-                    "このバージョンでの変更",
-                    "旧形式データのため、このバージョン固有の変更理由は判別できません。",
+                    "このバージョンで記録されたAI指示",
+                    "旧形式データのため、このバージョン固有のAI指示は判別できません。",
                     { muted: true }
                 );
             } else if (!versionChanges.length) {
                 createSection(
-                    "このバージョンでの変更",
-                    "今回の更新理由は記録されていません。",
+                    "このバージョンで記録されたAI指示",
+                    "今回のAI指示はありません",
                     { muted: true }
                 );
             } else {
                 createSection(
-                    "このバージョンでの変更",
+                    "このバージョンで記録されたAI指示",
                     versionChanges.map(change => {
                         const createdAt = String(change.createdAt || "").trim();
                         if (!createdAt) return change.text;
@@ -8646,10 +8739,10 @@ ${escapeHtml(versionChangeText)}</div>
                 : [];
 
             createSection(
-                "累積履歴",
+                "累積AI指示履歴",
                 cumulativeHistory.length
                     ? cumulativeHistory
-                    : ["累積履歴はありません。"],
+                    : ["累積AI指示履歴はありません。"],
                 { muted: !cumulativeHistory.length }
             );
 
