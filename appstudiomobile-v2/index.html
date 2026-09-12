@@ -1560,7 +1560,7 @@
             <h2>反映ツール</h2>
                                     <div class="modal-tabs">
                 <button class="modal-tab-btn active" onclick="switchFixTab('auto')">① 反映</button>
-                <button class="modal-tab-btn" onclick="switchFixTab('manual')" style="display:none;">② 手動修正</button>
+                <button id="manual-fix-tab-btn" class="modal-tab-btn" onclick="switchFixTab('manual')">② 手動修正</button>
             </div>
                         <div id="fix-error" style="display:none; margin: -4px 0 12px 0; padding: 8px 10px; border: 1px solid var(--danger-color); border-radius: 6px; background: rgba(244,67,54,0.12); color: #ffb3b3; font-size: 12px; line-height: 1.5; white-space: pre-wrap;"></div>
             <div id="fix-editor-jump" style="display:none; margin: -6px 0 12px 0;">
@@ -3918,7 +3918,15 @@
         let lastInvalidReflectText = "";
         let lastInvalidReflectReason = "";
 
+        function setManualFixTabVisible(isVisible) {
+            const button = document.getElementById('manual-fix-tab-btn');
+            if (button) {
+                button.style.display = isVisible ? "" : "none";
+            }
+        }
+
         function openFixModal() {
+            setManualFixTabVisible(false);
             clearFixError();
             switchFixTab('auto');
             document.getElementById('fix-modal').style.display = 'flex';
@@ -3968,14 +3976,7 @@
             return matches;
         }
 
-        function extractFencedClipboardBlock(text, preferredLangs = []) {
-            const trimmed = String(text || "").trim();
-            const matches = collectFencedClipboardBlocks(trimmed);
-            if (!matches.length) return trimmed;
 
-            const preferred = matches.find(item => preferredLangs.includes(item.lang));
-            return (preferred || matches[0]).body;
-        }
 
         function stripLeadingHtmlCommentsForDetection(text) {
             let candidate = String(text || "").replace(/^\uFEFF/, "").trimStart();
@@ -4469,6 +4470,8 @@
         }
 
         function clearFixError() {
+            setManualFixTabVisible(false);
+
             const box = document.getElementById('fix-error');
             if (box) {
                 box.textContent = "";
@@ -4747,10 +4750,7 @@ ${currentCode}
                     ? "以下のコードを見直し、修正・改善した完全なフルコードを出力してください。"
                     : "新しいWebアプリを一から作成し、完成した完全なフルコードを出力してください。";
                 prompt = `${splitModePrefix}${fullRequestLead}${instructionText}\n\n出力形式:\n1. 冒頭に、修正箇所・制約条件・改善提案を簡潔なコメントで記述。\n2. その後、修正済みの完全なフルコード。${targetCodeSection}`;
-            } else if (type === 'manual') {
-                // 手動修正 (Before/After表示)
-                prompt = `${splitModePrefix}以下のコードの修正をお願いします。${instructionText}\n\n出力形式:\n修正対象の箇所について、修正前(Before)と修正後(After)のコードブロックを対にして出力してください。\n修正前のコードは、検索して特定できるように、省略せず正確に記述してください。\n\n出力例:\n### 修正箇所1\n**修正前(Before)**\n\`\`\`html\n<div class="old">...</div>\n\`\`\`\n**修正後(After)**\n\`\`\`html\n<div class="new">...</div>\n\`\`\`${targetCodeSection}`;
-            } else if (type === 'auto' || type === 'json') {
+            } else if (type === 'auto') {
                 // オート修正: 通常は専用形式、予約マーカーを含む修正はJSON。
                 prompt = `${splitModePrefix}以下のコードの修正をお願いします。${instructionText}\n\n${buildPatchOutputInstructions()}${targetCodeSection}`;
             }
@@ -5005,6 +5005,7 @@ ${currentCode}
                 if (failedFixes.length > 0) {
                     document.getElementById('fix-modal').style.display = 'flex';
                     switchFixTab('auto');
+                    setManualFixTabVisible(true);
                     document.getElementById('json-input').value = JSON.stringify(
                         failedFixes.map(item => item.fix),
                         null,
@@ -5101,47 +5102,7 @@ ${currentCode}
             }
         }
 
-        function applyAutoFix(options = {}) {
-            const fromLongPress = options.fromLongPress === true;
-            clearFixError();
 
-            let jsonStr = document.getElementById('json-input').value;
-            if (!jsonStr.trim()) {
-                const msg = "JSONが空です";
-                if (fromLongPress) {
-                    openFixModal();
-                    displayFixError(msg);
-                } else {
-                    showToast(msg);
-                }
-                return false;
-            }
-
-            const firstOpen = jsonStr.indexOf('[');
-            const lastClose = jsonStr.lastIndexOf(']');
-
-            if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-                jsonStr = jsonStr.substring(firstOpen, lastClose + 1);
-            } else {
-                jsonStr = jsonStr.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '');
-            }
-
-            try {
-                const fixes = normalizeReflectPatchArray(JSON.parse(jsonStr));
-                return applyNormalizedPatches(fixes, { fromLongPress });
-            } catch (e) {
-                console.error(e);
-                const msg = "JSONエラー: " + e.message;
-                recordDevLog('json_parse_error', 'failed', 'JSONエラー', msg);
-                if (fromLongPress) {
-                    openFixModal();
-                    displayFixError(msg);
-                } else {
-                    alert(msg);
-                }
-                return false;
-            }
-        }
 
 
 
@@ -7683,22 +7644,6 @@ self.addEventListener("fetch", function (event) {
             // 公開状態が混ざらないよう現在コード自身のIDを基準にする。
             const sourceAppId = extractCurrentSourceAppId();
             if (sourceAppId) return `app:${sourceAppId}`;
-
-            try {
-                if (typeof appRecordId !== "undefined"
-                    && appRecordId !== null
-                    && String(appRecordId).trim()) {
-                    return `record:${String(appRecordId).trim()}`;
-                }
-            } catch (error) {}
-
-            try {
-                if (typeof currentAppRecordId !== "undefined"
-                    && currentAppRecordId !== null
-                    && String(currentAppRecordId).trim()) {
-                    return `record:${String(currentAppRecordId).trim()}`;
-                }
-            } catch (error) {}
 
             const name = String(
                 typeof currentAppName !== "undefined" ? currentAppName || "" : ""
