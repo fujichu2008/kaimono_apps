@@ -4465,6 +4465,114 @@ ${currentCode}
             };
         }
 
+        let reflectVerificationSummaryObserver = null;
+        let reflectVerificationSummaryTimer = null;
+
+        function clearReflectVerificationSummary() {
+            if (reflectVerificationSummaryObserver) {
+                reflectVerificationSummaryObserver.disconnect();
+                reflectVerificationSummaryObserver = null;
+            }
+            if (reflectVerificationSummaryTimer) {
+                clearTimeout(reflectVerificationSummaryTimer);
+                reflectVerificationSummaryTimer = null;
+            }
+        }
+
+        function findRuntimeVerificationStatusElement() {
+            const selectors = [
+                '#runtime-verification-status',
+                '#run-verification-status',
+                '#verification-status',
+                '.runtime-verification-status',
+                '.run-verification-status',
+                '.verification-status'
+            ];
+
+            for (const selector of selectors) {
+                const element = document.querySelector(selector);
+                if (element && /起動チェック|起動時エラー未検出|起動エラー|エラー検出/.test(String(element.textContent || ''))) {
+                    return element;
+                }
+            }
+
+            return Array.from(document.querySelectorAll('[role="status"], [aria-live]'))
+                .find(element =>
+                    /起動チェック|起動時エラー未検出|起動エラー|エラー検出/.test(
+                        String(element.textContent || '')
+                    )
+                ) || null;
+        }
+
+        function armReflectVerificationSummary(appliedCount, runtimeToken) {
+            clearReflectVerificationSummary();
+
+            const count = Math.max(0, Number(appliedCount) || 0);
+            if (!count) return;
+
+            const expectedRuntimeToken = runtimeToken;
+            const prefix = `反映${count}件｜`;
+            let verificationStarted = false;
+
+            const syncStatus = () => {
+                // 別の通常実行・再読み込みへ移った場合は今回の反映結果との関連付けを終了する。
+                if (
+                    expectedRuntimeToken
+                    && currentRuntimeToken
+                    && currentRuntimeToken !== expectedRuntimeToken
+                ) {
+                    clearReflectVerificationSummary();
+                    return;
+                }
+
+                const status = findRuntimeVerificationStatusElement();
+                if (!status) return;
+
+                const currentText = String(status.textContent || '');
+                const baseText = currentText.replace(/^反映\d+件｜\s*/, '');
+
+                if (/起動チェック中/.test(baseText)) {
+                    verificationStarted = true;
+                    const nextText = prefix + baseText;
+                    if (currentText !== nextText) {
+                        status.textContent = nextText;
+                    }
+                    return;
+                }
+
+                // 古い完了表示を今回の反映結果と誤って結び付けない。
+                if (!verificationStarted) return;
+
+                const verificationFinished =
+                    /起動時エラー未検出/.test(baseText)
+                    || /起動(?:時)?エラー検出/.test(baseText)
+                    || /エラー検出/.test(baseText);
+
+                if (!verificationFinished) return;
+
+                const nextText = prefix + baseText;
+                if (currentText !== nextText) {
+                    status.textContent = nextText;
+                }
+                clearReflectVerificationSummary();
+            };
+
+            reflectVerificationSummaryObserver = new MutationObserver(syncStatus);
+            reflectVerificationSummaryObserver.observe(document.body, {
+                subtree: true,
+                childList: true,
+                characterData: true
+            });
+
+            // beginReflectRuntimeVerification()直後ですでに表示が更新済みでも拾う。
+            syncStatus();
+
+            // 起動完了通知が来ないケースでも監視を残し続けない。
+            reflectVerificationSummaryTimer = setTimeout(() => {
+                clearReflectVerificationSummary();
+            }, 10000);
+        }
+
         function applyNormalizedPatches(fixes, options = {}) {
             const fromLongPress = options.fromLongPress === true;
             clearFixError();
@@ -4561,6 +4669,10 @@ ${currentCode}
 
                 if (appliedFixes.length > 0) {
                     beginReflectRuntimeVerification();
+                    armReflectVerificationSummary(
+                        appliedFixes.length,
+                        currentRuntimeToken
+                    );
                 } else {
                     showToast(resultSummary);
                 }
