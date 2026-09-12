@@ -2404,7 +2404,7 @@
             }
         }
 
-        function scheduleAppliedPatchAreaToast(appliedFixes, failedCount = 0) {
+        function scheduleAppliedPatchAreaToast(appliedFixes, alreadyAppliedCount = 0, failedCount = 0) {
             try {
                 const fixes = Array.isArray(appliedFixes) ? appliedFixes : [];
                 if (!fixes.length) return;
@@ -2412,11 +2412,12 @@
                 const areaSummary = buildAppliedPatchAreaSummary(fixes);
                 if (!areaSummary) return;
 
+                const alreadyApplied = Math.max(0, Number(alreadyAppliedCount) || 0);
                 const failed = Math.max(0, Number(failedCount) || 0);
-                const total = fixes.length + failed;
-                const countSummary = failed > 0
-                    ? `${fixes.length}/${total}件反映`
-                    : `${fixes.length}件反映`;
+                const countParts = [`${fixes.length}件反映`];
+                if (alreadyApplied > 0) countParts.push(`${alreadyApplied}件適用済み`);
+                if (failed > 0) countParts.push(`${failed}件未適用`);
+                const countSummary = countParts.join("・");
 
                 // 反映直後の既存メッセージを消さないよう少し遅らせる。
                 // runtimeVerificationの状態や判定そのものは変更しない。
@@ -4284,7 +4285,7 @@
             if (jump) jump.style.display = 'block';
         }
 
-                function displayFixRecovery(failedFixes, appliedCount) {
+                function displayFixRecovery(failedFixes, appliedCount, alreadyAppliedCount = 0) {
             lastFailedAutoFixes = Array.isArray(failedFixes) ? failedFixes : [];
             lastInvalidReflectText = "";
             lastInvalidReflectReason = "";
@@ -4293,11 +4294,14 @@
             const text = document.getElementById('fix-recovery-text');
             if (!box || !text) return;
 
+            const applied = Math.max(0, Number(appliedCount) || 0);
+            const alreadyApplied = Math.max(0, Number(alreadyAppliedCount) || 0);
             const resultParts = [];
-            if (appliedCount > 0) resultParts.push(`適用${appliedCount}件`);
-            if (!resultParts.length) resultParts.push("適用0件");
+            if (applied > 0) resultParts.push(`${applied}件反映`);
+            if (alreadyApplied > 0) resultParts.push(`${alreadyApplied}件適用済み`);
+            if (!resultParts.length) resultParts.push("反映0件");
 
-            text.textContent = `${resultParts.join(" / ")}です。\nJSON入力欄には、未適用の${lastFailedAutoFixes.length}件だけを残しています。\nリカバリープロンプトはフルコードを添付せず、AIが最新版コードを記憶している前提で作成します。`;
+            text.textContent = `${resultParts.join("・")}です。\nJSON入力欄には、未適用の${lastFailedAutoFixes.length}件だけを残しています。\n適用済み項目は再依頼せず、未適用項目だけをAIへ再依頼します。`;
             box.style.display = 'block';
         }
 
@@ -4644,6 +4648,7 @@ ${currentCode}
             const normalizedCode = String(originalCode || "").replace(/\r\n/g, '\n');
             const failedReasonsByIndex = new Map();
             const candidates = [];
+            const alreadyAppliedFixes = [];
 
             const countOccurrences = (base, needle) => {
                 if (!needle) return 0;
@@ -4672,15 +4677,36 @@ ${currentCode}
                 const replacement = String(afterText).replace(/\r\n/g, '\n');
                 const totalFound = countOccurrences(normalizedCode, target);
 
+                // beforeとafterが同一で、現在コードに一意に存在する場合は
+                // 実質的な無変更パッチとしてコードを書き換えない。
+                if (target === replacement && totalFound === 1) {
+                    alreadyAppliedFixes.push({
+                        fixIndex,
+                        fix
+                    });
+                    return;
+                }
+
                 if (totalFound === 0) {
                     const replacementFound = replacement
                         ? countOccurrences(normalizedCode, replacement)
                         : 0;
 
+                    // beforeが消えており、空ではないafter全体が現在コードに
+                    // 正確に1箇所だけ完全一致する場合に限り「適用済み」とする。
+                    // 部分一致・曖昧一致・複数一致・削除パッチは対象にしない。
+                    if (replacement && replacementFound === 1) {
+                        alreadyAppliedFixes.push({
+                            fixIndex,
+                            fix
+                        });
+                        return;
+                    }
+
                     failedReasonsByIndex.set(
                         fixIndex,
                         replacementFound > 0
-                            ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
+                            ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、一意な適用済み状態とは確認できないため未適用`
                             : "対象コードが見つかりません。after/replaceの完全一致も確認できません"
                     );
                     return;
@@ -4745,6 +4771,7 @@ ${currentCode}
             return {
                 normalizedCode,
                 safeCandidates,
+                alreadyAppliedFixes,
                 failedFixes
             };
         }
@@ -4762,6 +4789,7 @@ ${currentCode}
                 const {
                     normalizedCode,
                     safeCandidates,
+                    alreadyAppliedFixes,
                     failedFixes
                 } = buildPatchApplicationPlan(snapshotBeforeAutoFix, fixes);
 
@@ -4786,9 +4814,10 @@ ${currentCode}
 
                 const buildResultSummary = () => {
                     const parts = [];
-                    if (appliedFixes.length > 0) parts.push(`適用${appliedFixes.length}件`);
-                    if (failedFixes.length > 0) parts.push(`未適用${failedFixes.length}件`);
-                    return parts.length ? parts.join(" / ") : "適用0件";
+                    if (appliedFixes.length > 0) parts.push(`${appliedFixes.length}件反映`);
+                    if (alreadyAppliedFixes.length > 0) parts.push(`${alreadyAppliedFixes.length}件適用済み`);
+                    if (failedFixes.length > 0) parts.push(`${failedFixes.length}件未適用`);
+                    return parts.length ? parts.join("・") : "反映対象なし";
                 };
 
                 if (appliedFixes.length > 0) {
@@ -4799,16 +4828,32 @@ ${currentCode}
 
                 const resultSummary = buildResultSummary();
 
-                // 正常適用後、または有効なパッチを既存リカバリーへ引き渡した時点で、
+                // 適用済みは通常の成功・失敗へ混ぜず、独立したログ種別で記録する。
+                if (alreadyAppliedFixes.length > 0) {
+                    recordDevLog(
+                        'reflect_already_applied',
+                        'skipped',
+                        'already_applied',
+                        `count:${alreadyAppliedFixes.length}`
+                    );
+                }
+
+                // 正常適用・適用済み判定・既存リカバリーへの引き渡しのいずれでも、
                 // 通常の「AI回答待ち」強調は役目を終える。
-                if (appliedFixes.length > 0 || failedFixes.length > 0) {
+                if (appliedFixes.length > 0
+                    || alreadyAppliedFixes.length > 0
+                    || failedFixes.length > 0) {
                     clearAiRoundTripState();
                 }
 
                 // 実際に適用されたPatchだけを表示用に分類する。
-                // 分類結果は反映成否・部分適用・実行検証には一切使用しない。
+                // 適用済み項目はコード変更領域として分類しない。
                 if (appliedFixes.length > 0) {
-                    scheduleAppliedPatchAreaToast(appliedFixes, failedFixes.length);
+                    scheduleAppliedPatchAreaToast(
+                        appliedFixes,
+                        alreadyAppliedFixes.length,
+                        failedFixes.length
+                    );
                 }
 
                 if (failedFixes.length > 0) {
@@ -4836,7 +4881,11 @@ ${currentCode}
                     displayFixError(
                         `${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`
                     );
-                    displayFixRecovery(failedFixes, appliedFixes.length);
+                    displayFixRecovery(
+                        failedFixes,
+                        appliedFixes.length,
+                        alreadyAppliedFixes.length
+                    );
 
                     failedFixes.forEach((item, itemIndex) => {
                         recordDevLog(
@@ -4847,12 +4896,12 @@ ${currentCode}
                         );
                     });
 
-                    // 部分適用でも、今回の反映情報を起動検証へ直接渡して関連付ける。
-                    // 未適用リカバリー(fix modal)は従来どおり開いたままにする。
+                    // 適用済み項目はコード変更も実行検証も不要なので、
+                    // 起動検証の母数には「今回変更した項目＋未適用項目」だけを渡す。
                     if (appliedFixes.length > 0) {
                         beginReflectRuntimeVerification({
                             appliedCount: appliedFixes.length,
-                            totalCount: fixes.length,
+                            totalCount: appliedFixes.length + failedFixes.length,
                             failedCount: failedFixes.length
                         });
                     } else {
@@ -4862,14 +4911,28 @@ ${currentCode}
                 }
 
                 document.getElementById('json-input').value = "";
+
+                // 全項目が適用済みならコードは一切変更せず、
+                // snapshot・reflect_success・runtime verificationも発生させない。
+                if (appliedFixes.length === 0 && alreadyAppliedFixes.length > 0) {
+                    closeModal('fix-modal');
+                    showToast(
+                        alreadyAppliedFixes.length === fixes.length
+                            ? `✓ ${alreadyAppliedFixes.length}件ともすでに反映済みです`
+                            : resultSummary
+                    );
+                    switchTab('run');
+                    return true;
+                }
+
                 recordDevLog('reflect_success', 'success', '', `json_patch:${resultSummary}`);
                 closeModal('fix-modal');
 
                 if (appliedFixes.length > 0) {
                     beginReflectRuntimeVerification({
                         appliedCount: appliedFixes.length,
-                        totalCount: fixes.length,
-                        failedCount: failedFixes.length
+                        totalCount: appliedFixes.length,
+                        failedCount: 0
                     });
                 } else {
                     showToast(resultSummary);
@@ -5627,6 +5690,10 @@ nextBtn.onclick=nextStep;
             closeModal('save-modal');
             setGitHubPublishProgress("");
             document.getElementById('github-publish-modal').style.display = 'flex';
+
+            // JavaScriptで現在アプリ用の公開設定を入れ直した直後にも、
+            // input/changeイベントへ依存せず公開済状態を再評価する。
+            scheduleGitHubPublishedStateSync(0);
             syncGitHubPublishModal();
 
             try {
@@ -7420,9 +7487,9 @@ self.addEventListener("fetch", function (event) {
             }
         }
 
-        function extractCurrentSourceAppId() {
+        function extractSourceAppId(sourceCode) {
             try {
-                const source = String(editor?.getValue?.() || "");
+                const source = String(sourceCode || "");
                 const match = source.match(
                     /<script\b[^>]*\bid\s*=\s*["']lfs-meta["'][^>]*>([\s\S]*?)<\/script\s*>/i
                 );
@@ -7433,6 +7500,10 @@ self.addEventListener("fetch", function (event) {
             } catch (error) {
                 return "";
             }
+        }
+
+        function extractCurrentSourceAppId() {
+            return extractSourceAppId(editor?.getValue?.() || "");
         }
 
         function getGitHubPublishedAppKey() {
@@ -7566,6 +7637,82 @@ self.addEventListener("fetch", function (event) {
 
             const record = appState[mode === "pwa" ? "pwa" : "html"];
             return record && typeof record === "object" ? record : null;
+        }
+
+        function getLibraryGitHubPublishedRecords(app) {
+            if (!app) return { html: null, pwa: null };
+
+            const candidateKeys = [];
+            const sourceAppId = extractSourceAppId(app.code);
+
+            if (sourceAppId) candidateKeys.push(`app:${sourceAppId}`);
+            if (app.id !== undefined && app.id !== null) {
+                candidateKeys.push(`record:${String(app.id)}`);
+            }
+
+            const appName = String(app.projectName || app.name || "").trim();
+            if (appName) candidateKeys.push(`name:${appName}`);
+
+            for (const appKey of [...new Set(candidateKeys)]) {
+                const html = getGitHubPublishedRecord(appKey, "html");
+                const pwa = getGitHubPublishedRecord(appKey, "pwa");
+                if (html || pwa) return { html, pwa };
+            }
+
+            return { html: null, pwa: null };
+        }
+
+        function getGitHubPublishedPublicUrl(record, mode) {
+            if (!record) return "";
+
+            const savedUrl = String(record.publicUrl || "").trim();
+            if (savedUrl) return savedUrl;
+
+            const repo = String(record.repo || "").trim();
+            const path = mode === "pwa"
+                ? String(record.folder || "").trim()
+                : String(record.path || "").trim();
+
+            if (!repo || !path) return "";
+
+            try {
+                return buildGitHubPagesUrl(repo, path, mode === "pwa");
+            } catch (error) {
+                return "";
+            }
+        }
+
+        async function copyLibraryPublishedUrl(id, mode) {
+            try {
+                const app = await idb.get(id);
+                if (!app) {
+                    showToast("保存アプリを取得できませんでした");
+                    return;
+                }
+
+                const records = getLibraryGitHubPublishedRecords(app);
+                const normalizedMode = mode === "pwa" ? "pwa" : "html";
+                const record = records[normalizedMode];
+                const publicUrl = getGitHubPublishedPublicUrl(
+                    record,
+                    normalizedMode
+                );
+
+                if (!publicUrl) {
+                    showToast("公開URLを取得できませんでした");
+                    return;
+                }
+
+                writeTextWithFallback(
+                    publicUrl,
+                    normalizedMode === "pwa"
+                        ? "PWA公開URLをコピーしました"
+                        : "HTML公開URLをコピーしました"
+                );
+            } catch (error) {
+                console.error(error);
+                showToast("公開URLを取得できませんでした");
+            }
         }
 
         function saveGitHubPublishedRecord(appKey, mode, record) {
@@ -7735,7 +7882,11 @@ self.addEventListener("fetch", function (event) {
                     branch: target.branch,
                     path: mode === "html" ? target.path : "",
                     folder: mode === "pwa" ? target.folder : "",
-                    publicUrl: String(result?.publicUrl || "")
+                    publicUrl: String(
+                        result?.publicUrl
+                        || result?.pagesUrl
+                        || ""
+                    )
                 });
 
                 if (!saved) return;
@@ -7895,6 +8046,7 @@ self.addEventListener("fetch", function (event) {
                 for (const pName in projects) {
                     const latestApp = projects[pName][0];
                     const historyText = latestApp.history && latestApp.history.length > 0 ? latestApp.history[0] : '履歴なし';
+                    const published = getLibraryGitHubPublishedRecords(latestApp);
                    
                     const el = document.createElement('div');
                     el.className = 'lib-item';
@@ -7902,6 +8054,8 @@ self.addEventListener("fetch", function (event) {
                         <div class="lib-header">
                                                         <div class="lib-title" style="cursor: pointer; text-decoration: underline;" onclick="renderLibrary(\`${escapeForTemplate(pName)}\`)">📁 ${escapeHtml(pName)} (${projects[pName].length})</div>
                             <div class="lib-actions">
+                                ${published.html ? `<button class="btn-action" onclick="copyLibraryPublishedUrl(${latestApp.id}, 'html')" title="最後に公開した単一HTMLのURLをコピー">HTML URL</button>` : ''}
+                                ${published.pwa ? `<button class="btn-action" onclick="copyLibraryPublishedUrl(${latestApp.id}, 'pwa')" title="最後に公開したPWAのURLをコピー">PWA URL</button>` : ''}
                                 <button class="btn-del" onclick="deleteProject(\`${escapeForTemplate(pName)}\`)" title="プロジェクトを一括削除">🗑️</button>
                             </div>
                         </div>
@@ -8398,6 +8552,7 @@ self.addEventListener("fetch", function (event) {
                 prompt_copy: 0,
                 consult_copy: 0,
                 reflect_success: 0,
+                reflect_already_applied: 0,
                 reflect_failed: 0,
                 iframe_error: 0,
                 reasonCounts: {},
@@ -8437,6 +8592,7 @@ self.addEventListener("fetch", function (event) {
                     ['AI指示', summary.prompt_copy],
                     ['AI相談', summary.consult_copy],
                     ['反映成功', summary.reflect_success],
+                    ['適用済み', summary.reflect_already_applied],
                     ['反映失敗', summary.reflect_failed],
                     ['iframeエラー', summary.iframe_error],
                     ['パッチ成功率', `${summary.jsonSuccessRate}%`]
