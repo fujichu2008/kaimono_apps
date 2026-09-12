@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#007acc">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>AppStudioMobile v2</title>
@@ -1138,11 +1144,6 @@
             word-break: break-word;
         }
     </style>
-<!-- APPSTUDIO_PWA_HEAD_START -->
-<link rel="manifest" href="./manifest.webmanifest">
-<meta name="theme-color" content="#007acc">
-<link rel="apple-touch-icon" href="./icons/icon-192.png">
-<!-- APPSTUDIO_PWA_HEAD_END -->
 </head>
 <body>
 
@@ -3656,16 +3657,24 @@
                 const fromStart = candidate.slice(startMatch.index);
                 const closingPattern = /<\/html\s*>/gi;
                 let closingMatch;
-                let lastClosingEnd = -1;
 
                 while ((closingMatch = closingPattern.exec(fromStart)) !== null) {
-                    lastClosingEnd = closingMatch.index + closingMatch[0].length;
+                    // 作成アプリ自身のscript/style内にHTML文字列が含まれる場合、
+                    // その文字列中の終了htmlタグを実ドキュメント終端として扱わない。
+                    const lowerBeforeClosing = fromStart.slice(0, closingMatch.index).toLowerCase();
+                    const lastScriptOpen = lowerBeforeClosing.lastIndexOf("<script");
+                    const lastScriptClose = lowerBeforeClosing.lastIndexOf("</script");
+                    const lastStyleOpen = lowerBeforeClosing.lastIndexOf("<style");
+                    const lastStyleClose = lowerBeforeClosing.lastIndexOf("</style");
+                    const insideScript = lastScriptOpen > lastScriptClose;
+                    const insideStyle = lastStyleOpen > lastStyleClose;
+
+                    if (insideScript || insideStyle) continue;
+
+                    const closingEnd = closingMatch.index + closingMatch[0].length;
+                    const extracted = fromStart.slice(0, closingEnd).trim();
+                    if (looksLikeFullHtmlCode(extracted)) return extracted;
                 }
-
-                if (lastClosingEnd === -1) continue;
-
-                const extracted = fromStart.slice(0, lastClosingEnd).trim();
-                if (looksLikeFullHtmlCode(extracted)) return extracted;
             }
 
             return null;
@@ -3832,21 +3841,56 @@
                 }
             }
             if (fenceLength) throw new Error('Markdownコードフェンスが閉じられていません。');
-            if (!candidates.length) {
-                throw new Error('HTMLフルコード、AppStudio Patch、JSONパッチとして判定できませんでした。');
-            }
-            if (outside.some(line => {
+
+            const outsideHasReflectCandidate = outside.some(line => {
                 const value = line.trim();
+                if (!value) return false;
+
                 return Object.values(APPSTUDIO_PATCH_MARKERS).some(marker => value.includes(marker))
-                    || /^(?:[\[{]|<!doctype\s+html\b|<html\b)/i.test(value);
-            })) {
-                throw new Error('コードフェンス外にも反映候補があります。1形式だけ貼り付けてください。');
+                    || /^(?:<!doctype\s+html\b|<html\b)/i.test(value)
+                    || /(?:^|[:：]\s*)(?:\[\s*(?:\{|")|\{\s*")/.test(value);
+            });
+
+            if (candidates.length) {
+                if (outsideHasReflectCandidate) {
+                    throw new Error('コードフェンス外にも反映候補があります。1形式だけ貼り付けてください。');
+                }
+
+                const unique = new Map(candidates.map(candidate => [JSON.stringify(candidate), candidate]));
+                if (unique.size !== 1) {
+                    throw new Error('複数の異なる反映候補があります。反映するコードを1つに絞ってください。');
+                }
+                return unique.values().next().value;
             }
-            const unique = new Map(candidates.map(candidate => [JSON.stringify(candidate), candidate]));
-            if (unique.size !== 1) {
-                throw new Error('複数の異なる反映候補があります。反映するコードを1つに絞ってください。');
+
+            // コードフェンス内に反映候補がなかった場合だけ、
+            // 既存HTML抽出処理を使って「説明文 + 生の完全HTML」を検出する。
+            const extractedHtml = extractFullHtmlCode(text);
+            if (extractedHtml) {
+                const htmlIndex = text.indexOf(extractedHtml);
+                const outsideHtml = htmlIndex >= 0
+                    ? text.slice(0, htmlIndex) + '\n' + text.slice(htmlIndex + extractedHtml.length)
+                    : text;
+
+                const outsideHtmlHasReflectCandidate = outsideHtml.split('\n').some(line => {
+                    const value = line.trim();
+                    if (!value) return false;
+
+                    return Object.values(APPSTUDIO_PATCH_MARKERS).some(marker => value.includes(marker))
+                        || /^(?:<!doctype\s+html\b|<html\b)/i.test(value)
+                        || /(?:^|[:：]\s*)(?:\[\s*(?:\{|")|\{\s*")/.test(value);
+                });
+
+                // HTMLの外側にPatch/JSON/別HTMLが残る場合は、
+                // 意図を推測せず形式混在として拒否する。
+                if (outsideHtmlHasReflectCandidate || extractFullHtmlCode(outsideHtml)) {
+                    throw new Error('HTMLフルコード以外の反映候補も含まれています。反映するコードを1形式だけ貼り付けてください。');
+                }
+
+                return { format: 'html', html: extractedHtml };
             }
-            return unique.values().next().value;
+
+            throw new Error('HTMLフルコード、AppStudio Patch、JSONパッチとして判定できませんでした。');
         }
 
         function buildPatchOutputInstructions() {
@@ -4385,14 +4429,9 @@ ${currentCode}
                             ? countOccurrences(code, replacement)
                             : 0;
 
-                        if (replacementFound === 1) {
-                            alreadyAppliedFixes.push(fix);
-                            continue;
-                        }
-
                         failedFixes.push({
-                            reason: replacementFound > 1
-                                ? `対象コードが見つかりません。after/replaceが${replacementFound}箇所あるため適用済みと安全に判断できません`
+                            reason: replacementFound > 0
+                                ? `対象コードが見つかりません。after/replaceは${replacementFound}箇所ありますが、このパッチが適用済みとは安全に証明できないため未適用`
                                 : "対象コードが見つかりません。after/replaceの完全一致も確認できません",
                             fix
                         });
@@ -5715,25 +5754,54 @@ nextBtn.onclick=nextStep;
                 .replace(/[^a-z0-9:-]/g, "");
             if (!normalizedTagName) return -1;
 
-            const closingTagPattern = new RegExp(`</${normalizedTagName}\\s*>`, "gi");
-            let match;
-            let lastValidIndex = -1;
+            const targetPattern = new RegExp(`^</${normalizedTagName}\\s*>`, "i");
+            const rawTextOpeningPattern = /^<(script|style|textarea|title)\b[^>]*>/i;
+            let index = 0;
+            let rawTextTag = "";
 
-            while ((match = closingTagPattern.exec(text)) !== null) {
-                const lowerBeforeTag = text.slice(0, match.index).toLowerCase();
-                const lastScriptOpen = lowerBeforeTag.lastIndexOf("<script");
-                const lastScriptClose = lowerBeforeTag.lastIndexOf("</script");
-                const lastStyleOpen = lowerBeforeTag.lastIndexOf("<style");
-                const lastStyleClose = lowerBeforeTag.lastIndexOf("</style");
-                const insideScript = lastScriptOpen > lastScriptClose;
-                const insideStyle = lastStyleOpen > lastStyleClose;
+            while (index < text.length) {
+                if (rawTextTag) {
+                    const rawClosingPattern = new RegExp(`</${rawTextTag}\\s*>`, "ig");
+                    rawClosingPattern.lastIndex = index;
+                    const rawClosingMatch = rawClosingPattern.exec(text);
+                    if (!rawClosingMatch) return -1;
 
-                if (!insideScript && !insideStyle) {
-                    lastValidIndex = match.index;
+                    index = rawClosingMatch.index + rawClosingMatch[0].length;
+                    rawTextTag = "";
+                    continue;
                 }
+
+                if (text.startsWith("<!--", index)) {
+                    const commentEnd = text.indexOf("-->", index + 4);
+                    if (commentEnd === -1) return -1;
+                    index = commentEnd + 3;
+                    continue;
+                }
+
+                if (text[index] !== "<") {
+                    index++;
+                    continue;
+                }
+
+                const fromTag = text.slice(index);
+                const targetMatch = fromTag.match(targetPattern);
+                if (targetMatch) {
+                    return index;
+                }
+
+                const rawTextOpeningMatch = fromTag.match(rawTextOpeningPattern);
+                if (rawTextOpeningMatch) {
+                    rawTextTag = rawTextOpeningMatch[1].toLowerCase();
+                    index += rawTextOpeningMatch[0].length;
+                    continue;
+                }
+
+                const tagEnd = text.indexOf(">", index + 1);
+                if (tagEnd === -1) return -1;
+                index = tagEnd + 1;
             }
 
-            return lastValidIndex;
+            return -1;
         }
 
         function countHtmlManifestLinks(source) {
@@ -5923,11 +5991,24 @@ ${scriptEnd}`;
 
             let published = replacePwaMarkedRange(source, headStart, headEnd, headBlock);
             if (published === null) {
-                const headPosition = findHtmlClosingTagOutsideRawText(source, "head");
-                if (headPosition === -1) {
-                    throw createPublishValidationError("PWA公開には終了headタグが必要です。元HTMLを修正してから再実行してください。");
+                // manifestは終了headタグ探索に依存させず、開始headタグ直後へ挿入する。
+                // HTMLコメント内のhead文字列は空白化して位置を維持したまま検索対象から除外する。
+                const headSearchSource = source.replace(
+                    /<!--[\s\S]*?-->/g,
+                    comment => " ".repeat(comment.length)
+                );
+                const headMatch = headSearchSource.match(/<head\b[^>]*>/i);
+
+                if (!headMatch || !Number.isInteger(headMatch.index)) {
+                    throw createPublishValidationError("PWA公開にはheadタグが必要です。元HTMLを修正してから再実行してください。");
                 }
-                published = source.slice(0, headPosition) + headBlock + "\n" + source.slice(headPosition);
+
+                const headPosition = headMatch.index + headMatch[0].length;
+                published = source.slice(0, headPosition)
+                    + "\n"
+                    + headBlock
+                    + "\n"
+                    + source.slice(headPosition);
             }
 
             const scriptReplaced = replacePwaMarkedRange(published, scriptStart, scriptEnd, scriptBlock);
@@ -7679,8 +7760,6 @@ self.addEventListener("fetch", function (event) {
   "runId": "82a36cafc4c93fa979a8d71a856b1b00"
 }
 </script>
-</body>
-</html>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
 <script>
 window.addEventListener("load", function () {
@@ -7692,3 +7771,5 @@ window.addEventListener("load", function () {
 });
 </script>
 <!-- APPSTUDIO_PWA_SCRIPT_END -->
+</body>
+</html>
