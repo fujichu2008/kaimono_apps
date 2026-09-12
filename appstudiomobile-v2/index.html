@@ -11,13 +11,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>AppStudioMobile v2</title>
    
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/monokai.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/xml/xml.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/css/css.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/htmlmixed/htmlmixed.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/monokai.min.css" crossorigin="anonymous">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/xml/xml.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/css/css.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/htmlmixed/htmlmixed.min.js" crossorigin="anonymous"></script>
     <style>
         :root {
             --bg-color: #1e1e1e;
@@ -1816,13 +1816,214 @@
     <script>
                 // --- State & Elements ---
         const textarea = document.getElementById('code-editor');
-                const editor = CodeMirror.fromTextArea(textarea, {
-            mode: "htmlmixed",
-            theme: "monokai",
-            lineNumbers: true,
-            lineWrapping: false, // 横スクロールを有効化（折り返しOFF）
-            tabSize: 2
-        });
+        let editorFallbackActive = false;
+        let editorFallbackToastShown = false;
+
+        function createEditorOrFallback(textareaElement) {
+            if (typeof CodeMirror !== 'undefined') {
+                try {
+                    return CodeMirror.fromTextArea(textareaElement, {
+                        mode: "htmlmixed",
+                        theme: "monokai",
+                        lineNumbers: true,
+                        lineWrapping: false, // 横スクロールを有効化（折り返しOFF）
+                        tabSize: 2
+                    });
+                } catch (error) {
+                    console.warn("CodeMirrorの初期化に失敗したためtextareaへ切り替えます:", error);
+                }
+            }
+
+            editorFallbackActive = true;
+
+            textareaElement.style.display = "block";
+            textareaElement.style.flex = "1 1 auto";
+            textareaElement.style.width = "100%";
+            textareaElement.style.height = "100%";
+            textareaElement.style.minHeight = "0";
+            textareaElement.style.resize = "none";
+            textareaElement.style.border = "none";
+            textareaElement.style.outline = "none";
+            textareaElement.style.padding = "12px";
+            textareaElement.style.background = "var(--bg-color)";
+            textareaElement.style.color = "var(--text-color)";
+            textareaElement.style.fontFamily = '"Menlo", "Consolas", "Monaco", monospace';
+            textareaElement.style.fontSize = "14px";
+            textareaElement.style.lineHeight = "1.5";
+            textareaElement.style.overflow = "auto";
+            textareaElement.style.whiteSpace = "pre";
+            textareaElement.style.tabSize = "2";
+
+            const changeListeners = [];
+
+            const indexFromPos = position => {
+                const value = textareaElement.value;
+                const lines = value.split("\n");
+                const line = Math.max(
+                    0,
+                    Math.min(lines.length - 1, Number(position?.line) || 0)
+                );
+                const ch = Math.max(
+                    0,
+                    Math.min(lines[line].length, Number(position?.ch) || 0)
+                );
+
+                let index = 0;
+                for (let currentLine = 0; currentLine < line; currentLine++) {
+                    index += lines[currentLine].length + 1;
+                }
+                return index + ch;
+            };
+
+            const notifyChange = change => {
+                changeListeners.slice().forEach(listener => {
+                    try {
+                        listener(adapter, change);
+                    } catch (error) {
+                        console.error("textareaフォールバックのchange処理でエラー:", error);
+                    }
+                });
+            };
+
+            const adapter = {
+                getValue() {
+                    return textareaElement.value;
+                },
+
+                setValue(value) {
+                    const nextValue = String(value ?? "");
+                    const previousValue = textareaElement.value;
+                    textareaElement.value = nextValue;
+
+                    if (previousValue !== nextValue) {
+                        notifyChange({
+                            from: { line: 0, ch: 0 },
+                            to: adapter.posFromIndex(previousValue.length),
+                            text: nextValue.split("\n"),
+                            removed: previousValue.split("\n"),
+                            origin: "setValue"
+                        });
+                    }
+                },
+
+                on(eventName, handler) {
+                    if (eventName === "change" && typeof handler === "function") {
+                        changeListeners.push(handler);
+                    }
+                },
+
+                lineCount() {
+                    return textareaElement.value.split("\n").length;
+                },
+
+                setSize(width, height) {
+                    if (width !== undefined && width !== null) {
+                        textareaElement.style.width = typeof width === "number"
+                            ? `${width}px`
+                            : String(width);
+                    }
+                    if (height !== undefined && height !== null) {
+                        textareaElement.style.height = typeof height === "number"
+                            ? `${height}px`
+                            : String(height);
+                    }
+                },
+
+                refresh() {},
+
+                undo() {
+                    textareaElement.focus();
+                    try {
+                        document.execCommand("undo");
+                    } catch (error) {}
+                },
+
+                redo() {
+                    textareaElement.focus();
+                    try {
+                        document.execCommand("redo");
+                    } catch (error) {}
+                },
+
+                markText() {
+                    return {
+                        clear() {}
+                    };
+                },
+
+                operation(callback) {
+                    return typeof callback === "function"
+                        ? callback()
+                        : undefined;
+                },
+
+                getRange(from, to) {
+                    const start = indexFromPos(from);
+                    const end = indexFromPos(to);
+                    return textareaElement.value.slice(
+                        Math.min(start, end),
+                        Math.max(start, end)
+                    );
+                },
+
+                posFromIndex(index) {
+                    const value = textareaElement.value;
+                    const targetIndex = Math.max(
+                        0,
+                        Math.min(value.length, Number(index) || 0)
+                    );
+                    const before = value.slice(0, targetIndex);
+                    const lines = before.split("\n");
+                    return {
+                        line: lines.length - 1,
+                        ch: lines[lines.length - 1].length
+                    };
+                },
+
+                replaceRange(replacement, from, to, origin = "+input") {
+                    const value = textareaElement.value;
+                    const start = indexFromPos(from);
+                    const end = to ? indexFromPos(to) : start;
+                    const rangeStart = Math.min(start, end);
+                    const rangeEnd = Math.max(start, end);
+                    const removedText = value.slice(rangeStart, rangeEnd);
+                    const replacementText = String(replacement ?? "");
+
+                    textareaElement.value =
+                        value.slice(0, rangeStart)
+                        + replacementText
+                        + value.slice(rangeEnd);
+
+                    const nextCursor = rangeStart + replacementText.length;
+                    textareaElement.setSelectionRange(nextCursor, nextCursor);
+
+                    notifyChange({
+                        from: adapter.posFromIndex(rangeStart),
+                        to: adapter.posFromIndex(rangeStart + removedText.length),
+                        text: replacementText.split("\n"),
+                        removed: removedText.split("\n"),
+                        origin
+                    });
+                },
+
+                scrollIntoView() {}
+            };
+
+            textareaElement.addEventListener("input", () => {
+                notifyChange(null);
+            });
+
+            if (!editorFallbackToastShown) {
+                editorFallbackToastShown = true;
+                setTimeout(() => {
+                    showToast("エディタ部品を読み込めません。編集・保存・ライブラリは利用できます");
+                }, 0);
+            }
+
+            return adapter;
+        }
+
+        const editor = createEditorOrFallback(textarea);
         editor.setSize("100%", "100%");
 
         const EDITOR_SEARCH_MARK_LIMIT = 200;
@@ -2207,6 +2408,11 @@
         }
 
         function toggleEditorSearchBar() {
+            if (editorFallbackActive) {
+                showToast("この環境では検索・置換を利用できません");
+                return;
+            }
+
             if (editorSearchState.isOpen) {
                 closeEditorSearchBar();
             } else {
