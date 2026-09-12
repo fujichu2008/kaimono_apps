@@ -2341,6 +2341,93 @@
             syncAiRoundTripUi();
         }
 
+        // 反映結果の説明専用。Patchの適用可否や安全性判定には使用しない。
+        // 確信できない変更は無理に分類せず「その他」とする。
+        function classifyAppliedPatchArea(fix) {
+            try {
+                const before = String(fix?.before ?? fix?.search ?? "");
+                const after = String(fix?.after ?? fix?.replace ?? "");
+                const source = `${before}\n${after}`;
+
+                const hasJavaScriptContext =
+                    /<script\b|<\/script\s*>/i.test(source)
+                    || /(^|\n)\s*(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(/m.test(source)
+                    || /(^|\n)\s*(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/m.test(source)
+                    || /=>|\.addEventListener\s*\(|\bdocument\.(?:getElementById|querySelector|querySelectorAll)\s*\(/.test(source);
+
+                if (hasJavaScriptContext) return "JavaScript";
+
+                const hasCssContext =
+                    /<style\b|<\/style\s*>/i.test(source)
+                    || /(^|\n)\s*(?:[#.][\w-]+|\[[^\]\n]+\]|:[\w-]+|[a-z][\w-]*(?:\s+[.#a-z][\w-]*)*)[^{\n]*\{[\s\S]{0,400}?[a-z-]+\s*:/im.test(source);
+
+                if (hasCssContext) return "CSS";
+
+                const hasHtmlContext =
+                    /<\/?(?:html|head|body|title|meta|link|main|section|header|footer|nav|div|span|p|h[1-6]|button|input|textarea|select|option|form|label|iframe|canvas|svg|img|a|ul|ol|li|table|tr|td|th)\b/i.test(source);
+
+                if (hasHtmlContext) return "HTML";
+                return "その他";
+            } catch (error) {
+                return "その他";
+            }
+        }
+
+        function buildAppliedPatchAreaSummary(appliedFixes) {
+            try {
+                const fixes = Array.isArray(appliedFixes) ? appliedFixes : [];
+                if (!fixes.length) return "";
+
+                const counts = {
+                    HTML: 0,
+                    CSS: 0,
+                    JavaScript: 0,
+                    その他: 0
+                };
+
+                fixes.forEach(fix => {
+                    const area = classifyAppliedPatchArea(fix);
+                    if (Object.prototype.hasOwnProperty.call(counts, area)) {
+                        counts[area]++;
+                    } else {
+                        counts["その他"]++;
+                    }
+                });
+
+                return ["HTML", "CSS", "JavaScript", "その他"]
+                    .filter(area => counts[area] > 0)
+                    .map(area => `${area} ${counts[area]}`)
+                    .join("・");
+            } catch (error) {
+                console.warn("反映結果サマリーの生成に失敗しました:", error);
+                return "";
+            }
+        }
+
+        function scheduleAppliedPatchAreaToast(appliedFixes, failedCount = 0) {
+            try {
+                const fixes = Array.isArray(appliedFixes) ? appliedFixes : [];
+                if (!fixes.length) return;
+
+                const areaSummary = buildAppliedPatchAreaSummary(fixes);
+                if (!areaSummary) return;
+
+                const failed = Math.max(0, Number(failedCount) || 0);
+                const total = fixes.length + failed;
+                const countSummary = failed > 0
+                    ? `${fixes.length}/${total}件反映`
+                    : `${fixes.length}件反映`;
+
+                // 反映直後の既存メッセージを消さないよう少し遅らせる。
+                // runtimeVerificationの状態や判定そのものは変更しない。
+                setTimeout(() => {
+                    showToast(`${countSummary}｜${areaSummary}`);
+                }, 550);
+            } catch (error) {
+                console.warn("反映結果サマリーの表示に失敗しました:", error);
+            }
+        }
+
         function handleAiRoundTripReturn() {
             if (aiRoundTripState.status !== "awaiting_reflect"
                 || aiRoundTripState.returnHintShown) {
@@ -4710,6 +4797,12 @@ ${currentCode}
                 // 通常の「AI回答待ち」強調は役目を終える。
                 if (appliedFixes.length > 0 || failedFixes.length > 0) {
                     clearAiRoundTripState();
+                }
+
+                // 実際に適用されたPatchだけを表示用に分類する。
+                // 分類結果は反映成否・部分適用・実行検証には一切使用しない。
+                if (appliedFixes.length > 0) {
+                    scheduleAppliedPatchAreaToast(appliedFixes, failedFixes.length);
                 }
 
                 if (failedFixes.length > 0) {
