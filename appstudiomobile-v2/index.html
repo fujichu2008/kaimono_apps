@@ -1110,13 +1110,13 @@
             background: rgba(0,122,204,0.18);
             transform: scale(0.98);
         }
+
+
         @media (max-width: 359px) {
             .starter-template-grid {
                 grid-template-columns: 1fr;
             }
-        }
 
-        @media (max-width: 359px) {
             .run-controls {
                 padding: 0 2px;
                 gap: 1px;
@@ -3094,6 +3094,7 @@
         // 保存系SecurityErrorから互換実行を提案するconfirmは、
         // 同一runtimeToken内で最大1回だけ表示する。
         let runtimeSecurityCompatConfirmShown = false;
+        const compatRuntimeApprovals = new Map();
         // AI反映の成否とは分離して、反映後の「次のiframe実行」だけを検証する状態。
         // runtimeTokenを正本にし、旧iframeの遅延エラーを現在の検証へ混ぜない。
         const codeRevisionState = {
@@ -4193,6 +4194,9 @@
         }
 
         function toggleRuntimeMode() {
+            if (runtimeMode === "compat") {
+                compatRuntimeApprovals.delete(getGitHubPublishedAppKey(getEditorCode()));
+            }
             if (runtimeMode === "compat") {
                 const msg = "安全実行では、作成アプリからAppStudio本体へのアクセスを制限します。\nただし、作成アプリ内のlocalStorageやIndexedDBが使えない、または通常実行のセーブデータが引き継がれない場合があります。\n信頼できないコードを確認するときに使用してください。";
                 if (!confirm(msg)) return;
@@ -5956,7 +5960,7 @@ ${targetCodeSection}`;
             ].join('\n');
         }
 
-        function applySmartReflectText(text, options = {}) {
+        function applySmartReflectText(text) {
             const sourceText = String(text || "");
             const jsonInput = document.getElementById('json-input');
 
@@ -6055,13 +6059,13 @@ ${targetCodeSection}`;
 
         function applyReflectInput() {
             const text = document.getElementById('json-input').value;
-            return applySmartReflectText(text, { source: 'input' });
+            return applySmartReflectText(text);
         }
 
         async function autoApplyFixFromClipboard() {
             try {
                 const text = await navigator.clipboard.readText();
-                return applySmartReflectText(text, { source: 'clipboard' });
+                return applySmartReflectText(text);
             } catch (err) {
                 openFixModal();
                 displayFixError("クリップボードの読み取りに失敗しました。ブラウザの権限を確認するか、AI反映画面の「手動で貼り付ける」を使用してください。");
@@ -7042,7 +7046,22 @@ setInterval(pop,700);
                 return;
             }
 
-            setEditorCode(template.code);
+            invalidatePendingLoadRequests();
+            advanceWorkspaceGeneration();
+            beginDraftSaveSuppression();
+            try {
+                setEditorCode(template.code);
+                currentAppName = "";
+                currentAppHistory = [];
+                appNameDisplay.textContent = "(新規作成中)";
+                filenameInput.value = "";
+                resetSaveStatusButton();
+                syncRunBarState();
+            } finally {
+                endDraftSaveSuppression();
+            }
+            editorDraftDirty = true;
+            scheduleEditorDraftSave();
             closeModal('starter-template-modal');
             switchTab('run');
             showToast(`「${template.name}」から始めます`);
@@ -7335,7 +7354,9 @@ nextBtn.onclick=nextStep;
             // 新しいruntimeTokenでは、保存系SecurityErrorの互換実行確認を再び1回だけ許可する。
             runtimeSecurityCompatConfirmShown = false;
             // 1. 今回の実行に使うモードを決定(nextRunModeがあれば次の1回だけ優先)
-            const effectiveMode = nextRunMode || runtimeMode;
+            const runtimeAppKey = getGitHubPublishedAppKey(getEditorCode());
+            const effectiveMode = nextRunMode
+                || (compatRuntimeApprovals.has(runtimeAppKey) ? "compat" : runtimeMode);
             // 2. sandbox属性を設定(srcdoc代入前に必ず設定する)
             applyRuntimeSandbox(effectiveMode);
             // この実行が実際に使うモードをエラーログ記録用に保持する
@@ -7917,7 +7938,7 @@ nextBtn.onclick=nextStep;
             closeModal('save-modal');
             setGitHubPublishProgress("");
 
-            // GitHub認証画面を表示する前に、互換実行中の作成アプリを停止する。
+            // GitHub認証画面を表示する前に、実行中の作成アプリを停止する。
             // 空ドキュメントのload完了を確認できない場合はfail-closedとし、
             // GitHub公開画面を表示せず、隔離処理側で通常実行へ復旧する。
             try {
@@ -10505,6 +10526,11 @@ self.addEventListener("fetch", function (event) {
         }
 
         function runInternalSelfChecks() {
+            console.assert(
+                Object.values(STARTER_TEMPLATES).length === 4
+                    && Object.values(STARTER_TEMPLATES).every(template => looksLikeFullHtmlCode(template.code)),
+                "STARTER_TEMPLATES の4件すべてがフルHTMLであること"
+            );
             const formatValue = value => {
                 try {
                     const json = JSON.stringify(value);
@@ -11882,6 +11908,8 @@ ${escapeHtml(versionChangeText)}</div>
         }
 
         function offerCompatRunForStorageSecurityError(runtimeToken) {
+            const runtimeAppKey = getGitHubPublishedAppKey(getEditorCode());
+            if (compatRuntimeApprovals.has(runtimeAppKey)) return;
             if (runtimeSecurityCompatConfirmShown) return;
             if (!runtimeToken || runtimeToken !== currentRuntimeToken) return;
 
@@ -11890,6 +11918,7 @@ ${escapeHtml(versionChangeText)}</div>
 
             if (confirm("このアプリは保存機能を使おうとしています。互換実行で開き直しますか？")) {
                 nextRunMode = "compat";
+            compatRuntimeApprovals.set(runtimeAppKey, true);
                 reloadFrame();
             }
         }
