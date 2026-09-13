@@ -1741,7 +1741,7 @@
 
                 <label class="github-field-label" for="github-token-input">GitHubトークン</label>
                 <input type="text" id="github-token-input" placeholder="GitHub Personal Access Token" autocomplete="off" inputmode="text" oninput="updateGitHubSessionToken(this.value)">
-                <p class="github-publish-note">GitHubのPersonal Access Tokenを入力します。日本語IMEやスマホのユーザー辞書変換を利用できます。入力中の文字は変更せず、公開時に空白・改行だけを除去します。トークンは保存せず、現在のページを開いている間だけメモリ上に保持します。</p>
+                <p class="github-publish-note">GitHubのPersonal Access Tokenを入力します。日本語IMEやスマホのユーザー辞書変換を利用できます。入力中の文字は変更せず、公開時に空白・改行・不可視文字だけを除去します。トークンは保存せず、GitHub公開画面を開いている間だけメモリ上に保持し、画面を閉じると破棄します。</p>
             </div>
 
             <div id="github-html-settings" class="github-publish-section">
@@ -2212,7 +2212,7 @@
                     ・<strong>データ保存</strong>: アプリのコードやローカル保存データを自動で外部送信することはありません。データはブラウザ内に保存されますが、キャッシュクリアすると消える可能性があるため、重要なコードはGitHub等へバックアップしてください。<br>
                     ・<strong>互換実行（初期状態）</strong>: 作成アプリはAppStudio本体と同じlocalStorage・IndexedDB空間を使用します。作成アプリがlocalStorage.clear()を実行すると、本体のGitHubリポジトリ設定や開発統計が消える可能性があります。作成アプリがindexedDB.deleteDatabase("AppStudioDB")を実行すると、ライブラリや保存アプリが消える可能性があります。複数の作成アプリが同じlocalStorageキーを使用すると、セーブデータが衝突する可能性があります。また、作成アプリから親画面のDOMや関数へアクセスできる可能性があります。信頼できないコードを実行しないでください。<br>
                     ・<strong>安全実行</strong>: 実行画面の「その他」メニューから切り替えます。作成アプリからAppStudio本体へのアクセスを制限しますが、localStorageやIndexedDBが使用できない場合があり、通常実行のセーブデータが共有されない場合があります。その際SecurityErrorが発生する場合があります。未確認コードの最初の動作確認に向いていますが、完全なセキュリティ保証ではありません。<br>
-                    ・<strong>GitHubトークン</strong>: 保存せず、この画面を開いている間だけメモリ上に保持します。
+                    ・<strong>GitHubトークン</strong>: 保存せず、GitHub公開画面を開いている間だけメモリ上に保持し、公開画面を閉じると破棄します。GitHub認証情報を扱っている間は、実行中の作成アプリを一時停止します。
                 </p>
             </div>
 
@@ -2527,6 +2527,8 @@
         let currentPwaPreferenceKey = "";
         let githubPublishBusy = false;
         let githubPublishProgressPercent = 0;
+        let githubCredentialIsolationActive = false;
+        let githubCredentialIsolationPromise = null;
         const openModalStack = [];
         let githubPublishResult = {
             publicUrl: "",
@@ -3244,6 +3246,43 @@
                 ? "allow-scripts allow-forms allow-popups allow-modals"
                 : "allow-scripts allow-forms allow-popups allow-modals allow-same-origin";
             frame.setAttribute("sandbox", sandboxValue);
+        }
+
+        function suspendRuntimeForGitHubCredentials() {
+            if (githubCredentialIsolationActive) {
+                return Promise.resolve();
+            }
+            if (githubCredentialIsolationPromise) {
+                return githubCredentialIsolationPromise;
+            }
+
+            // sandbox属性だけを後変更せず、実行中ドキュメント自体を破棄する。
+            // 旧iframeから遅延送信されるpostMessageも現在実行として受理しない。
+            currentRuntimeToken = "";
+
+            githubCredentialIsolationPromise = new Promise(resolve => {
+                const finishIsolation = () => {
+                    githubCredentialIsolationActive = true;
+                    githubCredentialIsolationPromise = null;
+                    resolve();
+                };
+
+                // loadを先に登録してからsrcdocを空にし、
+                // 空ドキュメントへの遷移完了後だけGitHub認証画面を操作可能にする。
+                frame.addEventListener('load', finishIsolation, { once: true });
+                frame.srcdoc = "";
+            });
+
+            return githubCredentialIsolationPromise;
+        }
+
+        function restoreRuntimeAfterGitHubCredentials() {
+            if (!githubCredentialIsolationActive) return;
+
+            githubCredentialIsolationActive = false;
+            // 恒久的なruntimeMode / nextRunModeは変更せず、
+            // 既存の実行経路で現在コードを再実行する。
+            reloadFrame();
         }
 
         function updateRuntimeModeMenuLabel() {
@@ -6446,8 +6485,15 @@ nextBtn.onclick=nextStep;
             }
 
             if (id === 'github-publish-modal') {
+                // GitHub公開画面を閉じる全経路で認証情報を破棄する。
+                // 公開失敗だけではこの分岐へ来ないため、モーダル内での再試行は可能。
+                sessionGhToken = "";
+                const tokenInput = document.getElementById('github-token-input');
+                if (tokenInput) tokenInput.value = "";
+
                 setGitHubPublishProgress("");
                 resetGitHubPublishState();
+                restoreRuntimeAfterGitHubCredentials();
             }
         }
 
@@ -6836,6 +6882,12 @@ nextBtn.onclick=nextStep;
         }
 
         async function openGitHubPublishModal() {
+            if (githubCredentialIsolationPromise
+                || githubCredentialIsolationActive
+                || isGitHubPublishModalVisible()) {
+                return;
+            }
+
             const sourceCode = getEditorCode();
             if (!sourceCode.trim()) {
                 showToast("公開するコードがありません");
@@ -6881,6 +6933,12 @@ nextBtn.onclick=nextStep;
             githubPublishBusy = false;
             closeModal('save-modal');
             setGitHubPublishProgress("");
+
+            // GitHub認証画面を表示する前に、互換実行中の作成アプリを停止する。
+            // 空ドキュメントのload完了を待つため、実行中アプリが残った状態では
+            // GitHubトークン入力欄を操作できない。
+            await suspendRuntimeForGitHubCredentials();
+
             document.getElementById('github-publish-modal').style.display = 'flex';
             pushOpenModal('github-publish-modal');
 
@@ -6956,8 +7014,9 @@ nextBtn.onclick=nextStep;
         }
 
         function normalizeGitHubToken(value) {
+            // Personal Access Token自体の文字は変換しない。
+            // 公開時に空白・改行・既存対象の不可視文字だけを除去する。
             return String(value ?? "")
-                .normalize("NFKC")
                 .replace(/[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]+/g, "");
         }
 
@@ -6967,7 +7026,7 @@ nextBtn.onclick=nextStep;
 
         function updateGitHubSessionToken(value) {
             // 日本語IMEやユーザー辞書の変換途中に入力値を書き換えない。
-            // 空白・改行の除去はcollectGitHubPublishOptions()で公開時に行う。
+            // 空白・改行・不可視文字の除去はcollectGitHubPublishOptions()で公開時に行う。
             sessionGhToken = String(value ?? "");
         }
 
