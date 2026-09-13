@@ -3260,20 +3260,81 @@
             // 旧iframeから遅延送信されるpostMessageも現在実行として受理しない。
             currentRuntimeToken = "";
 
-            githubCredentialIsolationPromise = new Promise(resolve => {
-                const finishIsolation = () => {
-                    githubCredentialIsolationActive = true;
-                    githubCredentialIsolationPromise = null;
-                    resolve();
+            const isolationTimeoutMs = 3000;
+            let settled = false;
+            let timeoutId = null;
+            let isolationPromise = null;
+            let settleIsolation = null;
+
+            isolationPromise = new Promise((resolve, reject) => {
+                const handleBlankLoad = () => {
+                    settleIsolation(true);
                 };
 
-                // loadを先に登録してからsrcdocを空にし、
-                // 空ドキュメントへの遷移完了後だけGitHub認証画面を操作可能にする。
-                frame.addEventListener('load', finishIsolation, { once: true });
-                frame.srcdoc = "";
+                settleIsolation = (succeeded, error = null) => {
+                    // load成功とタイムアウト・例外が競合しても、完了処理は1回だけ行う。
+                    if (settled) return;
+                    settled = true;
+
+                    frame.removeEventListener('load', handleBlankLoad);
+                    if (timeoutId !== null) {
+                        clearTimeout(timeoutId);
+                        timeoutId = null;
+                    }
+
+                    if (githubCredentialIsolationPromise === isolationPromise) {
+                        githubCredentialIsolationPromise = null;
+                    }
+
+                    if (succeeded) {
+                        // 空ドキュメントへの遷移を確認できた場合だけ隔離完了とする。
+                        githubCredentialIsolationActive = true;
+                        resolve();
+                        return;
+                    }
+
+                    // 隔離完了を確認できない場合はfail-closedとし、
+                    // GitHub認証画面を開かず、認証情報を破棄して通常実行へ復旧する。
+                    githubCredentialIsolationActive = false;
+                    sessionGhToken = "";
+                    const tokenInput = document.getElementById('github-token-input');
+                    if (tokenInput) tokenInput.value = "";
+
+                    try {
+                        // runtimeMode / nextRunModeは隔離処理側では変更せず、
+                        // 既存の実行経路を使って実行環境を復旧する。
+                        reloadFrame();
+                    } catch (restoreError) {
+                        console.error("GitHub認証隔離失敗後の実行環境復旧に失敗しました:", restoreError);
+                    }
+
+                    showToast("安全な準備に失敗したため、GitHub公開画面を開きませんでした");
+                    reject(
+                        error instanceof Error
+                            ? error
+                            : new Error("GitHub公開の安全な準備に失敗しました。")
+                    );
+                };
+
+                frame.addEventListener('load', handleBlankLoad);
+                timeoutId = setTimeout(() => {
+                    settleIsolation(
+                        false,
+                        new Error("GitHub認証用のiframe隔離が時間内に完了しませんでした。")
+                    );
+                }, isolationTimeoutMs);
             });
 
-            return githubCredentialIsolationPromise;
+            githubCredentialIsolationPromise = isolationPromise;
+
+            try {
+                // loadリスナーとタイマーを準備してから空ドキュメントへ切り替える。
+                frame.srcdoc = "";
+            } catch (error) {
+                settleIsolation(false, error);
+            }
+
+            return isolationPromise;
         }
 
         function restoreRuntimeAfterGitHubCredentials() {
@@ -6935,9 +6996,14 @@ nextBtn.onclick=nextStep;
             setGitHubPublishProgress("");
 
             // GitHub認証画面を表示する前に、互換実行中の作成アプリを停止する。
-            // 空ドキュメントのload完了を待つため、実行中アプリが残った状態では
-            // GitHubトークン入力欄を操作できない。
-            await suspendRuntimeForGitHubCredentials();
+            // 空ドキュメントのload完了を確認できない場合はfail-closedとし、
+            // GitHub公開画面を表示せず、隔離処理側で通常実行へ復旧する。
+            try {
+                await suspendRuntimeForGitHubCredentials();
+            } catch (error) {
+                console.warn("GitHub公開の安全な準備に失敗したため公開画面を開きませんでした:", error);
+                return;
+            }
 
             document.getElementById('github-publish-modal').style.display = 'flex';
             pushOpenModal('github-publish-modal');
