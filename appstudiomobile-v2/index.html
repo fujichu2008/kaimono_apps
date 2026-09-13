@@ -6732,10 +6732,58 @@ nextBtn.onclick=nextStep;
                 });
             },
             getAll: async () => {
-                return idb.runTransaction('readonly', (store, setResult) => {
-                    const req = store.getAll();
-                    req.onsuccess = () => setResult(req.result.reverse());
-                });
+                const maxAttempts = 3;
+                let lastError = null;
+
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    try {
+                        return await idb.runTransaction('readonly', (store, setResult) => {
+                            const req = store.getAll();
+                            req.onsuccess = () => {
+                                const result = Array.isArray(req.result)
+                                    ? req.result
+                                    : [];
+                                setResult(result.reverse());
+                            };
+                        });
+                    } catch (error) {
+                        lastError = error;
+
+                        const errorName = String(error?.name || "");
+                        const errorMessage = String(error?.message || "");
+                        const retryableNames = new Set([
+                            "UnknownError",
+                            "AbortError",
+                            "InvalidStateError",
+                            "TransactionInactiveError",
+                            "NotReadableError"
+                        ]);
+                        const retryableMessage =
+                            /connection|database.*clos|backing store|temporar|internal error/i.test(
+                                errorMessage
+                            );
+                        const canRetry =
+                            retryableNames.has(errorName)
+                            || retryableMessage;
+
+                        console.warn(
+                            `ライブラリ読み込みに失敗しました (${attempt}/${maxAttempts}):`,
+                            error
+                        );
+
+                        if (!canRetry || attempt >= maxAttempts) {
+                            throw error;
+                        }
+
+                        // iOS/Safari等でIndexedDBプロセスや接続が一時的に不安定な場合、
+                        // 少し待ってから新しい接続で読み直す。
+                        await new Promise(resolve => {
+                            setTimeout(resolve, attempt * 180);
+                        });
+                    }
+                }
+
+                throw lastError || new Error("IndexedDBからライブラリを読み込めませんでした。");
             },
             get: async (id) => {
                 return idb.runTransaction('readonly', (store, setResult) => {
@@ -10162,8 +10210,39 @@ self.addEventListener("fetch", function (event) {
                         try {
                 library = (await idb.getAll()).filter(app => app.id !== DRAFT_ID);
             } catch(e) {
-                console.error(e);
-                libraryContainer.innerHTML = '<div role="alert" style="text-align:center; color:#ffb3b3; margin-top:50px; line-height:1.6;">ライブラリを読み込めませんでした。<br>もう一度ライブラリを開き直してください。</div>';
+                console.error("ライブラリの読み込みに失敗しました:", e);
+
+                libraryContainer.replaceChildren();
+
+                const errorBox = document.createElement('div');
+                errorBox.setAttribute('role', 'alert');
+                errorBox.style.cssText =
+                    'text-align:center; color:#ffb3b3; margin-top:50px; line-height:1.7; padding:0 20px;';
+
+                const message = document.createElement('div');
+                message.textContent = 'ライブラリを読み込めませんでした。';
+                errorBox.appendChild(message);
+
+                const subMessage = document.createElement('div');
+                subMessage.textContent = '一時的な保存領域の接続エラーの可能性があります。';
+                subMessage.style.cssText =
+                    'margin-top:6px; color:#aaa; font-size:12px;';
+                errorBox.appendChild(subMessage);
+
+                const retryButton = document.createElement('button');
+                retryButton.type = 'button';
+                retryButton.className = 'btn-action';
+                retryButton.textContent = '↻ もう一度読み込む';
+                retryButton.style.cssText =
+                    'margin-top:16px; min-height:46px; padding:10px 18px; border-radius:8px; touch-action:manipulation;';
+                retryButton.onclick = () => {
+                    retryButton.disabled = true;
+                    retryButton.textContent = '読み込み中...';
+                    renderLibrary(selectedProject);
+                };
+                errorBox.appendChild(retryButton);
+
+                libraryContainer.appendChild(errorBox);
                 return;
             }
 
