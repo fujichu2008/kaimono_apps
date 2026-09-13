@@ -7648,6 +7648,122 @@ nextBtn.onclick=nextStep;
 
                 throw lastError || new Error("IndexedDBからライブラリを読み込めませんでした。");
             },
+            getLibrarySummaries: async () => {
+                const maxAttempts = 3;
+                let lastError = null;
+
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    try {
+                        return await idb.runTransaction('readonly', (store, setResult) => {
+                            const summaries = [];
+                            // getAll().reverse()と同じ並びを維持しつつ、
+                            // 巨大なcodeを全件同時に配列へ展開しない。
+                            const req = store.openCursor(null, "prev");
+
+                            req.onsuccess = () => {
+                                const cursor = req.result;
+                                if (!cursor) {
+                                    setResult(summaries);
+                                    return;
+                                }
+
+                                const app = cursor.value;
+                                if (app && app.id !== DRAFT_ID) {
+                                    const code = typeof app.code === "string"
+                                        ? app.code
+                                        : "";
+                                    const hasVersionChanges =
+                                        Object.prototype.hasOwnProperty.call(
+                                            app,
+                                            "versionChanges"
+                                        );
+
+                                    let summaryVersionChanges;
+                                    if (hasVersionChanges) {
+                                        summaryVersionChanges = Array.isArray(app.versionChanges)
+                                            ? app.versionChanges.map(entry => {
+                                                if (typeof entry === "string") {
+                                                    return entry.slice(0, 200);
+                                                }
+
+                                                return {
+                                                    text: String(entry?.text || "").slice(0, 200),
+                                                    createdAt: String(entry?.createdAt || "")
+                                                };
+                                            })
+                                            : app.versionChanges;
+                                    }
+
+                                    const summary = {
+                                        id: app.id,
+                                        name: app.name,
+                                        projectName: app.projectName,
+                                        date: app.date,
+                                        savedAt: app.savedAt,
+                                        codeLength: Number.isFinite(app.codeLength)
+                                            ? app.codeLength
+                                            : code.length,
+                                        sourceAppId:
+                                            String(app.sourceAppId || "").trim()
+                                            || extractSourceAppId(code),
+                                        history: hasVersionChanges
+                                            ? []
+                                            : (
+                                                Array.isArray(app.history)
+                                                    ? app.history
+                                                        .slice(0, 1)
+                                                        .map(entry => String(entry || "").slice(0, 200))
+                                                    : []
+                                            )
+                                    };
+
+                                    if (hasVersionChanges) {
+                                        summary.versionChanges = summaryVersionChanges;
+                                    }
+
+                                    summaries.push(summary);
+                                }
+
+                                cursor.continue();
+                            };
+                        });
+                    } catch (error) {
+                        lastError = error;
+
+                        const errorName = String(error?.name || "");
+                        const errorMessage = String(error?.message || "");
+                        const retryableNames = new Set([
+                            "UnknownError",
+                            "AbortError",
+                            "InvalidStateError",
+                            "TransactionInactiveError",
+                            "NotReadableError"
+                        ]);
+                        const retryableMessage =
+                            /connection|database.*clos|backing store|temporar|internal error/i.test(
+                                errorMessage
+                            );
+                        const canRetry =
+                            retryableNames.has(errorName)
+                            || retryableMessage;
+
+                        console.warn(
+                            `ライブラリ一覧の読み込みに失敗しました (${attempt}/${maxAttempts}):`,
+                            error
+                        );
+
+                        if (!canRetry || attempt >= maxAttempts) {
+                            throw error;
+                        }
+
+                        await new Promise(resolve => {
+                            setTimeout(resolve, attempt * 180);
+                        });
+                    }
+                }
+
+                throw lastError || new Error("IndexedDBからライブラリ一覧を読み込めませんでした。");
+            },
             get: async (id) => {
                 return idb.runTransaction('readonly', (store, setResult) => {
                     const req = store.get(id);
@@ -10215,7 +10331,9 @@ self.addEventListener("fetch", function (event) {
             if (!app) return { html: null, pwa: null };
 
             const candidateKeys = [];
-            const sourceAppId = extractSourceAppId(app.code);
+            const sourceAppId =
+                String(app.sourceAppId || "").trim()
+                || extractSourceAppId(app.code);
 
             if (sourceAppId) candidateKeys.push(`app:${sourceAppId}`);
             if (app.id !== undefined && app.id !== null) {
@@ -11072,12 +11190,45 @@ self.addEventListener("fetch", function (event) {
                 .join("\n");
         }
 
+        let latestLibraryRenderRequestId = 0;
+        let librarySummaryLoadPromise = null;
+
+        function loadLibrarySummariesShared() {
+            if (!librarySummaryLoadPromise) {
+                librarySummaryLoadPromise = idb.getLibrarySummaries()
+                    .finally(() => {
+                        librarySummaryLoadPromise = null;
+                    });
+            }
+
+            return librarySummaryLoadPromise;
+        }
+
                         async function renderLibrary(selectedProject = null) {
-            libraryContainer.innerHTML = '';
+            const requestId = ++latestLibraryRenderRequestId;
+
+            libraryContainer.replaceChildren();
+
+            const loadingBox = document.createElement('div');
+            loadingBox.setAttribute('role', 'status');
+            loadingBox.setAttribute('aria-live', 'polite');
+            loadingBox.textContent = 'ライブラリを読み込んでいます…';
+            loadingBox.style.cssText =
+                'text-align:center; color:#aaa; margin-top:50px; line-height:1.7; padding:0 20px;';
+            libraryContainer.appendChild(loadingBox);
+
             let library = [];
                         try {
-                library = (await idb.getAll()).filter(app => app.id !== DRAFT_ID);
+                library = await loadLibrarySummariesShared();
+
+                if (requestId !== latestLibraryRenderRequestId) {
+                    return;
+                }
             } catch(e) {
+                if (requestId !== latestLibraryRenderRequestId) {
+                    return;
+                }
+
                 console.error("ライブラリの読み込みに失敗しました:", e);
 
                 libraryContainer.replaceChildren();
@@ -11113,6 +11264,12 @@ self.addEventListener("fetch", function (event) {
                 libraryContainer.appendChild(errorBox);
                 return;
             }
+
+            if (requestId !== latestLibraryRenderRequestId) {
+                return;
+            }
+
+            libraryContainer.replaceChildren();
 
             if(library.length === 0) {
                 libraryContainer.innerHTML = '<div style="text-align:center; color:#666; margin-top:50px;">保存されたアプリはありません</div>';
@@ -11172,6 +11329,9 @@ ${escapeHtml(latestChangeText)}</div>
                 appList.forEach(app => {
                     const savedAtLabel = formatLibrarySavedAt(app);
                     const versionChangeText = getVersionChangePreview(app);
+                    const codeLength = Number.isFinite(app.codeLength)
+                        ? app.codeLength
+                        : String(app.code || "").length;
                     const el = document.createElement('div');
                     el.className = 'lib-item';
                     el.style.marginLeft = '10px';
@@ -11185,7 +11345,7 @@ ${escapeHtml(latestChangeText)}</div>
                             </div>
                         </div>
                         <div class="lib-meta">
-                            内部名: ${escapeHtml(app.name)} | ${app.code.length} chars
+                            内部名: ${escapeHtml(app.name)} | ${codeLength} chars
                         </div>
                         <div class="lib-history" onclick="showHistoryModal(${app.id})">💡 今回のAI指示
 ${escapeHtml(versionChangeText)}</div>
