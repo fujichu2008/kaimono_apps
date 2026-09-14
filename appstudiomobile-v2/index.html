@@ -8377,10 +8377,17 @@ nextBtn.onclick=nextStep;
             if (submitButton) {
                 const pwaIconBusy = githubPublishState.mode === "pwa"
                     && githubPublishState.pwa.iconImageLoading;
+                const buttonStatusActive =
+                    submitButton.classList.contains('github-publish-progress-button')
+                    || submitButton.classList.contains('github-published-state');
+
                 submitButton.disabled = githubPublishBusy || pwaIconBusy;
-                submitButton.textContent = githubPublishBusy
-                    ? "公開中..."
-                    : (pwaIconBusy ? "アイコン読込中..." : "🌐 この設定で公開する");
+
+                if (!buttonStatusActive) {
+                    submitButton.textContent = pwaIconBusy
+                        ? "アイコン読込中..."
+                        : "🌐 このアプリを公開";
+                }
             }
             if (cancelButton) cancelButton.disabled = githubPublishBusy;
             renderPwaIconPreview();
@@ -8489,29 +8496,92 @@ nextBtn.onclick=nextStep;
             return folder || "app";
         }
 
+        let githubPublishButtonResetTimer = null;
+
+        function ensureGitHubPublishButtonProgressStyle() {
+            if (document.getElementById('github-publish-button-progress-style')) return;
+
+            const style = document.createElement('style');
+            style.id = 'github-publish-button-progress-style';
+            style.textContent = `
+                #github-publish-submit.github-publish-progress-button {
+                    --github-publish-progress: 0%;
+                    position: relative;
+                    overflow: hidden;
+                    background:
+                        linear-gradient(
+                            90deg,
+                            #176f53 0%,
+                            #176f53 var(--github-publish-progress),
+                            #34363b var(--github-publish-progress),
+                            #34363b 100%
+                        ) !important;
+                    border-color: #428f77 !important;
+                    color: #fff !important;
+                    opacity: 1 !important;
+                    transition:
+                        background .2s ease,
+                        border-color .2s ease,
+                        transform .15s ease;
+                }
+                #github-publish-submit.github-publish-progress-button:disabled {
+                    opacity: 1 !important;
+                    cursor: progress;
+                }
+                #github-publish-submit.github-publish-progress-button.github-publish-complete {
+                    background: #198754 !important;
+                    border-color: #27a765 !important;
+                }
+                #github-publish-submit.github-publish-progress-button.github-publish-failed {
+                    background: #7a3035 !important;
+                    border-color: #d06068 !important;
+                    cursor: default;
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    #github-publish-submit.github-publish-progress-button {
+                        transition: none;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
         function setGitHubPublishProgress(message, isError = false, percent = null, statusLabelOverride = "") {
             const progress = document.getElementById('github-publish-progress');
-            if (!progress) return;
-
-            const label = document.getElementById('github-publish-progress-label');
-            const percentText = document.getElementById('github-publish-progress-percent');
-            const track = document.getElementById('github-publish-progress-track');
-            const fill = document.getElementById('github-publish-progress-fill');
-            const messageElement = document.getElementById('github-publish-progress-message');
+            const button = document.getElementById('github-publish-submit');
             const text = String(message || "");
+
+            ensureGitHubPublishButtonProgressStyle();
+
+            // 旧来の別置き進捗欄は残して互換性を維持するが、表示はボタンへ一本化する。
+            if (progress) {
+                progress.style.display = "none";
+                progress.classList.remove('error', 'complete');
+            }
+
+            if (githubPublishButtonResetTimer) {
+                clearTimeout(githubPublishButtonResetTimer);
+                githubPublishButtonResetTimer = null;
+            }
 
             if (!text) {
                 githubPublishProgressPercent = 0;
-                progress.style.display = "none";
-                progress.classList.remove('error', 'complete');
 
-                if (label) label.textContent = "公開中";
-                if (percentText) percentText.textContent = "0%";
-                if (fill) fill.style.width = "0%";
-                if (messageElement) messageElement.textContent = "";
-                if (track) {
-                    track.setAttribute('aria-valuenow', '0');
-                    track.setAttribute('aria-valuetext', '公開待機中 0%');
+                if (button) {
+                    button.classList.remove(
+                        'github-publish-progress-button',
+                        'github-publish-failed',
+                        'github-publish-complete'
+                    );
+                    button.style.removeProperty('--github-publish-progress');
+                    button.removeAttribute('aria-valuenow');
+                    button.removeAttribute('aria-valuetext');
+                    button.removeAttribute('aria-busy');
+
+                    if (!button.classList.contains('github-published-state')) {
+                        button.textContent = "🌐 このアプリを公開";
+                        button.title = "";
+                    }
                 }
                 return;
             }
@@ -8533,25 +8603,65 @@ nextBtn.onclick=nextStep;
             const currentPercent = githubPublishProgressPercent;
             const failed = Boolean(isError);
             const completed = !failed && currentPercent >= 100;
-            const statusLabel = failed
-                ? (String(statusLabelOverride || "") || "公開に失敗しました")
-                : (completed ? "公開完了" : "公開中");
+            const failureLabel =
+                String(statusLabelOverride || "").trim()
+                || "公開に失敗しました";
 
-            if (label) label.textContent = statusLabel;
-            if (percentText) percentText.textContent = `${currentPercent}%`;
-            if (fill) fill.style.width = `${currentPercent}%`;
-            if (messageElement) messageElement.textContent = text;
-            if (track) {
-                track.setAttribute('aria-valuenow', String(currentPercent));
-                track.setAttribute(
-                    'aria-valuetext',
-                    `${statusLabel} ${currentPercent}%`
+            if (!button) return;
+
+            button.classList.remove('github-published-state');
+            button.removeAttribute('data-github-published-label');
+            button.removeAttribute('data-github-published-mode');
+            button.classList.add('github-publish-progress-button');
+            button.classList.toggle('github-publish-failed', failed);
+            button.classList.toggle('github-publish-complete', completed);
+            button.style.setProperty(
+                '--github-publish-progress',
+                `${currentPercent}%`
+            );
+            button.title = text;
+
+            if (failed) {
+                button.textContent = `⚠ ${failureLabel}`;
+                button.disabled = true;
+                button.setAttribute(
+                    'aria-label',
+                    `${failureLabel}。${text}`
                 );
+                button.removeAttribute('aria-busy');
+
+                // 失敗を認識できる時間だけ表示したあと、同じ場所を再び公開ボタンへ戻す。
+                githubPublishButtonResetTimer = setTimeout(() => {
+                    githubPublishButtonResetTimer = null;
+                    button.classList.remove(
+                        'github-publish-progress-button',
+                        'github-publish-failed',
+                        'github-publish-complete'
+                    );
+                    button.style.removeProperty('--github-publish-progress');
+                    button.removeAttribute('aria-valuenow');
+                    button.removeAttribute('aria-valuetext');
+                    button.removeAttribute('aria-busy');
+                    button.removeAttribute('aria-label');
+                    syncGitHubPublishModal();
+                }, 2200);
+                return;
             }
 
-            progress.style.display = "block";
-            progress.classList.toggle('error', failed);
-            progress.classList.toggle('complete', completed);
+            button.disabled = true;
+            button.textContent = completed
+                ? "✓ 公開完了"
+                : `公開中 ${currentPercent}%`;
+            button.setAttribute('aria-valuenow', String(currentPercent));
+            button.setAttribute(
+                'aria-valuetext',
+                `${completed ? "公開完了" : "公開中"} ${currentPercent}%`
+            );
+            button.setAttribute(
+                'aria-label',
+                `${completed ? "公開完了" : "公開中"} ${currentPercent}%。${text}`
+            );
+            button.setAttribute('aria-busy', completed ? 'false' : 'true');
         }
 
         async function publishToGitHub() {
@@ -8595,13 +8705,24 @@ nextBtn.onclick=nextStep;
 
                 githubPublishBusy = false;
                 syncGitHubPublishModal();
+
                 setGitHubPublishProgress(
                     "GitHubへの公開が正常に完了しました。",
                     false,
                     100
                 );
-                showGitHubPublishResult(result);
-                closeGitHubPublishModal();
+
+                githubPublishResult = {
+                    publicUrl: String(result?.publicUrl || ""),
+                    githubUrl: String(result?.githubUrl || ""),
+                    message: String(result?.message || "GitHubへの公開が完了しました。"),
+                    note: String(result?.note || "")
+                };
+
+                // 従来の結果モーダルへ画面遷移せず、
+                // 公開開始時のスナップショットをその場で公開済み状態として確定する。
+                await recordGitHubPublishSuccess(result);
+                setGitHubPublishedButtonState(options.mode);
                 showToast("GitHubへの公開が完了しました");
             } catch (error) {
                 pendingGitHubPublishSnapshot = null;
@@ -10631,7 +10752,24 @@ self.addEventListener("fetch", function (event) {
             const button = getGitHubPublishButton();
             if (!button) return;
 
+            if (githubPublishButtonResetTimer) {
+                clearTimeout(githubPublishButtonResetTimer);
+                githubPublishButtonResetTimer = null;
+            }
+
             ensureGitHubPublishedStateStyle();
+            button.classList.remove(
+                "github-publish-progress-button",
+                "github-publish-failed",
+                "github-publish-complete"
+            );
+            button.style.removeProperty("--github-publish-progress");
+            button.removeAttribute("aria-valuenow");
+            button.removeAttribute("aria-valuetext");
+            button.removeAttribute("aria-busy");
+            button.removeAttribute("aria-label");
+            button.disabled = false;
+
             button.classList.add("github-published-state");
             button.dataset.githubPublishedMode = mode === "pwa" ? "pwa" : "html";
             button.dataset.githubPublishedLabel = mode === "pwa"
