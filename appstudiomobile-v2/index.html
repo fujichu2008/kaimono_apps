@@ -3717,7 +3717,7 @@
             }
 
             aiRoundTripState.returnHintShown = true;
-            showToast("AIの回答をコピーしたら、強調中の「🔁 AI反映」をタップ");
+            syncBeginnerNextActionGuide({ force: true });
         }
 
         function syncRunBarState() {
@@ -4147,7 +4147,11 @@
                 runtimeVerification.status = "passed";
                 runtimeVerification.verifiedRevision = verificationRevision;
                 syncRuntimeVerificationStatus();
-                showToast("✓ 起動時エラー未検出（操作は未確認）");
+                showBeginnerNextActionToast(
+                    "動きを確認。直したいところがあれば再び「AI指示」",
+                    2800,
+                    { force: true }
+                );
             }, RUNTIME_VERIFICATION_DELAY_MS);
         }
 
@@ -6391,7 +6395,9 @@ ${targetCodeSection}`;
                 // クリップボードコピーの共通処理（成功時コールバック対応・フォールバック処理を一本化）
         function writeTextWithFallback(text, successMessage, onSuccess) {
             const onCopy = () => {
-                showToast(successMessage || "コピーしました");
+                if (successMessage !== null) {
+                    showToast(successMessage || "コピーしました");
+                }
                 if (typeof onSuccess === 'function') onSuccess();
             };
             const legacyCopy = () => {
@@ -6518,7 +6524,7 @@ ${currentCode}
                 prompt = `${splitModePrefix}以下のコードの修正をお願いします。${instructionText}\n\n${buildPatchOutputInstructions()}${targetCodeSection}`;
             }
 
-                        writeTextWithFallback(prompt, "プロンプトをコピーしました", () => {
+                        writeTextWithFallback(prompt, null, () => {
                 recordDevLog(
                     'prompt_copy',
                     'success',
@@ -6526,6 +6532,7 @@ ${currentCode}
                     `type:${type}, codeAttach:${hasCurrentCode ? codeAttachMode : 'none'}, instructionLength:${instruction.length}`
                 );
                 setAiRoundTripAwaitingReflect();
+                beginnerGuideLeftWhileAwaitingReflect = false;
                 if (instruction && addPendingAiInstruction(instruction)) {
                     editorDraftDirty = true;
                     scheduleEditorDraftSave();
@@ -6533,6 +6540,7 @@ ${currentCode}
                 syncPreviousAiInstructionButton();
                 instructionInput.value = "";
                 closeModal('prompt-modal');
+                syncBeginnerNextActionGuide({ force: true });
             });
         }
 
@@ -7462,6 +7470,7 @@ nextBtn.onclick=nextStep;
             if(tabName === 'run') {
                 if (frameDirty) reloadFrame();
                 syncRunBarState();
+                syncBeginnerNextActionGuide();
             }
             if(tabName === 'editor') {
                 setTimeout(() => editor.refresh(), 10);
@@ -12218,6 +12227,297 @@ ${escapeHtml(versionChangeText)}</div>
             }
         });
 
+        // 初心者向けUIは既存状態を短時間の案内トーストへ翻訳するだけとし、
+        // AI反映・実行・保存などの内部ロジックには介入しない。
+        let beginnerGuideLeftWhileAwaitingReflect = false;
+        let beginnerUiListenersInstalled = false;
+        let beginnerGuideToastTimer = null;
+        let beginnerGuideLastMessage = "";
+        let beginnerGuideLastShownAt = 0;
+
+        function getBeginnerRoundTripStateText() {
+            if (typeof aiRoundTripState === "undefined" || aiRoundTripState == null) {
+                return "";
+            }
+
+            if (typeof aiRoundTripState === "string") {
+                return aiRoundTripState.toLowerCase();
+            }
+
+            if (typeof aiRoundTripState === "object") {
+                return Object.entries(aiRoundTripState)
+                    .map(([key, value]) => `${key}:${String(value)}`)
+                    .join(" ")
+                    .toLowerCase();
+            }
+
+            return String(aiRoundTripState).toLowerCase();
+        }
+
+        function isBeginnerGuideAwaitingReflect() {
+            const stateText = getBeginnerRoundTripStateText();
+            return stateText.includes("awaiting_reflect")
+                || stateText.includes("awaiting-reflect")
+                || stateText.includes("awaiting reflect")
+                || (stateText.includes("await") && stateText.includes("reflect"));
+        }
+
+        function showBeginnerNextActionToast(message, duration = 2600, options = {}) {
+            const guide = document.getElementById('beginner-next-action-guide');
+            const text = document.getElementById('beginner-next-action-text');
+            if (!guide || !text) return;
+
+            const normalizedMessage = String(message || "").trim();
+            if (!normalizedMessage) return;
+
+            const now = Date.now();
+            const force = options.force === true;
+            if (!force
+                && normalizedMessage === beginnerGuideLastMessage
+                && now - beginnerGuideLastShownAt < 1400) {
+                return;
+            }
+
+            beginnerGuideLastMessage = normalizedMessage;
+            beginnerGuideLastShownAt = now;
+            text.textContent = normalizedMessage;
+
+            clearTimeout(beginnerGuideToastTimer);
+            guide.classList.remove('show');
+            void guide.offsetWidth;
+            guide.classList.add('show');
+
+            const visibleMs = Math.min(3000, Math.max(2000, Number(duration) || 2600));
+            beginnerGuideToastTimer = setTimeout(() => {
+                guide.classList.remove('show');
+                beginnerGuideToastTimer = null;
+            }, visibleMs);
+        }
+
+        function syncBeginnerNextActionGuide(options = {}) {
+            const hasCode = Boolean(getEditorCode().trim());
+            const awaitingReflect = isBeginnerGuideAwaitingReflect();
+
+            let message = "";
+
+            if (!hasCode) {
+                beginnerGuideLeftWhileAwaitingReflect = false;
+                message = "まずは「AI指示」で作りたいアプリを伝えます";
+            } else if (awaitingReflect && beginnerGuideLeftWhileAwaitingReflect) {
+                message = "AIの回答をコピーしたら「AI反映」で取り込みます";
+            } else if (awaitingReflect) {
+                message = "生成AIに貼り付け、返ってきた回答をコピーしてください";
+            } else {
+                beginnerGuideLeftWhileAwaitingReflect = false;
+
+                // 反映直後は既存の起動チェック表示を優先し、
+                // チェック完了後に次の操作を案内する。
+                if (runtimeVerification.status === "staged"
+                    || runtimeVerification.status === "pending"
+                    || runtimeVerification.status === "failed") {
+                    return;
+                }
+
+                message = "動きを確認。直したいところがあれば再び「AI指示」";
+            }
+
+            showBeginnerNextActionToast(message, 2600, options);
+        }
+
+        function ensureBeginnerPromptDetails() {
+            const promptModal = document.getElementById('prompt-modal');
+            const codeOptions = document.getElementById('prompt-code-options');
+            const splitPanel = document.getElementById('prompt-split-panel');
+
+            if (!promptModal || !codeOptions || !splitPanel) return;
+
+            const existing = document.getElementById('beginner-prompt-details');
+            if (existing) return;
+
+            const details = document.createElement('details');
+            details.id = 'beginner-prompt-details';
+            details.className = 'beginner-prompt-details';
+
+            const summary = document.createElement('summary');
+            summary.textContent = '詳細設定（コードの送り方）';
+
+            const note = document.createElement('div');
+            note.className = 'beginner-prompt-details-note';
+            note.textContent = '通常は変更しなくても使えます。大きなアプリでコードの送り方を調整するときに開きます。';
+
+            codeOptions.parentNode.insertBefore(details, codeOptions);
+            details.append(summary, note, codeOptions, splitPanel);
+            details.open = false;
+        }
+
+        function ensureBeginnerUiStyle() {
+            if (document.getElementById('beginner-ui-style')) return;
+
+            const style = document.createElement('style');
+            style.id = 'beginner-ui-style';
+            style.textContent = `
+                #beginner-next-action-guide {
+                    position: absolute;
+                    left: 50%;
+                    bottom: 14px;
+                    z-index: 32;
+                    width: max-content;
+                    max-width: calc(100% - 28px);
+                    padding: 9px 13px;
+                    border: 1px solid rgba(111, 184, 255, .48);
+                    border-radius: 999px;
+                    background: rgba(24, 33, 48, .94);
+                    color: #f2f7ff;
+                    box-shadow: 0 6px 20px rgba(0, 0, 0, .36);
+                    backdrop-filter: blur(8px);
+                    font-size: 11px;
+                    font-weight: 700;
+                    line-height: 1.4;
+                    text-align: center;
+                    overflow-wrap: anywhere;
+                    pointer-events: none;
+                    opacity: 0;
+                    transform: translate(-50%, 7px);
+                    transition: opacity .18s ease, transform .18s ease;
+                }
+                #beginner-next-action-guide.show {
+                    opacity: 1;
+                    transform: translate(-50%, 0);
+                }
+                #beginner-next-action-text {
+                    display: block;
+                }
+                #prompt-modal .beginner-prompt-details {
+                    margin: 10px 0;
+                    border: 1px solid var(--border-color);
+                    border-radius: 9px;
+                    background: rgba(255, 255, 255, .025);
+                    overflow: hidden;
+                }
+                #prompt-modal .beginner-prompt-details > summary {
+                    min-height: 44px;
+                    padding: 0 12px;
+                    display: flex;
+                    align-items: center;
+                    color: #bbb;
+                    font-size: 12px;
+                    font-weight: 700;
+                    cursor: pointer;
+                    touch-action: manipulation;
+                    list-style-position: inside;
+                }
+                #prompt-modal .beginner-prompt-details[open] > summary {
+                    border-bottom: 1px solid var(--border-color);
+                }
+                #prompt-modal .beginner-prompt-details-note {
+                    padding: 9px 12px 0;
+                    color: #888;
+                    font-size: 10px;
+                    line-height: 1.45;
+                }
+                #prompt-modal .beginner-prompt-details #prompt-code-options,
+                #prompt-modal .beginner-prompt-details #prompt-split-panel {
+                    margin-left: 10px;
+                    margin-right: 10px;
+                }
+                #prompt-modal .beginner-prompt-details #prompt-split-panel {
+                    margin-bottom: 10px;
+                }
+                @media (max-width: 359px) {
+                    #beginner-next-action-guide {
+                        bottom: 10px;
+                        max-width: calc(100% - 18px);
+                        padding: 8px 10px;
+                        font-size: 10.5px;
+                    }
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    #beginner-next-action-guide {
+                        transition: none;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        function ensureBeginnerNextActionGuide() {
+            if (document.getElementById('beginner-next-action-guide')) return;
+
+            const runFrameWrap = document.querySelector('#view-run .run-frame-wrap');
+            const runControls =
+                document.querySelector('#view-run .run-controls')
+                || document.querySelector('.run-controls');
+            if (!runFrameWrap || !runControls) return;
+
+            const guide = document.createElement('div');
+            guide.id = 'beginner-next-action-guide';
+            guide.setAttribute('role', 'status');
+            guide.setAttribute('aria-live', 'polite');
+            guide.setAttribute('aria-atomic', 'true');
+
+            const text = document.createElement('span');
+            text.id = 'beginner-next-action-text';
+
+            guide.appendChild(text);
+            runFrameWrap.appendChild(guide);
+
+            const reflectButton = Array.from(runControls.querySelectorAll('button'))
+                .find(button => String(button.textContent || "").includes("AI反映"));
+            if (reflectButton) {
+                reflectButton.title = '生成AIからコピーした回答をAppStudioへ取り込みます';
+                reflectButton.setAttribute(
+                    'aria-label',
+                    'AI反映。生成AIからコピーした回答をAppStudioへ取り込みます'
+                );
+            }
+        }
+
+        function installBeginnerUiListeners() {
+            if (beginnerUiListenersInstalled) return;
+            beginnerUiListenersInstalled = true;
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && isBeginnerGuideAwaitingReflect()) {
+                    beginnerGuideLeftWhileAwaitingReflect = true;
+                }
+            });
+
+            document.addEventListener('click', event => {
+                const button = event.target.closest('button');
+                if (!button) return;
+
+                const buttonText = String(button.textContent || "").replace(/\s+/g, " ").trim();
+
+                if (buttonText.includes("AI指示")) {
+                    const details = document.getElementById('beginner-prompt-details');
+                    if (details) details.open = false;
+                }
+
+                if (button.id === 'ai-prompt-primary-action') {
+                    beginnerGuideLeftWhileAwaitingReflect = false;
+                }
+
+                if (
+                    buttonText.includes("AI反映")
+                    || buttonText.includes("新規作成")
+                    || buttonText.includes("新しいアプリ")
+                    || buttonText.includes("反映前に戻す")
+                    || buttonText.includes("やり直す")
+                ) {
+                    setTimeout(syncBeginnerNextActionGuide, 80);
+                    setTimeout(syncBeginnerNextActionGuide, 900);
+                }
+            });
+        }
+
+        function ensureBeginnerUi() {
+            ensureBeginnerUiStyle();
+            ensureBeginnerNextActionGuide();
+            ensureBeginnerPromptDetails();
+            installBeginnerUiListeners();
+            syncBeginnerNextActionGuide();
+        }
+
         // SPEC: 「例から始める」は空コード時のオープニングへ集約し、
         // 「その他」は既存の補助操作を2列のコンパクトパネルとして表示する。
         function getRunMenuTriggerButton() {
@@ -12424,7 +12724,7 @@ ${escapeHtml(versionChangeText)}</div>
             };
 
             appendSection('編集・操作', editButtons);
-            appendSection('診断・確認', diagnosticButtons);
+            appendSection('困ったとき・上級者向け', diagnosticButtons);
 
             // ボタン自体を作り直さず移動することで、
             // 既存ID・onclick・disabled状態・状態同期処理をそのまま維持する。
@@ -12459,6 +12759,7 @@ ${escapeHtml(versionChangeText)}</div>
         }
 
                 // Initialize
+        ensureBeginnerUi();
         ensureCompactRunMenu();
         runInternalSelfChecks();
         updateStats();
