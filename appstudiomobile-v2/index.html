@@ -11212,6 +11212,65 @@ self.addEventListener("fetch", function (event) {
                     "#aabbcc",
                     () => normalizePwaColor("#abc", "#000000")
                 );
+
+                runCheck(
+                    "30万文字ちょうどでは分割送信を推奨しない",
+                    false,
+                    () => isSplitRecommendationCodeLength(300000)
+                );
+
+                runCheck(
+                    "30万1文字では分割送信を推奨する",
+                    true,
+                    () => isSplitRecommendationCodeLength(300001)
+                );
+
+                runCheck(
+                    "コード分割サイズ候補を維持",
+                    [100000, 300000, 500000],
+                    () => Array.from(PROMPT_CODE_CHUNK_SIZES)
+                );
+
+                runCheck(
+                    "AI指示のコード送信モード識別子に重複がない",
+                    true,
+                    () => {
+                        const codeOptions =
+                            document.getElementById('prompt-code-options');
+                        if (!codeOptions) return false;
+
+                        const modes = Array.from(
+                            codeOptions.querySelectorAll(
+                                'input[data-prompt-code-send-mode]'
+                            )
+                        )
+                            .map(input =>
+                                String(
+                                    input.dataset.promptCodeSendMode || ""
+                                )
+                            )
+                            .filter(Boolean);
+
+                        return modes.length > 0
+                            && modes.length === new Set(modes).size;
+                    }
+                );
+
+                runCheck(
+                    "AI指示の分割入力をsplitとして識別",
+                    "split",
+                    () => {
+                        const splitInput =
+                            document.getElementById('prompt-code-split')
+                            || document.querySelector(
+                                '#prompt-code-options input[data-prompt-code-send-mode="split"]'
+                            );
+
+                        return splitInput
+                            ? getPromptCodeSendModeFromInput(splitInput)
+                            : "";
+                    }
+                );
             } catch (error) {
                 console.error(
                     "[AppStudio SelfCheck] セルフチェック処理自体で予期しないエラー:",
@@ -12365,6 +12424,14 @@ ${escapeHtml(versionChangeText)}</div>
 
         // 初心者向けUIは既存状態を短時間の案内トーストへ翻訳するだけとし、
         // AI反映・実行・保存などの内部ロジックには介入しない。
+        const SPLIT_RECOMMENDATION_CODE_LENGTH = 300000;
+
+        function isSplitRecommendationCodeLength(codeLength) {
+            const length = Number(codeLength);
+            return Number.isFinite(length)
+                && length > SPLIT_RECOMMENDATION_CODE_LENGTH;
+        }
+
         let beginnerGuideLeftWhileAwaitingReflect = false;
         let beginnerUiListenersInstalled = false;
         let beginnerGuideToastTimer = null;
@@ -12489,6 +12556,80 @@ ${escapeHtml(versionChangeText)}</div>
             });
         }
 
+        const PROMPT_CODE_SEND_MODE_BY_ID = Object.freeze({
+            "prompt-code-attach": "full",
+            "prompt-code-split": "split",
+            "prompt-code-none": "none"
+        });
+
+        function getPromptCodeSendModeFromInput(input) {
+            if (!(input instanceof HTMLInputElement)) return "";
+
+            // 最新版では明示data属性を最優先する。
+            const explicitMode = String(
+                input.dataset.promptCodeSendMode || ""
+            ).toLowerCase();
+
+            if (["full", "split", "none"].includes(explicitMode)) {
+                return explicitMode;
+            }
+
+            // AI指示画面の既存固定IDを正本として扱う。
+            // DOM順や表示文言を変更しても送信方式の意味は変わらない。
+            const fixedIdMode = PROMPT_CODE_SEND_MODE_BY_ID[input.id];
+            if (fixedIdMode) {
+                return fixedIdMode;
+            }
+
+            // 旧HTMLとの後方互換として、機械的な属性から判定する。
+            const machineIdentity = [
+                input.name,
+                input.value,
+                input.getAttribute('data-mode'),
+                input.getAttribute('data-action'),
+                input.getAttribute('onclick'),
+                input.getAttribute('onchange')
+            ]
+                .filter(Boolean)
+                .join(" ")
+                .toLowerCase();
+
+            if (/(?:no[-_ ]?code|without[-_ ]?code|omit[-_ ]?code|none)/.test(machineIdentity)) {
+                return "none";
+            }
+            if (/(?:split|chunk)/.test(machineIdentity)) {
+                return "split";
+            }
+            if (/(?:attach|include|full)/.test(machineIdentity)) {
+                return "full";
+            }
+
+            // さらに古いHTMLとの最終後方互換専用。
+            // 一度判定できたらensurePromptCodeSendIdentifiers()がdata属性を設定するため、
+            // 以後の通常処理は表示文言へ依存しない。
+            const label = input.closest('label')
+                || (
+                    input.id
+                        ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`)
+                        : null
+                );
+            const legacyText = String(label?.textContent || "");
+
+            if (legacyText.includes("分割")) {
+                return "split";
+            }
+            if (legacyText.includes("添付しない")) {
+                return "none";
+            }
+            if (legacyText.includes("コード全体")
+                || legacyText.includes("コード全文")
+                || legacyText.includes("全文を添付")) {
+                return "full";
+            }
+
+            return "";
+        }
+
         function ensurePromptCodeSendIdentifiers() {
             const codeOptions = document.getElementById('prompt-code-options');
             if (!codeOptions) return null;
@@ -12496,24 +12637,29 @@ ${escapeHtml(versionChangeText)}</div>
             const inputs = Array.from(
                 codeOptions.querySelectorAll('input[type="checkbox"], input[type="radio"]')
             );
-            const modes = ["full", "split", "none"];
-            const labels = Array.from(codeOptions.querySelectorAll('label'));
+            const assignedModes = new Set();
 
-            modes.forEach((mode, index) => {
-                const input = inputs[index];
-                if (!input) return;
+            inputs.forEach(input => {
+                const mode = getPromptCodeSendModeFromInput(input);
+                if (!mode || assignedModes.has(mode)) return;
 
+                assignedModes.add(mode);
                 input.dataset.promptCodeSendMode = mode;
 
+                if (!input.id) {
+                    input.id = `prompt-code-send-${mode}`;
+                }
+
                 const label = input.closest('label')
-                    || (
-                        input.id
-                            ? labels.find(candidate => candidate.htmlFor === input.id)
-                            : null
+                    || document.querySelector(
+                        `label[for="${CSS.escape(input.id)}"]`
                     );
 
                 if (label) {
                     label.dataset.promptCodeSendChoice = mode;
+                    if (!label.htmlFor && input.id) {
+                        label.htmlFor = input.id;
+                    }
                 }
             });
 
@@ -12589,7 +12735,8 @@ ${escapeHtml(versionChangeText)}</div>
 
             const note = details.querySelector('.beginner-prompt-details-note');
             const codeLength = getEditorCode().length;
-            const shouldRecommendSplit = codeLength > 300000;
+            const shouldRecommendSplit =
+                isSplitRecommendationCodeLength(codeLength);
 
             if (note) {
                 note.textContent = shouldRecommendSplit
@@ -13308,7 +13455,8 @@ ${escapeHtml(versionChangeText)}</div>
             });
 
             const codeLength = getEditorCode().length;
-            const recommendSplit = codeLength > 300000;
+            const recommendSplit =
+                isSplitRecommendationCodeLength(codeLength);
 
             if (note) {
                 note.textContent = recommendSplit
