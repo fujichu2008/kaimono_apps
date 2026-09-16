@@ -2222,11 +2222,32 @@
             </div>
             <textarea id="consult-text" placeholder="具体的な相談内容や、特に見てほしい点を入力" style="height:140px;"></textarea>
 
-            <div style="margin: 0 0 12px 0; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(255,255,255,0.04);">
-                <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer;">
-                    <input type="checkbox" id="consult-code-none" style="width:auto; margin:0;"> コードを添付しない
+            <div id="consult-code-options" style="margin: 0 0 12px 0; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(255,255,255,0.04);">
+                <p class="section-desc" style="margin:0 0 8px 0;"><strong>コードの送り方</strong></p>
+                <label style="display:flex; align-items:center; gap:8px; min-height:36px; font-size:12px; cursor:pointer;">
+                    <input type="radio" name="consult-code-mode" value="attach" onchange="setConsultCodeAttachMode('attach')" style="width:auto; margin:0; padding:0;" checked> コード全体を添付
                 </label>
-                <p class="section-desc" style="margin:6px 0 0 0;">すでにAIにコードを先に覚えさせている場合だけ使います。</p>
+                <label style="display:flex; align-items:center; gap:8px; min-height:36px; font-size:12px; cursor:pointer;">
+                    <input type="radio" name="consult-code-mode" value="split" onchange="setConsultCodeAttachMode('split')" style="width:auto; margin:0; padding:0;"> AIにコードを分割して先に覚えさせる
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; min-height:36px; font-size:12px; cursor:pointer;">
+                    <input type="radio" name="consult-code-mode" value="none" onchange="setConsultCodeAttachMode('none')" style="width:auto; margin:0; padding:0;"> コードを添付しない
+                </label>
+
+                <div id="consult-split-panel" style="display:none; margin-top:8px; padding:8px; border-radius:6px; background:rgba(0,0,0,0.18);">
+                    <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+                        <div id="consult-split-info" class="section-desc" style="margin:0; flex:1; min-width:0;">選択した文字数ごとに分割します。</div>
+                        <select id="consult-chunk-size-select" onchange="setPromptCodeChunkSize(this.value)" style="flex:0 0 auto; min-height:36px; padding:4px 6px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-color); color:var(--text-color); font-size:11px;">
+                            <option value="100000">10万字</option>
+                            <option value="300000">30万字</option>
+                            <option value="500000">50万字</option>
+                            <option value="1000000">100万字</option>
+                        </select>
+                    </div>
+                    <div id="consult-split-buttons" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
+                </div>
+
+                <p class="section-desc" style="margin:7px 0 0 0;">分割を選んだ場合は、番号順にAIへ送ってから相談用プロンプトを送ります。「添付しない」はAIが現在コードをすでに認識している場合に使います。</p>
             </div>
            
             <div class="modal-buttons">
@@ -5271,6 +5292,34 @@
         });
 
         let consultMode = 'advice';
+        let consultCodeAttachMode = 'attach';
+
+        function getConsultCodeAttachMode() {
+            return ['attach', 'split', 'none'].includes(consultCodeAttachMode)
+                ? consultCodeAttachMode
+                : 'attach';
+        }
+
+        function setConsultCodeAttachMode(mode) {
+            consultCodeAttachMode = ['split', 'none'].includes(mode)
+                ? mode
+                : 'attach';
+
+            document.querySelectorAll('input[name="consult-code-mode"]').forEach(input => {
+                input.checked = input.value === consultCodeAttachMode;
+            });
+
+            const splitPanel = document.getElementById('consult-split-panel');
+            if (splitPanel) {
+                splitPanel.style.display = consultCodeAttachMode === 'split'
+                    ? 'block'
+                    : 'none';
+            }
+
+            if (consultCodeAttachMode === 'split') {
+                updateConsultSplitButtons();
+            }
+        }
 
         function switchConsultMode(mode) {
             consultMode = mode === 'visual' ? 'visual' : 'advice';
@@ -5316,6 +5365,7 @@
             }
 
             switchConsultMode('advice');
+            setConsultCodeAttachMode(getConsultCodeAttachMode());
             cancelConsultViewportUpdate();
             resetConsultViewportStyles();
             overlay.style.display = 'flex';
@@ -5330,12 +5380,16 @@
             ).map(cb => cb.value);
             const categories = selectedCategories.join(', ');
             const details = document.getElementById('consult-text').value;
-            const omitCode = document.getElementById('consult-code-none')?.checked === true;
-            const currentCode = omitCode ? "" : getEditorCode();
-            const rememberedCodePrefix = buildPromptCodeReferenceRules() + "\n\n";
-            const targetCodeSection = omitCode
-                ? `[対象コード]\n今回はコードを添付しません。上記のコード参照ルールに従ってください。必要なコードを参照できない場合は、必要箇所を指定して再提示を依頼してください。`
-                : `[対象コード]\n今回の正本は次のコードです。\n\`\`\`html\n${currentCode}\n\`\`\``;
+            const codeAttachMode = getConsultCodeAttachMode();
+            const currentCode = getEditorCode();
+            const rememberedCodePrefix = codeAttachMode === 'split'
+                ? buildSplitModePrefix('split')
+                : buildPromptCodeReferenceRules() + "\n\n";
+            const targetCodeSection = codeAttachMode === 'attach'
+                ? `[対象コード]\n今回の正本は次のコードです。\n\`\`\`html\n${currentCode}\n\`\`\``
+                : codeAttachMode === 'split'
+                    ? `[対象コード]\n今回はコード全文を添付しません。冒頭のコード参照ルールに従ってください。必要なコードを参照できない場合は、必要箇所を指定して再提示を依頼してください。`
+                    : `[対象コード]\n今回はコードを添付しません。上記のコード参照ルールに従ってください。必要なコードを参照できない場合は、必要箇所を指定して再提示を依頼してください。`;
 
             let outputMode = 'advice';
             let prompt = "";
@@ -5480,7 +5534,7 @@ ${targetCodeSection}`;
                     'consult_copy',
                     'success',
                     '',
-                    `categories:${logCategories}, omitCode:${omitCode}, outputMode:${outputMode}`
+                    `categories:${logCategories}, codeAttach:${codeAttachMode}, outputMode:${outputMode}`
                 );
                 closeModal('consult-modal');
             });
@@ -6389,6 +6443,7 @@ ${failedJson}`;
             promptCopiedChunkIndexes.clear();
             promptSplitCodeSignature = "";
             updatePromptSplitButtons();
+            updateConsultSplitButtons();
         }
 
         function togglePromptChunkSizeMenu(event) {
@@ -6448,21 +6503,12 @@ ${failedJson}`;
             return chunks.length ? chunks : [""];
         }
 
-                function updatePromptSplitButtons() {
-            const panel = document.getElementById('prompt-split-panel');
-            const info = document.getElementById('prompt-split-info');
-            const wrap = document.getElementById('prompt-split-buttons');
+                function renderCodeSplitButtons(panel, info, wrap, sizeControl) {
             if (!panel || !info || !wrap) return;
-
-            if (getPromptCodeAttachMode() !== 'split') {
-                panel.style.display = 'none';
-                return;
-            }
 
             panel.style.display = 'block';
             const currentCode = getEditorCode();
             const chunkSize = getPromptCodeChunkSize();
-
 
             syncPromptSplitCodeState();
 
@@ -6471,9 +6517,12 @@ ${failedJson}`;
             const chunkSizeLabel = `${Math.round(chunkSize / 10000)}万字`;
             info.textContent = `コード ${codeLength.toLocaleString()}文字を ${chunks.length} 分割。1から順番にコピーしてAIへ送ってください。`;
 
-            const chunkSizeButton = document.getElementById('prompt-chunk-size-btn');
-            if (chunkSizeButton) {
-                chunkSizeButton.textContent = `${chunkSizeLabel} ▾`;
+            if (sizeControl) {
+                if (sizeControl.tagName === 'SELECT') {
+                    sizeControl.value = String(chunkSize);
+                } else {
+                    sizeControl.textContent = `${chunkSizeLabel} ▾`;
+                }
             }
 
             wrap.innerHTML = "";
@@ -6492,6 +6541,44 @@ ${failedJson}`;
                 btn.onclick = () => copyPromptCodeChunk(index);
                 wrap.appendChild(btn);
             });
+        }
+
+        function updatePromptSplitButtons() {
+            const panel = document.getElementById('prompt-split-panel');
+            const info = document.getElementById('prompt-split-info');
+            const wrap = document.getElementById('prompt-split-buttons');
+            if (!panel || !info || !wrap) return;
+
+            if (getPromptCodeAttachMode() !== 'split') {
+                panel.style.display = 'none';
+                return;
+            }
+
+            renderCodeSplitButtons(
+                panel,
+                info,
+                wrap,
+                document.getElementById('prompt-chunk-size-btn')
+            );
+        }
+
+        function updateConsultSplitButtons() {
+            const panel = document.getElementById('consult-split-panel');
+            const info = document.getElementById('consult-split-info');
+            const wrap = document.getElementById('consult-split-buttons');
+            if (!panel || !info || !wrap) return;
+
+            if (getConsultCodeAttachMode() !== 'split') {
+                panel.style.display = 'none';
+                return;
+            }
+
+            renderCodeSplitButtons(
+                panel,
+                info,
+                wrap,
+                document.getElementById('consult-chunk-size-select')
+            );
         }
 
                 // クリップボードコピーの共通処理（成功時コールバック対応・フォールバック処理を一本化）
@@ -6534,6 +6621,7 @@ ${failedJson}`;
 
             if (!Number.isInteger(index) || index < 0 || index >= total) {
                 updatePromptSplitButtons();
+                updateConsultSplitButtons();
                 showToast("コード変更を検出したため分割一覧を更新しました");
                 return;
             }
@@ -6573,16 +6661,18 @@ ${chunk}
                         writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`, () => {
                 if (getPromptSplitCodeSignature() !== splitSignatureAtCopy) {
                     updatePromptSplitButtons();
+                    updateConsultSplitButtons();
                     return;
                 }
 
                 promptCopiedChunkIndexes.add(index);
-                const selectedBtn = document.querySelector(`#prompt-split-buttons button[data-chunk-index="${index}"]`);
-                if (selectedBtn) {
+                document.querySelectorAll(
+                    `#prompt-split-buttons button[data-chunk-index="${index}"], #consult-split-buttons button[data-chunk-index="${index}"]`
+                ).forEach(selectedBtn => {
                     selectedBtn.style.background = 'var(--success-color)';
                     selectedBtn.style.borderColor = 'var(--success-color)';
                     selectedBtn.style.color = '#fff';
-                }
+                });
             });
         }
 
