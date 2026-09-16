@@ -11088,11 +11088,12 @@ self.addEventListener("fetch", function (event) {
         }
 
         function runInternalSelfChecks() {
-            console.assert(
-                Object.values(STARTER_TEMPLATES).length === 4
-                    && Object.values(STARTER_TEMPLATES).every(template => looksLikeFullHtmlCode(template.code)),
-                "STARTER_TEMPLATES の4件すべてがフルHTMLであること"
-            );
+            const selfCheckSummary = {
+                total: 0,
+                passed: 0,
+                failed: 0
+            };
+
             const formatValue = value => {
                 try {
                     const json = JSON.stringify(value);
@@ -11103,11 +11104,13 @@ self.addEventListener("fetch", function (event) {
             };
 
             const runCheck = (name, expected, getActual) => {
+                selfCheckSummary.total++;
                 let actual;
 
                 try {
                     actual = getActual();
                 } catch (error) {
+                    selfCheckSummary.failed++;
                     console.warn(
                         `[AppStudio SelfCheck] ${name} | expected=${formatValue(expected)} | actual=例外: ${String(error?.message || error)}`
                     );
@@ -11117,14 +11120,25 @@ self.addEventListener("fetch", function (event) {
                 const expectedSerialized = formatValue(expected);
                 const actualSerialized = formatValue(actual);
                 if (expectedSerialized === actualSerialized) {
+                    selfCheckSummary.passed++;
                     return true;
                 }
 
+                selfCheckSummary.failed++;
                 console.warn(
                     `[AppStudio SelfCheck] ${name} | expected=${expectedSerialized} | actual=${actualSerialized}`
                 );
                 return false;
             };
+
+            runCheck(
+                "STARTER_TEMPLATES の4件すべてがフルHTML",
+                true,
+                () => Object.values(STARTER_TEMPLATES).length === 4
+                    && Object.values(STARTER_TEMPLATES).every(
+                        template => looksLikeFullHtmlCode(template.code)
+                    )
+            );
 
             runCheck(
                 "GitHub公開UIの5状態を一意な状態として維持",
@@ -11554,16 +11568,42 @@ self.addEventListener("fetch", function (event) {
                 );
 
                 runCheck(
+                    "AI指示のコード送信入力をすべて機械識別",
+                    true,
+                    () => {
+                        const codeOptions =
+                            ensurePromptCodeSendIdentifiers();
+                        if (!codeOptions) return false;
+
+                        const inputs = Array.from(
+                            codeOptions.querySelectorAll(
+                                'input[type="checkbox"], input[type="radio"]'
+                            )
+                        );
+
+                        return inputs.length > 0
+                            && inputs.every(input =>
+                                ["full", "split", "none"].includes(
+                                    String(
+                                        input.dataset.promptCodeSendMode
+                                            || ""
+                                    )
+                                )
+                            );
+                    }
+                );
+
+                runCheck(
                     "AI指示のコード送信モード識別子に重複がない",
                     true,
                     () => {
                         const codeOptions =
-                            document.getElementById('prompt-code-options');
+                            ensurePromptCodeSendIdentifiers();
                         if (!codeOptions) return false;
 
                         const modes = Array.from(
                             codeOptions.querySelectorAll(
-                                'input[data-prompt-code-send-mode]'
+                                'input[type="checkbox"], input[type="radio"]'
                             )
                         )
                             .map(input =>
@@ -11575,6 +11615,37 @@ self.addEventListener("fetch", function (event) {
 
                         return modes.length > 0
                             && modes.length === new Set(modes).size;
+                    }
+                );
+
+                runCheck(
+                    "AI指示の現在版必須コード送信モードに欠落がない",
+                    PROMPT_CODE_SEND_CURRENT_INPUT_IDS
+                        .map(id => PROMPT_CODE_SEND_MODE_BY_ID[id])
+                        .sort(),
+                    () => {
+                        const codeOptions =
+                            ensurePromptCodeSendIdentifiers();
+                        if (!codeOptions) return [];
+
+                        return PROMPT_CODE_SEND_CURRENT_INPUT_IDS
+                            .map(id => {
+                                const input =
+                                    document.getElementById(id);
+
+                                if (
+                                    !input
+                                    || !codeOptions.contains(input)
+                                ) {
+                                    return "";
+                                }
+
+                                return String(
+                                    input.dataset.promptCodeSendMode
+                                        || ""
+                                );
+                            })
+                            .sort();
                     }
                 );
 
@@ -11658,11 +11729,21 @@ self.addEventListener("fetch", function (event) {
                         && typeof scheduleGitHubPublishedStateSync === "function"
                 );
             } catch (error) {
+                selfCheckSummary.total++;
+                selfCheckSummary.failed++;
                 console.error(
                     "[AppStudio SelfCheck] セルフチェック処理自体で予期しないエラー:",
                     error
                 );
             }
+
+            if (selfCheckSummary.failed > 0) {
+                console.warn(
+                    `[AppStudio SelfCheck] total=${selfCheckSummary.total}, passed=${selfCheckSummary.passed}, failed=${selfCheckSummary.failed}`
+                );
+            }
+
+            return selfCheckSummary;
         }
 
         function showGitHubPublishResult(result) {
@@ -13080,6 +13161,14 @@ ${escapeHtml(versionChangeText)}</div>
             "prompt-code-none": "none"
         });
 
+        // 現在版HTMLで実際に定義しているAI指示のコード送信入力。
+        // prompt-code-noneは旧HTMLとの互換識別用としてMODE_BY_IDには残すが、
+        // 現在版の必須入力としては扱わない。
+        const PROMPT_CODE_SEND_CURRENT_INPUT_IDS = Object.freeze([
+            "prompt-code-attach",
+            "prompt-code-split"
+        ]);
+
         function getPromptCodeSendModeFromInput(input) {
             if (!(input instanceof HTMLInputElement)) return "";
 
@@ -13155,13 +13244,13 @@ ${escapeHtml(versionChangeText)}</div>
             const inputs = Array.from(
                 codeOptions.querySelectorAll('input[type="checkbox"], input[type="radio"]')
             );
-            const assignedModes = new Set();
 
             inputs.forEach(input => {
                 const mode = getPromptCodeSendModeFromInput(input);
-                if (!mode || assignedModes.has(mode)) return;
+                if (!mode) return;
 
-                assignedModes.add(mode);
+                // 同じmodeが複数存在しても識別子を隠さず全入力へ設定する。
+                // 重複自体の検出はrunInternalSelfChecks()へ任せる。
                 input.dataset.promptCodeSendMode = mode;
 
                 if (!input.id) {
