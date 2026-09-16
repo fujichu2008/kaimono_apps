@@ -6270,7 +6270,7 @@ ${targetCodeSection}`;
                 return normalizePromptCodeChunkSize(localStorage.getItem(PROMPT_CODE_CHUNK_SIZE_KEY));
             } catch (error) {
                 console.warn("コード分割文字数の読み込みに失敗しました:", error);
-                return PROMPT_CODE_CHUNK_UNIT;
+                return PROMPT_CODE_CHUNK_SIZES[0];
             }
         }
 
@@ -7520,6 +7520,11 @@ nextBtn.onclick=nextStep;
             if (id === 'consult-modal') {
                 cancelConsultViewportUpdate();
                 resetConsultViewportStyles();
+            }
+
+            if (id === 'prompt-modal'
+                && typeof resetBeginnerPromptSplitRecommendationSession === "function") {
+                resetBeginnerPromptSplitRecommendationSession();
             }
 
             if (id === 'github-publish-modal') {
@@ -12366,6 +12371,7 @@ ${escapeHtml(versionChangeText)}</div>
         let beginnerGuideLastMessage = "";
         let beginnerGuideLastShownAt = 0;
         let beginnerPromptSplitHighlightTimer = null;
+        let beginnerPromptSplitRecommendationShown = false;
 
         function getBeginnerRoundTripStateText() {
             if (typeof aiRoundTripState === "undefined" || aiRoundTripState == null) {
@@ -12483,34 +12489,86 @@ ${escapeHtml(versionChangeText)}</div>
             });
         }
 
-        function setBeginnerPromptSplitRecommendationHighlight(active) {
-            const details = document.getElementById('beginner-prompt-details');
-            if (!details) return;
-
-            const note = details.querySelector('.beginner-prompt-details-note');
+        function ensurePromptCodeSendIdentifiers() {
             const codeOptions = document.getElementById('prompt-code-options');
-            const splitChoice = codeOptions
-                ? Array.from(codeOptions.querySelectorAll('label')).find(label =>
-                    String(label.textContent || "").includes(
-                        "AIにコードを分割して先に覚えさせる"
-                    )
-                )
-                : null;
+            if (!codeOptions) return null;
 
-            const targets = [note, splitChoice].filter(Boolean);
+            const inputs = Array.from(
+                codeOptions.querySelectorAll('input[type="checkbox"], input[type="radio"]')
+            );
+            const modes = ["full", "split", "none"];
+            const labels = Array.from(codeOptions.querySelectorAll('label'));
+
+            modes.forEach((mode, index) => {
+                const input = inputs[index];
+                if (!input) return;
+
+                input.dataset.promptCodeSendMode = mode;
+
+                const label = input.closest('label')
+                    || (
+                        input.id
+                            ? labels.find(candidate => candidate.htmlFor === input.id)
+                            : null
+                    );
+
+                if (label) {
+                    label.dataset.promptCodeSendChoice = mode;
+                }
+            });
+
+            return codeOptions;
+        }
+
+        function resetBeginnerPromptSplitRecommendationSession() {
+            beginnerPromptSplitRecommendationShown = false;
 
             if (beginnerPromptSplitHighlightTimer) {
                 clearTimeout(beginnerPromptSplitHighlightTimer);
                 beginnerPromptSplitHighlightTimer = null;
             }
 
-            targets.forEach(target => {
+            document.querySelectorAll(
+                '#prompt-modal .beginner-prompt-recommend-highlight'
+            ).forEach(target => {
                 target.classList.remove('beginner-prompt-recommend-highlight');
             });
+        }
 
-            if (!active || !targets.length) return;
+        function setBeginnerPromptSplitRecommendationHighlight(active) {
+            const details = document.getElementById('beginner-prompt-details');
+            if (!details) return;
+
+            ensurePromptCodeSendIdentifiers();
+
+            const note = details.querySelector('.beginner-prompt-details-note');
+            const splitChoice = details.querySelector(
+                '[data-prompt-code-send-choice="split"]'
+            );
+            const targets = [note, splitChoice].filter(Boolean);
+
+            if (!active) {
+                beginnerPromptSplitRecommendationShown = false;
+
+                if (beginnerPromptSplitHighlightTimer) {
+                    clearTimeout(beginnerPromptSplitHighlightTimer);
+                    beginnerPromptSplitHighlightTimer = null;
+                }
+
+                targets.forEach(target => {
+                    target.classList.remove('beginner-prompt-recommend-highlight');
+                });
+                return;
+            }
+
+            if (!targets.length || beginnerPromptSplitRecommendationShown) {
+                return;
+            }
+
+            beginnerPromptSplitRecommendationShown = true;
 
             targets.forEach(target => {
+                target.classList.remove('beginner-prompt-recommend-highlight');
                 void target.offsetWidth;
                 target.classList.add('beginner-prompt-recommend-highlight');
             });
@@ -12526,6 +12584,8 @@ ${escapeHtml(versionChangeText)}</div>
         function syncBeginnerPromptDetailsState() {
             const details = document.getElementById('beginner-prompt-details');
             if (!details) return;
+
+            ensurePromptCodeSendIdentifiers();
 
             const note = details.querySelector('.beginner-prompt-details-note');
             const codeLength = getEditorCode().length;
@@ -12574,6 +12634,7 @@ ${escapeHtml(versionChangeText)}</div>
 
             codeOptions.parentNode.insertBefore(details, codeOptions);
             details.append(title, note, codeOptions, splitPanel);
+            ensurePromptCodeSendIdentifiers();
             syncBeginnerPromptDetailsState();
         }
 
@@ -13026,7 +13087,14 @@ ${escapeHtml(versionChangeText)}</div>
             const modal = document.getElementById('consult-modal');
             if (!modal) return null;
 
-            return Array.from(
+            const tagged = modal.querySelector(
+                'input[data-consult-legacy-no-code="1"]'
+            );
+            if (tagged) return tagged;
+
+            // 旧HTMLとの後方互換用。初回だけ従来文言から発見し、
+            // 以後はdata属性で安定して参照する。
+            const legacy = Array.from(
                 modal.querySelectorAll('input[type="checkbox"]')
             ).find(input => {
                 const label = input.closest('label');
@@ -13034,6 +13102,12 @@ ${escapeHtml(versionChangeText)}</div>
                 const text = String(container?.textContent || "");
                 return text.includes("コードを添付しない");
             }) || null;
+
+            if (legacy) {
+                legacy.dataset.consultLegacyNoCode = "1";
+            }
+
+            return legacy;
         }
 
         function getSharedPromptCodeChunkSizeForConsult() {
@@ -13463,11 +13537,16 @@ ${escapeHtml(versionChangeText)}</div>
                     const label = document.createElement('label');
                     label.className =
                         'consult-code-send-option';
+                    label.dataset.consultCodeSendChoice =
+                        option.value;
 
                     const radio = document.createElement('input');
                     radio.type = 'radio';
                     radio.name = 'consult-code-send-mode';
                     radio.value = option.value;
+                    radio.id = `consult-code-send-${option.value}`;
+                    radio.dataset.consultCodeSendMode =
+                        option.value;
                     radio.addEventListener('change', () => {
                         if (radio.checked) {
                             setConsultCodeSendMode(option.value);
@@ -13477,6 +13556,7 @@ ${escapeHtml(versionChangeText)}</div>
                     const text = document.createElement('span');
                     text.textContent = option.label;
 
+                    label.htmlFor = radio.id;
                     label.append(radio, text);
                     options.appendChild(label);
                 });
