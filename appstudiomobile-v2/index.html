@@ -3093,7 +3093,7 @@
             const sourceAppId = extractCurrentSourceAppId();
             if (sourceAppId) return `app:${sourceAppId}`;
             if (currentAppName) return `name:${currentAppName}`;
-            return "";
+            return `draft:${workspaceGeneration}`;
         }
         // AI反映の成否とは分離して、反映後の「次のiframe実行」だけを検証する状態。
         // runtimeTokenを正本にし、旧iframeの遅延エラーを現在の検証へ混ぜない。
@@ -3949,7 +3949,7 @@
         function updateRuntimeModeMenuLabel() {
             const btn = document.getElementById('runtime-mode-toggle-btn');
             if (!btn) return;
-            btn.textContent = runtimeMode === "safe" ? "⚠ 互換実行へ戻す" : "🛡 安全実行へ切替";
+            btn.textContent = currentRunEffectiveMode === "safe" ? "⚠ 互換実行へ戻す" : "🛡 安全実行へ切替";
         }
 
         function clearRuntimeVerificationTimer() {
@@ -4198,16 +4198,15 @@
         }
 
         function toggleRuntimeMode() {
-            if (runtimeMode === "compat") {
+            if (currentRunEffectiveMode === "compat") {
+                const msg = "安全実行では、作成アプリからAppStudio本体へのアクセスを制限します。\nただし、作成アプリ内のlocalStorageやIndexedDBが使えない、または通常実行のセーブデータが引き継がれない場合があります。\n信頼できないコードを確認するときに使用してください。";
+                if (!confirm(msg)) return;
+                runtimeMode = "safe";
+                nextRunMode = null;
                 const compatApprovalKey = getCompatApprovalKey();
                 if (compatApprovalKey) {
                     compatRuntimeApprovals.delete(compatApprovalKey);
                 }
-            }
-            if (runtimeMode === "compat") {
-                const msg = "安全実行では、作成アプリからAppStudio本体へのアクセスを制限します。\nただし、作成アプリ内のlocalStorageやIndexedDBが使えない、または通常実行のセーブデータが引き継がれない場合があります。\n信頼できないコードを確認するときに使用してください。";
-                if (!confirm(msg)) return;
-                runtimeMode = "safe";
             } else {
                 const msg = "互換実行では、作成アプリのlocalStorageやIndexedDBが利用しやすくなります。\n一方、作成アプリはAppStudio本体と同じオリジンで動作するため、信頼できないコードを実行すると、本体の設定・ライブラリ・通信処理へ影響する可能性があります。\n信頼できるコードだけを実行してください。";
                 if (!confirm(msg)) return;
@@ -4215,7 +4214,7 @@
             }
             updateRuntimeModeMenuLabel();
             reloadFrame();
-            showToast(runtimeMode === "safe" ? "現在: 安全実行" : "現在: 互換実行");
+            showToast(currentRunEffectiveMode === "safe" ? "現在: 安全実行" : "現在: 互換実行");
         }
 
 
@@ -5349,10 +5348,14 @@
             const details = document.getElementById('consult-text').value;
             const omitCode = document.getElementById('consult-code-none')?.checked === true;
             const currentCode = omitCode ? "" : getEditorCode();
-            const rememberedCodePrefix = omitCode
+            const rememberedCodePrefix = omitCode && !consultSplitReferenceActive
+                ? `あなたは、直前までの会話で提示された対象コードをすでに把握しています。もし直前に修正コード（AppStudio PatchまたはJSON）が提示されている場合は、その修正を反映した最新版コードを前提にしてください。\n\n`
+                : omitCode
                 ? `あなたは、直前までの会話で分割して渡された対象コードをすでに記憶しています。もし直前にJSON修正コードが提示されている場合は、そのJSON修正を反映した最新版コードを前提にしてください。\n\n`
                 : "";
-            const targetCodeSection = omitCode
+            const targetCodeSection = omitCode && consultSplitReferenceActive
+                ? `[対象コード]\n対象コード全文はこのプロンプトへ再添付しません。直前までに同じ会話で第1分割から最終分割まで送信し、AIが順番に記憶した対象コード全文を正本として使用してください。分割コードを別の過去版や別アプリのコードと混ぜないでください。`
+                : omitCode
                 ? `[対象コード]\nこのプロンプトには対象コードを添付しません。直前までにAIへ記憶させた最新版コードを前提にしてください。`
                 : `[対象コード]\n\`\`\`html\n${currentCode}\n\`\`\``;
 
@@ -7498,7 +7501,7 @@ nextBtn.onclick=nextStep;
                 filenameInput.value = currentAppName;
             } else {
                 const now = new Date();
-                filenameInput.value = `App_${now.getHours()}${now.getMinutes()}`;
+                filenameInput.value = `App_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
             }
         }
 
@@ -8543,9 +8546,7 @@ nextBtn.onclick=nextStep;
                     false,
                     100
                 );
-                recordGitHubPublishSuccess(result).catch(error => {
-                    console.warn("GitHub公開済状態の更新に失敗しました:", error);
-                });
+                showGitHubPublishResult(result);
                 showToast("GitHubへの公開が完了しました");
             } catch (error) {
                 pendingGitHubPublishSnapshot = null;
@@ -11481,6 +11482,11 @@ self.addEventListener("fetch", function (event) {
                 projects.get(pName).push(app);
             });
 
+            if (selectedProject && !projects.has(selectedProject)) {
+                // 最後のバージョン削除などで対象プロジェクトが消えた場合は一覧へ戻す
+                selectedProject = null;
+            }
+
             if (!selectedProject) {
                 // プロジェクト一覧表示
                 for (const [pName, projectVersions] of projects) {
@@ -11614,7 +11620,14 @@ ${escapeHtml(versionChangeText)}</div>
         }
 
         async function showHistoryModal(id) {
-            const app = await idb.get(id);
+            let app;
+            try {
+                app = await idb.get(id);
+            } catch (error) {
+                console.error("履歴の取得に失敗しました:", error);
+                showToast("履歴を取得できませんでした");
+                return;
+            }
             if (!app) {
                 showToast("更新履歴を取得できませんでした");
                 return;
@@ -11720,24 +11733,43 @@ ${escapeHtml(versionChangeText)}</div>
 
                 async function deleteApp(id, currentProjectName = null) {
             if(!confirm("本当に削除しますか？")) return;
-            await idb.delete(id);
+            try {
+                await idb.delete(id);
+            } catch (error) {
+                console.error("アプリの削除に失敗しました:", error);
+                showToast("削除に失敗しました");
+            }
             renderLibrary(currentProjectName);
         }
 
         async function deleteProject(pName) {
             if(!confirm(`プロジェクト「${pName}」と、それに含まれるすべてのバージョンを削除しますか？`)) return;
-            const library = await idb.getAll();
-            for (const app of library) {
-                const appPName = app.projectName || app.name;
-                if (appPName === pName) {
-                    await idb.delete(app.id);
+            try {
+                const summaries = await idb.getLibrarySummaries();
+                const ids = summaries
+                    .filter(app => (app.projectName || app.name) === pName)
+                    .map(app => app.id);
+                if (ids.length) {
+                    await idb.runTransaction('readwrite', store => {
+                        ids.forEach(id => store.delete(id));
+                    });
                 }
+            } catch (error) {
+                console.error("プロジェクトの削除に失敗しました:", error);
+                showToast("プロジェクトの削除に失敗しました");
             }
             renderLibrary();
         }
 
         async function shareApp(id) {
-            const app = await idb.get(id);
+            let app;
+            try {
+                app = await idb.get(id);
+            } catch (error) {
+                console.error("共有用データの取得に失敗しました:", error);
+                showToast("共有用データを取得できませんでした");
+                return;
+            }
             if(!app) return;
 
             try {
@@ -13478,6 +13510,8 @@ ${escapeHtml(versionChangeText)}</div>
             renderConsultCodeChunkButtons();
         }
 
+        let consultSplitReferenceActive = false;
+
         function copyConsultPromptWithCodeMode() {
             const legacyNoCodeCheckbox =
                 getLegacyConsultNoCodeCheckbox();
@@ -13490,30 +13524,11 @@ ${escapeHtml(versionChangeText)}</div>
                     consultCodeSendMode !== "full";
             }
 
-            const consultText =
-                document.getElementById('consult-text');
-            const originalConsultText =
-                consultText ? consultText.value : "";
-
-            if (consultText && consultCodeSendMode === "split") {
-                const splitReferenceRule = [
-                    "【コード参照ルール】",
-                    "対象コード全文はこの相談プロンプトへ再添付しません。",
-                    "直前までに同じ会話で第1分割から最終分割まで送信し、AIが順番に記憶した対象コード全文を今回の対象コードの正本として使用してください。",
-                    "分割コードを別の過去版や別アプリのコードと混ぜないでください。"
-                ].join("\n");
-
-                consultText.value = originalConsultText.trim()
-                    ? `${splitReferenceRule}\n\n${originalConsultText}`
-                    : splitReferenceRule;
-            }
-
+            consultSplitReferenceActive = consultCodeSendMode === "split";
             try {
                 copyConsultPrompt();
             } finally {
-                if (consultText) {
-                    consultText.value = originalConsultText;
-                }
+                consultSplitReferenceActive = false;
             }
         }
 
@@ -13789,12 +13804,21 @@ ${escapeHtml(versionChangeText)}</div>
                         legacyCheckbox.closest('label')
                         || legacyCheckbox.parentElement;
 
-                    if (legacyContainer?.parentNode) {
-                        legacyContainer.parentNode.insertBefore(
+                    const legacyWrapper = legacyContainer?.parentElement;
+                    const consultPanel = modal.querySelector('.modal');
+                    const legacyHideTarget =
+                        legacyWrapper
+                        && legacyWrapper !== consultPanel
+                        && legacyWrapper !== modal
+                            ? legacyWrapper
+                            : legacyContainer;
+
+                    if (legacyHideTarget?.parentNode) {
+                        legacyHideTarget.parentNode.insertBefore(
                             details,
-                            legacyContainer
+                            legacyHideTarget
                         );
-                        legacyContainer.style.display = 'none';
+                        legacyHideTarget.style.display = 'none';
                     }
                 } else {
                     const modalBody =
@@ -13825,8 +13849,16 @@ ${escapeHtml(versionChangeText)}</div>
                 const legacyContainer =
                     legacyCheckbox.closest('label')
                     || legacyCheckbox.parentElement;
-                if (legacyContainer) {
-                    legacyContainer.style.display = 'none';
+                const legacyWrapper = legacyContainer?.parentElement;
+                const consultPanel = modal.querySelector('.modal');
+                const legacyHideTarget =
+                    legacyWrapper
+                    && legacyWrapper !== consultPanel
+                    && legacyWrapper !== modal
+                        ? legacyWrapper
+                        : legacyContainer;
+                if (legacyHideTarget) {
+                    legacyHideTarget.style.display = 'none';
                 }
             }
 
