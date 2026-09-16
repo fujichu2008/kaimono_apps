@@ -1305,6 +1305,10 @@
             word-break: normal;
             overflow-wrap: break-word;
         }
+        #prompt-modal #ai-instruction {
+            max-height: min(34dvh, 260px);
+            overflow-y: auto;
+        }
         .ai-instruction-actions {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6968,8 +6972,12 @@ ${currentCode}
             pushReflectSnapshot(code);
             const newCode = code.split(findText).join(replaceText);
             setEditorCode(newCode);
-            showToast(`${matchCount}箇所を置換しました`);
             closeModal('fix-modal');
+            // 置換後のコードで実行画面を更新し、起動確認を行う。
+            beginReflectRuntimeVerification();
+            switchTab('run');
+            // 起動確認開始時の通知より後に表示し、置換件数のメッセージを残す。
+            showToast(`${matchCount}箇所を置換しました`);
         }
        
        
@@ -7563,10 +7571,16 @@ nextBtn.onclick=nextStep;
             }
         }
 
+        // モーダルを開いた時点のフォーカス要素。閉じたときにボタンへだけ戻す。
+        const modalFocusReturnTargets = new Map();
+
         function pushOpenModal(id) {
             const modalId = String(id || "");
             if (!modalId || openModalStack.includes(modalId)) return;
             openModalStack.push(modalId);
+            try {
+                modalFocusReturnTargets.set(modalId, document.activeElement);
+            } catch (error) {}
         }
 
         function closeModal(id) {
@@ -7599,6 +7613,17 @@ nextBtn.onclick=nextStep;
                 resetGitHubPublishState();
                 restoreRuntimeAfterGitHubCredentials();
             }
+
+            try {
+                const focusTarget = modalFocusReturnTargets.get(id);
+                modalFocusReturnTargets.delete(id);
+                // 入力欄へは戻さず、ソフトキーボードが開くのを防ぐ。
+                if (focusTarget instanceof HTMLButtonElement
+                    && document.contains(focusTarget)
+                    && !focusTarget.disabled) {
+                    focusTarget.focus({ preventScroll: true });
+                }
+            } catch (error) {}
         }
 
         document.addEventListener('keydown', event => {
@@ -11742,6 +11767,14 @@ self.addEventListener("fetch", function (event) {
                 .join("\n");
         }
 
+        // ライブラリ項目内の data-lib-action 要素へ、文字列埋め込みなしでクリック処理を登録する。
+        function bindLibraryItemAction(container, action, handler) {
+            const target = container.querySelector(`[data-lib-action="${action}"]`);
+            if (target && typeof handler === "function") {
+                target.addEventListener('click', handler);
+            }
+        }
+
         let latestLibraryRenderRequestId = 0;
         let librarySummaryLoadPromise = null;
 
@@ -11853,16 +11886,21 @@ self.addEventListener("fetch", function (event) {
                     el.className = 'lib-item';
                     el.innerHTML = `
                         <div class="lib-header">
-                                                        <div class="lib-title" style="cursor: pointer; text-decoration: underline;" onclick="renderLibrary(\`${escapeForTemplate(pName)}\`)">📁 ${escapeHtml(pName)} (${projectVersions.length})</div>
+                                                        <div class="lib-title" style="cursor: pointer; text-decoration: underline;" data-lib-action="open-project">📁 ${escapeHtml(pName)} (${projectVersions.length})</div>
                             <div class="lib-actions">
-                                ${published.html || published.pwa ? `<button class="btn-action" onclick="copyLibraryPublishedUrl(${latestApp.id})" title="公開URLをコピー">URL</button>` : ''}
-                                <button class="btn-del" onclick="deleteProject(\`${escapeForTemplate(pName)}\`)" title="プロジェクトを一括削除">🗑️</button>
+                                ${published.html || published.pwa ? `<button class="btn-action" data-lib-action="copy-url" title="公開URLをコピー">URL</button>` : ''}
+                                <button class="btn-del" data-lib-action="delete-project" title="プロジェクトを一括削除">🗑️</button>
                             </div>
                         </div>
                         <div class="lib-meta" style="margin-bottom: 4px;">最新保存: ${escapeHtml(latestSavedAt)}</div>
                         <div class="lib-history" style="pointer-events: none; cursor: default; background: rgba(255,255,255,0.05);">💡 今回のAI指示
 ${escapeHtml(latestChangeText)}</div>
                     `;
+                    const projectNameForActions = pName;
+                    const latestAppIdForActions = latestApp.id;
+                    bindLibraryItemAction(el, 'open-project', () => renderLibrary(projectNameForActions));
+                    bindLibraryItemAction(el, 'copy-url', () => copyLibraryPublishedUrl(latestAppIdForActions));
+                    bindLibraryItemAction(el, 'delete-project', () => deleteProject(projectNameForActions));
                     libraryContainer.appendChild(el);
                 }
             } else {
@@ -11896,17 +11934,23 @@ ${escapeHtml(latestChangeText)}</div>
                         <div class="lib-header">
                             <div class="lib-title" style="font-size: 13px; color: #ccc;">🕒 ${escapeHtml(savedAtLabel)}</div>
                             <div class="lib-actions">
-                                <button class="btn-load" onclick="loadApp(${app.id})">読込</button>
-                                <button class="btn-action" onclick="shareApp(${app.id})">✉️</button>
-                                                                <button class="btn-del" onclick="deleteApp(${app.id}, \`${escapeForTemplate(selectedProject)}\`)">×</button>
+                                <button class="btn-load" data-lib-action="load">読込</button>
+                                <button class="btn-action" data-lib-action="share">✉️</button>
+                                                                <button class="btn-del" data-lib-action="delete-version">×</button>
                             </div>
                         </div>
                         <div class="lib-meta">
                             内部名: ${escapeHtml(app.name)} | ${codeLength} chars
                         </div>
-                        <div class="lib-history" onclick="showHistoryModal(${app.id})">💡 今回のAI指示
+                        <div class="lib-history" data-lib-action="history">💡 今回のAI指示
 ${escapeHtml(versionChangeText)}</div>
                     `;
+                    const appIdForActions = app.id;
+                    const projectForActions = selectedProject;
+                    bindLibraryItemAction(el, 'load', () => loadApp(appIdForActions));
+                    bindLibraryItemAction(el, 'share', () => shareApp(appIdForActions));
+                    bindLibraryItemAction(el, 'delete-version', () => deleteApp(appIdForActions, projectForActions));
+                    bindLibraryItemAction(el, 'history', () => showHistoryModal(appIdForActions));
                     libraryContainer.appendChild(el);
                 });
             }
@@ -12691,14 +12735,7 @@ ${escapeHtml(versionChangeText)}</div>
                 .replace(/'/g, "&#039;");
         }
 
-        // inline onclick内のテンプレートリテラルへ安全に埋め込むためのエスケープ
-        // (バックスラッシュ・バッククォートに加え、${ }による式展開も無効化)
-        function escapeForTemplate(text) {
-            return escapeHtml(text)
-                .replace(/\\/g, "\\\\")
-                .replace(/`/g, "\\`")
-                .replace(/\$/g, "\\$");
-        }
+
 
         function isStorageAccessSecurityError(message, source) {
             if (currentRunEffectiveMode !== "safe" || source === "resource") {
@@ -13274,17 +13311,6 @@ ${escapeHtml(versionChangeText)}</div>
             if (!style) return;
 
             style.textContent = `
-                #prompt-modal > .modal {
-                    box-sizing: border-box;
-                    max-height: calc(100dvh - 16px - env(safe-area-inset-bottom));
-                    overflow-y: auto;
-                    overscroll-behavior: contain;
-                    -webkit-overflow-scrolling: touch;
-                }
-                #prompt-modal #ai-instruction {
-                    max-height: min(34dvh, 260px);
-                    overflow-y: auto;
-                }
                 #beginner-next-action-guide {
                     position: absolute;
                     left: 50%;
@@ -13743,6 +13769,13 @@ ${escapeHtml(versionChangeText)}</div>
         function getLegacyConsultNoCodeCheckbox() {
             const modal = document.getElementById('consult-modal');
             if (!modal) return null;
+
+            // 静的HTMLの固定IDを最優先で使う。
+            const byId = document.getElementById('consult-code-none');
+            if (byId) {
+                byId.dataset.consultLegacyNoCode = "1";
+                return byId;
+            }
 
             const tagged = modal.querySelector(
                 'input[data-consult-legacy-no-code="1"]'
