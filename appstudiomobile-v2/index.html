@@ -4646,6 +4646,8 @@
                       if(!confirm("【警告】\n現在のアプリを破棄し、クリップボードの内容で上書きしますか？")) return;
                 }
                 pushReflectSnapshot(getEditorCode());
+                // 別のコードへ置き換えるため、以前の互換実行承認は引き継がない。
+                compatRuntimeApprovals.clear();
                 setEditorCode(text);
                 showToast("全コードを貼り付けました");
                 // HTMLと判定できないテキストは自動実行せず、エディタへ貼り付けるだけとする。
@@ -8187,12 +8189,14 @@ nextBtn.onclick=nextStep;
         }
 
         function setGitHubPublishMode(mode) {
+            resetCompletedGitHubPublishButton();
             githubPublishState.mode = mode === "pwa" ? "pwa" : "html";
             syncGitHubPublishModal();
             scheduleGitHubPublishedStateSync(0);
         }
 
         function updateGitHubPublishField(path, value) {
+            resetCompletedGitHubPublishButton();
             const text = String(value ?? "");
             if (path === "repo") {
                 githubPublishState.repo = text;
@@ -9472,6 +9476,7 @@ self.addEventListener("fetch", function (event) {
                 showToast("PWAアイコンを関連付けるアプリ情報がありません");
                 return;
             }
+            resetCompletedGitHubPublishButton();
 
             const preferenceKey = currentPwaPreferenceKey;
             githubPublishState.pwa.iconImageLoading = true;
@@ -9503,6 +9508,7 @@ self.addEventListener("fetch", function (event) {
         async function removePwaIconImage() {
             if (!githubPublishState.pwa.hasCustomIcon) return;
             if (!confirm("保存済みのPWAアイコン画像を解除しますか？\n解除後はアイコン文字から簡易アイコンを生成します。")) return;
+            resetCompletedGitHubPublishButton();
 
             const preferenceKey = currentPwaPreferenceKey;
             githubPublishState.pwa.iconImageLoading = true;
@@ -10534,6 +10540,15 @@ self.addEventListener("fetch", function (event) {
             return document.getElementById("github-publish-submit");
         }
 
+        // 公開完了表示のまま設定を変更した場合に、ボタンを通常状態へ戻す。
+        function resetCompletedGitHubPublishButton() {
+            const button = getGitHubPublishButton();
+            if (!button || button.dataset.githubPublishUiState !== "complete") return;
+
+            setGitHubPublishProgress("");
+            syncGitHubPublishModal();
+        }
+
         function ensureGitHubPublishedStateStyle() {
             if (document.getElementById("github-published-state-style")) return;
 
@@ -10628,10 +10643,16 @@ self.addEventListener("fetch", function (event) {
             const button = getGitHubPublishButton();
             if (!button) return;
 
+            const wasPublished = button.classList.contains("github-published-state");
             button.classList.remove("github-published-state");
             button.removeAttribute("data-github-published-label");
             button.removeAttribute("data-github-published-mode");
             button.title = "";
+
+            // 公開済み表示の下に残った古いボタン内容を、通常表示へ戻す。
+            if (wasPublished && !button.dataset.githubPublishUiState) {
+                syncGitHubPublishModal();
+            }
         }
 
         function setGitHubPublishedButtonState(mode) {
@@ -13376,7 +13397,15 @@ ${escapeHtml(versionChangeText)}</div>
             syncConsultCodeSendUi();
         }
 
+        const consultCopiedChunkIndexes = new Set();
+        let consultCopiedChunkSignature = "";
+
+        function getConsultChunkSignature() {
+            return `${getSharedPromptCodeChunkSizeForConsult()}:${codeRevisionState.current}`;
+        }
+
         function copyConsultCodeChunk(index) {
+            const signatureAtCopy = getConsultChunkSignature();
             const code = getEditorCode();
             if (!code.trim()) {
                 showToast("分割して送るコードがありません");
@@ -13428,7 +13457,13 @@ ${escapeHtml(versionChangeText)}</div>
 
             writeTextWithFallback(
                 payload,
-                `第${currentNumber}分割をコピーしました`
+                `第${currentNumber}分割をコピーしました`,
+                () => {
+                    if (getConsultChunkSignature() === signatureAtCopy) {
+                        consultCopiedChunkIndexes.add(safeIndex);
+                    }
+                    renderConsultCodeChunkButtons();
+                }
             );
         }
 
@@ -13452,11 +13487,25 @@ ${escapeHtml(versionChangeText)}</div>
                 ? `${code.length.toLocaleString()}文字 / ${total}分割`
                 : "現在コードは空です";
 
+            const currentChunkSignature = getConsultChunkSignature();
+            if (consultCopiedChunkSignature !== currentChunkSignature) {
+                consultCopiedChunkIndexes.clear();
+                consultCopiedChunkSignature = currentChunkSignature;
+            }
+
             for (let index = 0; index < total; index++) {
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.className = 'consult-code-chunk-btn';
-                button.textContent = `第${index + 1}分割をコピー`;
+                const copied = consultCopiedChunkIndexes.has(index);
+                button.textContent = copied
+                    ? `✓ 第${index + 1}分割をコピー済`
+                    : `第${index + 1}分割をコピー`;
+                if (copied) {
+                    button.style.background = 'var(--success-color)';
+                    button.style.borderColor = 'var(--success-color)';
+                    button.style.color = '#fff';
+                }
                 button.onclick = () => copyConsultCodeChunk(index);
                 container.appendChild(button);
             }
