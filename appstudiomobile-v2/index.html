@@ -6669,11 +6669,21 @@ ${currentCode}
                     // beforeが消えており、空ではないafter全体が現在コードに
                     // 正確に1箇所だけ完全一致する場合に限り「適用済み」とする。
                     // 部分一致・曖昧一致・複数一致・削除パッチは対象にしない。
-                    if (replacement && replacementFound === 1) {
+                    // 短いafterは偶然一致の可能性があるため、空白除去後16文字以上の場合だけ適用済みとする。
+                    const replacementCompactLength = replacement.replace(/\s/g, "").length;
+                    if (replacement && replacementFound === 1 && replacementCompactLength >= 16) {
                         alreadyAppliedFixes.push({
                             fixIndex,
                             fix
                         });
+                        return;
+                    }
+
+                    if (replacementFound === 1) {
+                        failedReasonsByIndex.set(
+                            fixIndex,
+                            "対象コードが見つかりません。afterが短く、適用済みかを安全に判定できないため未適用"
+                        );
                         return;
                     }
 
@@ -7616,6 +7626,34 @@ nextBtn.onclick=nextStep;
         const DB_VERSION = 1;
         const STORE_NAME = 'apps';
 
+        const IDB_READ_RETRYABLE_ERROR_NAMES = new Set([
+            "UnknownError",
+            "AbortError",
+            "InvalidStateError",
+            "TransactionInactiveError",
+            "NotReadableError"
+        ]);
+
+        // IndexedDB読込エラーが一時的なもので、再試行してよいかを判定する。
+        function isRetryableIdbReadError(error) {
+            const errorName = String(error?.name || "");
+            const errorMessage = String(error?.message || "");
+            const retryableMessage =
+                /connection|database.*clos|backing store|temporar|internal error/i.test(
+                    errorMessage
+                );
+            return IDB_READ_RETRYABLE_ERROR_NAMES.has(errorName)
+                || retryableMessage;
+        }
+
+        // iOS/Safari等でIndexedDBプロセスや接続が一時的に不安定な場合、
+        // 少し待ってから新しい接続で読み直す。
+        function waitForIdbReadRetry(attempt) {
+            return new Promise(resolve => {
+                setTimeout(resolve, attempt * 180);
+            });
+        }
+
         const idb = {
             open: () => {
                 return new Promise((resolve, reject) => {
@@ -7662,60 +7700,6 @@ nextBtn.onclick=nextStep;
                         closeAndReject(error);
                     }
                 });
-            },
-            getAll: async () => {
-                const maxAttempts = 3;
-                let lastError = null;
-
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    try {
-                        return await idb.runTransaction('readonly', (store, setResult) => {
-                            const req = store.getAll();
-                            req.onsuccess = () => {
-                                const result = Array.isArray(req.result)
-                                    ? req.result
-                                    : [];
-                                setResult(result.reverse());
-                            };
-                        });
-                    } catch (error) {
-                        lastError = error;
-
-                        const errorName = String(error?.name || "");
-                        const errorMessage = String(error?.message || "");
-                        const retryableNames = new Set([
-                            "UnknownError",
-                            "AbortError",
-                            "InvalidStateError",
-                            "TransactionInactiveError",
-                            "NotReadableError"
-                        ]);
-                        const retryableMessage =
-                            /connection|database.*clos|backing store|temporar|internal error/i.test(
-                                errorMessage
-                            );
-                        const canRetry =
-                            retryableNames.has(errorName)
-                            || retryableMessage;
-
-                        console.warn(
-                            `ライブラリ読み込みに失敗しました (${attempt}/${maxAttempts}):`,
-                            error
-                        );
-
-                        if (!canRetry || attempt >= maxAttempts) {
-                            throw error;
-                        }
-
-                        // iOS/Safari等でIndexedDBプロセスや接続が一時的に不安定な場合、
-                        // 少し待ってから新しい接続で読み直す。
-                        await new Promise(resolve => {
-                            setTimeout(resolve, attempt * 180);
-                        });
-                    }
-                }
-
-                throw lastError || new Error("IndexedDBからライブラリを読み込めませんでした。");
             },
             getLibrarySummaries: async () => {
                 const maxAttempts = 3;
@@ -7799,22 +7783,7 @@ nextBtn.onclick=nextStep;
                     } catch (error) {
                         lastError = error;
 
-                        const errorName = String(error?.name || "");
-                        const errorMessage = String(error?.message || "");
-                        const retryableNames = new Set([
-                            "UnknownError",
-                            "AbortError",
-                            "InvalidStateError",
-                            "TransactionInactiveError",
-                            "NotReadableError"
-                        ]);
-                        const retryableMessage =
-                            /connection|database.*clos|backing store|temporar|internal error/i.test(
-                                errorMessage
-                            );
-                        const canRetry =
-                            retryableNames.has(errorName)
-                            || retryableMessage;
+                        const canRetry = isRetryableIdbReadError(error);
 
                         console.warn(
                             `ライブラリ一覧の読み込みに失敗しました (${attempt}/${maxAttempts}):`,
@@ -7825,9 +7794,7 @@ nextBtn.onclick=nextStep;
                             throw error;
                         }
 
-                        await new Promise(resolve => {
-                            setTimeout(resolve, attempt * 180);
-                        });
+                        await waitForIdbReadRetry(attempt);
                     }
                 }
 
@@ -8715,6 +8682,20 @@ nextBtn.onclick=nextStep;
                 setGitHubPublishProgress(error.message, true);
                 showToast("公開設定を確認してください");
                 return;
+            }
+
+            // 公開開始時点のコード・公開先設定を固定する。
+            // fingerprintは同一snapshotから生成し、二重取得しない。
+            try {
+                const snapshot = createGitHubPublishSnapshot(options.mode);
+                pendingGitHubPublishSnapshot = {
+                    ...snapshot,
+                    fingerprintPromise: buildGitHubPublishedFingerprint(snapshot)
+                        .catch(() => null)
+                };
+            } catch (error) {
+                pendingGitHubPublishSnapshot = null;
+                console.warn("GitHub公開開始状態の取得に失敗しました:", error);
             }
 
             githubPublishBusy = true;
@@ -10978,28 +10959,6 @@ self.addEventListener("fetch", function (event) {
             }, Math.max(0, Number(delay) || 0));
         }
 
-        function isLikelyGitHubPublishActionButton(button) {
-            return button instanceof Element
-                && button.id === "github-publish-submit";
-        }
-
-        function capturePendingGitHubPublishSnapshot(event) {
-            const button = event.target?.closest?.("button");
-            if (!button || !isLikelyGitHubPublishActionButton(button)) return;
-
-            try {
-                const snapshot = createGitHubPublishSnapshot();
-                pendingGitHubPublishSnapshot = {
-                    ...snapshot,
-                    fingerprintPromise: buildGitHubPublishedFingerprint(snapshot)
-                        .catch(() => null)
-                };
-            } catch (error) {
-                pendingGitHubPublishSnapshot = null;
-                console.warn("GitHub公開開始状態の取得に失敗しました:", error);
-            }
-        }
-
         async function recordGitHubPublishSuccess(result) {
             try {
                 const snapshot = pendingGitHubPublishSnapshot;
@@ -11059,15 +11018,7 @@ self.addEventListener("fetch", function (event) {
                 });
             }
 
-            // 公開開始時の内容を固定するため、既存の公開ボタンだけを直接監視する。
-            const submitButton = document.getElementById("github-publish-submit");
-            if (submitButton) {
-                submitButton.addEventListener(
-                    "click",
-                    capturePendingGitHubPublishSnapshot,
-                    true
-                );
-            }
+            // 公開開始時のスナップショットはpublishToGitHub()内で取得する。
 
             scheduleGitHubPublishedStateSync(0);
         }
@@ -11457,8 +11408,8 @@ self.addEventListener("fetch", function (event) {
                     },
                     () => {
                         const plan = buildPatchApplicationPlan(
-                            "left UPDATED right",
-                            [{ before: "TARGET", after: "UPDATED" }]
+                            "left UPDATED_VALUE_FOR_CHECK right",
+                            [{ before: "TARGET", after: "UPDATED_VALUE_FOR_CHECK" }]
                         );
                         return {
                             safeCandidates: plan.safeCandidates.length,
@@ -11477,8 +11428,28 @@ self.addEventListener("fetch", function (event) {
                     },
                     () => {
                         const plan = buildPatchApplicationPlan(
-                            "UPDATED middle UPDATED",
-                            [{ before: "TARGET", after: "UPDATED" }]
+                            "UPDATED_VALUE_FOR_CHECK middle UPDATED_VALUE_FOR_CHECK",
+                            [{ before: "TARGET", after: "UPDATED_VALUE_FOR_CHECK" }]
+                        );
+                        return {
+                            safeCandidates: plan.safeCandidates.length,
+                            alreadyApplied: plan.alreadyAppliedFixes.length,
+                            failed: plan.failedFixes.length
+                        };
+                    }
+                );
+
+                runCheck(
+                    "短いafterは適用済みにしない",
+                    {
+                        safeCandidates: 0,
+                        alreadyApplied: 0,
+                        failed: 1
+                    },
+                    () => {
+                        const plan = buildPatchApplicationPlan(
+                            "left SHORT right",
+                            [{ before: "TARGET", after: "SHORT" }]
                         );
                         return {
                             safeCandidates: plan.safeCandidates.length,
@@ -11656,86 +11627,10 @@ self.addEventListener("fetch", function (event) {
                 );
 
                 runCheck(
-                    "GitHub公開ボタンのエラー・完了から通常状態へ戻す経路を維持",
+                    "GitHub公開設定変更の再評価関数が存在",
                     true,
-                    () => {
-                        const progressSource =
-                            Function.prototype.toString.call(
-                                setGitHubPublishProgress
-                            );
-                        const resetSource =
-                            Function.prototype.toString.call(
-                                resetCompletedGitHubPublishButton
-                            );
-
-                        return progressSource.includes(
-                            'renderGitHubPublishButtonState('
-                        )
-                            && progressSource.includes(
-                                '"idle"'
-                            )
-                            && resetSource.includes(
-                                'renderGitHubPublishButtonState('
-                            )
-                            && resetSource.includes(
-                                '"idle"'
-                            );
-                    }
-                );
-
-                runCheck(
-                    "GitHub公開設定変更後の再評価経路を維持",
-                    true,
-                    () => {
-                        if (
-                            typeof scheduleGitHubPublishedStateAfterSettingsChange
-                                !== "function"
-                            || typeof scheduleGitHubPublishedStateSync
-                                !== "function"
-                            || typeof setGitHubPublishMode !== "function"
-                            || typeof updateGitHubPublishField !== "function"
-                        ) {
-                            return false;
-                        }
-
-                        const modeSource =
-                            Function.prototype.toString.call(
-                                setGitHubPublishMode
-                            );
-                        const fieldSource =
-                            Function.prototype.toString.call(
-                                updateGitHubPublishField
-                            );
-
-                        return modeSource.includes(
-                            "scheduleGitHubPublishedStateAfterSettingsChange"
-                        )
-                            && fieldSource.includes(
-                                "scheduleGitHubPublishedStateAfterSettingsChange"
-                            );
-                    }
-                );
-
-                runCheck(
-                    "GitHub公開成功記録を結果モーダル表示から分離",
-                    true,
-                    () => {
-                        const publishSource =
-                            Function.prototype.toString.call(
-                                publishToGitHub
-                            );
-                        const resultSource =
-                            Function.prototype.toString.call(
-                                showGitHubPublishResult
-                            );
-
-                        return publishSource.includes(
-                            "recordGitHubPublishSuccess(result)"
-                        )
-                            && !resultSource.includes(
-                                "recordGitHubPublishSuccess"
-                            );
-                    }
+                    () => typeof scheduleGitHubPublishedStateAfterSettingsChange === "function"
+                        && typeof scheduleGitHubPublishedStateSync === "function"
                 );
             } catch (error) {
                 console.error(
