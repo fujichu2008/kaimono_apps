@@ -6846,6 +6846,26 @@ ${failedJson}`;
             return (hash >>> 0).toString(16).padStart(8, "0");
         }
 
+        // 分割送信時の索引用。各分割に含まれる関数名を出現順・重複なしで抽出する。
+        function getPromptCodeChunkFunctionNames(chunk) {
+            const names = [];
+            const seen = new Set();
+            const pattern = /(?:^|\n)[ \t]*(?:async[ \t]+)?function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\(/g;
+            let match;
+            while ((match = pattern.exec(String(chunk ?? ""))) !== null) {
+                if (seen.has(match[1])) continue;
+                seen.add(match[1]);
+                names.push(match[1]);
+            }
+            return names;
+        }
+
+        function formatPromptCodeChunkFunctionIndex(names) {
+            if (!names.length) return "なし";
+            if (names.length <= 12) return names.join(", ");
+            return `${names.slice(0, 6).join(", ")} … ${names.slice(-6).join(", ")}（全${names.length}件）`;
+        }
+
         function copyPromptCodeChunk(index) {
             const currentCode = getEditorCode();
             const splitSignatureAtCopy = syncPromptSplitCodeState();
@@ -6869,11 +6889,31 @@ ${failedJson}`;
             const chunkEnd = chunkStart + chunk.length;
             const fullCodeFingerprint = createPromptCodeFingerprint(currentCode);
             const chunkFingerprint = createPromptCodeFingerprint(chunk);
+            const chunkFunctionNames = chunks.map(part => getPromptCodeChunkFunctionNames(part));
             const splitManifest = chunks.map((part, partIndex) => {
                 const partStart = partIndex * chunkSize;
                 const partEnd = partStart + part.length;
-                return `・第${partIndex + 1}分割: 全文の${(partStart + 1).toLocaleString()}〜${partEnd.toLocaleString()}文字目 / ${part.length.toLocaleString()}文字 / 照合ID ${createPromptCodeFingerprint(part)}`;
+                return `・第${partIndex + 1}分割: 全文の${(partStart + 1).toLocaleString()}〜${partEnd.toLocaleString()}文字目 / ${part.length.toLocaleString()}文字 / 照合ID ${createPromptCodeFingerprint(part)}
+  主な関数: ${formatPromptCodeChunkFunctionIndex(chunkFunctionNames[partIndex])}`;
             }).join("\n");
+
+            const restoreCheckSection = isLast
+                ? `
+
+[最終分割の受領後に行う復元チェック]
+・ChatGPT等では、長い会話の前半に送った分割を参照できなくなることがあります。保持できていると仮定せず、第1分割から第${total}分割まで、それぞれの分割メッセージの原文を実際に読み返してください。
+・各分割について、上記マニフェストの「主な関数」の最後に載っている関数の定義行を、原文から1行だけそのまま引用してください（引数部分まで含めます）。関数が「なし」の分割は、その分割の最後の空でない行を引用してください。
+・引用は各80文字以内に切り詰めて構いません。ただし、言い換え・推測による補完・マニフェストからの転記は禁止です。
+・原文を読み返せず引用できない分割が1つでもあれば、引用を作らず「第N分割を再送してください」と該当番号をすべて示してください。
+・全分割を引用できた場合だけ、次の形式で返答してください。
+
+第${total}分割を記憶しました
+復元チェック:
+${chunks.map((_, partIndex) => `第${partIndex + 1}分割: （原文から引用した1行）`).join("\n")}`
+                : `
+
+[受領確認]
+第${index + 1}分割の受領確認として、「第${index + 1}分割を記憶しました」とだけ返答してください。まだ解析・修正は開始しないでください。`;
 
             const prompt = `${isFirst
                 ? `これから対象コードを${total}回に分割して送ります。
@@ -6895,7 +6935,10 @@ ${failedJson}`;
 ・全分割を実際に参照できる場合だけ、番号順につないだ全文を今回の対象コードとして扱ってください。
 ・以前の分割について概要や要約しか参照できず、原文を逐語参照できない場合は、保持できていると仮定したり内容を推測で復元したりしないでください。
 ・分割が不足していることを確認できた場合だけ、「第N分割を再送してください」と不足番号を示してください。
-・全分割が揃っている場合は、従来どおり余計な説明を付けず「第${index + 1}分割を記憶しました」とだけ返答してください。
+・後の修正では、対象の関数名を[全分割マニフェスト]の「主な関数」で探して所属する分割を特定し、その分割メッセージの原文を読み返してからSEARCH/beforeを作ってください。記憶や要約からコードを再構成しないでください。
+${isLast
+    ? "・全分割が揃っている場合は、このメッセージ末尾の[最終分割の受領後に行う復元チェック]の形式だけで返答してください。"
+    : `・全分割が揃っている場合は、従来どおり余計な説明を付けず「第${index + 1}分割を記憶しました」とだけ返答してください。`}
 
 全${total}分割を受領するまでは、コードの解析・修正・提案を開始しないでください。
 最後の修正指示が来るまでは修正案やコードを出力しないでください。
@@ -6925,7 +6968,7 @@ ${isLast ? "※これは最後の分割です。全分割の原文が実際に�
 [対象コード 第${index + 1}分割]
 \`\`\`html
 ${chunk}
-\`\`\``;
+\`\`\`${restoreCheckSection}`;
 
                         writeTextWithFallback(prompt, `第${index + 1}分割をコピーしました`, () => {
                 if (getPromptSplitCodeSignature() !== splitSignatureAtCopy) {
@@ -6993,6 +7036,9 @@ ${buildAiCodeTargetSection(currentCode, mode)}`;
                 '・以前の分割について概要・要約・一部の断片しか参照できない場合、それを全文として推測復元したり、参照できていると仮定してSEARCH/beforeを作ったりしないでください。',
                 '・全分割を受領済みで原文も参照可能なら、今回コード全文が添付されていないことだけを理由に再送を要求しないでください。',
                 '・分割番号単位で欠落を特定できる場合は不足分割を、修正に必要な箇所だけが参照できない場合は必要な関数や周辺コードだけを指定して再提示を依頼してください。',
+                '・修正対象の関数が含まれる分割は、分割受領時の[全分割マニフェスト]の「主な関数」で特定し、その分割メッセージの原文を読み返してからSEARCH/beforeを作ってください。',
+                '・各SEARCH/beforeをどの分割番号の原文から抽出したかを、コードブロック外の説明に短く明記してください。',
+                '・最終分割受領時の復元チェックで引用できなかった分割や、今回読み返せない分割がある場合は、推測でパッチを作らず、その分割番号を示して再送を依頼してください。',
                 '・反映失敗、部分適用、取り消しなどが明示された場合の扱いは、上のコード参照ルールを優先してください。'
             ].join('\n') + "\n\n";
         }
