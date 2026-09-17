@@ -6451,6 +6451,12 @@ async function openDetail(id){
 
   void renderRecordingHistory(id);
 
+  // AI練習履歴：詳細表示を遅らせないよう待たずに描画する
+  aiPracticeResultState.detailSentenceId = String(id);
+  const aiHistoryDetails = ensureAiPracticeHistoryUi();
+  if(aiHistoryDetails) aiHistoryDetails.open = false;
+  void renderAiPracticeHistory(String(id));
+
   bindDetailPlayback(row);
   bindDetailRecording();
   bindDetailActions(id);
@@ -6780,6 +6786,12 @@ function bindDetailActions(id){
       try{
         cleanupDetailSession();
         await deleteSentence(id);
+        // AI練習結果の削除失敗は例文削除自体を失敗扱いにしない
+        try{
+          await deleteAiPracticeResultsForSentence(id);
+        }catch(err){
+          console.warn('AI practice delete cleanup skipped', err);
+        }
         $('#dlg-detail').close();
         notify('削除しました');
         await refreshList();
@@ -7894,6 +7906,12 @@ $('#reset-all-sentences').onclick = async (ev)=>{
     try{
       // 全削除も取り込みと同じ単一トランザクション処理に統一する
       await saveImportedSentenceBatch([], true);
+      // AI練習結果のクリア失敗は全削除自体を失敗扱いにしない
+      try{
+        await clearAiPracticeResults();
+      }catch(err){
+        console.warn('AI practice reset cleanup skipped', err);
+      }
       notify('すべての例文を削除しました。');
       await refreshList();
       await fillCategoryFilter();
@@ -10973,7 +10991,8 @@ function normalizeAiFeedbackData(data,expectedSentenceId='',expectedScene=''){
   };
 }
 
-function parseAiPracticeResult(raw,expectedSentenceId=''){
+/* expectedScene は呼び出し側が持つ場面名。渡されたときだけ補助的な照合に使う。 */
+function parseAiPracticeResult(raw,expectedSentenceId='',expectedScene=''){
   const data=parseAiFeedback(raw);
 
   if(data&&data.format==='speaknote_ai_practice_result'){
@@ -10983,24 +11002,10 @@ function parseAiPracticeResult(raw,expectedSentenceId=''){
     );
   }
 
-  let expectedScene='';
-
-  if(
-    expectedSentenceId&&
-    typeof currentDetailId!=='undefined'&&
-    currentDetailId!=null&&
-    String(currentDetailId)===String(expectedSentenceId)
-  ){
-    const sceneElement=document.getElementById('d-scene');
-    expectedScene=sceneElement
-      ? String(sceneElement.textContent||'').trim()
-      : '';
-  }
-
   return normalizeAiFeedbackData(
     data,
     expectedSentenceId,
-    expectedScene
+    String(expectedScene||'').trim()
   );
 }
 
@@ -11312,7 +11317,8 @@ function aiPracticeNotify(message,isError=false){
     status.textContent=message;
     status.classList.toggle('danger',!!isError);
   }
-  if(!isError&&typeof notify==='function'){
+  // ステータス表示とトーストの二重表示を避け、要素が無いときだけ通知へ回す
+  else if(typeof notify==='function'){
     try{ notify(message); }catch(_){}
   }
 }
@@ -11483,7 +11489,11 @@ async function saveAiPracticeResultText(raw){
   const sentenceId=aiPracticeResultState.currentSentenceId||aiPracticeResultState.detailSentenceId;
   try{
     if(!sentenceId) throw new Error('対象の例文を確認できません。詳細画面からAI練習を開き直してください');
-    const record=parseAiPracticeResult(raw,sentenceId);
+    const record=parseAiPracticeResult(
+      raw,
+      sentenceId,
+      (aiPracticeRow&&aiPracticeRow.id===sentenceId)?(aiPracticeRow.scene||''):''
+    );
     await addAiPracticeResult(record);
     const fallback=$('#ai-practice-result-fallback');
     const textarea=$('#ai-practice-result-json');
@@ -11573,46 +11583,6 @@ async function createSentenceTransferZipWithAiResults(rows){
   };
 }
 
-function installAiPracticeDetailHooks(){
-  if(typeof openDetail==='function'){
-    const baseOpenDetail=openDetail;
-    openDetail=async function(id,...args){
-      const sentenceId=String(id??'');
-      aiPracticeResultState.detailSentenceId=sentenceId;
-      const result=await baseOpenDetail.call(this,id,...args);
-      const details=ensureAiPracticeHistoryUi();
-      if(details) details.open=false;
-      await renderAiPracticeHistory(sentenceId);
-
-      const deleteButton=$('#d-del');
-      if(deleteButton&&typeof deleteButton.onclick==='function'){
-        const baseDelete=deleteButton.onclick;
-        deleteButton.onclick=async event=>{
-          const output=await baseDelete.call(deleteButton,event);
-          try{
-            const stillExists=await getOne(sentenceId);
-            if(!stillExists) await deleteAiPracticeResultsForSentence(sentenceId);
-          }catch(error){ console.warn('AI practice delete cleanup skipped',error); }
-          return output;
-        };
-      }
-      return result;
-    };
-  }
-
-  const resetButton=$('#reset-all-sentences');
-  if(resetButton&&typeof resetButton.onclick==='function'){
-    const baseReset=resetButton.onclick;
-    resetButton.onclick=async event=>{
-      const output=await baseReset.call(resetButton,event);
-      try{
-        if(await countAllSentences()===0) await clearAiPracticeResults();
-      }catch(error){ console.warn('AI practice reset cleanup skipped',error); }
-      return output;
-    };
-  }
-}
-
 function installAiPracticePromptExtension(){
   if(typeof buildAiPracticePrompt!=='function') return;
   const baseBuildAiPracticePrompt=buildAiPracticePrompt;
@@ -11671,7 +11641,6 @@ function initializeAiPracticeResultFeature(){
   ensureAiPracticeHistoryUi();
   ensureAiPracticeImportUi();
   installAiPracticePromptExtension();
-  installAiPracticeDetailHooks();
   setTimeout(()=>void pruneAiPracticeOrphans(),1200);
 }
 
