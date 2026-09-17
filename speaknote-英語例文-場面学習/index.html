@@ -10537,7 +10537,389 @@ function normalizeAiPracticeStoredRecord(value,{expectedSentenceId=''}={}){
   };
 }
 
+function normalizeAiFeedbackText(rawText){
+  if(typeof rawText!=='string') throw new Error('AIフィードバックが空です');
+
+  let text=rawText.replace(/^\uFEFF/,'').trim();
+  if(!text) throw new Error('AIフィードバックが空です');
+
+  text=text
+    .replace(/(^|[{\[,:]\s*)“/g,'$1"')
+    .replace(/”(?=\s*[,}\]:])/g,'"')
+    .replace(/[‘’]/g,"'");
+
+  const fenced=text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if(fenced) text=fenced[1].trim();
+
+  const candidates=[];
+  let start=-1;
+  let depth=0;
+  let inString=false;
+  let escaped=false;
+
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+
+    if(inString){
+      if(escaped){
+        escaped=false;
+        continue;
+      }
+      if(ch==='\\'){
+        escaped=true;
+        continue;
+      }
+      if(ch==='"') inString=false;
+      continue;
+    }
+
+    if(ch==='"'){
+      inString=true;
+      continue;
+    }
+
+    if(ch==='{'){
+      if(depth===0) start=i;
+      depth++;
+      continue;
+    }
+
+    if(ch==='}'){
+      if(depth<=0){
+        throw new Error('AIフィードバックJSONの括弧が不正です');
+      }
+
+      depth--;
+
+      if(depth===0&&start>=0){
+        candidates.push(text.slice(start,i+1));
+        start=-1;
+      }
+    }
+  }
+
+  if(inString||depth!==0){
+    throw new Error('AIフィードバックJSONが途中で切れています');
+  }
+
+  if(candidates.length===0){
+    throw new Error('AIフィードバックのJSONオブジェクトが見つかりません');
+  }
+
+  if(candidates.length>1){
+    throw new Error('AIフィードバックに複数のJSONオブジェクトがあります');
+  }
+
+  return candidates[0].trim();
+}
+
+function parseAiFeedback(rawText){
+  const normalized=normalizeAiFeedbackText(rawText);
+
+  try{
+    return JSON.parse(normalized);
+  }catch(_){
+    throw new Error('AIフィードバックJSONを解析できませんでした');
+  }
+}
+
+function validateAiFeedback(data){
+  const isObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+
+  if(!isObject(data)){
+    throw new Error('AIフィードバックの形式が不正です');
+  }
+
+  if(typeof data.scene!=='string'){
+    throw new Error('sceneが不正です');
+  }
+
+  if(typeof data.mode!=='string'){
+    throw new Error('modeが不正です');
+  }
+
+  if(typeof data.focus!=='string'){
+    throw new Error('focusが不正です');
+  }
+
+  if(typeof data.completed!=='boolean'){
+    throw new Error('completedが不正です');
+  }
+
+  if(typeof data.originalSpeech!=='string'){
+    throw new Error('originalSpeechが不正です');
+  }
+
+  if(
+    !Array.isArray(data.strengths)||
+    !data.strengths.every(item=>typeof item==='string')
+  ){
+    throw new Error('strengthsが不正です');
+  }
+
+  if(
+    !Array.isArray(data.improvements)||
+    !data.improvements.every(item=>
+      isObject(item)&&
+      typeof item.original==='string'&&
+      typeof item.corrected==='string'&&
+      typeof item.reason==='string'
+    )
+  ){
+    throw new Error('improvementsが不正です');
+  }
+
+  if(typeof data.correctedSpeech!=='string'){
+    throw new Error('correctedSpeechが不正です');
+  }
+
+  if(typeof data.mainFeedback!=='string'){
+    throw new Error('mainFeedbackが不正です');
+  }
+
+  if(!data.mainFeedback.trim()){
+    throw new Error('総評が空です');
+  }
+
+  if(!isObject(data.audioEvaluation)){
+    throw new Error('audioEvaluationが不正です');
+  }
+
+  if(typeof data.audioEvaluation.pronunciationEvaluated!=='boolean'){
+    throw new Error('pronunciationEvaluatedが不正です');
+  }
+
+  if(typeof data.audioEvaluation.note!=='string'){
+    throw new Error('audioEvaluation.noteが不正です');
+  }
+
+  return true;
+}
+
+function normalizeAiFeedbackData(data,expectedSentenceId=''){
+  validateAiFeedback(data);
+
+  if(data.sentenceId!=null&&typeof data.sentenceId!=='string'){
+    throw new Error('sentenceIdが不正です');
+  }
+
+  if(
+    data.sentenceId&&
+    expectedSentenceId&&
+    String(data.sentenceId)!==String(expectedSentenceId)
+  ){
+    throw new Error('この練習結果は現在の例文用ではありません');
+  }
+
+  const sentenceId=String(expectedSentenceId||data.sentenceId||'').trim();
+
+  if(!sentenceId){
+    throw new Error('保存先の例文を特定できません');
+  }
+
+  const now=new Date();
+  const practiceDate=[
+    now.getFullYear(),
+    String(now.getMonth()+1).padStart(2,'0'),
+    String(now.getDate()).padStart(2,'0')
+  ].join('-');
+
+  const feedback=data.improvements
+    .map(item=>{
+      const original=item.original.trim();
+      const corrected=item.corrected.trim();
+      const reason=item.reason.trim();
+
+      const change=
+        original&&corrected
+          ? `${original} → ${corrected}`
+          : (corrected||original);
+
+      return [change,reason]
+        .filter(Boolean)
+        .join('：');
+    })
+    .filter(Boolean)
+    .slice(0,3);
+
+  if(!feedback.length){
+    feedback.push(
+      ...data.strengths
+        .map(item=>item.trim())
+        .filter(Boolean)
+        .slice(0,3)
+    );
+  }
+
+  if(!feedback.length){
+    feedback.push(data.mainFeedback.trim());
+  }
+
+  return {
+    format:'speaknote_ai_practice_result',
+    schemaVersion:1,
+    sentenceId,
+    practiceDate,
+    mode:data.mode.trim(),
+    focus:data.focus.trim(),
+    feedback,
+    summary:data.mainFeedback.trim(),
+
+    scene:data.scene,
+    completed:data.completed,
+    originalSpeech:data.originalSpeech,
+    strengths:data.strengths.slice(),
+    improvements:data.improvements.map(item=>({
+      original:item.original,
+      corrected:item.corrected,
+      reason:item.reason
+    })),
+    correctedSpeech:data.correctedSpeech,
+    mainFeedback:data.mainFeedback,
+    audioEvaluation:{
+      pronunciationEvaluated:data.audioEvaluation.pronunciationEvaluated,
+      note:data.audioEvaluation.note
+    }
+  };
+}
+
 function parseAiPracticeResult(raw,expectedSentenceId=''){
+  const data=parseAiFeedback(raw);
+
+  if(data&&data.format==='speaknote_ai_practice_result'){
+    return parseAiPracticeResultLegacy(
+      JSON.stringify(data),
+      expectedSentenceId
+    );
+  }
+
+  return normalizeAiFeedbackData(data,expectedSentenceId);
+}
+
+window.runSpeakNoteAiFeedbackParserSelfTests=function(){
+  const base={
+    scene:'休日の過ごし方を説明するとき',
+    mode:'発話添削',
+    focus:'総合',
+    completed:true,
+    originalSpeech:'On weekends, I usually spend time with my family.',
+    strengths:[
+      '内容が明確です'
+    ],
+    improvements:[
+      {
+        original:'spend the time',
+        corrected:'spend time',
+        reason:'一般的にはtheを付けません'
+      }
+    ],
+    correctedSpeech:'On weekends, I usually spend time with my family.',
+    mainFeedback:'全体としてよく伝わっています。',
+    audioEvaluation:{
+      pronunciationEvaluated:false,
+      note:'流暢さと表現を中心に評価'
+    }
+  };
+
+  const results=[];
+
+  const run=(name,test)=>{
+    try{
+      results.push({
+        name,
+        passed:!!test()
+      });
+    }catch(error){
+      results.push({
+        name,
+        passed:false,
+        error:String(error&&error.message||error)
+      });
+    }
+  };
+
+  const rejects=value=>{
+    try{
+      parseAiPracticeResult(
+        value,
+        'self-test-sentence'
+      );
+      return false;
+    }catch(_){
+      return true;
+    }
+  };
+
+  run(
+    '標準JSON',
+    ()=>parseAiPracticeResult(
+      JSON.stringify(base),
+      'self-test-sentence'
+    ).sentenceId==='self-test-sentence'
+  );
+
+  run(
+    'スマートクォート',
+    ()=>{
+      const smart=JSON.stringify(base)
+        .replace(/"([^"]*)"/g,'“$1”');
+
+      return parseAiPracticeResult(
+        smart,
+        'self-test-sentence'
+      ).summary===base.mainFeedback;
+    }
+  );
+
+  run(
+    'Markdownコードフェンス',
+    ()=>parseAiPracticeResult(
+      '```json\n'+JSON.stringify(base)+'\n```',
+      'self-test-sentence'
+    ).mode===base.mode
+  );
+
+  run(
+    '前後に説明文',
+    ()=>parseAiPracticeResult(
+      'フィードバックです。\n'+JSON.stringify(base)+'\n以上です。',
+      'self-test-sentence'
+    ).focus===base.focus
+  );
+
+  run(
+    '必須キー欠落',
+    ()=>{
+      const value={...base};
+      delete value.scene;
+      return rejects(JSON.stringify(value));
+    }
+  );
+
+  run(
+    '型不正',
+    ()=>rejects(
+      JSON.stringify({
+        ...base,
+        completed:'true'
+      })
+    )
+  );
+
+  run(
+    'JSONではない文字列',
+    ()=>rejects('not json')
+  );
+
+  run(
+    '空文字列',
+    ()=>rejects('   ')
+  );
+
+  return results;
+};
+
+function parseAiPracticeResultLegacy(raw,expectedSentenceId=''){
   const source=String(raw??'');
   if(!source.trim()) throw new Error('AI練習結果のJSONをコピーしてください');
   if(source.length>AI_PRACTICE_RESULT_MAX_JSON) throw new Error('AI練習結果のJSONが大きすぎます');
