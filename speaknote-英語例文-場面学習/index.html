@@ -5686,6 +5686,8 @@ async function openAiPracticeDialog(){
     }
 
     aiPracticeRow = {
+      // 練習結果の保存先を特定する主識別子。sceneは補助的な整合チェックに使う。
+      id:row.id || id,
       scene:row.scene || '',
       english:row.english || '',
       japanese:row.japanese || '',
@@ -6954,7 +6956,10 @@ function imageExtensionFromMime(mimeType){
   return extensions[mimeType] || 'bin';
 }
 
-function createSentenceTransferZip(rows){
+/* ZIPへ詰めるエントリだけを組み立てる。
+   createStoreZip の呼び出しは呼び出し側で1回だけ行い、
+   「作成→解凍→再構築」を発生させない。 */
+function buildSentenceTransferEntries(rows){
   const imageEntries = [];
   let imageCount = 0;
   let fallbackImageCount = 0;
@@ -7039,7 +7044,7 @@ function createSentenceTransferZip(rows){
     '録音データと音声設定は含まれません。'
   ].join('\n');
 
-  const blob = createStoreZip([
+  const entries = [
     {
       name:'sentences.json',
       bytes:zipTextEncoder.encode(JSON.stringify(manifest, null, 2))
@@ -7053,9 +7058,18 @@ function createSentenceTransferZip(rows){
       bytes:zipTextEncoder.encode(readme)
     },
     ...imageEntries
-  ]);
+  ];
 
-  return {blob, imageCount, fallbackImageCount};
+  return {entries, imageCount, fallbackImageCount};
+}
+
+function createSentenceTransferZip(rows){
+  const built = buildSentenceTransferEntries(rows);
+  return {
+    blob: createStoreZip(built.entries),
+    imageCount: built.imageCount,
+    fallbackImageCount: built.fallbackImageCount
+  };
 }
 
 function localDateStamp(value=new Date()){
@@ -7332,6 +7346,8 @@ async function prepareSentenceZipImport(file){
 
   const items = [];
   let imageCount = 0;
+  // 旧id→新idの対応表。インポート1回ごとに作り、AI練習結果の復元へ引数で渡す。
+  const idMap = new Map();
 
   for(const row of manifest.sentences){
     if(!row || typeof row !== 'object'){
@@ -7367,8 +7383,12 @@ async function prepareSentenceZipImport(file){
     const updatedAt = Number(row.updatedAt);
     const playCount = Number(row.playCount);
 
+    const newId = uid();
+    const oldId = String(row.id || '').trim();
+    if(oldId) idMap.set(oldId, newId);
+
     items.push({
-      id:uid(),
+      id:newId,
       english:String(row.english || ''),
       japanese:String(row.japanese || ''),
       scene:String(row.scene || ''),
@@ -7392,9 +7412,51 @@ async function prepareSentenceZipImport(file){
   return {
     items,
     imageCount,
+    idMap,
+    aiPracticeResults: readImportedAiPracticeResults(entries),
     kpiDays: readImportedKpiDays(entries),
     practiceSkipped: countInvalidPractice(manifest.sentences)
   };
+}
+
+/* ZIP内のAI練習結果は「おまけ」として扱い、壊れていても例文の復元は止めない。
+   形式が一致しない場合や読み取りに失敗した場合は空配列を返す。 */
+function readImportedAiPracticeResults(entries){
+  const bytes = entries.get('ai_practice_results.json');
+  if(!bytes) return [];
+
+  try{
+    const text = new TextDecoder('utf-8', {fatal:true}).decode(bytes);
+    const manifest = JSON.parse(text);
+    if(
+      manifest?.format !== AI_PRACTICE_BACKUP_FORMAT ||
+      Number(manifest.schemaVersion) !== 1 ||
+      !Array.isArray(manifest.results)
+    ){
+      return [];
+    }
+    return manifest.results;
+  }catch(error){
+    console.warn('ai_practice_results.jsonを読み込めなかったためAI練習結果は復元しません', error);
+    return [];
+  }
+}
+
+/* 例文保存が成功したあとにだけ呼ぶ。2つのIndexedDBは単一トランザクションにできないため、
+   ここでの失敗は例文取り込み自体の失敗とはせず、通知へ1行添えるだけにする。
+   戻り値の restored は復元できた件数、failed は復元処理が失敗したかどうか。 */
+async function restoreAiPracticeAfterImport(results, idMap, replace){
+  try{
+    if(replace) await clearAiPracticeResults();
+    const restored = (Array.isArray(results) && results.length && idMap && idMap.size)
+      ? await restoreImportedAiPracticeResults(results, idMap)
+      : 0;
+    await pruneAiPracticeOrphans();
+    return { restored, failed:false };
+  }catch(error){
+    console.warn('AI practice restore after import failed', error);
+    return { restored:0, failed:true };
+  }
 }
 
 function saveImportedSentenceBatch(items, replace){
@@ -7564,14 +7626,19 @@ $('#btn-export-zip').onclick = async (event)=>{
         return;
       }
 
-      const result = createSentenceTransferZip(rows);
+      const result = await createSentenceTransferZipWithAiResults(rows);
       const filename = `speaknote_sentences_${localDateStamp()}.zip`;
       const delivery = await shareOrDownloadZip(result.blob, filename);
 
       if(delivery !== 'cancelled'){
         const lines = [];
         if(delivery === 'downloaded'){
-          lines.push('ZIPを保存しました。', `例文：${rows.length}件`, `画像：${result.imageCount}件`);
+          lines.push(
+            'ZIPを保存しました。',
+            `例文：${rows.length}件`,
+            `画像：${result.imageCount}件`,
+            `AI練習結果：${result.aiPracticeResultCount || 0}件`
+          );
         }
         if(result.fallbackImageCount > 0){
           lines.push(
@@ -7608,6 +7675,13 @@ $('#file-import-zip').onchange = async (event)=>{
       label.textContent = '復元中…';
       await saveImportedSentenceBatch(prepared.items, replace);
 
+      // 例文の保存に成功したあとでAI練習結果を入れ替える
+      const ai = await restoreAiPracticeAfterImport(
+        prepared.aiPracticeResults,
+        prepared.idMap,
+        replace
+      );
+
       // 学習記録は「入れ替え」のときだけ置き換える（追加では既存の記録に触れない）
       const kpiRestored = replace && !!prepared.kpiDays;
       if(kpiRestored){
@@ -7623,7 +7697,9 @@ $('#file-import-zip').onchange = async (event)=>{
       notify(
         `${replace ? '入れ替え' : '追加'}が完了しました。\n` +
         `例文：${prepared.items.length}件\n` +
-        `画像：${prepared.imageCount}件` +
+        `画像：${prepared.imageCount}件\n` +
+        `AI練習結果：${ai.restored}件` +
+        (ai.failed ? '\nAI練習結果の復元に失敗しました。' : '') +
         (kpiRestored ? '\n学習記録：復元しました' : '') +
         (prepared.practiceSkipped
           ? `\n補助データが不正な${prepared.practiceSkipped}件は、例文本体のみ復元しました。`
@@ -7645,7 +7721,8 @@ $('#btn-export').onclick = async (event)=>{
     try{
       const data = await getAll();
       const safe = data.map(({recBlob,recType,recDurationMs,recExpiresAt,recUpdatedAt, ...rest})=>rest);
-      const blob = new Blob([JSON.stringify({sentences:safe},null,2)],{type:'application/json'});
+      const aiPracticeResults = (await getAllAiPracticeResults()).map(({id, ...rest})=>rest);
+      const blob = new Blob([JSON.stringify({sentences:safe,aiPracticeResults},null,2)],{type:'application/json'});
       const href = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = href;
@@ -7710,14 +7787,27 @@ $('#file-import').onchange = async (e)=>{
     const items = validRows.map(jsonRowToSentenceItem);
     const practiceSkipped = countInvalidPractice(validRows);
 
+    // 旧id→新idの対応表。インポート1回ごとに作り、AI練習結果の復元へ引数で渡す。
+    const idMap = new Map();
+    validRows.forEach((row, i)=>{
+      const oldId = String(row.id || '').trim();
+      if(oldId && items[i]) idMap.set(oldId, items[i].id);
+    });
+    const aiSource = Array.isArray(json.aiPracticeResults) ? json.aiPracticeResults : [];
+
+    let ai = { restored:0, failed:false };
     await withBusy(label, '読み込み中…', async ()=>{
       // 全削除と追加を1つのトランザクションで実行し、部分更新を防ぐ
       await saveImportedSentenceBatch(items, replace);
+      // 例文の保存に成功したあとでAI練習結果を入れ替える
+      ai = await restoreAiPracticeAfterImport(aiSource, idMap, replace);
     });
 
     notify(
       (replace ? 'インポート（入れ替え）が完了しました。' : 'インポート（追加）が完了しました。') +
       `\n例文：${items.length}件` +
+      `\nAI練習結果：${ai.restored}件` +
+      (ai.failed ? '\nAI練習結果の復元に失敗しました。' : '') +
       (skipped > 0 ? `\n読み込めなかったデータ：${skipped}件（形式が不正のためスキップ）` : '') +
       (practiceSkipped > 0
         ? `\n補助データが不正な${practiceSkipped}件は、例文本体のみ復元しました。`
@@ -9104,7 +9194,6 @@ const aiCreate = {
   rows:[],
   selected:new Set(),
   duplicateKeys:[],
-  prompt:'',
   saved:[]
 };
 
@@ -10104,7 +10193,6 @@ async function copyAiPrompt(){
     ));
 
     const prompt=buildAiPrompt(c,titles);
-    aiCreate.prompt=prompt;
     $('#ai-prompt').value=prompt;
 
     $('#ai-prompt-info').textContent=
@@ -10444,7 +10532,6 @@ function isAllowedAiPracticeFocus(value){
 
 const aiPracticeResultState={
   currentSentenceId:'',
-  currentPracticeDate:'',
   currentMode:'feedback',
   currentFocus:'overall',
   detailSentenceId:'',
@@ -10543,10 +10630,101 @@ function normalizeAiFeedbackText(rawText){
   let text=rawText.replace(/^\uFEFF/,'').trim();
   if(!text) throw new Error('AIフィードバックが空です');
 
-  text=text
-    .replace(/(^|[{\[,:]\s*)“/g,'$1"')
-    .replace(/”(?=\s*[,}\]:])/g,'"')
-    .replace(/[‘’]/g,"'");
+  const normalizeStructuralSmartDoubleQuotes=source=>{
+    let out='';
+    let inString=false;
+    let delimiter='';
+    let escaped=false;
+
+    const previousNonSpace=()=>{
+      for(let i=out.length-1;i>=0;i--){
+        if(!/\s/.test(out[i])) return out[i];
+      }
+      return '';
+    };
+
+    const nextNonSpace=index=>{
+      for(let i=index;i<source.length;i++){
+        if(!/\s/.test(source[i])) return source[i];
+      }
+      return '';
+    };
+
+    for(let i=0;i<source.length;i++){
+      const ch=source[i];
+
+      if(!inString){
+        if(ch==='"'){
+          out+=ch;
+          inString=true;
+          delimiter='"';
+          escaped=false;
+          continue;
+        }
+
+        if(ch==='“'){
+          const previous=previousNonSpace();
+          if(
+            !previous||
+            previous==='{'||
+            previous==='['||
+            previous===','||
+            previous===':'
+          ){
+            out+='"';
+            inString=true;
+            delimiter='smart';
+            escaped=false;
+            continue;
+          }
+        }
+
+        out+=ch;
+        continue;
+      }
+
+      if(escaped){
+        out+=ch;
+        escaped=false;
+        continue;
+      }
+
+      if(ch==='\\'){
+        out+=ch;
+        escaped=true;
+        continue;
+      }
+
+      if(delimiter==='"'&&ch==='"'){
+        out+=ch;
+        inString=false;
+        delimiter='';
+        continue;
+      }
+
+      if(delimiter==='smart'&&ch==='”'){
+        const next=nextNonSpace(i+1);
+        if(
+          !next||
+          next===':'||
+          next===','||
+          next==='}'||
+          next===']'
+        ){
+          out+='"';
+          inString=false;
+          delimiter='';
+          continue;
+        }
+      }
+
+      out+=ch;
+    }
+
+    return out;
+  };
+
+  text=normalizeStructuralSmartDoubleQuotes(text);
 
   const fenced=text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   if(fenced) text=fenced[1].trim();
@@ -10696,7 +10874,7 @@ function validateAiFeedback(data){
   return true;
 }
 
-function normalizeAiFeedbackData(data,expectedSentenceId=''){
+function normalizeAiFeedbackData(data,expectedSentenceId='',expectedScene=''){
   validateAiFeedback(data);
 
   if(data.sentenceId!=null&&typeof data.sentenceId!=='string'){
@@ -10709,6 +10887,18 @@ function normalizeAiFeedbackData(data,expectedSentenceId=''){
     String(data.sentenceId)!==String(expectedSentenceId)
   ){
     throw new Error('この練習結果は現在の例文用ではありません');
+  }
+
+  const feedbackScene=String(data.scene||'').trim();
+  const targetScene=String(expectedScene||'').trim();
+
+  if(
+    feedbackScene&&
+    targetScene&&
+    targetScene!=='(場面未設定)'&&
+    feedbackScene!==targetScene
+  ){
+    throw new Error('フィードバックの教材が現在開いている例文と一致しません。');
   }
 
   const sentenceId=String(expectedSentenceId||data.sentenceId||'').trim();
@@ -10793,10 +10983,29 @@ function parseAiPracticeResult(raw,expectedSentenceId=''){
     );
   }
 
-  return normalizeAiFeedbackData(data,expectedSentenceId);
+  let expectedScene='';
+
+  if(
+    expectedSentenceId&&
+    typeof currentDetailId!=='undefined'&&
+    currentDetailId!=null&&
+    String(currentDetailId)===String(expectedSentenceId)
+  ){
+    const sceneElement=document.getElementById('d-scene');
+    expectedScene=sceneElement
+      ? String(sceneElement.textContent||'').trim()
+      : '';
+  }
+
+  return normalizeAiFeedbackData(
+    data,
+    expectedSentenceId,
+    expectedScene
+  );
 }
 
-window.runSpeakNoteAiFeedbackParserSelfTests=function(){
+/* 開発時のみ window へ公開する。本番では露出させない。 */
+function runSpeakNoteAiFeedbackParserSelfTests(){
   const base={
     scene:'休日の過ごし方を説明するとき',
     mode:'発話添削',
@@ -10916,8 +11125,77 @@ window.runSpeakNoteAiFeedbackParserSelfTests=function(){
     ()=>rejects('   ')
   );
 
+  run(
+    'Legacy形式互換',
+    ()=>{
+      const legacy={
+        format:'speaknote_ai_practice_result',
+        schemaVersion:1,
+        sentenceId:'self-test-sentence',
+        practiceDate:'2026-09-18',
+        mode:'発話添削',
+        focus:'総合',
+        feedback:[
+          'spend the time → spend time：一般的にはtheを付けません'
+        ],
+        summary:'全体としてよく伝わっています。'
+      };
+
+      const result=parseAiPracticeResult(
+        JSON.stringify(legacy),
+        'self-test-sentence'
+      );
+
+      return !!result&&
+        String(result.sentenceId)==='self-test-sentence';
+    }
+  );
+
+  run(
+    '教材取り違え',
+    ()=>{
+      try{
+        normalizeAiFeedbackData(
+          {
+            ...base,
+            scene:'別の教材'
+          },
+          'self-test-sentence',
+          '休日の過ごし方を説明するとき'
+        );
+        return false;
+      }catch(error){
+        return String(error&&error.message||error)
+          .includes('現在開いている例文と一致しません');
+      }
+    }
+  );
+
+  run(
+    'スマートアポストロフィ保持',
+    ()=>{
+      const value={
+        ...base,
+        originalSpeech:'I’m ready, and I don’t want to stop.',
+        correctedSpeech:'I’m ready, and I don’t want to stop.'
+      };
+
+      const result=parseAiPracticeResult(
+        JSON.stringify(value),
+        'self-test-sentence'
+      );
+
+      return result.originalSpeech==='I’m ready, and I don’t want to stop.'&&
+        result.correctedSpeech==='I’m ready, and I don’t want to stop.';
+    }
+  );
+
   return results;
-};
+}
+
+if(SPEAKNOTE_DEBUG){
+  window.runSpeakNoteAiFeedbackParserSelfTests=runSpeakNoteAiFeedbackParserSelfTests;
+}
 
 function parseAiPracticeResultLegacy(raw,expectedSentenceId=''){
   const source=String(raw??'');
@@ -10963,21 +11241,14 @@ async function withAiPracticeStore(mode,callback){
   });
 }
 
-async function addAiPracticeResult(record){
+/* 新規保存とインポート復元の共通経路。
+   importedAt を省略した場合は現在時刻を使う。 */
+async function addAiPracticeResult(record,importedAt){
+  const stamp=Number(importedAt);
   const saved={
     ...record,
     id:aiPracticeResultUid(),
-    importedAt:Date.now()
-  };
-  await withAiPracticeStore('readwrite',store=>store.add(saved));
-  return saved;
-}
-
-async function putImportedAiPracticeResult(record){
-  const saved={
-    ...record,
-    id:aiPracticeResultUid(),
-    importedAt:Number.isFinite(Number(record.importedAt))?Number(record.importedAt):Date.now()
+    importedAt:Number.isFinite(stamp)?stamp:Date.now()
   };
   await withAiPracticeStore('readwrite',store=>store.add(saved));
   return saved;
@@ -11041,8 +11312,8 @@ function aiPracticeNotify(message,isError=false){
     status.textContent=message;
     status.classList.toggle('danger',!!isError);
   }
-  if(!isError&&typeof toast==='function'){
-    try{ toast(message); }catch(_){}
+  if(!isError&&typeof notify==='function'){
+    try{ notify(message); }catch(_){}
   }
 }
 
@@ -11245,46 +11516,6 @@ async function importAiPracticeResultFromClipboard(){
   }
 }
 
-function sentenceImportSignature(row={}){
-  const categories=Array.isArray(row.categories)?row.categories.map(String).sort():[];
-  const tags=Array.isArray(row.tags)?row.tags.map(String).sort():[];
-  return JSON.stringify([
-    String(row.scene||'').trim(),
-    String(row.english||'').trim(),
-    String(row.japanese||'').trim(),
-    categories,
-    tags,
-    String(row.notes||'').trim()
-  ]);
-}
-
-function buildAiPracticeIdMap(sourceRows,beforeRows,afterRows){
-  const beforeIds=new Set((beforeRows||[]).map(row=>String(row.id)));
-  const afterIds=new Set((afterRows||[]).map(row=>String(row.id)));
-  const replace=(beforeRows||[]).length>0&&![...(beforeRows||[])].some(row=>afterIds.has(String(row.id)));
-  const candidates=replace
-    ?(afterRows||[]).slice()
-    :(afterRows||[]).filter(row=>!beforeIds.has(String(row.id)));
-  const queues=new Map();
-  candidates.forEach(row=>{
-    const key=sentenceImportSignature(row);
-    if(!queues.has(key)) queues.set(key,[]);
-    queues.get(key).push(String(row.id));
-  });
-  const map=new Map();
-  (sourceRows||[]).forEach(row=>{
-    const oldId=String(row?.id||'');
-    if(!oldId) return;
-    if(afterIds.has(oldId)&&!beforeIds.has(oldId)){
-      map.set(oldId,oldId);
-      return;
-    }
-    const queue=queues.get(sentenceImportSignature(row));
-    if(queue?.length) map.set(oldId,queue.shift());
-  });
-  return {map,replace};
-}
-
 async function restoreImportedAiPracticeResults(sourceResults,idMap){
   let restored=0;
   for(const raw of Array.isArray(sourceResults)?sourceResults:[]){
@@ -11292,11 +11523,10 @@ async function restoreImportedAiPracticeResults(sourceResults,idMap){
       const normalized=normalizeAiPracticeStoredRecord(raw);
       const mapped=idMap.get(String(normalized.sentenceId));
       if(!mapped) continue;
-      await putImportedAiPracticeResult({
-        ...normalized,
-        sentenceId:mapped,
-        importedAt:Number(raw.importedAt)||Date.now()
-      });
+      await addAiPracticeResult(
+        {...normalized,sentenceId:mapped},
+        Number(raw.importedAt)
+      );
       restored++;
     }catch(error){
       console.warn('AI practice result skipped during import',error);
@@ -11317,36 +11547,6 @@ async function pruneAiPracticeOrphans(){
   }
 }
 
-async function extractStoredZipEntries(blob){
-  const bytes=new Uint8Array(await blob.arrayBuffer());
-  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
-  const decoder=new TextDecoder('utf-8');
-  const entries=[];
-  let offset=0;
-  while(offset+4<=bytes.length){
-    const signature=view.getUint32(offset,true);
-    if(signature===0x02014b50||signature===0x06054b50) break;
-    if(signature!==0x04034b50) throw new Error('ZIP形式を解析できません');
-    const flags=view.getUint16(offset+6,true);
-    const method=view.getUint16(offset+8,true);
-    const compressedSize=view.getUint32(offset+18,true);
-    const uncompressedSize=view.getUint32(offset+22,true);
-    const nameLength=view.getUint16(offset+26,true);
-    const extraLength=view.getUint16(offset+28,true);
-    if(flags&0x0008) throw new Error('データ記述子付きZIPには対応していません');
-    if(method!==0) throw new Error('圧縮ZIPには対応していません');
-    if(compressedSize!==uncompressedSize) throw new Error('ZIPサイズが不正です');
-    const nameStart=offset+30;
-    const dataStart=nameStart+nameLength+extraLength;
-    const dataEnd=dataStart+compressedSize;
-    if(dataEnd>bytes.length) throw new Error('ZIPが途中で切れています');
-    const name=decoder.decode(bytes.slice(nameStart,nameStart+nameLength));
-    entries.push({name,bytes:bytes.slice(dataStart,dataEnd)});
-    offset=dataEnd;
-  }
-  return entries;
-}
-
 async function buildAiPracticeTransferFile(){
   const results=await getAllAiPracticeResults();
   return {
@@ -11359,144 +11559,18 @@ async function buildAiPracticeTransferFile(){
 }
 
 async function createSentenceTransferZipWithAiResults(rows){
-  const base=await createSentenceTransferZip(rows);
-  const entries=await extractStoredZipEntries(base.blob);
+  const built=buildSentenceTransferEntries(rows);
   const manifest=await buildAiPracticeTransferFile();
-  entries.push({
+  const entries=built.entries.concat([{
     name:'ai_practice_results.json',
     bytes:zipTextEncoder.encode(JSON.stringify(manifest,null,2))
-  });
-  return {...base,blob:createStoreZip(entries),aiPracticeResultCount:manifest.count};
-}
-
-function installAiPracticeExportHooks(){
-  const zipButton=$('#btn-export-zip');
-  if(zipButton){
-    zipButton.onclick=async event=>{
-      event.preventDefault();
-      const button=event.currentTarget;
-      const originalLabel=button.textContent;
-      button.disabled=true;
-      button.textContent='ZIP作成中…';
-      try{
-        const rows=await getAll();
-        if(rows.length===0){ alert('エクスポートする例文がありません。'); return; }
-        const result=await createSentenceTransferZipWithAiResults(rows);
-        const filename=`speaknote_sentences_${aiPracticeLocalDate()}.zip`;
-        const delivery=await shareOrDownloadZip(result.blob,filename);
-        if(delivery==='downloaded'){
-          alert(`ZIPを保存しました。\n例文：${rows.length}件\nAI練習結果：${result.aiPracticeResultCount||0}件${Number.isFinite(result.imageCount)?`\n画像：${result.imageCount}件`:''}`);
-        }
-        if(delivery!=='cancelled'&&result.fallbackImageCount>0){
-          alert(`${result.fallbackImageCount}件の画像は個別ファイルへ変換できなかったため、sentences.json内に元の画像データを保持しました。`);
-        }
-      }catch(error){
-        console.error('ZIP export error',error);
-        alert('ZIPの作成に失敗しました。端末の空き容量を確認して、もう一度お試しください。');
-      }finally{
-        button.disabled=false;
-        button.textContent=originalLabel;
-      }
-    };
-  }
-
-  const jsonButton=$('#btn-export');
-  if(jsonButton){
-    jsonButton.onclick=async ()=>{
-      try{
-        const [data,aiPracticeResults]=await Promise.all([getAll(),getAllAiPracticeResults()]);
-        const safe=data.map(({recBlob,recType,recDurationMs,recExpiresAt,recUpdatedAt,...rest})=>rest);
-        const history=aiPracticeResults.map(({id,...rest})=>rest);
-        const blob=new Blob([JSON.stringify({sentences:safe,aiPracticeResults:history},null,2)],{type:'application/json'});
-        const a=document.createElement('a');
-        a.href=URL.createObjectURL(blob);
-        a.download=`speaknote_backup_${aiPracticeLocalDate()}.json`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }catch(error){
-        console.error('JSON export error',error);
-        alert('JSONバックアップの作成に失敗しました。');
-      }
-    };
-  }
-}
-
-async function readAiPracticeImportPayload(file){
-  const name=String(file?.name||'').toLowerCase();
-  if(name.endsWith('.json')||String(file?.type||'').includes('json')){
-    const value=JSON.parse(await file.text());
-    if(!Array.isArray(value?.sentences)) return null;
-    return {
-      sentences:value.sentences,
-      results:Array.isArray(value.aiPracticeResults)?value.aiPracticeResults:[]
-    };
-  }
-  if(name.endsWith('.zip')||String(file?.type||'').includes('zip')){
-    const entries=await extractStoredZipEntries(file);
-    const decoder=new TextDecoder('utf-8');
-    const sentenceEntry=entries.find(entry=>entry.name==='sentences.json');
-    if(!sentenceEntry) return null;
-    const sentenceManifest=JSON.parse(decoder.decode(sentenceEntry.bytes));
-    if(!Array.isArray(sentenceManifest?.sentences)) return null;
-    const resultEntry=entries.find(entry=>entry.name==='ai_practice_results.json');
-    let results=[];
-    if(resultEntry){
-      const resultManifest=JSON.parse(decoder.decode(resultEntry.bytes));
-      if(resultManifest?.format===AI_PRACTICE_BACKUP_FORMAT&&Number(resultManifest.schemaVersion)===1&&Array.isArray(resultManifest.results)){
-        results=resultManifest.results;
-      }
-    }
-    return {sentences:sentenceManifest.sentences,results};
-  }
-  return null;
-}
-
-async function waitForSentenceImportSettled(beforeRows){
-  const beforeKey=(beforeRows||[]).map(row=>String(row.id)).sort().join('|');
-  let lastKey=beforeKey;
-  let stable=0;
-  let changed=false;
-  let latest=beforeRows||[];
-  for(let i=0;i<48;i++){
-    await new Promise(resolve=>setTimeout(resolve,250));
-    try{ latest=await getAll(); }catch(_){ continue; }
-    const key=latest.map(row=>String(row.id)).sort().join('|');
-    if(key!==beforeKey) changed=true;
-    if(changed&&key===lastKey) stable++;
-    else stable=0;
-    lastKey=key;
-    if(changed&&stable>=2) break;
-  }
-  return {rows:latest,changed};
-}
-
-function installAiPracticeImportHooks(){
-  document.addEventListener('change',event=>{
-    const input=event.target;
-    if(!(input instanceof HTMLInputElement)||input.type!=='file') return;
-    const file=input.files?.[0];
-    if(!file) return;
-    const name=String(file.name||'').toLowerCase();
-    if(!name.endsWith('.json')&&!name.endsWith('.zip')) return;
-
-    let beforeRowsPromise;
-    try{ beforeRowsPromise=getAll().catch(()=>null); }catch(_){ beforeRowsPromise=Promise.resolve(null); }
-    const payloadPromise=readAiPracticeImportPayload(file).catch(error=>{
-      console.warn('AI practice import metadata skipped',error);
-      return null;
-    });
-
-    void (async()=>{
-      const [beforeRows,payload]=await Promise.all([beforeRowsPromise,payloadPromise]);
-      if(!beforeRows||!payload) return;
-      const settled=await waitForSentenceImportSettled(beforeRows);
-      if(!settled.changed) return;
-      const {map,replace}=buildAiPracticeIdMap(payload.sentences,beforeRows,settled.rows);
-      if(replace) await clearAiPracticeResults();
-      if(payload.results.length) await restoreImportedAiPracticeResults(payload.results,map);
-      await pruneAiPracticeOrphans();
-    })();
-  },true);
+  }]);
+  return {
+    blob:createStoreZip(entries),
+    imageCount:built.imageCount,
+    fallbackImageCount:built.fallbackImageCount,
+    aiPracticeResultCount:manifest.count
+  };
 }
 
 function installAiPracticeDetailHooks(){
@@ -11543,13 +11617,21 @@ function installAiPracticePromptExtension(){
   if(typeof buildAiPracticePrompt!=='function') return;
   const baseBuildAiPracticePrompt=buildAiPracticePrompt;
   buildAiPracticePrompt=function(row={},options={}){
-    const sentenceId=String(row?.id??'').trim();
+    // 解決順は row.id → detailSentenceId → currentDetailId の固定順。
+    // 最初に空でない値が取れた時点で確定し、以降は参照しない。
+    const sentenceId=(()=>{
+      const fromRow=String(row?.id??'').trim();
+      if(fromRow) return fromRow;
+      const fromState=String(aiPracticeResultState.detailSentenceId??'').trim();
+      if(fromState) return fromState;
+      if(typeof currentDetailId==='undefined'||currentDetailId==null) return '';
+      return String(currentDetailId).trim();
+    })();
     const mode=String(options?.mode||$('#ai-practice-mode')?.value||'feedback');
     const focus=String(options?.focus||$('#ai-practice-focus')?.value||'overall');
     const practiceDate=aiPracticeLocalDate();
 
     aiPracticeResultState.currentSentenceId=sentenceId;
-    aiPracticeResultState.currentPracticeDate=practiceDate;
     aiPracticeResultState.currentMode=isAllowedAiPracticeMode(mode)?mode:'feedback';
     aiPracticeResultState.currentFocus=isAllowedAiPracticeFocus(focus)?focus:'overall';
 
@@ -11561,12 +11643,17 @@ function installAiPracticePromptExtension(){
 
   if(typeof openAiPracticeDialog==='function'){
     const baseOpenAiPracticeDialog=openAiPracticeDialog;
-    openAiPracticeDialog=function(row,...args){
-      if(row&&row.id!=null){
-        aiPracticeResultState.currentSentenceId=String(row.id);
-        aiPracticeResultState.detailSentenceId=String(row.id);
+    // 本体は引数を取らない非同期関数なので、currentDetailId から対象を決める。
+    // UIの初期化は本体の完了後に行い、何度呼んでも同じ結果になるようにする。
+    openAiPracticeDialog=async function(...args){
+      const detailId=(typeof currentDetailId!=='undefined'&&currentDetailId!=null)
+        ?String(currentDetailId).trim()
+        :'';
+      if(detailId){
+        aiPracticeResultState.currentSentenceId=detailId;
+        aiPracticeResultState.detailSentenceId=detailId;
       }
-      const result=baseOpenAiPracticeDialog.call(this,row,...args);
+      const result=await baseOpenAiPracticeDialog.apply(this,args);
       ensureAiPracticeImportUi();
       const fallback=$('#ai-practice-result-fallback');
       const textarea=$('#ai-practice-result-json');
@@ -11585,8 +11672,6 @@ function initializeAiPracticeResultFeature(){
   ensureAiPracticeImportUi();
   installAiPracticePromptExtension();
   installAiPracticeDetailHooks();
-  installAiPracticeExportHooks();
-  installAiPracticeImportHooks();
   setTimeout(()=>void pruneAiPracticeOrphans(),1200);
 }
 
@@ -11616,9 +11701,7 @@ window.__SpeakNoteTest = {
   importedImageMimeType,
   buildAiPracticePrompt,
   parseAiPracticeResult,
-  normalizeAiPracticeStoredRecord,
-  sentenceImportSignature,
-  buildAiPracticeIdMap
+  normalizeAiPracticeStoredRecord
 };
 </script>
 
