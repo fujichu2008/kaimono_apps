@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-appstudiomobile-v2-a39b5119576c485ab10e";
+const CACHE_NAME = "appstudio-pwa-appstudiomobile-v2-f32c70fcfd8565136bfc";
 const CACHE_PREFIX = "appstudio-pwa-appstudiomobile-v2-";
 const PRECACHE_URLS = [
     "./",
