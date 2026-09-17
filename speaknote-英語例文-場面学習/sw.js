@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-speaknote-英語例文-場面学習-55b2029efb54914c83ac";
+const CACHE_NAME = "appstudio-pwa-speaknote-英語例文-場面学習-aa6dff1d0666ccfd5895";
 const CACHE_PREFIX = "appstudio-pwa-speaknote-英語例文-場面学習-";
 const PRECACHE_URLS = [
     "./",
