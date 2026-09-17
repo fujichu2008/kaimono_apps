@@ -5658,7 +5658,7 @@ function buildAiPracticePrompt(row={}, options={}){
       '音素単位の精密評価、根拠のない100点評価、聞こえていない音声についての推測はしないでください。'
     ].join('\n'),
     conversationInstruction,
-    'フィードバックは簡潔にしてください。ユーザーの発話練習時間を、あなたの説明時間より長くしてください。\n\n【フィードバックJSONの音声出力】\nユーザーが練習終了後に「フィードバックjson」「フィードバックJSON」など、SpeakNoteへ保存するためのフィードバックJSONを求めた場合は、JSON本文を省略せず画面にテキストとして表示してください。ただし、JSON本文そのものは音声で読み上げないでください。音声出力が利用できる場合もJSONのキー名・値・記号を読み上げず、必要であれば「フィードバックJSONを表示しました。」とだけ短く音声で伝えてください。\n\nJSONはSpeakNoteがそのまま機械的に読み込める厳密なJSONとして出力してください。すべてのキー名と文字列値には必ずASCIIの半角ダブルクォート（"）だけを使用し、“ ” や ‘ ’ などのスマートクォート・全角引用符へ置き換えないでください。Markdownの\`\`\`jsonなどのコードフェンス、JSONの前後の説明文、コメント、末尾カンマは一切付けず、JSONオブジェクトそのものだけを表示してください。scene、mode、focus、completed、originalSpeech、strengths、improvements、correctedSpeech、mainFeedback、audioEvaluationの既存構造とデータ型を維持し、SpeakNoteが追加変換なしでJSON.parseできる形式にしてください。'
+    'フィードバックは簡潔にしてください。ユーザーの発話練習時間を、あなたの説明時間より長くしてください。\n\n【フィードバックJSONの音声出力】\nユーザーが練習終了後に「フィードバックjson」「フィードバックJSON」など、SpeakNoteへ保存するためのフィードバックJSONを求めた場合は、後段の「SpeakNoteへ練習結果を保存するための最終JSON」で指定された保存用JSONだけを出力してください。JSON本文は省略せず画面にテキストとして表示してください。ただし、JSON本文そのものは音声で読み上げないでください。音声出力が利用できる場合もJSONのキー名・値・記号を読み上げず、必要であれば「フィードバックJSONを表示しました。」とだけ短く音声で伝えてください。保存用JSONの構造・キー・データ型は後段の最終JSONセクションに従い、ここでは別形式を定義しないでください。'
   ].join('\n\n');
 }
 
@@ -10548,6 +10548,42 @@ function isAllowedAiPracticeFocus(value){
   return typeof AI_PRACTICE_FOCUS_LABELS==='object'&&AI_PRACTICE_FOCUS_LABELS!==null&&Object.prototype.hasOwnProperty.call(AI_PRACTICE_FOCUS_LABELS,key);
 }
 
+/* 外部AIの表示用ラベルとSpeakNote内部コードの境界。
+   保存時は必ず内部コードへ正規化し、未知の値は推測せず拒否する。 */
+function normalizeAiPracticeModeValue(value){
+  const text=String(value??'').trim();
+  const aliases={
+    feedback:'feedback',
+    conversation:'conversation',
+    '発話添削':'feedback',
+    '会話練習':'conversation'
+  };
+  const normalized=aliases[text];
+  if(!normalized) throw new Error('練習モードが不正です');
+  return normalized;
+}
+
+function normalizeAiPracticeFocusValue(value){
+  const text=String(value??'').trim();
+  const aliases={
+    overall:'overall',
+    fluency:'fluency',
+    grammar:'grammar',
+    naturalness:'naturalness',
+    pronunciation:'pronunciation',
+    toeic:'toeic',
+    '総合':'overall',
+    '流暢さ':'fluency',
+    '文法':'grammar',
+    '自然な表現':'naturalness',
+    '発音・イントネーション':'pronunciation',
+    'TOEIC Speaking':'toeic'
+  };
+  const normalized=aliases[text];
+  if(!normalized) throw new Error('重点項目が不正です');
+  return normalized;
+}
+
 const aiPracticeResultState={
   currentSentenceId:'',
   currentMode:'feedback',
@@ -10609,10 +10645,8 @@ function normalizeAiPracticeStoredRecord(value,{expectedSentenceId=''}={}){
   const practiceDate=String(value.practiceDate??'').trim();
   if(!isValidPracticeDate(practiceDate)) throw new Error('練習日が不正です');
 
-  const mode=String(value.mode??'').trim();
-  const focus=String(value.focus??'').trim();
-  if(!isAllowedAiPracticeMode(mode)) throw new Error('練習モードが不正です');
-  if(!isAllowedAiPracticeFocus(focus)) throw new Error('重点項目が不正です');
+  const mode=normalizeAiPracticeModeValue(value.mode);
+  const focus=normalizeAiPracticeFocusValue(value.focus);
 
   if(!Array.isArray(value.feedback)||value.feedback.length<1||value.feedback.length>3){
     throw new Error('AI指摘は1〜3件にしてください');
@@ -10810,6 +10844,13 @@ function normalizeAiFeedbackText(rawText){
 }
 
 function parseAiFeedback(rawText){
+  if(typeof rawText!=='string'){
+    throw new Error('AIフィードバックが空です');
+  }
+  if(rawText.length>AI_PRACTICE_RESULT_MAX_JSON){
+    throw new Error('AI練習結果のJSONが大きすぎます');
+  }
+
   const normalized=normalizeAiFeedbackText(rawText);
 
   try{
@@ -10895,6 +10936,9 @@ function validateAiFeedback(data){
 function normalizeAiFeedbackData(data,expectedSentenceId='',expectedScene=''){
   validateAiFeedback(data);
 
+  const mode=normalizeAiPracticeModeValue(data.mode);
+  const focus=normalizeAiPracticeFocusValue(data.focus);
+
   if(data.sentenceId!=null&&typeof data.sentenceId!=='string'){
     throw new Error('sentenceIdが不正です');
   }
@@ -10968,8 +11012,8 @@ function normalizeAiFeedbackData(data,expectedSentenceId='',expectedScene=''){
     schemaVersion:1,
     sentenceId,
     practiceDate,
-    mode:data.mode.trim(),
-    focus:data.focus.trim(),
+    mode,
+    focus,
     feedback,
     summary:data.mainFeedback.trim(),
 
@@ -11013,8 +11057,8 @@ function parseAiPracticeResult(raw,expectedSentenceId='',expectedScene=''){
 function runSpeakNoteAiFeedbackParserSelfTests(){
   const base={
     scene:'休日の過ごし方を説明するとき',
-    mode:'発話添削',
-    focus:'総合',
+    mode:'feedback',
+    focus:'overall',
     completed:true,
     originalSpeech:'On weekends, I usually spend time with my family.',
     strengths:[
@@ -11195,6 +11239,78 @@ function runSpeakNoteAiFeedbackParserSelfTests(){
     }
   );
 
+  run(
+    '日本語mode・focusの内部コード正規化',
+    ()=>{
+      const localized={
+        ...base,
+        mode:'発話添削',
+        focus:'総合'
+      };
+
+      const result=parseAiPracticeResult(
+        JSON.stringify(localized),
+        'self-test-sentence'
+      );
+
+      return result.mode==='feedback'&&
+        result.focus==='overall';
+    }
+  );
+
+  run(
+    '日本語mode・focusのExport・Import互換',
+    ()=>{
+      const localized={
+        ...base,
+        mode:'発話添削',
+        focus:'総合'
+      };
+
+      const converted=parseAiPracticeResult(
+        JSON.stringify(localized),
+        'self-test-sentence'
+      );
+
+      const restored=normalizeAiPracticeStoredRecord(
+        converted,
+        {expectedSentenceId:'self-test-sentence'}
+      );
+
+      return restored.mode==='feedback'&&
+        restored.focus==='overall'&&
+        restored.sentenceId==='self-test-sentence';
+    }
+  );
+
+  run(
+    '内部mode・focusを維持',
+    ()=>{
+      const result=parseAiPracticeResult(
+        JSON.stringify(base),
+        'self-test-sentence'
+      );
+
+      return result.mode==='feedback'&&
+        result.focus==='overall';
+    }
+  );
+
+  run(
+    '未知のmode・focusを拒否',
+    ()=>rejects(
+      JSON.stringify({
+        ...base,
+        mode:'unknown-mode'
+      })
+    )&&rejects(
+      JSON.stringify({
+        ...base,
+        focus:'unknown-focus'
+      })
+    )
+  );
+
   return results;
 }
 
@@ -11348,9 +11464,6 @@ function ensureAiPracticeResultStyles(){
     .ai-practice-history-meta{font-size:11px;color:var(--muted);margin-top:2px}
     .ai-practice-history-feedback{margin:7px 0;padding-left:20px;font-size:13px;line-height:1.55}
     .ai-practice-history-summary{font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
-    #ai-practice-result-fallback[hidden]{display:none!important}
-    #ai-practice-result-fallback{margin-top:10px}
-    #ai-practice-result-json{min-height:130px}
     #ai-practice-result-status{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px}
     #ai-practice-result-status.danger{color:var(--danger,#ff7b7b)}
   `;
@@ -11451,25 +11564,6 @@ function ensureAiPracticeImportUi(){
   button.textContent='練習結果を読み込む';
   copyButton.insertAdjacentElement('afterend',button);
 
-  const fallback=document.createElement('div');
-  fallback.id='ai-practice-result-fallback';
-  fallback.hidden=true;
-  const label=document.createElement('label');
-  label.htmlFor='ai-practice-result-json';
-  label.textContent='AIが最後に出力したJSONを貼り付け';
-  const textarea=document.createElement('textarea');
-  textarea.id='ai-practice-result-json';
-  textarea.placeholder='JSONをここへ貼り付けてください';
-  const actions=document.createElement('div');
-  actions.className='actions';
-  const save=document.createElement('button');
-  save.type='button';
-  save.className='btn ok';
-  save.id='ai-practice-result-save';
-  save.textContent='貼り付けた結果を保存';
-  actions.appendChild(save);
-  fallback.append(label,textarea,actions);
-
   const status=document.createElement('div');
   status.id='ai-practice-result-status';
   status.className='tiny';
@@ -11477,12 +11571,10 @@ function ensureAiPracticeImportUi(){
   status.setAttribute('aria-live','polite');
 
   const promptWrap=$('#ai-practice-prompt-wrap');
-  if(promptWrap) promptWrap.insertAdjacentElement('afterend',fallback);
-  else dialog.appendChild(fallback);
-  fallback.insertAdjacentElement('afterend',status);
+  if(promptWrap) promptWrap.insertAdjacentElement('afterend',status);
+  else dialog.appendChild(status);
 
   button.onclick=()=>void importAiPracticeResultFromClipboard();
-  save.onclick=()=>void saveAiPracticeResultText(textarea.value);
 }
 
 async function saveAiPracticeResultText(raw){
@@ -11495,10 +11587,6 @@ async function saveAiPracticeResultText(raw){
       (aiPracticeRow&&aiPracticeRow.id===sentenceId)?(aiPracticeRow.scene||''):''
     );
     await addAiPracticeResult(record);
-    const fallback=$('#ai-practice-result-fallback');
-    const textarea=$('#ai-practice-result-json');
-    if(fallback) fallback.hidden=true;
-    if(textarea) textarea.value='';
     aiPracticeNotify('AI練習結果を保存しました');
     if(aiPracticeResultState.detailSentenceId===sentenceId){
       await renderAiPracticeHistory(sentenceId);
@@ -11514,15 +11602,13 @@ async function importAiPracticeResultFromClipboard(){
     const raw=await navigator.clipboard.readText();
     await saveAiPracticeResultText(raw);
   }catch(error){
-    if(error?.message!=='clipboard_unavailable') console.warn('AI practice clipboard read error',error);
-    const fallback=$('#ai-practice-result-fallback');
-    const textarea=$('#ai-practice-result-json');
-    if(fallback) fallback.hidden=false;
-    if(textarea){
-      textarea.focus();
-      textarea.select();
+    if(error?.message!=='clipboard_unavailable'){
+      console.warn('AI practice clipboard read error',error);
     }
-    aiPracticeNotify('クリップボードを自動で読めませんでした。JSONを貼り付けて保存してください',true);
+    aiPracticeNotify(
+      'クリップボードを読み取れませんでした。ブラウザの権限を確認して、もう一度押してください。',
+      true
+    );
   }
 }
 
@@ -11625,12 +11711,11 @@ function installAiPracticePromptExtension(){
       }
       const result=await baseOpenAiPracticeDialog.apply(this,args);
       ensureAiPracticeImportUi();
-      const fallback=$('#ai-practice-result-fallback');
-      const textarea=$('#ai-practice-result-json');
       const status=$('#ai-practice-result-status');
-      if(fallback) fallback.hidden=true;
-      if(textarea) textarea.value='';
-      if(status) status.textContent='';
+      if(status){
+        status.textContent='';
+        status.classList.remove('danger');
+      }
       return result;
     };
   }
