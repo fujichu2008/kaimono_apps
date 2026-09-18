@@ -5583,38 +5583,8 @@ const AI_PRACTICE_FOCUS_LABELS = Object.freeze({
 let aiPracticeRow = null;
 
 function buildAiPracticePrompt(row={}, options={}){
-  const mode = Object.prototype.hasOwnProperty.call(
-    AI_PRACTICE_MODE_LABELS,
-    options.mode
-  ) ? options.mode : 'feedback';
-
-  const focus = Object.prototype.hasOwnProperty.call(
-    AI_PRACTICE_FOCUS_LABELS,
-    options.focus
-  ) ? options.focus : 'overall';
-
-  // 保存先の特定は row.id → detailSentenceId → currentDetailId の固定順。
-  // 最初に空でない値が取れた時点で確定し、以降は参照しない。
-  const sentenceId = (()=>{
-    const fromRow = String(row?.id ?? '').trim();
-    if(fromRow) return fromRow;
-    const fromState = String(aiPracticeResultState.detailSentenceId ?? '').trim();
-    if(fromState) return fromState;
-    if(typeof currentDetailId === 'undefined' || currentDetailId == null) return '';
-    return String(currentDetailId).trim();
-  })();
-
-  const rawMode = String(options?.mode || $('#ai-practice-mode')?.value || 'feedback');
-  const rawFocus = String(options?.focus || $('#ai-practice-focus')?.value || 'overall');
-  let storedMode, storedFocus;
-  try{ storedMode = normalizeAiPracticeModeValue(rawMode); }
-  catch(_){ storedMode = 'feedback'; }
-  try{ storedFocus = normalizeAiPracticeFocusValue(rawFocus); }
-  catch(_){ storedFocus = 'overall'; }
-
-  aiPracticeResultState.currentSentenceId = sentenceId;
-  aiPracticeResultState.currentMode = storedMode;
-  aiPracticeResultState.currentFocus = storedFocus;
+  // 保存対象と mode / focus の解決は1か所に集約する
+  const {sentenceId, mode, focus} = resolveAiPracticeSaveTarget(row, options);
 
   const material = {
     scene:String(row.scene || ''),
@@ -5684,13 +5654,12 @@ function buildAiPracticePrompt(row={}, options={}){
     'フィードバックは簡潔にしてください。ユーザーの発話練習時間を、あなたの説明時間より長くしてください。\n\n【フィードバックJSONの音声出力】\nユーザーが練習終了後に「フィードバックjson」「フィードバックJSON」など、SpeakNoteへ保存するためのフィードバックJSONを求めた場合は、後段の「SpeakNoteへ練習結果を保存するための最終JSON」で指定された保存用JSONだけを出力してください。JSON本文は省略せず画面にテキストとして表示してください。ただし、JSON本文そのものは音声で読み上げないでください。音声出力が利用できる場合もJSONのキー名・値・記号を読み上げず、必要であれば「フィードバックJSONを表示しました。」とだけ短く音声で伝えてください。保存用JSONの構造・キー・データ型は後段の最終JSONセクションに従い、ここでは別形式を定義しないでください。'
   ].join('\n\n');
 
-  if(!sentenceId) return body;
-
-  const practiceDate = aiPracticeLocalDate();
-  return `${body}\n\n【SpeakNoteへ練習結果を保存するための最終JSON】\nこのセクションは練習終了時だけ実行してください。練習開始時や途中ではJSONを出力しないでください。\n今回の練習が終了したら、最後の回答の末尾に、次の形式のJSONオブジェクトを1つだけ出力してください。JSONの各キー名と、sentenceId / practiceDate / mode / focus の値は変更しないでください。\n\n{\n  "format": "${AI_PRACTICE_RESULT_FORMAT}",\n  "schemaVersion": ${AI_PRACTICE_RESULT_SCHEMA},\n  "sentenceId": ${JSON.stringify(sentenceId)},\n  "practiceDate": ${JSON.stringify(practiceDate)},\n  "mode": ${JSON.stringify(storedMode)},\n  "focus": ${JSON.stringify(storedFocus)},\n  "feedback": [\n    "今回の練習で特に重要だった改善点1",\n    "改善点2",\n    "改善点3"\n  ],\n  "summary": "今回の練習後の短い総評"\n}\n\nfeedbackは実際の練習内容に基づく重要な指摘だけを1〜3件にしてください。summaryは短く具体的にしてください。会話全文、ユーザーの発話全文、推定TOEICスコア、根拠のない点数評価は入れないでください。音声を実際に評価できない環境では、発音を評価したように断定しないでください。JSON以外の保存用データは追加しないでください。`;
+  const section = buildAiPracticeResultJsonSection(sentenceId, mode, focus);
+  return section ? `${body}\n\n${section}` : body;
 }
 
-function resetAiPracticeFallback(){
+/* プロンプトの手動コピー欄（#ai-practice-prompt-wrap）を初期化する */
+function resetAiPracticePromptFallback(){
   const wrap = $('#ai-practice-prompt-wrap');
   const prompt = $('#ai-practice-prompt');
   const message = $('#ai-practice-message');
@@ -5744,7 +5713,7 @@ async function openAiPracticeDialog(){
       source.style.whiteSpace = 'pre-wrap';
     }
 
-    resetAiPracticeFallback();
+    resetAiPracticePromptFallback();
 
     // AI練習の準備中にTTSだけ残らないよう停止する。録音状態には触れない。
     await stopAllPlayback();
@@ -5755,7 +5724,7 @@ async function openAiPracticeDialog(){
 
     // 追加UIの用意と初期化はダイアログ表示後に行う（何度呼んでも同じ結果になる）
     ensureAiPracticeImportUi();
-    resetAiPracticeFallbackUi();
+    resetAiPracticeResultFallback();
     const status = $('#ai-practice-result-status');
     if(status){
       status.textContent = '';
@@ -5819,11 +5788,11 @@ $('#ai-practice-close')?.addEventListener('click', ()=>{
   const dlg = $('#dlg-ai-practice');
   if(dlg?.open) dlg.close();
 });
-$('#ai-practice-mode')?.addEventListener('change', resetAiPracticeFallback);
-$('#ai-practice-focus')?.addEventListener('change', resetAiPracticeFallback);
+$('#ai-practice-mode')?.addEventListener('change', resetAiPracticePromptFallback);
+$('#ai-practice-focus')?.addEventListener('change', resetAiPracticePromptFallback);
 $('#dlg-ai-practice')?.addEventListener('close', ()=>{
   aiPracticeRow = null;
-  resetAiPracticeFallback();
+  resetAiPracticePromptFallback();
 });
 
 function setPlayToggleLabel(btn, state){
@@ -10620,6 +10589,43 @@ const aiPracticeResultState={
   dbPromise:null
 };
 
+/* 保存対象の例文IDと mode / focus を1か所で解決する。
+   sentenceId は row.id → detailSentenceId → currentDetailId の固定順で、
+   最初に空でない値が取れた時点で確定し、以降は参照しない。 */
+function resolveAiPracticeSaveTarget(row={},options={}){
+  const sentenceId=(()=>{
+    const fromRow=String(row?.id??'').trim();
+    if(fromRow) return fromRow;
+    const fromState=String(aiPracticeResultState.detailSentenceId??'').trim();
+    if(fromState) return fromState;
+    if(typeof currentDetailId==='undefined'||currentDetailId==null) return '';
+    return String(currentDetailId).trim();
+  })();
+
+  const rawMode=String(options?.mode||$('#ai-practice-mode')?.value||'feedback');
+  const rawFocus=String(options?.focus||$('#ai-practice-focus')?.value||'overall');
+
+  let mode,focus;
+  try{ mode=normalizeAiPracticeModeValue(rawMode); }
+  catch(_){ mode='feedback'; }
+  try{ focus=normalizeAiPracticeFocusValue(rawFocus); }
+  catch(_){ focus='overall'; }
+
+  aiPracticeResultState.currentSentenceId=sentenceId;
+  aiPracticeResultState.currentMode=mode;
+  aiPracticeResultState.currentFocus=focus;
+
+  return {sentenceId,mode,focus};
+}
+
+/* 練習結果をSpeakNoteへ保存するための最終JSONセクション。
+   保存対象を特定できないときは付与しない。 */
+function buildAiPracticeResultJsonSection(sentenceId,mode,focus){
+  if(!sentenceId) return '';
+  const practiceDate=aiPracticeLocalDate();
+  return `【SpeakNoteへ練習結果を保存するための最終JSON】\nこのセクションは練習終了時だけ実行してください。練習開始時や途中ではJSONを出力しないでください。\n今回の練習が終了したら、最後の回答の末尾に、次の形式のJSONオブジェクトを1つだけ出力してください。JSONの各キー名と、sentenceId / practiceDate / mode / focus の値は変更しないでください。\n\n{\n  "format": "${AI_PRACTICE_RESULT_FORMAT}",\n  "schemaVersion": ${AI_PRACTICE_RESULT_SCHEMA},\n  "sentenceId": ${JSON.stringify(sentenceId)},\n  "practiceDate": ${JSON.stringify(practiceDate)},\n  "mode": ${JSON.stringify(mode)},\n  "focus": ${JSON.stringify(focus)},\n  "feedback": [\n    "今回の練習で特に重要だった改善点1",\n    "改善点2",\n    "改善点3"\n  ],\n  "summary": "今回の練習後の短い総評"\n}\n\nfeedbackは実際の練習内容に基づく重要な指摘だけを1〜3件にしてください。summaryは短く具体的にしてください。会話全文、ユーザーの発話全文、推定TOEICスコア、根拠のない点数評価は入れないでください。音声を実際に評価できない環境では、発音を評価したように断定しないでください。JSON以外の保存用データは追加しないでください。`;
+}
+
 function aiPracticeResultUid(){
   try{ return uid(); }catch(_){
     return 'air_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,9);
@@ -11718,8 +11724,8 @@ function ensureAiPracticeImportUi(){
   );
 }
 
-/* 非常用フォールバックの表示制御 */
-function showAiPracticeFallback(){
+/* 練習結果の手動貼り付け欄（#ai-practice-result-fallback）の表示制御 */
+function showAiPracticeResultFallback(){
   const fallback=$('#ai-practice-result-fallback');
   const textarea=$('#ai-practice-result-json');
   if(fallback) fallback.hidden=false;
@@ -11729,7 +11735,7 @@ function showAiPracticeFallback(){
   }
 }
 
-function resetAiPracticeFallbackUi(){
+function resetAiPracticeResultFallback(){
   const fallback=$('#ai-practice-result-fallback');
   const textarea=$('#ai-practice-result-json');
   if(fallback) fallback.hidden=true;
@@ -11758,7 +11764,7 @@ async function saveAiPracticeResultText(raw){
     };
 
     await addAiPracticeResult(savableRecord);
-    resetAiPracticeFallbackUi();
+    resetAiPracticeResultFallback();
     aiPracticeNotify('AI練習結果を保存しました');
     if(aiPracticeResultState.detailSentenceId===sentenceId){
       await renderAiPracticeHistory(sentenceId);
@@ -11785,7 +11791,7 @@ async function importAiPracticeResultFromClipboard(){
     if(error?.message!=='clipboard_unavailable'){
       console.warn('AI practice clipboard read error',error);
     }
-    showAiPracticeFallback();
+    showAiPracticeResultFallback();
     aiPracticeNotify(
       'クリップボードを自動で読めませんでした。JSONを貼り付けて保存してください。',
       true
