@@ -12741,6 +12741,69 @@ ${escapeHtml(latestChangeText)}</div>
                 libraryContainer.appendChild(projectHeader);
 
                 const appList = projects.get(selectedProject) || [];
+                const selectedVersionIds = new Set();
+
+                const bulkToolbar = document.createElement('div');
+                bulkToolbar.style.cssText =
+                    'display:grid; grid-template-columns:auto 1fr; gap:8px; align-items:center; margin:0 0 12px 10px;';
+
+                const selectAllButton = document.createElement('button');
+                selectAllButton.type = 'button';
+                selectAllButton.className = 'btn-action';
+                selectAllButton.textContent = '全選択';
+                selectAllButton.style.cssText =
+                    'min-height:42px; padding:8px 12px; border-radius:8px; font-size:12px;';
+
+                const deleteSelectedButton = document.createElement('button');
+                deleteSelectedButton.type = 'button';
+                deleteSelectedButton.className = 'btn-del';
+                deleteSelectedButton.textContent = '選択したバージョンを削除';
+                deleteSelectedButton.disabled = true;
+                deleteSelectedButton.style.cssText =
+                    'min-height:42px; padding:8px 12px; border-radius:8px; font-size:12px; font-weight:600;';
+
+                bulkToolbar.append(selectAllButton, deleteSelectedButton);
+                libraryContainer.appendChild(bulkToolbar);
+
+                const versionCheckboxes = [];
+
+                const syncVersionSelectionUi = () => {
+                    const selectedCount = selectedVersionIds.size;
+                    deleteSelectedButton.disabled = selectedCount === 0;
+                    deleteSelectedButton.textContent = selectedCount > 0
+                        ? `選択した${selectedCount}件を削除`
+                        : '選択したバージョンを削除';
+
+                    const allSelected =
+                        versionCheckboxes.length > 0
+                        && selectedCount === versionCheckboxes.length;
+                    selectAllButton.textContent = allSelected
+                        ? '選択解除'
+                        : '全選択';
+                };
+
+                selectAllButton.onclick = () => {
+                    const shouldSelectAll =
+                        selectedVersionIds.size !== versionCheckboxes.length;
+
+                    selectedVersionIds.clear();
+                    versionCheckboxes.forEach(({ input, appId }) => {
+                        input.checked = shouldSelectAll;
+                        if (shouldSelectAll) {
+                            selectedVersionIds.add(appId);
+                        }
+                    });
+
+                    syncVersionSelectionUi();
+                };
+
+                deleteSelectedButton.onclick = () => {
+                    deleteSelectedVersions(
+                        Array.from(selectedVersionIds),
+                        selectedProject
+                    );
+                };
+
                 appList.forEach(app => {
                     const savedAtLabel = formatLibrarySavedAt(app);
                     const versionChangeText = getVersionChangePreview(app);
@@ -12752,11 +12815,13 @@ ${escapeHtml(latestChangeText)}</div>
                     el.style.marginLeft = '10px';
                     el.innerHTML = `
                         <div class="lib-header">
-                            <div class="lib-title" style="font-size: 13px; color: #ccc;">🕒 ${escapeHtml(savedAtLabel)}</div>
+                            <label style="display:flex; align-items:center; gap:8px; min-width:0; cursor:pointer;">
+                                <input type="checkbox" data-lib-action="select-version" style="width:auto; margin:0; flex:0 0 auto;">
+                                <span class="lib-title" style="font-size:13px; color:#ccc; min-width:0;">🕒 ${escapeHtml(savedAtLabel)}</span>
+                            </label>
                             <div class="lib-actions">
                                 <button class="btn-load" data-lib-action="load">読込</button>
                                 <button class="btn-action" data-lib-action="share">✉️</button>
-                                                                <button class="btn-del" data-lib-action="delete-version">×</button>
                             </div>
                         </div>
                         <div class="lib-meta">
@@ -12766,13 +12831,32 @@ ${escapeHtml(latestChangeText)}</div>
 ${escapeHtml(versionChangeText)}</div>
                     `;
                     const appIdForActions = app.id;
-                    const projectForActions = selectedProject;
+                    const selectionInput = el.querySelector(
+                        '[data-lib-action="select-version"]'
+                    );
+
+                    if (selectionInput) {
+                        versionCheckboxes.push({
+                            input: selectionInput,
+                            appId: appIdForActions
+                        });
+                        selectionInput.addEventListener('change', () => {
+                            if (selectionInput.checked) {
+                                selectedVersionIds.add(appIdForActions);
+                            } else {
+                                selectedVersionIds.delete(appIdForActions);
+                            }
+                            syncVersionSelectionUi();
+                        });
+                    }
+
                     bindLibraryItemAction(el, 'load', () => loadApp(appIdForActions));
                     bindLibraryItemAction(el, 'share', () => shareApp(appIdForActions));
-                    bindLibraryItemAction(el, 'delete-version', () => deleteApp(appIdForActions, projectForActions));
                     bindLibraryItemAction(el, 'history', () => showHistoryModal(appIdForActions));
                     libraryContainer.appendChild(el);
                 });
+
+                syncVersionSelectionUi();
             }
         }
 
@@ -12949,14 +13033,29 @@ ${escapeHtml(versionChangeText)}</div>
             pushOpenModal('history-modal');
         }
 
-                async function deleteApp(id, currentProjectName = null) {
-            if(!confirm("本当に削除しますか？")) return;
-            try {
-                await idb.delete(id);
-            } catch (error) {
-                console.error("アプリの削除に失敗しました:", error);
-                showToast("削除に失敗しました");
+                async function deleteSelectedVersions(ids, currentProjectName = null) {
+            const uniqueIds = [...new Set(Array.isArray(ids) ? ids : [])]
+                .filter(id => id !== undefined && id !== null && id !== DRAFT_ID);
+
+            if (!uniqueIds.length) {
+                showToast("削除するバージョンを選択してください");
+                return;
             }
+
+            if (!confirm(`選択した${uniqueIds.length}件のバージョンを削除しますか？\nこの操作は元に戻せません。`)) {
+                return;
+            }
+
+            try {
+                await idb.runTransaction('readwrite', store => {
+                    uniqueIds.forEach(id => store.delete(id));
+                });
+                showToast(`${uniqueIds.length}件のバージョンを削除しました`);
+            } catch (error) {
+                console.error("バージョンの一括削除に失敗しました:", error);
+                showToast("バージョンの一括削除に失敗しました");
+            }
+
             renderLibrary(currentProjectName);
         }
 
