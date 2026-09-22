@@ -1,6 +1,12 @@
 <!doctype html>
 <html lang="ja">
 <head>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#007acc">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>デジ単</title>
@@ -473,11 +479,6 @@
     .speakable:not(:empty)::after { content: '🔊'; font-size: 0.8em; margin-left: 6px; opacity: 0.6; display: inline-block; vertical-align: middle; filter: grayscale(100%) opacity(0.7); }
     .speakable:not(:empty):hover::after { filter: none; opacity: 1; transform: scale(1.1); transition: transform 0.2s; }
   </style>
-<!-- APPSTUDIO_PWA_HEAD_START -->
-<link rel="manifest" href="./manifest.webmanifest">
-<meta name="theme-color" content="#007acc">
-<link rel="apple-touch-icon" href="./icons/icon-192.png">
-<!-- APPSTUDIO_PWA_HEAD_END -->
 </head>
 <body>
   <div id="appSplash" class="app-splash" role="status" aria-label="デジ単">
@@ -9395,9 +9396,26 @@ function startInitialView(){
     const defaultDesc = (typeVal === 'idiom') ? '一般的な重要熟語' : '一般的な重要単語';
     const desc = $('#ivDesc').value || defaultDesc;
    
-    // 除外リスト作成（全レベル・全単語を対象）
-    const allWords = Array.from(new Set(WORDS.map(w => w.en)));
-    const excludeList = allWords.join(', ');
+    // 選択中の単語帳に既にある単語だけを除外対象にする。
+    // 表記ゆれによる重複も避けるため、大文字小文字・全半角・連続空白を正規化して判定する。
+    const normalizeIvWord = value => String(value||'')
+      .normalize('NFKC')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+    const excludeSeen = new Set();
+    const existingWordsInLevel = [];
+    WORDS.forEach(w => {
+      if(String(w.level||'') !== String(lvlVal)) return;
+      const en = String(w.en||'').trim();
+      const key = normalizeIvWord(en);
+      if(!key || excludeSeen.has(key)) return;
+      excludeSeen.add(key);
+      existingWordsInLevel.push(en);
+    });
+    const excludeList = existingWordsInLevel.length
+      ? existingWordsInLevel.join(', ')
+      : 'なし';
 
     const labelItem = (typeVal === 'idiom') ? '英熟語' : '英単語';
     const labelData = (typeVal === 'idiom') ? '学習用英熟語データ' : '学習用英単語データ';
@@ -9417,7 +9435,7 @@ function startInitialView(){
 - データ件数: ${count}件
 - レベル: ${lvlVal}
 - 内容の指示: ${desc}
-- 以下の${labelItem}は既にアプリにあるため除外してください: ${excludeList}
+- 「${lvlVal}」単語帳に既に登録されている以下の${labelItem}は除外してください。大文字小文字・全半角・余分な空白だけが異なる表記も重複として扱い、生成しないでください: ${excludeList}
 - 各オブジェクトのキー:
   "level": "${lvlVal}"
   "en": ${labelItem}
@@ -9518,10 +9536,10 @@ ${exampleJson}`;
       const saved = localStorage.getItem('dejitan_custom_words');
       let currentCustom = saved ? JSON.parse(saved) : [];
 
-            // AIコーチレベルの上書き・自動追加ロジック
+      // AIコーチだけは従来どおり今回の提案内容へ入れ替える。
+      // 手動作成した既存単語帳は削除せず、必ず既存データへ追記する。
       const hasAiCoach = pendingCustomWords.some(w => w.level === 'AIコーチ');
       if (hasAiCoach) {
-        // 既存のAIコーチレベルの単語を削除（上書き準備）
         currentCustom = currentCustom.filter(w => w.level !== 'AIコーチ');
         // 最新のカスタムレベルリストをロードしてチェック
         let currentLvList = JSON.parse(localStorage.getItem('dejitan_custom_levels')||'[]');
@@ -9531,9 +9549,46 @@ ${exampleJson}`;
         }
       }
 
-      const newSet = currentCustom.concat(pendingCustomWords);
+      // AIが除外指示を無視した場合にも備え、
+      // 同一単語帳内では表記を正規化して重複登録を防ぐ。
+      const normalizeKeyPart = value => String(value||'')
+        .normalize('NFKC')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+      const wordBookKey = word =>
+        normalizeKeyPart(word.level) + '\u0000' + normalizeKeyPart(word.en);
+
+      const existingKeys = new Set(
+        currentCustom
+          .filter(w => w && typeof w === 'object')
+          .map(wordBookKey)
+      );
+      const wordsToAdd = [];
+      let duplicateCount = 0;
+
+      pendingCustomWords.forEach(word => {
+        const key = wordBookKey(word);
+        if(!normalizeKeyPart(word.en) || existingKeys.has(key)){
+          duplicateCount++;
+          return;
+        }
+        existingKeys.add(key);
+        wordsToAdd.push(word);
+      });
+
+      if(!wordsToAdd.length){
+        pendingCustomWords = [];
+        alert('追加できる新しい単語がありません。既存単語帳との重複を確認してください。');
+        return;
+      }
+
+      const newSet = currentCustom.concat(wordsToAdd);
       localStorage.setItem('dejitan_custom_words', JSON.stringify(newSet));
-      alert('単語を追加しました！アプリをリロードして反映させます。');
+      const duplicateMessage = duplicateCount > 0
+        ? `\n${duplicateCount}件の重複単語は追加しませんでした。`
+        : '';
+      alert(`${wordsToAdd.length}件の単語を既存単語帳へ追加しました！${duplicateMessage}\nアプリをリロードして反映させます。`);
       location.reload();
     } catch(e) {
       alert('保存に失敗しました');
