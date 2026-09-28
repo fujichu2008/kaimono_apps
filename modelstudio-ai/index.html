@@ -267,8 +267,12 @@ window.addEventListener('error',e => {
 
 // 10秒たっても起動していない（読み込み中の表示のまま）ときだけ、止まった段階を知らせる
 setTimeout(() => {
+ // 起動完了の合図があれば何もしない（合図がないときだけ、読み込み中の表示を確かめる）
+ if (window.__msStage === 'ready') return;
+
  const panel = document.getElementById('panel');
- if (!panel || !panel.querySelector('[data-startup-loading]')) return;
+ const loading = panel && panel.querySelector('[data-startup-loading]');
+ if (!loading) return;
 
  const stage = window.__msStage;
  const where = !stage
@@ -791,7 +795,18 @@ const state = {
  toastTimer: null,
  modalAction: null,
  modalReturn: null,
- storageError: false,
+ io: {
+  session: 0,
+  saveSerial: 0,
+  saving: null,
+  libraryError: false,
+  draftError: false,
+  draftBlocked: false,
+  restoreNotice: ''
+ },
+ get storageError() {
+  return this.io.libraryError || this.io.draftError;
+ },
  motion: {
   animator: null,
   playing: null,
@@ -829,8 +844,9 @@ const state = {
  uiLevel: 'easy',
  // 固定時は3D表示を残し、編集パネルだけをスクロールする
  pinViewport: false,
- // 3D画面で選択中の部品をドラッグして動かす（horizontal: 水平 / vertical: 上下）
+ // 3D画面で選択中の部品をドラッグして動かす（horizontal: 水平 / vertical: 上下、dragSnap: 方眼に吸着）
  dragMove: true,
+ dragSnap: true,
  dragMode: 'horizontal',
  // かんたん調整の刻みと、連続操作をまとめるための情報
  nudgeStep: 'normal',
@@ -2128,7 +2144,7 @@ function bindOrbit(canvas) {
   const pd = r.partDrag;
 
   if (pd && pd.pointerId === e.pointerId && r.pointers.size === 1) {
-   pd.last = {x:e.clientX,y:e.clientY,shift:e.shiftKey};
+   pd.last = {x:e.clientX,y:e.clientY,shift:e.shiftKey,alt:e.altKey};
    // 5px以上動いてから反映する（それ未満で離せばタップとして扱う）
    if (r.dragStart?.moved) queuePartDrag();
    return;
@@ -2276,7 +2292,7 @@ function startPartDrag(e) {
   const o = r.root.userData.parts[id];
   if (!o) return;
 
-  const p = {x:e.clientX,y:e.clientY,shift:e.shiftKey};
+  const p = {x:e.clientX,y:e.clientY,shift:e.shiftKey,alt:e.altKey};
 
   const hit = pointerRay(p).intersectObjects([r.anchorLayer,r.root],true).find(h => {
    let yes = h.object.visible;
@@ -2306,7 +2322,9 @@ function startPartDrag(e) {
    startHit: null,
    raf: 0,
    changed: false,
-   limit: modelSpan()*10
+   limit: modelSpan()*10,
+   // 吸着の刻み（ドラッグ開始時のかんたん調整の刻み）
+   step: nudgeStepSize()
   };
 
   rebasePartDrag(d);
@@ -2352,7 +2370,15 @@ function applyPartDrag(d) {
  if (delta.length() > d.limit) delta.setLength(d.limit);
 
  const local = o.parent.worldToLocal(d.base.clone().add(delta));
- const pos = local.toArray().map(v => Math.round(v*10000)/10000 || 0);
+
+ // 方眼に吸着: 水平は X・Z、上下は Y だけを刻みの倍数に丸める（Alt 押下中は吸着しない）
+ const snapStep = state.dragSnap && !d.last.alt && d.step > 0 ? d.step : 0;
+
+ const pos = local.toArray().map((v,i) => {
+  const snapThis = snapStep > 0 && (mode === 'vertical' ? i === 1 : i !== 1);
+  const snapped = snapThis ? Math.round(v/snapStep)*snapStep : v;
+  return Math.round(snapped*10000)/10000 || 0;
+ });
  const cur = state.modelSpec.parts[d.id].position;
 
  if (pos.every((v,i) => v === cur[i])) return;
@@ -2390,7 +2416,11 @@ function endPartDrag() {
 
 function saveDragPrefs() {
  try {
-  localStorage.setItem(DRAG_KEY,JSON.stringify({on:state.dragMove,mode:state.dragMode}));
+  localStorage.setItem(DRAG_KEY,JSON.stringify({
+   on: state.dragMove,
+   mode: state.dragMode,
+   snap: state.dragSnap
+  }));
  } catch (_) {}
 }
 
@@ -2413,9 +2443,13 @@ function dragMoveControls() {
     ${chip('horizontal','水平に動かす')}
     ${chip('vertical','上下に動かす')}
    </div>
+   <label>
+    <input type="checkbox" id="dragSnap" ${state.dragSnap ? 'checked' : ''}>
+    方眼に吸着（かんたん調整の刻み）
+   </label>
    <p class="hint">
     選んだ部品を3D画面でドラッグすると動かせます（何もない所をドラッグすると視点が回ります）。
-    PCでは Shift を押しながらドラッグすると上下に動かせます。
+    PCでは Shift を押しながらドラッグすると上下に、Alt を押している間は吸着せずに動かせます。
    </p>
   </div>
  `;
@@ -5709,19 +5743,28 @@ function remember(before) {
  state.redo = [];
 }
 
+function beginEditSession() {
+ state.io.session++;
+ state.io.saving = null;
+ state.io.libraryError = false;
+ state.motion.exported = false;
+}
+
 function markChanged() {
  state.dirty = true;
+ state.motion.exported = false;
  updateHeader();
  scheduleDraft();
 }
 
-function commitSpec(next,{history=true,fit=false}={}) {
+function commitSpec(next,{history=true,fit=false,newSession=false}={}) {
  validateModelSpec(next);
 
  // 現在のSceneを破棄する前に新しいモデルを構築する。
  const candidate = state.runtime ? state.engine.buildModel(next) : null;
 
  if (history) remember(snapshot());
+ if (newSession) beginEditSession();
 
  state.modelSpec = next;
 
@@ -5830,6 +5873,7 @@ function undoRedo(redo=false) {
  to.push({spec:snapshot(),projectId:state.projectId});
  from.pop();
 
+ beginEditSession();
  state.modelSpec = next;
  state.projectId = entry.projectId;
  // 履歴を移動したら確認バーは閉じる（取り消しの基準と食い違わないようにする）
@@ -6894,7 +6938,7 @@ function applyAIText(text) {
  validateModelSpec(s);
 
  // 検証や描画モデルの構築に失敗したら、ここで止まり、現在のモデルと保存先は変わらない
- commitSpec(s,{fit:true});
+ commitSpec(s,{fit:true,newSession:true});
 
  // 完全なモデルは新しい未保存プロジェクトとして扱う（元の保存済みモデルは上書きしない）
  state.projectId = null;
@@ -7166,7 +7210,10 @@ function restoreReviewBase() {
  const next = clone(b.spec);
 
  stopMotion();
- commitSpec(next,{fit: next.meta.id !== state.modelSpec.meta.id});
+ commitSpec(next,{
+  fit: next.meta.id !== state.modelSpec.meta.id,
+  newSession: true
+ });
 
  state.projectId = b.projectId;
  state.dirty = b.dirty;
@@ -7995,7 +8042,7 @@ function readStore() {
 
 // ライブラリを保存する。完了を待てる Promise を返す。
 // localStorage のときはその場で書き込み、失敗すると例外（写しは変えない）
-function writeStore(data,{silent=false}={}) {
+function writeStore(data,{silent=false,forceIds=[]}={}) {
  if (libraryBackend !== 'idb') {
   localStorage.setItem(STORE,JSON.stringify(data));
   libraryData = data;
@@ -8004,6 +8051,23 @@ function writeStore(data,{silent=false}={}) {
 
  // 差分は呼び出し時点の写しと比べて決める（他のタブの追加分は削除しない）
  const diff = libraryDiff(libraryData,data);
+
+ // 明示的な保存は、楽観的な写しとの一致にかかわらず対象を必ず書く。
+ // 直前の保存が失敗しても、同じ内容の再試行を空の差分にしない。
+ const putIds = new Set(diff.puts.map(p => p.projectId));
+ for (const id of new Set(forceIds)) {
+  const record = data.projects.find(p => p.projectId === id);
+  assert(record,'保存対象のプロジェクトが見つかりません');
+  if (!putIds.has(id)) {
+   diff.puts.push(record);
+   putIds.add(id);
+  }
+ }
+
+ // 待機中に呼び出し元が変更しても、書き込む内容は変えない。
+ diff.puts = clone(diff.puts);
+ if (diff.last) diff.last = clone(diff.last);
+
  libraryData = clone(data);
  libPending++;
 
@@ -8011,11 +8075,9 @@ function writeStore(data,{silent=false}={}) {
   try {
    await idbApplyDiff(diff);
   } catch (e) {
-   // 失敗したら保存先から読み直して、写しと画面を実際の状態に合わせる
+   // 後続の保存が待機している間は、その楽観的な写しを消さない。
+   // 全要求が完了してから保存先を読み直す。
    libReloadAgain = true;
-   try {
-    await applyLibraryReload(true);
-   } catch (_) {}
    throw e;
   }
  });
@@ -8075,104 +8137,160 @@ function refreshStorageEstimate() {
   .catch(() => {});
 }
 
-function saveProject() {
+function saveProject({asNew=false}={}) {
  finishLive();
+
+ const io = state.io;
+ let ticket = null;
+ let started = false;
+ let name = state.modelSpec.meta.name;
+
+ const isCurrent = () => ticket
+  && io.session === ticket.session
+  && state.projectId === ticket.projectId
+  && io.saveSerial === ticket.serial;
+
+ const fail = e => {
+  if (!started || isCurrent()) {
+   io.libraryError = true;
+   io.saving = null;
+   state.dirty = true;
+   if (started) writeDraft();
+   updateHeader();
+  }
+
+  showError(Error(
+   '「'+name+'」のライブラリ保存に失敗しました: '
+   +(e?.message || e)
+   +'。「データをコピー」や「ファイルに保存」で控えを取ってください。'
+  ));
+ };
 
  try {
   const data = readStore();
-  const id = state.projectId || uid('project');
-
+  const id = asNew ? uid('project') : state.projectId || uid('project');
+  const saved = state.modelSpec;
   const record = {
    projectId: id,
-   name: state.modelSpec.meta.name,
+   name: saved.meta.name,
    modelSpec: snapshot(),
-   thumb: makeThumbnail(state.modelSpec)
+   thumb: makeThumbnail(saved)
     || data.projects.find(p => p.projectId === id)?.thumb
     || null,
    updatedAt: new Date().toISOString()
   };
 
+  name = record.name;
   const index = data.projects.findIndex(p => p.projectId === id);
-
   if (index < 0) data.projects.push(record);
   else data.projects[index] = record;
-
   data.last = id;
 
-  const saved = state.modelSpec;
-  const pending = writeStore(data,{silent:true});
+  // 同期的な保存失敗では、別名保存の保存先を切り替えない。
+  const pending = writeStore(data,{silent:true,forceIds:[id]});
+
+  if (asNew) beginEditSession();
 
   state.projectId = id;
   state.projects = data.projects;
+  ticket = {
+   session: io.session,
+   projectId: id,
+   serial: ++io.saveSerial,
+   spec: saved
+  };
+  started = true;
+  io.saving = ticket;
 
   const finish = () => {
-   // 保存中にモデルを編集していたら、その編集は未保存のまま残す
-   state.dirty = state.modelSpec !== saved;
-   state.storageError = false;
+   const current = isCurrent();
 
-   writeDraft();
-   updateHeader();
+   if (current) {
+    io.saving = null;
+    io.libraryError = false;
+    state.dirty = state.modelSpec !== ticket.spec;
+    writeDraft();
+    updateHeader();
+    if (state.activeTab === 'model') renderPanel();
+   }
 
-   if (state.activeTab === 'model') renderPanel();
    renderLibraryGrid();
 
-   // 初めて保存に成功したときだけ、ファイル保存も案内する
    let tip = false;
-
    try {
     tip = !localStorage.getItem(SAVE_TIP);
     if (tip) localStorage.setItem(SAVE_TIP,'1');
    } catch (_) {}
 
-   toast(
-    tip
-     ? 'プロジェクトを保存しました。ブラウザのデータを消すと消えます。大切なモデルは『ファイルに保存』もしてください'
-     : 'プロジェクトを保存しました',
-    tip ? 6000 : 2400
-   );
+   let message = '「'+name+'」の保存要求時点の内容をライブラリに保存しました。';
+
+   if (current && state.dirty) {
+    message += 'その後の編集は未保存です。';
+   } else if (!current) {
+    message += '現在の編集画面の保存状態は変更していません。';
+   }
+
+   if (current && io.draftError) {
+    message += '復旧用の一時保存はできていません。';
+   }
+
+   if (tip) {
+    message += '大切なモデルは「ファイルに保存」でも控えを取ってください。';
+   }
+
+   toast(message,tip || !current || state.dirty ? 6000 : 3200);
   };
 
   if (libraryBackend !== 'idb') {
    finish();
-   return;
+   return pending;
   }
 
-  // IndexedDB では書き込みの完了を待ってから保存済みにする
-  toast('保存しています…',8000);
+  // 保存開始時にも保存先をDraftへ記録するが、保存済みにはしない。
+  writeDraft();
+  updateHeader();
+  toast('「'+name+'」を保存しています…',8000);
   renderLibraryGrid();
 
-  pending.then(finish,e => {
-   state.dirty = true;
-   writeDraft();
-   state.storageError = true;
-   updateHeader();
-   showError(Error(
-    '保存できません: '+(e?.message || e)+'。「データをコピー」や「ファイルに保存」で控えを取ってください。'
-   ));
-  });
+  return pending.then(finish,fail);
  } catch (e) {
-  state.storageError = true;
-  showError(Error(
-   '保存できません: '+e.message+'。「データをコピー」で控えを取ってください。'
-  ));
+  fail(e);
+  return Promise.resolve();
  }
 }
 
 function writeDraft() {
+ const io = state.io;
+
+ if (!state.modelSpec) return false;
+
+ // 原文の退避を確認できなかった起動では、pagehideでも上書きしない。
+ if (io.draftBlocked) {
+  io.draftError = true;
+  updateHeader();
+  return false;
+ }
+
  try {
   localStorage.setItem(DRAFT,JSON.stringify({
    projectId: state.projectId,
    modelSpec: state.modelSpec,
-   dirty: state.dirty,
+   // 未完了のライブラリ保存を、復元後に保存済みと誤認しない。
+   dirty: state.dirty || !!io.saving,
    updatedAt: Date.now()
   }));
 
-  state.storageError = false;
+  io.draftError = false;
   updateHeader();
+  return true;
  } catch (e) {
-  state.storageError = true;
-  showError(Error('自動保存できません。「データをコピー」で控えを取ってください。'));
+  io.draftError = true;
+  showError(Error(
+   '復旧用の一時保存ができません。ライブラリ保存の結果とは別のエラーです。'
+   +'「データをコピー」や「ファイルに保存」で控えを取ってください。'
+  ));
   updateHeader();
+  return false;
  }
 }
 
@@ -8183,7 +8301,7 @@ function scheduleDraft() {
 
 function replaceProject(spec,id=null,dirty=true) {
  validateModelSpec(spec);
- commitSpec(spec,{history:false,fit:true});
+ commitSpec(spec,{history:false,fit:true,newSession:true});
 
  state.projectId = id;
  state.undo = [];
@@ -8213,42 +8331,137 @@ function loadProject(id) {
  }
 }
 
-function restoreProject() {
- let chosen = null;
+function preserveInvalidDraft(raw) {
+ const key = DRAFT+'.recovery.'+uid('raw');
 
  try {
-  const data = readStore();
+  localStorage.setItem(key,raw);
+  assert(localStorage.getItem(key) === raw,'退避内容を確認できません');
+  return key;
+ } catch (_) {
+  // 退避できなければ、元のDRAFTへの以後の書き込みを止める。
+  state.io.draftBlocked = true;
+  state.io.draftError = true;
+  return null;
+ }
+}
+
+function restoreProject() {
+ let chosen = null;
+ let data = {projects:[],last:null};
+ let draft = null;
+ let opened = '';
+ const notices = [];
+
+ try {
+  data = readStore();
   state.projects = data.projects;
-
-  const draft = localStorage.getItem(DRAFT);
-
-  if (draft) {
-   const d = parseJSON(draft);
-   const s = normalizeSpec(d.modelSpec);
-
-   validateModelSpec(s);
-   chosen = s;
-
-   state.projectId = d.projectId;
-   state.dirty = !!d.dirty;
-  } else {
-   const p = data.projects.find(x => x.projectId === data.last);
-
-   if (p) {
-    chosen = normalizeSpec(p.modelSpec);
-    validateModelSpec(chosen);
-    state.projectId = p.projectId;
-   }
-  }
  } catch (e) {
-  showError(Error('保存データを復元できません: '+e.message));
+  notices.push('ライブラリを読み込めません: '+e.message);
+  state.io.libraryError = true;
+  state.projects = [];
  }
 
- state.modelSpec = chosen || sampleSpec();
+ // ライブラリが読めない場合もDraftの復元は独立して試す。
+ try {
+  draft = localStorage.getItem(DRAFT);
+ } catch (e) {
+  state.io.draftBlocked = true;
+  state.io.draftError = true;
+  notices.push(
+   '一時保存の原文を読み取れないため、上書きを停止しました: '+e.message
+  );
+ }
 
- if (!chosen) state.dirty = true;
+ if (draft !== null) {
+  try {
+   // ModelSpec本体の上限に、Draftの管理情報分を加える。
+   const d = parseJSON(draft,LIMIT.bytes+4096);
+   assert(obj(d),'一時保存の形式が不正です');
+   assert(
+    d.projectId == null
+     || typeof d.projectId === 'string' && d.projectId.length > 0,
+    '一時保存の保存先IDが不正です'
+   );
+   assert(
+    d.dirty === undefined || typeof d.dirty === 'boolean',
+    '一時保存の保存状態が不正です'
+   );
 
- state.selectedMaterialId = Object.keys(state.modelSpec.materials)[0];
+   const spec = normalizeSpec(d.modelSpec);
+   validateModelSpec(spec);
+
+   const requestedId = d.projectId ?? null;
+   const saved = data.projects.find(p => p.projectId === requestedId);
+   const projectId = saved ? requestedId : null;
+
+   // Draftのdirtyだけを信用せず、保存済み内容との一致も確認する。
+   let sameAsSaved = false;
+   if (saved) {
+    try {
+     const storedSpec = normalizeSpec(saved.modelSpec);
+     validateModelSpec(storedSpec);
+     sameAsSaved = JSON.stringify(storedSpec) === JSON.stringify(spec);
+    } catch (_) {}
+   }
+
+   chosen = {
+    spec,
+    projectId,
+    dirty: !!d.dirty || !sameAsSaved
+   };
+   opened = '復旧用の一時保存から「'+spec.meta.name+'」を開きました。';
+  } catch (e) {
+   const backup = preserveInvalidDraft(draft);
+
+   notices.push('一時保存を復元できません: '+e.message);
+   notices.push(
+    backup
+     ? '不正な一時保存の原文をブラウザ内に退避しました（'+backup+'）。'
+     : '原文を退避できなかったため、一時保存の上書きを停止しています。'
+   );
+  }
+ }
+
+ // 不正なDraftがあっても、最後に開いた保存済みモデルを試す。
+ if (!chosen) {
+  const p = data.projects.find(x => x?.projectId === data.last);
+
+  if (p) {
+   try {
+    assert(
+     typeof p.projectId === 'string' && p.projectId.length > 0,
+     '保存先IDが不正です'
+    );
+    const spec = normalizeSpec(p.modelSpec);
+    validateModelSpec(spec);
+
+    chosen = {spec,projectId:p.projectId,dirty:false};
+    opened = '保存済みの「'+spec.meta.name+'」を開きました。';
+   } catch (e) {
+    notices.push(
+     '最後の保存済みモデルを復元できません: '+e.message
+     +'。元のライブラリデータは削除していません。'
+    );
+   }
+  }
+ }
+
+ if (!chosen) {
+  const spec = sampleSpec();
+  validateModelSpec(spec);
+  chosen = {spec,projectId:null,dirty:true};
+  opened = '代わりに標準サンプルを未保存のモデルとして開きました。';
+ }
+
+ state.modelSpec = chosen.spec;
+ state.projectId = chosen.projectId;
+ state.dirty = chosen.dirty;
+ state.selectedMaterialId = Object.keys(chosen.spec.materials)[0];
+
+ state.io.restoreNotice = notices.length
+  ? notices.join('\n')+'\n'+opened
+  : '';
 }
 
 function replaceGuard(fn) {
@@ -8590,11 +8803,19 @@ function bindMoreMenu() {
 function updateHeader() {
  if (!state.modelSpec) return;
 
+ const io = state.io;
+ const errors = [
+  io.libraryError ? 'ライブラリ保存失敗' : '',
+  io.draftError
+   ? io.draftBlocked ? '原文保護のため一時保存停止' : '一時保存失敗'
+   : ''
+ ].filter(Boolean);
+
  $('modelTitle').textContent = state.modelSpec.meta.name+' · '+(
-  state.storageError ? '保存不可'
-   : state.dirty ? '未保存（一時保存中）'
+  io.saving ? 'ライブラリ保存中'
+   : state.dirty ? '未保存'
    : '保存済み'
- );
+ )+(errors.length ? ' · '+errors.join(' / ') : '');
 
  $('undoBtn').disabled = !state.undo.length;
  $('redoBtn').disabled = !state.redo.length;
@@ -8808,6 +9029,7 @@ function renderLibrary() {
    <div class="row">
     ${button('libraryExport','すべて書き出す')}
     ${button('libraryImport','まとめて読み込む')}
+    <span id="libraryLegacySlot">${libraryLegacyKey ? button('libraryLegacy','移行前の控えを保存') : ''}</span>
    </div>
    <input type="file" id="libraryFile" accept=".json,application/json" hidden>
    <p class="hint">カードをタップすると、そのモデルを開いて編集画面に戻ります。</p>
@@ -8846,8 +9068,13 @@ function openLibrary() {
  libraryBackground().forEach(el => el.setAttribute('inert',''));
 
  renderLibrary();
- $('libraryScreen').hidden = false;
- $('libraryScreen').scrollTop = 0;
+
+ const libScreen = $('libraryScreen');
+ libScreen.hidden = false;
+ libScreen.scrollTop = 0;
+
+ // 移行前の控え（IndexedDB 内）があれば、保存ボタンを出す
+ checkLegacyBackups();
 
  setTimeout(() => $('libraryBack')?.focus(),0);
 }
@@ -8873,8 +9100,53 @@ function closeLibrary() {
 }
 
 // ------------------------------------------------------------
-// ライブラリの管理（名前変更・複製・一括書き出し／読み込み）
+// ライブラリの管理（名前変更・複製・一括書き出し／読み込み・移行前の控え）
 // ------------------------------------------------------------
+
+// 移行前の控え（kv ストアの LIB_LEGACY で始まるキー）のうち最新のもの
+let libraryLegacyKey = null;
+
+function checkLegacyBackups() {
+ libraryLegacyKey = null;
+ if (libraryBackend !== 'idb' || !libDb) return;
+
+ idbRequest('readonly',s => s.getAllKeys())
+  .then(keys => {
+   const stamp = k => Number(k.slice(LIB_LEGACY.length)) || 0;
+   const list = (keys || [])
+    .filter(k => typeof k === 'string' && k.startsWith(LIB_LEGACY))
+    .sort((a,b) => stamp(a)-stamp(b));
+
+   libraryLegacyKey = list.length ? list[list.length-1] : null;
+
+   const slot = $('libraryLegacySlot');
+   if (slot && state.libraryOpen) {
+    slot.innerHTML = libraryLegacyKey ? button('libraryLegacy','移行前の控えを保存') : '';
+   }
+  })
+  .catch(() => {});
+}
+
+function saveLegacyBackup() {
+ assert(
+  libraryBackend === 'idb' && libDb && libraryLegacyKey,
+  '移行前の控えが見つかりません'
+ );
+
+ const key = libraryLegacyKey;
+
+ idbGet(key)
+  .then(rec => {
+   assert(obj(rec) && typeof rec.raw === 'string','控えの中身を読み取れません');
+
+   const time = Number(key.slice(LIB_LEGACY.length)) || Date.parse(rec.savedAt) || Date.now();
+   const stamp = new Date(time).toISOString().slice(0,10).replace(/-/g,'');
+
+   downloadBlob(rec.raw,'modelstudio_legacy_'+stamp+'.json','application/json');
+   toast('移行前の控えを保存しました');
+  })
+  .catch(e => showError(e));
+}
 
 let libraryRenameId = null;
 
@@ -9647,27 +9919,33 @@ async function copyText(text,message='コピーしました') {
  try {
   assert(navigator.clipboard && window.isSecureContext,'fallback');
   await navigator.clipboard.writeText(text);
-  toast(message);
+  if (message) toast(message);
+  return true;
  } catch (e) {
   const t = document.createElement('textarea');
+  let ok = false;
 
   t.value = text;
   t.style.cssText = 'position:fixed;left:0;top:0;opacity:0';
 
-  document.body.appendChild(t);
-  t.focus();
-  t.select();
-
-  let ok = false;
-
   try {
-   ok = document.execCommand('copy');
-  } catch (_) {}
+   document.body.appendChild(t);
+   t.focus();
+   t.select();
+   ok = document.execCommand('copy') === true;
+  } catch (_) {
+   ok = false;
+  } finally {
+   t.remove();
+  }
 
-  t.remove();
+  if (ok) {
+   if (message) toast(message);
+   return true;
+  }
 
-  if (ok) toast(message);
-  else manualCopy(text);
+  manualCopy(text);
+  return false;
  }
 }
 
@@ -9680,6 +9958,12 @@ function showGuide() {
     <div>3 · 指1本で回転、2本指で拡大縮小・移動（PCはドラッグとホイール）</div>
     <div>4 · 「動き」タブで、おまかせかAIに頼んで動きを付け、「試してみる」で確認する</div>
     <div>5 · 「書き出し」タブの一括コピーを、AppStudioのAI指示に貼ってゲームへ組み込む</div>
+   </div>
+   <h3>AIとのやりとり（3ステップ）</h3>
+   <div class="helpsteps">
+    <div>① 指示文をコピー（各タブの「指示文をコピー」ボタン）</div>
+    <div>② ChatGPTなどに貼って送信（「AI相談」タブの共有ボタンでも送れます）</div>
+    <div>③ AIの回答をコピーして「AIの回答を読み込む」を押す</div>
    </div>
    <p class="hint">最初はサンプルの部品を選んでみてください。</p>`,
   button('close','はじめる','primary')
@@ -9797,8 +10081,9 @@ function handleChangeNow(e) {
   renderPanel();
  } else if (el.id === 'editFine') {
   if (state.motion.edit) state.motion.edit.fine = el.checked;
- } else if (el.id === 'dragMove') {
-  state.dragMove = el.checked;
+ } else if (el.id === 'dragMove' || el.id === 'dragSnap') {
+  if (el.id === 'dragMove') state.dragMove = el.checked;
+  else state.dragSnap = el.checked;
   saveDragPrefs();
  } else if (el.id === 'paintOnly') {
   state.paintOnly = el.checked;
@@ -9925,6 +10210,7 @@ const actions = {
  library: openLibrary,
  libraryClose: closeLibrary,
  libraryExport: exportLibrary,
+ libraryLegacy: saveLegacyBackup,
  libraryImport: () => $('libraryFile')?.click(),
 
  doRename: () => {
@@ -10178,16 +10464,35 @@ const actions = {
   state.motion.tester.reset();
   startTry();
  },
- bundle: () => {
+ bundle: async () => {
+  const spec = state.modelSpec;
+  const session = state.io.session;
+  const name = spec.meta.name;
   const text = bundleText();
-  state.motion.exported = true;
-  copyText(
-   text,
-   text.length > 200000
-    ? 'コピーしました。ただし文字数が多いため、部品や動きのキーを減らすと安定します'
-    : 'コピーしました。AppStudioのAI指示に、ゲームのコードと一緒に貼り付けてください'
-  );
-  renderPanel();
+
+  try {
+   const copied = await copyText(text,null);
+   if (!copied) return;
+
+   const current = state.io.session === session
+    && state.modelSpec === spec;
+
+   if (current) {
+    state.motion.exported = true;
+    renderPanel();
+   }
+
+   toast(
+    !current
+     ? '「'+name+'」の操作開始時点の内容をコピーしました。現在のモデルはコピー済みにしていません。'
+     : text.length > 200000
+      ? 'コピーしました。ただし文字数が多いため、部品や動きのキーを減らすと安定します'
+      : 'コピーしました。AppStudioのAI指示に、ゲームのコードと一緒に貼り付けてください',
+    current ? 3200 : 5000
+   );
+  } catch (e) {
+   showError(e);
+  }
  },
  makeJoint: () => makeJoint($('jointAt').value),
  promptMotion: () => copyPrompt(
@@ -10223,10 +10528,7 @@ const actions = {
  },
 
 
- saveAs: () => {
-  state.projectId = null;
-  saveProject();
- },
+ saveAs: () => saveProject({asNew:true}),
 
  close: closeDialog,
 
@@ -10459,7 +10761,9 @@ function init() {
 
   if (obj(drag)) {
    if (typeof drag.on === 'boolean') state.dragMove = drag.on;
-   if (drag.mode === 'vertical' || drag.mode === 'horizontal') state.dragMode = drag.mode;
+   if (['vertical','horizontal'].includes(drag.mode)) state.dragMode = drag.mode;
+   // snap が無い古い保存データは、吸着オンとして扱う
+   if (typeof drag.snap === 'boolean') state.dragSnap = drag.snap;
   }
  } catch (_) {}
 
@@ -10476,6 +10780,11 @@ function init() {
  });
 
  renderPanel();
+
+ // init中のsafe()で復元時の案内が消えないよう、初期描画後に表示する。
+ if (state.io.restoreNotice) {
+  showError(Error(state.io.restoreNotice));
+ }
 
  document.addEventListener('click',handleClick);
  document.addEventListener('input',handleInput);
