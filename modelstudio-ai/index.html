@@ -152,19 +152,22 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
  <strong>ModelStudio AI</strong>
 </div>
 <script>
-const startupSplashDone = new Promise(resolve => {
+// 最初の描画機会を確保してから、タイトルの計時とアプリの準備を始める
+const startupPainted = new Promise(resolve => {
  requestAnimationFrame(() => {
-  requestAnimationFrame(() => {
-   setTimeout(() => {
-    document.getElementById('startupSplash')?.remove();
-    document.querySelectorAll('[data-startup-lock]').forEach(el => {
-     el.removeAttribute('inert');
-    });
-    resolve();
-   },1500);
-  });
+  requestAnimationFrame(resolve);
  });
 });
+
+const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
+ setTimeout(() => {
+  document.getElementById('startupSplash')?.remove();
+  document.querySelectorAll('[data-startup-lock]').forEach(el => {
+   el.removeAttribute('inert');
+  });
+  resolve();
+ },1500);
+}));
 </script>
 
 <div id="error" class="error" role="alert" hidden></div>
@@ -566,6 +569,7 @@ function sampleSpec() {
 // ============================================================
 
 const state = {
+ initialized: false,
  modelSpec: null,
  projectId: null,
  selectedPartId: null,
@@ -2317,15 +2321,68 @@ function pickObject(e) {
  }
 }
 
-// 3D画面で選んだとき、設定カードが見えるようにスクロールする
-// PC（パネル内スクロール）は先頭に合わせ、スマホは3D表示を残すため最小限だけ動かす
+// スクロールの動きは端末の「動きを減らす」設定に従う
+function viewScrollBehavior() {
+ return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  ? 'auto'
+  : 'smooth';
+}
+
+// 再生・試遊・部位割り当ての結果を、非固定時だけ画面内へ戻す
+function scrollToPreview(stillNeeded=() => true) {
+ requestAnimationFrame(() => {
+  if (state.pinViewport || !stillNeeded() || !$('modal').hidden) return;
+
+  const view = $('viewport');
+  if (!view) return;
+
+  const rect = view.getBoundingClientRect();
+  const visual = window.visualViewport;
+  const top = visual?.offsetTop || 0;
+  const bottom = Math.min(
+   top+(visual?.height || window.innerHeight),
+   document.querySelector('nav').getBoundingClientRect().top
+  );
+
+  if (rect.top >= top && rect.bottom <= bottom) return;
+
+  window.scrollTo({
+   top: Math.max(0,window.scrollY+rect.top-top),
+   behavior: viewScrollBehavior()
+  });
+ });
+}
+
+// 固定時はパネルだけを動かし、ページ全体へのスクロール伝播を避ける
+function scrollPanelTargetIntoView(target) {
+ if (!target) return;
+
+ const panel = $('panel');
+ const rect = target.getBoundingClientRect();
+ const behavior = viewScrollBehavior();
+
+ if (state.pinViewport) {
+  const panelRect = panel.getBoundingClientRect();
+  panel.scrollTo({
+   top: Math.max(0,panel.scrollTop+rect.top-panelRect.top-panel.clientTop-12),
+   behavior
+  });
+ } else {
+  const visualTop = window.visualViewport?.offsetTop || 0;
+  const menuBottom = $('viewTools').getBoundingClientRect().bottom;
+  const top = Math.max(visualTop+12,menuBottom+12);
+
+  window.scrollTo({
+   top: Math.max(0,window.scrollY+rect.top-top),
+   behavior
+  });
+ }
+}
+
+// 3Dで選んだ部品の設定見出しへ移動する
 function scrollToInspector() {
  requestAnimationFrame(() => {
-  const card = $('inspectorCard');
-  if (!card) return;
-
-  const inPanel = getComputedStyle($('panel')).overflowY === 'auto';
-  card.scrollIntoView({block: inPanel ? 'start' : 'nearest',behavior:'smooth'});
+  scrollPanelTargetIntoView($('inspectorHeading'));
  });
 }
 
@@ -2446,6 +2503,7 @@ function playMotion(id) {
   );
   m.playing = id;
   invalidate();
+  scrollToPreview(() => state.motion.playing === id);
  }
 
  renderPanel();
@@ -3368,7 +3426,7 @@ function startAssign(role) {
  box.innerHTML = '<span>「'+esc(ROLE_INFO[role].label)+'」に当たる部品をタップしてください</span>'
   + button('assignCancel','キャンセル');
  $('viewport').appendChild(box);
- $('viewport').scrollIntoView({block:'nearest',behavior:'smooth'});
+ scrollToPreview(() => state.motion.assignRole === role);
 }
 
 function endAssign() {
@@ -4820,6 +4878,57 @@ function changedAnimationIds(ops,next) {
  return [...ids];
 }
 
+// チェック表示と修正候補の両方で同じ端点の判定を使う
+function hasLoopEndpointGap(a,ch,keys) {
+ if (!a || a.loop === false || !keys?.length) return false;
+
+ const first = keys[0];
+ const last = keys[keys.length-1];
+ const tolerance = ch === 'rotation' ? 1 : .01;
+
+ return first[0] > .001
+  || last[0] < a.duration-.001
+  || first[1].some((v,i) => Math.abs(v-last[1][i]) > tolerance);
+}
+
+// 修正可能な動きだけ、適用するキー列を作る。元データは変更しない。
+// キー上限を超える場合は動き単位で除外し、表示と実行の条件を一致させる。
+function loopEndpointFixPlan(a) {
+ if (!a || a.loop === false) return null;
+
+ const changes = [];
+ let totalKeys = 0;
+
+ for (const [pid,tr] of Object.entries(a.tracks || {})) {
+  for (const [ch,keys] of Object.entries(tr)) {
+   totalKeys += keys.length;
+   if (!hasLoopEndpointGap(a,ch,keys)) continue;
+
+   const next = keys.map(([t,v]) => [
+    Math.min(a.duration,Math.max(0,t)),
+    v.slice()
+   ]);
+   const first = next[0][1].slice();
+
+   if (next[0][0] > 0) next.unshift([0,first.slice()]);
+
+   if (next[next.length-1][0] < a.duration) {
+    next.push([a.duration,first.slice()]);
+   } else {
+    // 終端に同じ時刻のキーが複数ある場合も、終端の値をそろえる
+    for (let i=next.length-1;i>=0 && next[i][0] === a.duration;i--) {
+     next[i][1] = first.slice();
+    }
+   }
+
+   totalKeys += next.length-keys.length;
+   changes.push({pid,ch,keys:next});
+  }
+ }
+
+ return changes.length && totalKeys <= LIMIT.motionKeys ? changes : null;
+}
+
 // 動きの品質チェック。地面へのめり込みは一時モデルで実際に再生して測る。
 function reviewMotions(ids) {
  const s = state.modelSpec;
@@ -4861,17 +4970,8 @@ function reviewMotions(ids) {
       if (big) list.push(pid+' の回転が170°を超えています（'+big[0]+'秒）');
      }
 
-     if (loop && k.length) {
-      const first = k[0][1];
-      const last = k[k.length-1][1];
-      const lim = ch === 'rotation' ? 1 : .01;
-      const gap = first.some((v,j) => Math.abs(v-last[j]) > lim)
-       || k[0][0] > .001
-       || k[k.length-1][0] < a.duration-.001;
-
-      if (gap) {
-       list.push(pid+' の'+(ch === 'rotation' ? '回転' : '位置')+'が、くり返しのつなぎ目でずれています');
-      }
+     if (hasLoopEndpointGap(a,ch,k)) {
+      list.push(pid+' の'+(ch === 'rotation' ? '回転' : '位置')+'が、くり返しのつなぎ目でずれています');
      }
     }
    }
@@ -4966,6 +5066,8 @@ function motionReviewBar() {
  }
 
  const hasIssue = ids.some(id => (rv.report[id] || []).length) || !!(rv.failed || []).length;
+ const canFixEndpoints = ids.some(id => loopEndpointFixPlan(anims[id]) !== null);
+ const reportIsCurrent = rv.owned === state.modelSpec;
 
  const rows = ids.map(id => {
   const issues = rv.report[id] || [];
@@ -4980,13 +5082,19 @@ function motionReviewBar() {
    ${rv.plans?.[id] ? `<p class="hint"><b>計画:</b> ${esc(rv.plans[id])}</p>` : ''}
    ${issues.length
     ? `<p class="error">${issues.map(esc).join('\n')}</p>`
-    : '<p class="success">✓ 問題は見つかりませんでした</p>'}
+    : '<p class="success">✓ 自動チェックの対象項目では問題を検出しませんでした</p>'}
   `;
  }).join('');
 
  return `
   <div class="card review">
    <h3>AIの動きを確認</h3>
+   <p class="hint">
+    自動チェックは、キー列の端点・回転量・キー数・合図を確認します。
+    3D計算が使える場合は、関節位置の推定と25時点の地面へのめり込みも確認します。
+    動きの自然さ・足滑り・部品同士の貫通は、再生して目視確認してください。
+   </p>
+   ${reportIsCurrent ? '' : '<p class="warnbox">以下は読み込み時または直前のつなぎ目修正時の結果です。その後の編集は、この結果に反映されていません。</p>'}
    ${rv.plan ? `<p class="hint"><b>AIの計画:</b> ${esc(rv.plan)}</p>` : ''}
    ${rows}
    ${(rv.failed || []).length ? `
@@ -4996,56 +5104,54 @@ function motionReviewBar() {
    <div class="row">
     ${button('reviewAccept','採用','primary')}
     ${button('reviewUndo','取り消す')}
-    ${hasIssue ? button('reviewFix','自動で直す') : ''}
+    ${canFixEndpoints ? button('reviewFix','つなぎ目を直す') : ''}
     ${hasIssue ? button('reviewAsk','AIに直してもらう') : ''}
    </div>
    <p class="hint">
-    「取り消す」は読み込む前の状態に戻します。「自動で直す」は、くり返しのつなぎ目のずれを直します。
-    「AIに直してもらう」は、問題のある動きだけを直す指示文をコピーします。
+    「取り消す」は読み込む前の状態に戻します。
+    「つなぎ目を直す」は、現在のデータに修正可能なループ端点の問題があるときだけ表示します。
+    地面へのめり込み・関節位置・合図などは直しません。
+    キー数上限を超える動きは、この修正の対象外です。
+    「AIに直してもらう」は、チェックで指摘された動きや読み込めなかった動きを直す指示文をコピーします。
    </p>
   </div>
  `;
 }
 
-// くり返しのつなぎ目をそろえる（最後のキーを最初と同じ値に。時刻は範囲内に丸める）
+// ボタンの表示判定と同じ計画を使い、修正可能な端点だけを変更する
 function autoFixMotions() {
  const m = state.motion;
  const rv = m.review;
  assert(rv,'確認中の動きがありません');
 
- const ids = rv.ids.filter(id => own(state.modelSpec.animations || {},id));
+ const anims = state.modelSpec.animations || {};
+ const ids = [...new Set(rv.ids.filter(id => own(anims,id)))];
+ const plans = ids
+  .map(id => ({id,changes:loopEndpointFixPlan(anims[id])}))
+  .filter(plan => plan.changes !== null);
 
- stopMotion();
+ if (!plans.length) {
+  toast('自動で修正できるつなぎ目はありません');
+  renderPanel();
+  return;
+ }
 
- mutate(s => {
-  for (const id of ids) {
-   const a = s.animations[id];
-   if (a.loop === false) continue;
+ // 候補を先に検証し、失敗時にモデルや履歴を変更しない
+ const next = snapshot();
 
-   for (const tr of Object.values(a.tracks || {})) {
-    for (const k of Object.values(tr)) {
-     if (!k.length) continue;
-
-     k.forEach(x => {
-      x[0] = Math.min(a.duration,Math.max(0,x[0]));
-     });
-
-     const first = k[0][1].slice();
-
-     if (k[0][0] > 0) k.unshift([0,first.slice()]);
-
-     const last = k[k.length-1];
-
-     if (last[0] < a.duration) k.push([a.duration,first.slice()]);
-     else last[1] = first.slice();
-    }
-   }
+ for (const {id,changes} of plans) {
+  for (const {pid,ch,keys} of changes) {
+   next.animations[id].tracks[pid][ch] = keys;
   }
- });
+ }
+
+ validateModelSpec(next);
+ stopMotion();
+ commitSpec(next);
 
  m.review = {...rv,report:reviewMotions(ids),owned:state.modelSpec};
  renderPanel();
- toast('つなぎ目を直しました（↶で取り消せます）');
+ toast(plans.length+'件の動きのつなぎ目を直しました（↶で取り消せます）');
 }
 
 // 品質チェックの結果を入れて、問題のある動きだけを直してもらう指示文
@@ -6510,6 +6616,7 @@ function startWalk() {
 
  buildWalkUI();
  invalidate();
+ scrollToPreview(() => state.motion.walk);
 }
 
 // 試遊の後片付けだけを行う（入力・UI・表示用 root の位置と向き）。再生の停止は呼び出し側が行う
@@ -7632,7 +7739,7 @@ function updateInspector() {
 
  let html = `
   <div class="card" id="inspectorCard">
-   <h3>${isAnchor ? '取付点' : '部品'}の設定</h3>
+   <h3 id="inspectorHeading">${isAnchor ? '取付点' : '部品'}の設定 · ${esc(d.name)}</h3>
    ${easy() ? '' : `<small>識別名（ID）: ${esc(d.id)}</small>`}
    ${isAnchor ? '' : nudgePad()}
 
@@ -8771,6 +8878,9 @@ function handleKeyboard(e) {
 // ============================================================
 
 function init() {
+ if (state.initialized) return;
+ state.initialized = true;
+
  try {
   const level = localStorage.getItem(UI_KEY);
   if (level === 'easy' || level === 'pro') state.uiLevel = level;
@@ -8849,7 +8959,17 @@ function init() {
  });
 }
 
-startupSplashDone.then(init);
+// タイトルの初回描画後、終了を待たずに準備する。
+// タイトルの除去は独立したタイマーなので、初期化エラーでも解除される。
+startupPainted.then(() => {
+ setTimeout(() => {
+  try {
+   init();
+  } catch (e) {
+   showError(e);
+  }
+ },0);
+});
 </script>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
 <script>
