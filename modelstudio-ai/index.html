@@ -754,6 +754,9 @@ const state = {
   prompt: '',
   motion: '',
   motionFix: '',
+  // 演出付きの動き（炎・光など）をAIに頼む欄
+  fxId: 'fly',
+  fx: '',
   // 貼り付け欄の内容と、直前にコピーした指示文（共有ボタン用）
   paste: '',
   lastPrompt: '',
@@ -1166,8 +1169,8 @@ function validateAnimations(s) {
 
    for (const [ch,list] of Object.entries(tr)) {
     assert(
-     ['rotation','position'].includes(ch),
-     label+': '+pid+'.'+ch+'は使えません（rotation/positionのみ）'
+     ['rotation','position','scale'].includes(ch),
+     label+': '+pid+'.'+ch+'は使えません（rotation/position/scaleのみ）'
     );
     assert(
      Array.isArray(list) && list.length > 0,
@@ -1182,6 +1185,8 @@ function validateAnimations(s) {
      assert(k[0] >= prev,label+': '+pid+'.'+ch+'の時刻は小さい順に並べてください');
      prev = k[0];
      vector(k[1],label+': '+pid+'.'+ch);
+     // scale は倍率（1=元の大きさ）
+     if (ch === 'scale') k[1].forEach(v => number(v,label+': '+pid+'.scale（倍率）',.001,1000));
      keys++;
     }
    }
@@ -1194,6 +1199,11 @@ function validateAnimations(s) {
    assert(obj(sp) && own(s.parts,sp.part),label+': 回し続ける部品が見つかりません');
    assert(['x','y','z'].includes(sp.axis),label+': spinsのaxisはx/y/zです');
    number(sp.degPerSec,label+'の回転速度',-100000,100000);
+  }
+
+  assert(a.show === undefined || Array.isArray(a.show),label+': showは部品IDの配列です');
+  for (const pid of a.show || []) {
+   assert(typeof pid === 'string' && own(s.parts,pid),label+': showの部品「'+pid+'」がありません');
   }
 
   assert(a.events === undefined || Array.isArray(a.events),label+': eventsは配列です');
@@ -1298,6 +1308,7 @@ function validateModelSpec(s) {
   p.scale.forEach(n => number(n,id+'.scale',.001,1000));
 
   assert(typeof p.visible === 'boolean',id+': visibleはbooleanです');
+  assert(p.effect === undefined || typeof p.effect === 'boolean',id+': effectはtrue/falseです');
   assert(
    p.parent === null
     || typeof p.parent === 'string' && own(s.parts,p.parent),
@@ -1576,28 +1587,43 @@ function createModelRenderer(THREE) {
 
  // 動きの再生。各部品の基本姿勢に「差分（回転=度, 位置=m）」を足して毎フレーム当てはめる。
  // 使い方: const anim = createAnimator(model, spec); anim.play('walk'); 毎フレーム anim.update(dt,{speed});
- function createAnimator(root,spec) {
+ // showEffects: 停止中（動きなし）に効果部品を表示するか（編集画面では true、ゲームでは既定の false）
+ function createAnimator(root,spec,{showEffects=false}={}) {
   const D = Math.PI/180;
   const parts = root.userData.parts;
   const clips = spec.animations || {};
   const rest = {};
   const touched = new Set();
   const handlers = {};
+  // 効果部品（effect:true。炎・煙・光など）と、その本来の表示設定
+  const effects = {};
+  // 動きごとに参照している部品（tracks・spins・show）
+  const uses = {};
   let current = null;
   let previous = null;
   let fade = 0;
   let fadeTime = 0;
 
   for (const [id,o] of Object.entries(parts)) {
-   rest[id] = {p:o.position.clone(),r:o.rotation.clone()};
+   rest[id] = {p:o.position.clone(),r:o.rotation.clone(),s:o.scale.clone()};
   }
 
-  for (const c of Object.values(clips)) {
+  for (const p of Object.values(spec.parts || {})) {
+   if (p.effect === true && parts[p.id]) effects[p.id] = p.visible !== false;
+  }
+
+  for (const [cid,c] of Object.entries(clips)) {
+   const used = uses[cid] = new Set((c.show || []).filter(id => parts[id]));
+
    Object.keys(c.tracks || {}).forEach(id => {
-    if (parts[id]) touched.add(id);
+    if (!parts[id]) return;
+    touched.add(id);
+    used.add(id);
    });
    (c.spins || []).forEach(sp => {
-    if (parts[sp.part]) touched.add(sp.part);
+    if (!parts[sp.part]) return;
+    touched.add(sp.part);
+    used.add(sp.part);
    });
   }
 
@@ -1682,20 +1708,23 @@ function createModelRenderer(THREE) {
    for (const [id,tr] of Object.entries(c.tracks || {})) {
     if (!parts[id]) continue;
 
-    const a = acc[id] || (acc[id] = {r:[0,0,0],p:[0,0,0]});
+    const a = acc[id] || (acc[id] = {r:[0,0,0],p:[0,0,0],s:[0,0,0]});
     const r = sample(tr.rotation,layer.time,c);
     const p = sample(tr.position,layer.time,c);
+    const sc = sample(tr.scale,layer.time,c);
 
     for (let j=0;j<3;j++) {
      if (r) a.r[j] += r[j]*w;
      if (p) a.p[j] += p[j]*w;
+     // 大きさは倍率（1=元の大きさ）。1からのずれを重みで混ぜる
+     if (sc) a.s[j] += (sc[j]-1)*w;
     }
    }
 
    for (const sp of c.spins || []) {
     if (!parts[sp.part]) continue;
 
-    const a = acc[sp.part] || (acc[sp.part] = {r:[0,0,0],p:[0,0,0]});
+    const a = acc[sp.part] || (acc[sp.part] = {r:[0,0,0],p:[0,0,0],s:[0,0,0]});
     a.r['xyz'.indexOf(sp.axis)] += (sp.degPerSec*layer.elapsed % 360)*w;
    }
   }
@@ -1710,7 +1739,7 @@ function createModelRenderer(THREE) {
    for (const id of touched) {
     const o = parts[id];
     const base = rest[id];
-    const a = acc[id] || {r:[0,0,0],p:[0,0,0]};
+    const a = acc[id] || {r:[0,0,0],p:[0,0,0],s:[0,0,0]};
 
     o.position.set(base.p.x+a.p[0],base.p.y+a.p[1],base.p.z+a.p[2]);
     o.rotation.set(
@@ -1719,6 +1748,19 @@ function createModelRenderer(THREE) {
      base.r.z+a.r[2]*D,
      base.r.order
     );
+    o.scale.set(
+     base.s.x*Math.max(.001,1+a.s[0]),
+     base.s.y*Math.max(.001,1+a.s[1]),
+     base.s.z*Math.max(.001,1+a.s[2])
+    );
+   }
+
+   // 効果部品は、それを使う動きの再生中だけ表示する（停止中は showEffects に従う）
+   for (const [id,visible] of Object.entries(effects)) {
+    const shown = current
+     ? !!(uses[current.id]?.has(id) || previous && uses[previous.id]?.has(id))
+     : showEffects;
+    parts[id].visible = visible && shown;
    }
   }
 
@@ -1786,6 +1828,9 @@ function createModelRenderer(THREE) {
    }));
   }
 
+  // 作った直後に、効果部品の表示を停止中の状態へそろえる
+  apply();
+
   return {
    play,
    stop,
@@ -1831,11 +1876,31 @@ function createModelRenderer(THREE) {
   let loco;
   let oneShot = null;
   let dead = false;
+  // play で指定した、続けて再生する動き（null のときは速さで自動選択）
+  let hold = null;
 
   function reset() {
    loco = undefined;
    oneShot = null;
    dead = false;
+   hold = null;
+  }
+
+  // くり返しの動き（炎を吹いて飛ぶ fly など）を続けて再生する。null で自動の切り替えに戻す
+  function play(id,{fade=.2}={}) {
+   if (id === null || id === undefined) {
+    hold = null;
+    loco = undefined;
+    return true;
+   }
+
+   if (dead || !clips[id]) return false;
+
+   hold = id;
+   oneShot = null;
+   loco = id;
+   animator.play(id,{fade});
+   return true;
   }
 
   function setSpeed(v) {
@@ -1863,7 +1928,7 @@ function createModelRenderer(THREE) {
     oneShot = null;
    }
 
-   const next = pickLocomotion(clips,speed,opts);
+   const next = hold ? {id:hold,rate:1} : pickLocomotion(clips,speed,opts);
 
    if (next.id !== loco) {
     loco = next.id;
@@ -1877,6 +1942,7 @@ function createModelRenderer(THREE) {
   return {
    setSpeed,
    action,
+   play,
    update,
    reset,
    get current() {
@@ -1900,6 +1966,7 @@ function createModelRenderer(THREE) {
    animator,
    setSpeed: controller.setSpeed,
    action: controller.action,
+   play: controller.play,
    update: controller.update,
    reset: controller.reset,
    on: animator.on,
@@ -2501,11 +2568,34 @@ function fitCamera() {
  invalidate();
 }
 
+// 効果部品（炎・煙など）を除いた、モデル本体の範囲（接地や地面チェックに使う）
+function solidBox(root,spec) {
+ const fx = new Set(
+  Object.values(spec.parts || {}).filter(p => p.effect === true).map(p => p.id)
+ );
+
+ if (!fx.size) return new THREE.Box3().setFromObject(root);
+
+ root.updateMatrixWorld(true);
+
+ const box = new THREE.Box3();
+
+ root.traverse(o => {
+  if (!o.isMesh) return;
+  for (let n = o; n && n !== root; n = n.parent) {
+   if (fx.has(n.userData.partId)) return;
+  }
+  box.expandByObject(o);
+ });
+
+ return box.isEmpty() ? new THREE.Box3().setFromObject(root) : box;
+}
+
 function updateStage() {
  const r = state.runtime;
  if (!r) return;
 
- const box = new THREE.Box3().setFromObject(r.root);
+ const box = solidBox(r.root,state.modelSpec);
  const size = box.isEmpty()
   ? new THREE.Vector3(2,2,2)
   : box.getSize(new THREE.Vector3());
@@ -2912,7 +3002,7 @@ function resetAnimator() {
 
  m.playing = null;
  m.animator = r?.root && state.engine
-  ? state.engine.createAnimator(r.root,state.modelSpec)
+  ? state.engine.createAnimator(r.root,state.modelSpec,{showEffects:true})
   : null;
 
  m.animator?.on('*',e => toast('合図「'+e.event+'」'));
@@ -2959,6 +3049,7 @@ function pruneAnimations(s,ids) {
    if (a.tracks) delete a.tracks[id];
   });
   if (a.spins) a.spins = a.spins.filter(sp => !ids.includes(sp.part));
+  if (a.show) a.show = a.show.filter(pid => !ids.includes(pid));
  }
 }
 
@@ -3523,6 +3614,7 @@ function motionPromptBase(tail) {
   +' | 形:'+(p.type === 'group' ? 'group（関節・まとめ役）' : p.geometry.type)
   +' | 位置:['+p.position.map(num).join(',')+']'
   +' | 回転(度):['+p.rotation.map(deg).join(',')+']'
+  +(p.effect === true ? ' | 効果部品' : '')
  ).join('\n');
 
  const existing = Object.keys(s.animations || {}).join(', ') || 'なし';
@@ -3536,21 +3628,32 @@ function motionPromptBase(tail) {
   + '\n既存の動きID: '+existing+'\n'
   + '\n動きの形式:\n'
   + '{"name":"表示名","duration":秒(0.1〜30),"loop":true/false,'
-  + '"tracks":{"部品ID":{"rotation":[[時刻,[x,y,z]],...],"position":[[時刻,[x,y,z]],...]}},'
+  + '"tracks":{"部品ID":{"rotation":[[時刻,[x,y,z]],...],"position":[[時刻,[x,y,z]],...],"scale":[[時刻,[x,y,z]],...]}},'
   + '"spins":[{"part":"部品ID","axis":"x|y|z","degPerSec":数値}],'
+  + '"show":["表示するだけの効果部品ID"],'
   + '"events":[[時刻,"英数字の合図名"]],"ease":"smooth"}\n'
   + 'ルール:\n'
   + '- rotation は基本姿勢からの差分を「度」で、position は差分を「メートル」で書く（0 = いつもの姿勢）。\n'
+  + '- scale は大きさの倍率（1 = いつもの大きさ、0.001〜1000）。炎の揺らめき・伸び縮みや、光の脈打ちに使う。\n'
   + '- 時刻は0〜durationの範囲で小さい順。くり返す動きは最初と最後のキーを同じ値にする。\n'
-  + '- 1つの動きのキーは合計300個まで。tracks/spinsの部品IDは上の一覧に実在するものだけ。\n'
+  + '- 1つの動きのキーは合計300個まで。tracks/spins/showの部品IDは、上の一覧に実在するものか、同じ回答で追加する効果部品だけ。\n'
   + '- spinsは車輪やプロペラなど回り続ける部品に使う。攻撃が当たる瞬間などは events に "hit" などの合図を入れる。\n'
-  + '- 動きIDは英字で始まる英数字・_・-（64文字以内）。部品やその他の項目は変更しない。\n'
+  + '- 動きIDは英字で始まる英数字・_・-（64文字以内）。既存の部品・色・取付点は変更・削除しない。\n'
   + '- "ease":"smooth" を付けると、キーの間が滑らかな曲線でつながる（推奨）。付けないと直線でつながる。\n'
   + '- 回転の符号と軸は、上の「関節ガイド」の実測（+30°回したときの先端の動き）に必ず従う。推測で決めない。\n'
-  + '- 地面の高さより下に部品が出ないようにする。\n'
+  + '- 地面の高さより下に部品が出ないようにする（炎・煙などの効果部品は例外）。\n'
   + '- 出力の最上位に "plan"（文字列）を必ず書き、各キーの時刻と姿勢を短く説明してから operations を書く。\n'
+  + '\n演出用の効果部品（元のモデルにない炎・噴射・煙・光・火花など）:\n'
+  + '- 動きに必要なら、新しい部品を {"op":"add","path":"/parts/新しい部品ID","value":{...}} で追加してよい。'
+  + 'value には id（パスと同じ）,name,type（"primitive" か "group"）,parent（部品IDかnull）,position,rotation（ラジアン）,scale,"visible":true,"effect":true をすべて書き、primitive なら geometry と material も書く。子部品も含め、追加する部品すべてに "effect":true を付ける。\n'
+  + '- "effect":true の部品は、その部品を tracks・spins・show のどれかで参照している動きの再生中だけ表示され、ほかの動き（待機など）の間は自動で隠れる。動かさずに表示だけする場合は "show" に入れる。\n'
+  + '- 効果部品の色は新しい色・質感を {"op":"add","path":"/materials/新しいID","value":{"type":"standard","name":"名前","color":"#rrggbb","roughness":1,"metalness":0,"emissive":"#rrggbb","emissiveIntensity":1〜3,"transparent":true,"opacity":0.5〜0.9}} で追加し、発光させる。\n'
+  + '- 炎・噴射は cone（円すい。先端は既定で+Y向きなので、下向きに噴くなら rotation を [3.1416,0,0]）を、外側（オレンジ・半透明・太く長い）と内側（黄色〜白・細く短い）の2〜3層に重ねると自然に見える。\n'
+  + '- 伸び縮みさせるときは、噴射口の位置に効果部品の group を置き、その子に円すいを位置 [0,-高さ/2,0] で入れ、group の scale を変えると噴射口から伸び縮みする。機体の部品を group の parent にすると、機体と一緒に動く。\n'
+  + '- 炎の揺らめきは scale のキーを0.05〜0.1秒刻みで細かく変えて表す（例 [1,1,1] → [1.1,1.35,1.1] → [0.95,0.9,0.95]）。\n'
+  + '- 追加する部品は必要最小限（1つの演出につき1〜4個）。すでに一覧に効果部品があれば、それを使い重複して追加しない。\n'
   + '\n出力: MODELSTUDIO_PATCH_V1 のJSONのみ。新しい動きは {"op":"add","path":"/animations/動きID","value":{...}}、'
-  + '既存の動きIDを作り直す場合は op を "replace" にする。\n'
+  + '既存の動きIDを作り直す場合は op を "replace" にする。効果部品・色の追加（op:"add"）は operations の先頭に置く。\n'
   + '例: {"format":"MODELSTUDIO_PATCH_V1","plan":"0秒 腕を下ろした構え → 0.5秒 右腕を横に上げる → 1秒 元に戻る","operations":[{"op":"add","path":"/animations/wave","value":'
   + '{"name":"手を振る","duration":1,"loop":true,"tracks":{"arm_r":{"rotation":[[0,[0,0,0]],[0.5,[0,0,-60]],[1,[0,0,0]]]}}}}]}\n'
   + '出力はプレーンテキストとし、Markdown・コードフェンス（```）・見出し・説明文は禁止。先頭文字は{、末尾文字は}としてください。\n'
@@ -3605,6 +3708,68 @@ function createMotionFixPrompt() {
   + '\nこの動きだけを {"op":"replace","path":"/animations/'+id+'","value":{...}} の1操作で返すこと。IDは変えない。ほかの動きや部品は変更しない。'
   + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
  );
+}
+
+// 演出付きの動きの例 [動きID, ボタンの表示, 要望文]
+const FX_EXAMPLES = [
+ ['fly','ロケットの噴射','エンジン（機体の最下部の噴射口）から炎を吹き出しながら飛ぶ。炎は外側がオレンジ、内側が黄色〜白で、揺らめきながら細かく伸び縮みする。機体は小刻みに振動し、わずかに上下する。飛び続けるのでくり返す動き。'],
+ ['boost','ジェット噴射（加速）','後ろ（-Z側）の噴射口から青白い炎を勢いよく噴き出して加速する。最初は短い炎が一気に長く伸び、機体が少し前に傾く。1回きりの動き。'],
+ ['glow','光る・点滅','ライトや目の部分が明るく光り、ゆっくり脈打つように大きさが変わる。光る部品がなければ、小さな発光する球を追加する。くり返す動き。'],
+ ['smoke','煙を出す','下や後ろから白い煙の玉がふくらみながら上がり、小さくなって消えていく（大きさの変化で表現）。くり返す動き。']
+];
+
+// 元のモデルにない演出（炎・煙・光など）も含めて、1つの動きをAIに頼む指示文
+function createFxMotionPrompt() {
+ const id = String(state.ai.fxId || '').trim();
+ const request = String(state.ai.fx || '').trim();
+
+ assert(validId(id),'動きIDは英字で始まる英数字・_・-（64文字以内）で入力してください');
+ assert(request,'どんな動きと演出にしたいか入力してください');
+
+ const exists = own(state.modelSpec.animations || {},id);
+
+ return motionPromptBase(
+  '\n作る動き: ID "'+id+'" / op は "'+(exists ? 'replace' : 'add')+'"\n'
+  + '\n要望（演出込み）:\n'+request.slice(0,2000)+'\n'
+  + '\n演出付きの動きのルール:\n'
+  + '- 要望にある炎・煙・光などが今のモデルになければ、上の「演出用の効果部品」のルールで追加する。すでに効果部品があれば、それを使う。\n'
+  + '- くり返すかどうか（loop）と長さ（duration）は要望から判断する。飛び続ける・光り続けるなどは loop:true にし、各キー列の最初と最後を同じ値にする。\n'
+  + '- 機体の移動（上昇・前進）はゲーム側で行うのが基本。動きの中では、振動・傾き・わずかな上下など、その場での演出にとどめる。\n'
+  + '\nこの動きと、必要な効果部品・色だけを1つの MODELSTUDIO_PATCH_V1 で出力すること。最上位に "plan" を必ず書く。'
+  + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
+ );
+}
+
+function fxMotionCard() {
+ return `
+  <details class="card" id="fxDetails" ${motionCardOpen('fx',false) ? 'open' : ''}>
+   <summary><b>✨ 炎・光などの演出付きで動かす（AIに頼む）</b></summary>
+   <p class="hint">
+    元のモデルにない炎・噴射・煙・光なども、AIが「効果部品」として追加します。
+    効果部品は、その動きの再生中だけ表示されます（ゲームでは待機中などは自動で隠れます）。
+   </p>
+   <p class="hint">例をタップすると、下の欄に入ります（書き換えもできます）。</p>
+   <div class="chips">
+    ${FX_EXAMPLES.map(([,label],i) => `<button data-fxex="${i}">${esc(label)}</button>`).join('')}
+   </div>
+   ${field('動きID（英字で始まる英数字）','data-ai="fxId"',state.ai.fxId || '')}
+   <label>どんな動きと演出にしますか？
+    <textarea
+     data-ai="fx"
+     placeholder="エンジンから炎を吹き出しながら飛ぶ。炎は揺らめきながら伸び縮みする。"
+    >${esc(state.ai.fx || '')}</textarea>
+   </label>
+   <div class="row">
+    ${button('promptFx','指示文をコピー','primary')}
+    ${button('import','AIの回答を読み込む')}
+   </div>
+   <p class="hint">
+    読み込んだ後は、①の一覧で名前をタップすると演出付きで再生できます。
+    炎などの大きさ・位置は「部品」タブ（✨効果）で直せます。
+    ゲームでは hero.play("動きID") で続けて再生できます。
+   </p>
+  </details>
+ `;
 }
 
 // 動きタブの開閉式カード。ユーザーが開閉していなければ既定値を使う
@@ -3767,6 +3932,8 @@ function motionPanel() {
 
    ${button('import','AIの回答を読み込む')}
   </details>
+
+  ${fxMotionCard()}
 
   <details class="card" id="tryDetails" ${motionCardOpen('try',clips.length > 0) ? 'open' : ''}>
    <summary><b>④ 試してみる（ゲームと同じ切り替え）</b></summary>
@@ -4983,15 +5150,25 @@ function motionGuideText() {
   try {
    root.updateMatrixWorld(true);
 
-   const box = new THREE.Box3().setFromObject(root);
+   const box = solidBox(root,s);
    const size = box.getSize(new THREE.Vector3());
+   const bottom = box.getCenter(new THREE.Vector3());
+   const fxIds = Object.values(s.parts).filter(p => p.effect === true).map(p => p.id);
 
    lines.push('\n関節ガイド（アプリが3Dから計算した実測値。回転は基本姿勢からの差分）:');
    lines.push(
-    '- モデルの大きさ: 幅'+f(size.x)+'m・高さ'+f(size.y)+'m・奥行き'+f(size.z)
-    +'m。地面の高さ y='+f(box.min.y)+'（これより下に部品を出さない）'
+    '- モデルの大きさ（効果部品を除く）: 幅'+f(size.x)+'m・高さ'+f(size.y)+'m・奥行き'+f(size.z)
+    +'m。地面の高さ y='+f(box.min.y)+'（これより下に部品を出さない。炎・煙などの効果部品は例外）'
    );
    lines.push('- 向き: +Zがモデルの前、+Yが上、+Xがモデルから見て左。');
+   lines.push(
+    '- 機体の最下部の中心（効果部品を除く。最上位から見た座標）: ['
+    +f(bottom.x)+','+f(box.min.y)+','+f(bottom.z)
+    +']。下向きの噴射・煙などを付けるときの目安。'
+   );
+   if (fxIds.length) {
+    lines.push('- すでにある効果部品: '+fxIds.join(', ')+'（同じ演出にはこれを使い、重複して追加しない）');
+   }
 
    for (const role of MOTION_KINDS[m.kind].roles) {
     const id = m.roles[role];
@@ -5466,25 +5643,56 @@ function motionOpId(op) {
  return String(op.path).split('/')[2].replace(/~1/g,'/').replace(/~0/g,'~');
 }
 
-// 全操作が /animations/<id> 直下の add/replace なら true
-function isMotionOnlyPatch(ops) {
- return Array.isArray(ops)
-  && ops.length > 0
-  && ops.every(op =>
-   obj(op)
-   && ['add','replace'].includes(op.op)
-   && typeof op.path === 'string'
-   && /^\/animations\/[^/]+$/.test(op.path)
-  );
+// 動きの修正データで扱う操作: 動き（/animations/<id>）の add/replace と、演出用の効果部品・色の追加
+const ANIM_OP_RE = /^\/animations\/[^/]+$/;
+const ASSET_OP_RE = /^\/(parts|materials)\/[^/]+$/;
+
+function isAnimOp(op) {
+ return obj(op)
+  && ['add','replace'].includes(op.op)
+  && typeof op.path === 'string'
+  && ANIM_OP_RE.test(op.path);
 }
 
-// add と replace の取り違えを読み替える
+// 効果部品（effect:true）と色・質感の追加
+function isEffectAssetOp(op) {
+ return obj(op)
+  && op.op === 'add'
+  && typeof op.path === 'string'
+  && ASSET_OP_RE.test(op.path)
+  && obj(op.value)
+  && (op.path.startsWith('/materials/') || op.value.effect === true);
+}
+
+// 動きの追加・作り直しと、演出用の効果部品・色の追加だけなら true
+function isMotionOnlyPatch(ops) {
+ return Array.isArray(ops)
+  && ops.some(isAnimOp)
+  && ops.every(op => isAnimOp(op) || isEffectAssetOp(op));
+}
+
+// add と replace の取り違えを読み替える（既存の効果部品・演出専用の色は作り直す）
 function fixMotionOps(spec,ops) {
  const present = new Set(Object.keys(spec.animations || {}));
+ const solidMats = new Set(
+  Object.values(spec.parts)
+   .filter(p => p.type === 'primitive' && p.effect !== true)
+   .map(p => p.material)
+ );
 
  return ops.map(op => {
   const id = motionOpId(op);
   const fixed = {...op};
+
+  if (!isAnimOp(op)) {
+   if (op.path.startsWith('/parts/') && own(spec.parts,id) && spec.parts[id].effect === true) {
+    fixed.op = 'replace';
+   }
+   if (op.path.startsWith('/materials/') && own(spec.materials,id) && !solidMats.has(id)) {
+    fixed.op = 'replace';
+   }
+   return fixed;
+  }
 
   if (op.op === 'add' && present.has(id)) fixed.op = 'replace';
   if (op.op === 'replace' && !present.has(id)) fixed.op = 'add';
@@ -5494,13 +5702,22 @@ function fixMotionOps(spec,ops) {
  });
 }
 
-// 動きごとに適用・検証し、成功した分だけを重ねる
+// 効果部品・色を先にまとめて適用し、動きは1つずつ適用・検証して成功した分だけを重ねる
 function applyMotionOpsOneByOne(source,ops) {
+ const assets = ops.filter(op => !isAnimOp(op));
  let cur = source;
  let ok = 0;
  const failed = [];
 
- for (const op of ops) {
+ if (assets.length) {
+  try {
+   cur = applyModelPatch(cur,{format:'MODELSTUDIO_PATCH_V1',operations:assets});
+  } catch (e) {
+   failed.push({id:'effect_parts',reason:'演出用の部品・色を追加できませんでした: '+e.message});
+  }
+ }
+
+ for (const op of ops.filter(isAnimOp)) {
   try {
    cur = applyModelPatch(cur,{format:'MODELSTUDIO_PATCH_V1',operations:[op]});
    ok++;
@@ -5706,7 +5923,14 @@ function changedAnimationIds(ops,next) {
  if (
   !Array.isArray(ops)
   || !ops.length
-  || !ops.every(op => obj(op) && typeof op.path === 'string' && op.path.startsWith('/animations'))
+  || !ops.every(op =>
+   obj(op)
+   && typeof op.path === 'string'
+   && (
+    op.path.startsWith('/animations')
+    || ['add','replace'].includes(op.op) && ASSET_OP_RE.test(op.path)
+   )
+  )
  ) {
   return [];
  }
@@ -5715,6 +5939,9 @@ function changedAnimationIds(ops,next) {
  const ids = new Set();
 
  for (const op of ops) {
+  // 効果部品・色の追加は動きの確認対象ではない
+  if (!op.path.startsWith('/animations')) continue;
+
   const key = op.path.split('/')[2];
 
   if (key) {
@@ -5794,7 +6021,8 @@ function reviewMotions(ids) {
  if (e && window.THREE) {
   root = e.buildModel(s);
   root.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(root);
+  // 炎などの効果部品は地面チェックの対象外
+  const box = solidBox(root,s);
   baseMin = box.min.y;
   H = Math.max(.05,box.max.y-box.min.y);
   anim = e.createAnimator(root,s);
@@ -5853,7 +6081,7 @@ function reviewMotions(ids) {
     for (let i=0;i<=n;i++) {
      if (i) anim.update(a.duration/n);
      root.updateMatrixWorld(true);
-     const y = new THREE.Box3().setFromObject(root).min.y;
+     const y = solidBox(root,s).min.y;
      if (y < floor && (!worst || y < worst.y)) worst = {y,t:r3(a.duration*i/n)};
     }
 
@@ -7240,11 +7468,17 @@ function applyAIText(text) {
 
   if (ids.length) {
    markQueueLoaded(ids);
+
+   const fxAdded = Object.keys(next.parts)
+    .filter(id => !own(base.spec.parts,id) && next.parts[id].effect === true)
+    .length;
+   const fxNote = fxAdded ? '（演出用の効果部品を'+fxAdded+'個追加）' : '';
+
    startReview(ids,data.plan,failed,base);
 
    return failed.length
-    ? ids.length+'件の動きを読み込みました（'+failed.length+'件は読み込めませんでした。確認バーを見てください）'
-    : '動きを読み込みました。確認バーで品質を確かめてください';
+    ? ids.length+'件の動きを読み込みました'+fxNote+'（'+failed.length+'件は読み込めませんでした。確認バーを見てください）'
+    : '動きを読み込みました'+fxNote+'。確認バーで品質を確かめてください';
   }
 
   return '修正を反映しました（↶で取り消せます）';
@@ -7701,10 +7935,16 @@ function demoHtmlText() {
  const code = createModelRenderer.toString()
   + '\nconst MODEL_DATA = '+JSON.stringify(s).replace(/</g,'\\u003c')+';\n';
 
+ const holdSkip = ['idle','walk','run','drive'];
  const buttons = Object.entries(clips)
   .filter(([,a]) => a.loop === false)
   .map(([id,a]) => '<button data-act="'+esc(id)+'">'+esc(a.name || id)+'</button>')
   .join('')
+  // くり返しの演出付きの動き（fly など）は、押すと続けて再生し、もう一度押すと自動に戻る
+  + Object.entries(clips)
+   .filter(([id,a]) => a.loop !== false && !holdSkip.includes(id))
+   .map(([id,a]) => '<button data-hold="'+esc(id)+'">'+esc(a.name || id)+' ⟳</button>')
+   .join('')
   + (own(clips,'die') ? '<button data-act="reset">起き上がる</button>' : '');
 
  const demo = [
@@ -7752,6 +7992,7 @@ function demoHtmlText() {
   'stick.addEventListener("pointerup",endStick);',
   'stick.addEventListener("pointercancel",endStick);',
   'document.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click",() => { if (b.dataset.act === "reset") hero.reset(); else hero.action(b.dataset.act); }));',
+  'document.querySelectorAll("[data-hold]").forEach(b => b.addEventListener("click",() => { hero.play(hero.current === b.dataset.hold ? null : b.dataset.hold); }));',
   'const clock = new THREE.Clock();',
   'function loop(){',
   ' requestAnimationFrame(loop);',
@@ -8876,7 +9117,8 @@ sphere/cylinder/cone/capsule/latheはY軸、torus/planeはXY面。
 分割数は整数3〜128、pointsは最大128点。
 Part上限300、Material100、Anchor100、推定triangle20万以下。
 拡張情報はextensionsに保持し描画の追加機能を捏造しない。
-animations（動き）は任意項目。部品を削除・ID変更する場合は、その部品を参照するanimationsのtracks/spinsも整合させること。`;
+animations（動き）は任意項目。部品を削除・ID変更する場合は、その部品を参照するanimationsのtracks/spins/showも整合させること。
+Partは任意で effect:true を持てる（炎・煙・光などの演出用の効果部品。その部品を参照する動きの再生中だけ表示され、待機中などは隠れる）。`;
 }
 
 function createAIPrompt(mode) {
@@ -9040,6 +9282,8 @@ function bundleText() {
   '- コードブロックを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA) でキャラを作る。モデル専用の描画関数を新たに書かない。',
   '- ゲームの移動速度（m/秒）を毎フレーム hero.setSpeed に渡し、hero.update(dt) を呼ぶ。待機・歩く・走るは速さに応じて自動で切り替わる。',
   '- ジャンプや攻撃などの入力では hero.action("動きID") を呼ぶ。終わると自動で移動の動きに戻る（die は戻らず、hero.reset() で復活）。',
+  '- くり返しの演出付きの動き（例: 炎を吹いて飛ぶ fly）を続けて再生するには hero.play("動きID")、速さによる自動の切り替えに戻すには hero.play(null) を呼ぶ。',
+  '- effect:true の部品（炎・煙・光などの効果部品）は、それを使う動きの再生中だけ自動で表示される。ゲーム側で個別に表示・非表示を操作しない。',
   '- 動きの一覧: '+list,
   '- 合図の名前: '+events+'（hero.on("合図名", fn) で受け取る。hit は攻撃が当たる瞬間、land は着地の瞬間）',
   '- 取付点: '+anchors,
@@ -9762,7 +10006,7 @@ function hierarchyRows(parent=null,depth=0) {
     <button
      class="pick ${state.selectedPartId === p.id ? 'selected' : ''}"
      data-part="${p.id}"
-    >${esc(p.name)}<small>${esc(geoLabel(p.geometry?.type || 'group'))}</small></button>
+    >${esc(p.name)}<small>${esc(geoLabel(p.geometry?.type || 'group'))}${p.effect === true ? ' · ✨効果' : ''}</small></button>
    </div>
   `+hierarchyRows(p.id,depth+1)).join('');
 }
@@ -9840,6 +10084,10 @@ function updateInspector() {
    <label>
     <input type="checkbox" ${attrs} data-key="visible" ${d.visible ? 'checked' : ''}>
     表示
+   </label>
+   <label>
+    <input type="checkbox" ${attrs} data-key="effect" ${d.effect === true ? 'checked' : ''}>
+    ✨ 効果部品（炎・煙など。それを使う動きの再生中だけ表示）
    </label>
   `;
 
@@ -10846,6 +11094,10 @@ const actions = {
   createMotionFixPrompt(),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
+ promptFx: () => copyPrompt(
+  createFxMotionPrompt(),
+  '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
+ ),
  closeFix: () => {
   state.motion.fixId = null;
   renderPanel();
@@ -11094,6 +11346,13 @@ function handleClick(e) {
    // 初回起動のサンプルは作業中のデータではないので、置き換えの確認を出さない
    if (first) startTemplate(kind);
    else replaceGuard(() => startTemplate(kind));
+  } else if (b.dataset.fxex !== undefined) {
+   const ex = FX_EXAMPLES[Number(b.dataset.fxex)];
+   if (ex) {
+    state.ai.fxId = ex[0];
+    state.ai.fx = ex[2];
+    renderPanel();
+   }
   } else if (b.dataset.tab) {
    // 別のタブへ移るときは試遊を終える
    if (b.dataset.tab !== state.activeTab) stopWalk();
@@ -11309,7 +11568,7 @@ function init() {
   if (details.id === 'queueDetails') state.ai.queueOpen = !details.open;
   if (details.id === 'autoDetails') state.motion.autoOpen = !details.open;
 
-  const motionCard = {readyDetails:'ready',aiDetails:'ai',tryDetails:'try'}[details.id];
+  const motionCard = {readyDetails:'ready',aiDetails:'ai',tryDetails:'try',fxDetails:'fx'}[details.id];
   if (motionCard) state.motion.openCards[motionCard] = !details.open;
  },true);
 
