@@ -111,6 +111,7 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 #walkActs{position:absolute;right:12px;bottom:44px;display:flex;flex-direction:column;gap:8px;pointer-events:auto}
 #walkActs button{background:#175d75e6;min-width:92px}
 .warnbox{border:1px solid #b98b52;background:#3a2e1c;color:#ffe2b8;border-radius:10px;padding:10px}
+#assignHint{position:absolute;left:10px;right:10px;top:58px;z-index:4;background:#204255f2;color:#e6f9ff;border:1px solid var(--cyan);border-radius:12px;padding:8px 10px;display:flex;gap:8px;align-items:center;justify-content:space-between}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -595,7 +596,13 @@ const state = {
   review: null,
   // 試遊モード（歩かせてみる）
   walk: false,
-  walkLimit: 20
+  walkLimit: 20,
+  // 手で直す編集（{clipId,time,partId,fine,pending,lastPart,len,amp}）
+  edit: null,
+  // 3D画面のタップで割り当てる役割
+  assignRole: null,
+  // ②おまかせの開閉（null のときは自動）
+  autoOpen: null
  },
  thumb: null,
  thumbTried: new Set(),
@@ -1488,6 +1495,21 @@ function createModelRenderer(THREE) {
    apply();
   }
 
+  // 指定した動きを時刻 t の姿勢で止めて表示する（前の動きのフェードは消し、合図は発火しない）
+  function seek(id,t) {
+   const c = clips[id];
+   if (!c) return false;
+
+   const time = Math.min(c.duration,Math.max(0,Number(t) || 0));
+
+   current = {id,time,elapsed:time,fresh:false};
+   previous = null;
+   fade = 0;
+   fadeTime = 0;
+   apply();
+   return true;
+  }
+
   function update(dt,{speed=1}={}) {
    if (!current) return;
 
@@ -1522,6 +1544,7 @@ function createModelRenderer(THREE) {
   return {
    play,
    stop,
+   seek,
    update,
    on,
    list,
@@ -2212,6 +2235,15 @@ function pickObject(e) {
   return yes;
  });
 
+ // 部位の割り当て中・手で直す編集中は、部品タブへ移動せずに部品を選ぶ
+ const mm = state.motion;
+
+ if (mm.assignRole || mm.edit) {
+  const partHit = hits.find(h => h.object.userData.partId);
+  if (partHit) handleMotionPick(partHit.object.userData.partId);
+  return;
+ }
+
  const anchor = hits.find(h => h.object.userData.anchorId);
 
  if (anchor) {
@@ -2248,12 +2280,12 @@ function scrollToInspector() {
 const MOTION_KINDS = {
  biped: {
   label: '二足（人・ロボットなど）',
-  clips: '待機・歩く・走る・ジャンプ・攻撃',
+  clips: '待機・歩く・走る・ジャンプ・攻撃・やられ・倒れる・喜ぶ',
   roles: ['body','head','armL','armR','legL','legR']
  },
  quad: {
   label: '四足（馬・犬・猫など）',
-  clips: '待機・歩く・走る・ジャンプ・攻撃',
+  clips: '待機・歩く・走る・ジャンプ・攻撃・やられ・倒れる・喜ぶ',
   roles: ['body','head','tail','legFL','legFR','legBL','legBR']
  },
  vehicle: {
@@ -2263,7 +2295,7 @@ const MOTION_KINDS = {
  },
  flyer: {
   label: '飛ぶもの（鳥・ドラゴンなど）',
-  clips: '待機・飛ぶ・速く飛ぶ・ジャンプ・攻撃',
+  clips: '待機・飛ぶ・速く飛ぶ・ジャンプ・攻撃・やられ・倒れる・喜ぶ',
   roles: ['body','head','wingL','wingR','tail']
  }
 };
@@ -2306,6 +2338,9 @@ function stopMotion() {
  // 停止・部品の編集などでは試遊も終える（後片付けだけを行い、再帰しない）
  if (m.walk) endWalk();
 
+ // 手で直す編集中なら、直接当てた姿勢を戻して編集を終える
+ if (m.edit) endEdit();
+
  m.animator?.stop();
  m.playing = null;
  m.trying = false;
@@ -2329,6 +2364,9 @@ function resetAnimator() {
  m.tester = m.animator
   ? state.engine.createController(m.animator,state.modelSpec)
   : null;
+
+ // 手で直す編集中なら、新しいモデルでも同じ時刻の姿勢を表示し直す
+ refreshEdit();
 }
 
 function playMotion(id) {
@@ -2336,6 +2374,9 @@ function playMotion(id) {
 
  // 試遊中に通常の再生へ切り替えたら、試遊の入力・UI・位置を元に戻す
  if (m.walk) endWalk();
+
+ // 手で直す編集中なら、編集を終えてから再生する
+ if (m.edit) endEdit();
 
  if (m.playing === id) {
   stopMotion();
@@ -2612,6 +2653,27 @@ function buildMotionClips(kind,R,opt) {
    k.move([[0,[0,0,0]],[.5,[0,0,.06*H]],[1,[0,0,0]]]);
    k.hit(.5);
   });
+  clip('hurt','やられ',.5,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-15,0,0]],[1,[0,0,0]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.3,[-20,0,0]],[1,[0,0,0]]]);
+   k.move([[0,[0,0,0]],[.3,[0,0,-.05*H]],[1,[0,0,0]]]);
+  });
+  clip('die','倒れる',1.2,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-10,0,0]],[1,[0,0,80]]]);
+   k.move([[0,[0,0,0]],[.3,[0,-.05*H,0]],[1,[0,-.3*H,0]]]);
+   if (bodyAll) {
+    // 胴がモデル全体のときは、脚を外へ開いて沈む
+    k.pose(R.legL,[[0,[0,0,0]],[1,[0,0,35]]]);
+    k.pose(R.legR,[[0,[0,0,0]],[1,[0,0,-35]]]);
+   }
+   k.pose(R.head,[[0,[0,0,0]],[.6,[15,0,0]],[1,[20,0,0]]]);
+  });
+  clip('emote','喜ぶ',1.2,false,k => {
+   k.pose(R.armL,[[0,[0,0,0]],[.2,[0,0,150]],[.8,[0,0,150]],[1,[0,0,0]]]);
+   k.pose(R.armR,[[0,[0,0,0]],[.2,[0,0,-150]],[.8,[0,0,-150]],[1,[0,0,0]]]);
+   k.move([[0,[0,0,0]],[.2,[0,0,0]],[.35,[0,.12*B,0]],[.5,[0,0,0]],[.65,[0,.12*B,0]],[.8,[0,0,0]],[1,[0,0,0]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.3,[-12,0,0]],[.8,[-12,0,0]],[1,[0,0,0]]]);
+  });
  }
 
  if (kind === 'quad') {
@@ -2659,6 +2721,30 @@ function buildMotionClips(kind,R,opt) {
    k.pose(R.legFR,lift);
    k.hit(.5);
   });
+  clip('hurt','やられ',.5,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-15,0,0]],[1,[0,0,0]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.3,[-20,0,0]],[1,[0,0,0]]]);
+   k.move([[0,[0,0,0]],[.3,[0,0,-.05*H]],[1,[0,0,0]]]);
+  });
+  clip('die','倒れる',1.2,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-8,0,0]],[1,[0,0,80]]]);
+   k.move([[0,[0,0,0]],[.3,[0,-.05*H,0]],[1,[0,-.3*H,0]]]);
+   if (bodyAll) {
+    // 胴がモデル全体のときは、脚を外へ開いて沈む
+    const outL = [[0,[0,0,0]],[1,[0,0,35]]];
+    const outR = [[0,[0,0,0]],[1,[0,0,-35]]];
+    k.pose(R.legFL,outL);
+    k.pose(R.legBL,outL);
+    k.pose(R.legFR,outR);
+    k.pose(R.legBR,outR);
+   }
+   k.pose(R.head,[[0,[0,0,0]],[.6,[15,0,0]],[1,[25,0,0]]]);
+  });
+  clip('emote','喜ぶ',1.2,false,k => {
+   k.pose(R.head,[[0,[0,0,0]],[.2,[-25,0,0]],[.8,[-25,0,0]],[1,[0,0,0]]]);
+   k.rot(R.tail,p => [0,35*cyc(p*4),0],16);
+   k.move([[0,[0,0,0]],[.3,[0,.08*B,0]],[.45,[0,0,0]],[.6,[0,.08*B,0]],[.75,[0,0,0]],[1,[0,0,0]]]);
+  });
  }
 
  if (kind === 'flyer') {
@@ -2696,6 +2782,26 @@ function buildMotionClips(kind,R,opt) {
    k.pose(R.wingL,[[0,[0,0,0]],[.3,[0,0,40]],[.55,[0,0,-20]],[1,[0,0,0]]]);
    k.pose(R.wingR,[[0,[0,0,0]],[.3,[0,0,-40]],[.55,[0,0,20]],[1,[0,0,0]]]);
    k.hit(.55);
+  });
+  clip('hurt','やられ',.5,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-15,0,0]],[1,[0,0,0]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.3,[-20,0,0]],[1,[0,0,0]]]);
+   k.move([[0,[0,0,0]],[.3,[0,.02*H,-.06*H]],[1,[0,0,0]]]);
+   k.pose(R.wingL,[[0,[0,0,0]],[.3,[0,0,30]],[1,[0,0,0]]]);
+   k.pose(R.wingR,[[0,[0,0,0]],[.3,[0,0,-30]],[1,[0,0,0]]]);
+  });
+  clip('die','倒れる',1.2,false,k => {
+   k.tilt([[0,[0,0,0]],[.3,[-10,0,0]],[1,[0,0,80]]]);
+   k.move([[0,[0,0,0]],[.3,[0,.03*H,0]],[1,[0,-.3*H,0]]]);
+   // 翼は下へたたむ（胴がモデル全体のときの「開いて沈む」も兼ねる）
+   k.pose(R.wingL,[[0,[0,0,0]],[1,[0,0,-40]]]);
+   k.pose(R.wingR,[[0,[0,0,0]],[1,[0,0,40]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.6,[15,0,0]],[1,[25,0,0]]]);
+  });
+  clip('emote','喜ぶ',1.2,false,k => {
+   flap(k,2*W,4,24);
+   k.move([[0,[0,0,0]],[.3,[0,.1*B,0]],[.7,[0,.1*B,0]],[1,[0,0,0]]]);
+   k.pose(R.head,[[0,[0,0,0]],[.3,[-15,0,0]],[.7,[-15,0,0]],[1,[0,0,0]]]);
   });
  }
 
@@ -2964,6 +3070,11 @@ function motionPanel() {
     data-play="${esc(id)}"
    >${m.playing === id ? '■' : '▶'} ${esc(c.name || id)}<small>${esc(id)} · ${c.duration}秒${c.loop === false ? '' : ' · くり返し'}</small></button>
    <button
+    class="toggle ${m.edit?.clipId === id ? 'selected' : ''}"
+    data-edit-clip="${esc(id)}"
+    aria-label="${esc(c.name || id)}を手で直す"
+   >✋</button>
+   <button
     class="toggle"
     data-fix="${esc(id)}"
     aria-label="${esc(c.name || id)}をAIで直す"
@@ -2997,6 +3108,8 @@ function motionPanel() {
   <div class="card">
    <h3>① 動きを見る</h3>
 
+   ${motionEditCard()}
+
    ${clipRows || '<p class="hint">まだ動きがありません。下の②か③で作れます。</p>'}
 
    ${motionFixArea()}
@@ -3013,8 +3126,8 @@ function motionPanel() {
    </p>
   </div>
 
-  <div class="card">
-   <h3>② おまかせで作る</h3>
+  <details class="card" id="autoDetails" ${(m.autoOpen ?? !clips.length) ? 'open' : ''}>
+   <summary><b>② おまかせで作る</b></summary>
 
    ${selectField(
     '種類',
@@ -3047,7 +3160,7 @@ function motionPanel() {
     作られる動き: ${esc(kind.clips)}。同じ名前の動きは上書きされます（↶で戻せます）。
    </p>
    ${moreHint()}
-  </div>
+  </details>
 
   <div class="card">
    <h3>③ AIに頼む（まとめて作る）</h3>
@@ -3149,6 +3262,488 @@ function defaultPicks(kind) {
  return kind === 'vehicle'
   ? ['drive','turn','bump']
   : ['idle','walk','run','jump','attack','hurt'];
+}
+
+// ------------------------------------------------------------
+// 3D画面のタップで部位を割り当てる
+// ------------------------------------------------------------
+
+function assignButtons(r) {
+ const m = state.motion;
+ const s = state.modelSpec;
+ const assigned = role => {
+  const id = m.roles[role];
+  return !!id && (id === '*' || own(s.parts,id));
+ };
+
+ const roles = [
+  ...r.missing.filter(x => x !== 'wheels'),
+  ...(r.missing.includes('wheels')
+   ? ['wheelFL','wheelFR','wheelBL','wheelBR'].filter(x => !assigned(x))
+   : []),
+  ...r.optionalMissing
+ ];
+
+ if (!roles.length || !state.runtime) return '';
+
+ return `
+  <p class="hint">3D画面でタップして選ぶ:</p>
+  <div class="chips">
+   ${roles.map(role => `
+    <button data-assign="${role}" class="${m.assignRole === role ? 'selected' : ''}">${esc(ROLE_INFO[role].label)}</button>
+   `).join('')}
+  </div>
+ `;
+}
+
+function startAssign(role) {
+ assert(ROLE_INFO[role],'部位が分かりません');
+ assert(state.runtime,'3D表示が使えないため、タップで選べません');
+
+ const m = state.motion;
+ if (m.walk || m.edit) stopMotion();
+
+ m.assignRole = role;
+ $('assignHint')?.remove();
+
+ const box = document.createElement('div');
+ box.id = 'assignHint';
+ box.innerHTML = '<span>「'+esc(ROLE_INFO[role].label)+'」に当たる部品をタップしてください</span>'
+  + button('assignCancel','キャンセル');
+ $('viewport').appendChild(box);
+ $('viewport').scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+
+function endAssign() {
+ state.motion.assignRole = null;
+ $('assignHint')?.remove();
+}
+
+// 割り当て中・手で直す編集中に3D画面でタップされた部品を受け取る
+function handleMotionPick(id) {
+ const m = state.motion;
+ const s = state.modelSpec;
+ if (!own(s.parts,id)) return;
+
+ if (m.assignRole) {
+  const role = m.assignRole;
+  const p = s.parts[id];
+  // 親が group（関節）なら、関節を優先する
+  const pick = p.parent && s.parts[p.parent]?.type === 'group' ? p.parent : id;
+
+  m.roles[role] = pick;
+  endAssign();
+  renderPanel();
+  toast('「'+ROLE_INFO[role].label+'」に「'+s.parts[pick].name+'」を割り当てました');
+  return;
+ }
+
+ if (m.edit) {
+  m.edit.partId = id;
+  m.edit.pending = null;
+  showEditPose();
+  renderPanel();
+ }
+}
+
+// ------------------------------------------------------------
+// 手で直す（ポーズ編集）
+// 表示は seek と部品への直接の当てはめだけで行い、記録するまで ModelSpec は変えない
+// ------------------------------------------------------------
+
+function toggleEdit(id) {
+ const m = state.motion;
+
+ if (m.edit?.clipId === id) {
+  stopMotion();
+  renderPanel();
+  return;
+ }
+
+ assert(m.animator,'3D表示が使えないため、手で直せません');
+ assert(state.modelSpec.animations?.[id],'動きが見つかりません');
+
+ stopMotion();
+
+ m.edit = {clipId:id,time:0,partId:null,fine:false,pending:null,lastPart:null,len:1,amp:1};
+ showEditPose();
+ renderPanel();
+}
+
+// 編集の後片付け（手で当てた部品を基本姿勢へ戻す）。再生の停止は呼び出し側（stopMotion）が行う
+function endEdit() {
+ const m = state.motion;
+ const e = m.edit;
+ if (!e) return;
+
+ m.edit = null;
+
+ const parts = state.runtime?.root?.userData.parts;
+
+ if (parts) {
+  for (const id of [e.lastPart,e.partId]) {
+   if (id && parts[id] && state.modelSpec.parts[id]) {
+    state.engine.transform(parts[id],state.modelSpec.parts[id]);
+   }
+  }
+ }
+}
+
+// モデルが作り直されたとき（resetAnimator の最後）に編集の表示を合わせ直す
+function refreshEdit() {
+ const m = state.motion;
+ const e = m.edit;
+ if (!e) return;
+
+ const a = state.modelSpec.animations?.[e.clipId];
+
+ if (!a || !m.animator) {
+  m.edit = null;
+  return;
+ }
+
+ e.time = Math.min(e.time,a.duration);
+
+ if (e.partId && !own(state.modelSpec.parts,e.partId)) {
+  e.partId = null;
+  e.pending = null;
+ }
+
+ // 新しいモデルには、まだ手で当てた部品はない
+ e.lastPart = null;
+ showEditPose();
+}
+
+// その時刻の姿勢を表示し、選んだ部品に pending（差分）を当てる
+function showEditPose() {
+ const m = state.motion;
+ const e = m.edit;
+ const r = state.runtime;
+ if (!e || !m.animator || !r?.root) return;
+
+ const parts = r.root.userData.parts;
+ const spec = state.modelSpec.parts;
+
+ // 前に手で当てた部品を基本姿勢へ戻してから、動きの姿勢を当て直す
+ for (const id of [e.lastPart,e.partId]) {
+  if (id && parts[id] && spec[id]) state.engine.transform(parts[id],spec[id]);
+ }
+
+ m.animator.seek(e.clipId,e.time);
+
+ if (e.partId && e.pending && parts[e.partId] && spec[e.partId]) {
+  const o = parts[e.partId];
+  const p = spec[e.partId];
+  const D = Math.PI/180;
+
+  o.position.set(
+   p.position[0]+e.pending.pos[0],
+   p.position[1]+e.pending.pos[1],
+   p.position[2]+e.pending.pos[2]
+  );
+  o.rotation.set(
+   p.rotation[0]+e.pending.rot[0]*D,
+   p.rotation[1]+e.pending.rot[1]*D,
+   p.rotation[2]+e.pending.rot[2]*D
+  );
+ }
+
+ e.lastPart = e.partId;
+ r.root.updateMatrixWorld(true);
+ invalidate();
+}
+
+// 選んだ部品の、その時刻の差分（回転=度、位置=m）を表示から読み取る
+function currentOffset() {
+ const e = state.motion.edit;
+ const r = state.runtime;
+
+ e.pending = null;
+ showEditPose();
+
+ const o = r.root.userData.parts[e.partId];
+ const p = state.modelSpec.parts[e.partId];
+ const DEG = 180/Math.PI;
+ const pos = v => Math.round(v*10000)/10000;
+
+ return {
+  rot: [
+   (o.rotation.x-p.rotation[0])*DEG,
+   (o.rotation.y-p.rotation[1])*DEG,
+   (o.rotation.z-p.rotation[2])*DEG
+  ].map(r3),
+  pos: [
+   o.position.x-p.position[0],
+   o.position.y-p.position[1],
+   o.position.z-p.position[2]
+  ].map(pos)
+ };
+}
+
+function editRotate(dir) {
+ const e = state.motion.edit;
+ assert(e?.partId,'3D画面で動かしたい部品をタップしてください');
+
+ if (!e.pending) e.pending = currentOffset();
+
+ const i = 'xyz'.indexOf(dir[0]);
+ const step = (e.fine ? 5 : 15)*(dir[1] === '+' ? 1 : -1);
+
+ e.pending.rot[i] = r3(e.pending.rot[i]+step);
+ showEditPose();
+ renderPanel();
+}
+
+function editMove(dir) {
+ const e = state.motion.edit;
+ assert(e?.partId,'3D画面で動かしたい部品をタップしてください');
+
+ if (!e.pending) e.pending = currentOffset();
+
+ const step = modelSpan()*.02*(dir === 'y+' ? 1 : -1);
+
+ e.pending.pos[1] = Math.round((e.pending.pos[1]+step)*10000)/10000;
+ showEditPose();
+ renderPanel();
+}
+
+function stepEdit(dir) {
+ const e = state.motion.edit;
+ const a = e && state.modelSpec.animations?.[e.clipId];
+ if (!a) return;
+
+ e.time = r3(Math.min(a.duration,Math.max(0,e.time+dir/24)));
+ e.pending = null;
+ showEditPose();
+ renderPanel();
+}
+
+// ±0.01秒以内に既存のキーがあれば値を置き換え、なければ時刻順に挿入する
+function upsertKey(list,t,val) {
+ const i = list.findIndex(k => Math.abs(k[0]-t) <= .01);
+
+ if (i >= 0) {
+  list[i][1] = val.slice();
+  return;
+ }
+
+ const at = list.findIndex(k => k[0] > t);
+ list.splice(at < 0 ? list.length : at,0,[t,val.slice()]);
+}
+
+function findKeyNear(a,pid,t) {
+ const tr = pid && a.tracks?.[pid];
+ return !!tr && Object.values(tr).some(list => list.some(k => Math.abs(k[0]-t) <= .01));
+}
+
+function recordEditKey() {
+ const e = state.motion.edit;
+ assert(e?.partId,'3D画面で動かしたい部品をタップしてください');
+ assert(e.pending,'回転や上下のボタンで姿勢を変えてから記録してください');
+
+ const pend = clone(e.pending);
+ const pid = e.partId;
+ const cid = e.clipId;
+ const t = r3(e.time);
+
+ // 記録後は、新しいモデルで記録した姿勢を表示し直す（失敗したら pending を戻す）
+ e.pending = null;
+
+ try {
+  mutate(s => {
+   const a = s.animations[cid];
+   assert(a,'動きが見つかりません');
+
+   a.tracks ??= {};
+   const tr = a.tracks[pid] ??= {};
+   const loop = a.loop !== false;
+   const dur = r3(a.duration);
+
+   const write = (ch,val) => {
+    const list = tr[ch] ??= [[0,[0,0,0]],[dur,[0,0,0]]];
+    upsertKey(list,t,val);
+
+    // くり返す動きは、端に記録したら反対側の端もそろえる
+    if (loop) {
+     if (t <= .01) upsertKey(list,dur,val);
+     else if (t >= dur-.01) upsertKey(list,0,val);
+    }
+   };
+
+   write('rotation',pend.rot.map(r3));
+
+   if (pend.pos.some(v => Math.abs(v) > 1e-6) || tr.position) {
+    write('position',pend.pos.map(v => Math.round(v*10000)/10000));
+   }
+
+   let count = 0;
+   Object.values(a.tracks).forEach(x => Object.values(x).forEach(list => count += list.length));
+
+   assert(
+    count <= LIMIT.motionKeys,
+    'キーが多すぎます（1つの動きで'+LIMIT.motionKeys+'個まで）。不要なキーを消してから記録してください'
+   );
+  });
+ } catch (err) {
+  e.pending = pend;
+  showEditPose();
+  throw err;
+ }
+
+ toast('この時刻の姿勢を記録しました（↶で取り消せます）');
+}
+
+function deleteEditKey() {
+ const e = state.motion.edit;
+ assert(e?.partId,'キーを消す部品を選んでください');
+
+ const t = e.time;
+ const pid = e.partId;
+ const cid = e.clipId;
+
+ e.pending = null;
+
+ mutate(s => {
+  const a = s.animations[cid];
+  const tr = a?.tracks?.[pid];
+  if (!tr) return;
+
+  for (const ch of Object.keys(tr)) {
+   tr[ch] = tr[ch].filter(k => Math.abs(k[0]-t) > .01);
+   if (!tr[ch].length) delete tr[ch];
+  }
+
+  if (!Object.keys(tr).length) delete a.tracks[pid];
+ });
+
+ toast('このキーを消しました（↶で取り消せます）');
+}
+
+// 動き全体の調整（長さ・大きさ）。反映ボタンを押したときだけデータを変える
+function applyEditScale(kind) {
+ const e = state.motion.edit;
+ const a = e && state.modelSpec.animations?.[e.clipId];
+ assert(a,'動きが見つかりません');
+
+ const f = kind === 'len' ? e.len : e.amp;
+
+ if (Math.abs(f-1) < 1e-6) {
+  toast('倍率が1なので、変更はありません');
+  return;
+ }
+
+ const cid = e.clipId;
+
+ if (kind === 'len') {
+  const dur = Math.min(30,Math.max(.1,r3(a.duration*f)));
+  const g = dur/a.duration;
+
+  mutate(s => {
+   const c = s.animations[cid];
+
+   for (const tr of Object.values(c.tracks || {})) {
+    for (const list of Object.values(tr)) {
+     list.forEach(k => {
+      k[0] = Math.min(dur,r3(k[0]*g));
+     });
+    }
+   }
+
+   (c.events || []).forEach(ev => {
+    ev[0] = Math.min(dur,r3(ev[0]*g));
+   });
+
+   (c.spins || []).forEach(sp => {
+    sp.degPerSec = r3(sp.degPerSec/g);
+   });
+
+   c.duration = dur;
+  });
+
+  e.time = Math.min(dur,r3(e.time*g));
+  e.len = 1;
+ } else {
+  mutate(s => {
+   const c = s.animations[cid];
+
+   for (const tr of Object.values(c.tracks || {})) {
+    if (tr.rotation) tr.rotation.forEach(k => {
+     k[1] = k[1].map(v => r3(v*f));
+    });
+    if (tr.position) tr.position.forEach(k => {
+     k[1] = k[1].map(v => Math.round(v*f*10000)/10000);
+    });
+   }
+  });
+
+  e.amp = 1;
+ }
+
+ showEditPose();
+ renderPanel();
+ toast((kind === 'len' ? '長さ' : '大きさ')+'を反映しました（↶で取り消せます）');
+}
+
+function motionEditCard() {
+ const m = state.motion;
+ const e = m.edit;
+ const a = e && state.modelSpec.animations?.[e.clipId];
+ if (!a) return '';
+
+ const part = e.partId && state.modelSpec.parts[e.partId];
+ const step = Math.max(.001,r3(a.duration/60));
+ const near = findKeyNear(a,e.partId,e.time);
+ const b = (attr,label) => `<button ${attr}>${label}</button>`;
+
+ return `
+  <div class="card review">
+   <h3>「${esc(a.name || e.clipId)}」を手で直す</h3>
+
+   <label>時刻 <output id="editTimeOut">${r3(e.time)}</output>秒 / ${a.duration}秒
+    <input type="range" min="0" max="${a.duration}" step="${step}" value="${e.time}" data-etime="1">
+   </label>
+   <div class="row">
+    ${b('data-estep="-1"','◀ 1コマ')}
+    ${b('data-estep="1"','1コマ ▶')}
+   </div>
+
+   <p class="hint">${part
+    ? '選択中: '+esc(part.name)+(e.pending ? '（未記録の変更あり）' : '')
+    : '3D画面で動かしたい部品をタップしてください'}</p>
+
+   ${part ? `
+    <div class="nudgegrid">
+     ${b('data-erot="x+"','X ＋')}${b('data-erot="y+"','Y ＋')}${b('data-erot="z+"','Z ＋')}
+     ${b('data-erot="x-"','X −')}${b('data-erot="y-"','Y −')}${b('data-erot="z-"','Z −')}
+     ${b('data-epos="y+"','↑ 上へ')}${b('data-epos="y-"','↓ 下へ')}<span></span>
+    </div>
+    <label>
+     <input type="checkbox" id="editFine" ${e.fine ? 'checked' : ''}>
+     細かく（5°ずつ）
+    </label>
+    <p class="hint">ボタンを押すと、すぐ3D画面で向きを確かめられます。よければ「この時刻に記録」を押してください。</p>
+    <div class="row">
+     ${button('editRecord','この時刻に記録','primary')}
+     ${near ? button('editDeleteKey','このキーを消す','danger') : ''}
+    </div>
+   ` : ''}
+
+   <h3>動き全体の調整</h3>
+   <label>長さ × <output id="editLenOut">${e.len}</output>
+    <input type="range" min=".5" max="2" step=".05" value="${e.len}" data-escale="len">
+   </label>
+   ${button('editApplyLen','長さを反映')}
+   <label>大きさ × <output id="editAmpOut">${e.amp}</output>
+    <input type="range" min=".5" max="2" step=".05" value="${e.amp}" data-escale="amp">
+   </label>
+   ${button('editApplyAmp','大きさを反映')}
+
+   <div class="row">
+    ${button('editClose','閉じる')}
+   </div>
+   <p class="hint">記録・削除・反映は、それぞれ↶で1回ずつ取り消せます。</p>
+  </div>
+ `;
 }
 
 // 回転の中心を調べる部位（脚・腕・翼）
@@ -3270,8 +3865,8 @@ function motionReadinessCard() {
     <p class="warnbox">
      主要な部位の役割が決まっていません: ${esc(r.missing.map(label).join('、'))}<br>
      ${easy()
-      ? '部品の名前から自動で見つけられませんでした。くわしく表示にすると、下の②で部品を選べます。'
-      : '下の②で、それぞれの部位に当たる部品を選んでください。'}
+      ? '部品の名前から自動で見つけられませんでした。下の「3D画面でタップして選ぶ」から部品を選んでください。'
+      : '下の「3D画面でタップして選ぶ」か②で、それぞれの部位に当たる部品を選んでください。'}
     </p>
    ` : ''}
 
@@ -3287,6 +3882,8 @@ function motionReadinessCard() {
    ${r.optionalMissing.length ? `
     <p class="hint">見つからなかった部位（なくても使えます）: ${esc(r.optionalMissing.map(label).join('、'))}</p>
    ` : ''}
+
+   ${assignButtons(r)}
 
    <p class="hint">このチェックは参考です。動きの作成・読み込み・書き出しはいつでもできます。</p>
   </div>
@@ -3320,6 +3917,9 @@ function motionFixArea() {
 function startTry() {
  const m = state.motion;
  if (!m.tester) return;
+
+ // 手で直す編集中なら、編集を終えてから試す
+ if (m.edit) stopMotion();
 
  if (!m.trying) {
   m.playing = null;
@@ -7473,6 +8073,11 @@ function handleChange(e) {
   state.ai.batchSize = [2,3,4,6].includes(Number(el.value)) ? Number(el.value) : 3;
   saveQueue();
   renderPanel();
+ } else if (d.etime) {
+  // 指を離したら、キーの有無などの表示を更新する
+  renderPanel();
+ } else if (el.id === 'editFine') {
+  if (state.motion.edit) state.motion.edit.fine = el.checked;
  } else if (el.id === 'paintOnly') {
   state.paintOnly = el.checked;
  } else if (d.geotype) {
@@ -7515,6 +8120,25 @@ function handleInput(e) {
   const out = $('out_m_'+d.motion);
   if (out) out.value = e.target.value;
   if (d.motion === 'trySpeed') startTry();
+ } else if (d.etime) {
+  // 手で直す: 時間スライダーを動かしている間は姿勢の表示だけを更新する
+  const ed = state.motion.edit;
+
+  if (ed) {
+   ed.time = Number(e.target.value) || 0;
+   ed.pending = null;
+   const out = $('editTimeOut');
+   if (out) out.value = r3(ed.time);
+   showEditPose();
+  }
+ } else if (d.escale) {
+  const ed = state.motion.edit;
+
+  if (ed) {
+   ed[d.escale] = Number(e.target.value) || 1;
+   const out = $(d.escale === 'len' ? 'editLenOut' : 'editAmpOut');
+   if (out) out.value = ed[d.escale];
+  }
  } else if (d.dim) {
   // 形の寸法は指を離したときに反映する（ここでは数値表示だけ更新）
   const out = $('dim_'+d.dim+'_'+(d.dimi || 'v'));
@@ -7584,6 +8208,21 @@ const actions = {
  },
 
  demoHtml: saveDemoHtml,
+
+ editRecord: recordEditKey,
+ editDeleteKey: deleteEditKey,
+ editApplyLen: () => applyEditScale('len'),
+ editApplyAmp: () => applyEditScale('amp'),
+
+ editClose: () => {
+  stopMotion();
+  renderPanel();
+ },
+
+ assignCancel: () => {
+  endAssign();
+  renderPanel();
+ },
  glb: exportGLB,
 
  pruneMaterials: () => {
@@ -7860,6 +8499,17 @@ function handleClick(e) {
  safe(() => {
   if (b.dataset.nudge !== undefined) {
    nudgePart(b.dataset.nudge);
+  } else if (b.dataset.assign) {
+   startAssign(b.dataset.assign);
+   renderPanel();
+  } else if (b.dataset.editClip) {
+   toggleEdit(b.dataset.editClip);
+  } else if (b.dataset.estep !== undefined) {
+   stepEdit(Number(b.dataset.estep));
+  } else if (b.dataset.erot) {
+   editRotate(b.dataset.erot);
+  } else if (b.dataset.epos) {
+   editMove(b.dataset.epos);
   } else if (b.dataset.paint) {
    paintPart(b.dataset.paint);
   } else if (b.dataset.nudgestep !== undefined) {
@@ -8022,6 +8672,7 @@ function init() {
 
   if (details.id === 'partList') state.partListOpen = !details.open;
   if (details.id === 'queueDetails') state.ai.queueOpen = !details.open;
+  if (details.id === 'autoDetails') state.motion.autoOpen = !details.open;
  },true);
 
  document.addEventListener('focusout',e => {
