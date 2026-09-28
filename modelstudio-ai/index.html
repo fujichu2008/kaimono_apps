@@ -97,6 +97,11 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 .libopen small{font-size:11px}
 .libcard.current .libopen{border-color:var(--cyan);background:#1f3442}
 .libdel{position:absolute;top:10px;right:10px;min-height:32px;width:32px;padding:0;background:#18212de6}
+#levelBtn{font-size:12px;padding:9px 8px}
+.nudge{border:1px solid var(--line);border-radius:12px;padding:9px;margin:8px 0;background:#16202b}
+.nudgegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:8px 0}
+.nudgegrid button{min-height:44px;padding:6px 4px;font-size:13px}
+.newkind{display:block;width:100%;text-align:left;margin:6px 0}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -122,6 +127,7 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
  <div class="row">
   <button id="undoBtn" data-action="undo" aria-label="元に戻す">↶</button>
   <button id="redoBtn" data-action="redo" aria-label="やり直す">↷</button>
+  <button id="levelBtn" data-action="level" aria-label="表示の切り替え（かんたん／くわしく）">表示: かんたん</button>
   <button data-action="save" class="primary">保存</button>
  </div>
 </header>
@@ -175,6 +181,8 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 const STORE = 'modelstudio.ai.v1';
 const DRAFT = STORE + '.draft';
 const GUIDE = STORE + '.guide';
+const UI_KEY = STORE + '.ui';
+const SAVE_TIP = STORE + '.saveTip';
 
 const LIMIT = {
  parts: 300,
@@ -566,7 +574,13 @@ const state = {
  },
  thumb: null,
  thumbTried: new Set(),
- thumbQueued: false
+ thumbQueued: false,
+ // 表示の細かさ（easy: かんたん / pro: くわしく）
+ uiLevel: 'easy',
+ // かんたん調整の刻みと、連続操作をまとめるための情報
+ nudgeStep: 'normal',
+ nudge: {id:null},
+ nudgeTimer: null
 };
 
 // ============================================================
@@ -614,13 +628,13 @@ function safe(fn) {
  }
 }
 
-function toast(message) {
+function toast(message,ms=2400) {
  $('toast').textContent = message;
  $('toast').style.display = 'block';
  clearTimeout(state.toastTimer);
  state.toastTimer = setTimeout(() => {
   $('toast').style.display = 'none';
- },2400);
+ },ms);
 }
 
 function guardTree(v,depth=0) {
@@ -748,7 +762,10 @@ function vector(v,label,n=3) {
 }
 
 function validateGeometry(g,label) {
- assert(obj(g) && own(GEO,g.type),label+': 不明なGeometry');
+ assert(
+  obj(g) && own(GEO,g.type),
+  '部品「'+label+'」の形の種類が分かりません。箱・球・円柱などの形を選び直してください'
+ );
 
  const base = GEO[g.type];
 
@@ -943,7 +960,10 @@ function validateModelSpec(s) {
  assert(Object.keys(s.anchors).length <= LIMIT.anchors,'Anchorは100個までです');
 
  for (const [id,m] of Object.entries(s.materials)) {
-  assert(validId(id) && obj(m),'Material ID/Objectが不正: '+id);
+  assert(
+   validId(id) && obj(m),
+   '色・質感の識別名（'+id+'）が正しくありません。英字で始まる英数字の名前にしてください'
+  );
   assert(m.type === 'standard','Material.typeはstandardです');
   assert(
    m.name === undefined || typeof m.name === 'string',
@@ -976,7 +996,7 @@ function validateModelSpec(s) {
  for (const [id,p] of Object.entries(s.parts)) {
   assert(
    validId(id) && obj(p) && p.id === id,
-   'Partキーとidが不一致: '+id
+   '部品の識別名（ID）が一致していません（'+id+'）。データを読み込み直すか、AIに作り直してもらってください'
   );
   assert(typeof p.name === 'string','Part.nameが必要です');
   assert(
@@ -993,13 +1013,13 @@ function validateModelSpec(s) {
   assert(
    p.parent === null
     || typeof p.parent === 'string' && own(s.parts,p.parent),
-   id+': Parent ID不正'
+   '部品「'+id+'」の親部品が見つかりません。親部品を選び直すか、AIに「今のモデルに合わせて直して」と頼んでください'
   );
 
   if (p.type === 'primitive') {
    assert(
     typeof p.material === 'string' && own(s.materials,p.material),
-    id+': 不明なMaterial'
+    '部品「'+id+'」の色・質感が見つかりません。「色・質感」を選び直してください'
    );
    estimate += validateGeometry(p.geometry,id);
   }
@@ -1008,10 +1028,16 @@ function validateModelSpec(s) {
   let parent = p.parent;
 
   while (parent !== null) {
-   assert(!visited.has(parent),'Circular hierarchy: '+id);
+   assert(
+    !visited.has(parent),
+    '部品の親子関係が輪になっています（'+id+'）。親部品の選び方を見直してください'
+   );
    visited.add(parent);
    assert(visited.size <= 32,'階層は32段までです');
-   assert(obj(s.parts[parent]),id+': Parent ID不正');
+   assert(
+    obj(s.parts[parent]),
+    '部品「'+id+'」の親部品が見つかりません。親部品を選び直すか、AIに「今のモデルに合わせて直して」と頼んでください'
+   );
    parent = s.parts[parent].parent;
   }
  }
@@ -1026,7 +1052,7 @@ function validateModelSpec(s) {
   assert(
    a.parent === null
     || typeof a.parent === 'string' && own(s.parts,a.parent),
-   id+': Anchor Parent ID不正'
+   '取付点「'+id+'」を付ける部品が見つかりません。取付点を付け直すか、削除してください'
   );
  }
 
@@ -2065,7 +2091,7 @@ function buildMarkers() {
 
 function updateMarkers() {
  const r = state.runtime;
- r.anchorLayer.visible = state.showAnchors;
+ r.anchorLayer.visible = state.showAnchors && !easy();
 
  for (const m of r.anchorLayer.children) {
   const a = r.root.userData.anchors[m.userData.anchorId];
@@ -2928,9 +2954,11 @@ function motionPanel() {
     m.kind
    )}
 
-   <p class="hint">部品の名前から役割を自動で選んでいます。違っていたら選び直してください。</p>
+   <p class="hint">${easy()
+    ? '部品の名前から、脚・腕などの役割を自動で選んでいます。'
+    : '部品の名前から役割を自動で選んでいます。違っていたら選び直してください。'}</p>
 
-   ${roleFields}
+   ${easy() ? '' : roleFields}
 
    <div class="row">
     ${button('autoJoints','脚・腕の付け根に関節を作る')}
@@ -2949,6 +2977,7 @@ function motionPanel() {
    <p class="hint">
     作られる動き: ${esc(kind.clips)}。同じ名前の動きは上書きされます（↶で戻せます）。
    </p>
+   ${moreHint()}
   </div>
 
   <div class="card">
@@ -3624,7 +3653,7 @@ function batchButtons() {
    `).join('');
 
  return `
-  ${selectField(
+  ${easy() ? '' : selectField(
    '1回にAIへ頼む数（多すぎると回答が途中で切れます）',
    'data-batch="1"',
    [['2','2件'],['3','3件'],['4','4件'],['6','6件']],
@@ -3917,8 +3946,8 @@ function motionDraftCard() {
     台本では書ききれない細かい指示（速さの緩急、止め、向き、雰囲気、動かさない部位、キャラの性格など）を自由に書けます。
    </p>
 
-   <h3>使う部位</h3>
-   ${roles.length ? roles.map(([r,pid]) => `
+   ${easy() ? '' : '<h3>使う部位</h3>'}
+   ${easy() ? '' : roles.length ? roles.map(([r,pid]) => `
     <label>
      <input type="checkbox" data-draft-part="${r}" ${checked(r) ? 'checked' : ''}>
      ${esc(ROLE_INFO[r].label)} <small>${esc(pid === '*' ? 'モデル全体' : pid)}</small>
@@ -3927,7 +3956,7 @@ function motionDraftCard() {
     <p class="hint">役割が決まっていません。「動き」タブの②で部品の役割を選べます。</p>
    `}
 
-   ${selectField('参考にする既存の動き（任意）','data-draft="ref"',[['','なし'],...refs],d.ref)}
+   ${easy() ? '' : selectField('参考にする既存の動き（任意）','data-draft="ref"',[['','なし'],...refs],d.ref)}
 
    <h3>AIに頼む</h3>
 
@@ -3941,9 +3970,10 @@ function motionDraftCard() {
    ${batchButtons()}
 
    <div class="row">
-    ${button('promptDetail','この動きだけの指示文をコピー')}
+    ${easy() ? '' : button('promptDetail','この動きだけの指示文をコピー')}
     ${button('import','AIの回答を読み込む')}
    </div>
+   ${moreHint()}
   </div>
  `;
 }
@@ -4326,6 +4356,9 @@ function refreshDirect(collection,id) {
 }
 
 function editDirect(collection,id,key,value,index=null,live=false) {
+ // 確定していない連続操作があれば、先に1つの履歴として確定する
+ if (!live) finishLive();
+
  const next = snapshot();
 
  if (index === null) next[collection][id][key] = value;
@@ -4391,6 +4424,422 @@ function descendants(id,s=state.modelSpec) {
  }
 
  return result;
+}
+
+// ------------------------------------------------------------
+// 初心者向け: 表示の細かさ・かんたん調整・ミラー複製・ひな形・ファイル保存
+// ------------------------------------------------------------
+
+const easy = () => state.uiLevel !== 'pro';
+
+function moreHint() {
+ return easy()
+  ? '<p class="hint">くわしく表示にすると、さらに細かく設定できます。</p>'
+  : '';
+}
+
+// かんたん調整の1回の移動量（モデル全体の最大辺に対する割合）
+function nudgeStepSize() {
+ const r = state.runtime;
+ let span = 2;
+
+ if (r?.root) {
+  const box = new THREE.Box3().setFromObject(r.root);
+  if (!box.isEmpty()) {
+   const size = box.getSize(new THREE.Vector3());
+   span = Math.max(size.x,size.y,size.z,.05);
+  }
+ }
+
+ return span*({fine:.01,normal:.03,coarse:.1}[state.nudgeStep] || .03);
+}
+
+function nudgePad() {
+ const b = (dir,label) => `<button data-nudge="${dir}">${label}</button>`;
+ const steps = [['fine','細かく'],['normal','普通'],['coarse','粗く']];
+
+ return `
+  <div class="nudge">
+   <b>かんたん調整</b>
+   <div class="nudgegrid">
+    ${b('x-','← 右へ')}${b('y+','↑ 上へ')}${b('x+','左へ →')}
+    ${b('z+','前へ')}${b('y-','↓ 下へ')}${b('z-','後ろへ')}
+    ${b('ry+','左を向く 15°')}${b('rx+','前に傾ける 15°')}${b('ry-','右を向く 15°')}
+    ${b('s-','小さく −10%')}${b('rx-','後ろに傾ける 15°')}${b('s+','大きく +10%')}
+   </div>
+   <div class="chips">
+    ${steps.map(([k,t]) => `
+     <button data-nudgestep="${k}" class="${state.nudgeStep === k ? 'selected' : ''}">${t}</button>
+    `).join('')}
+   </div>
+   <p class="hint">
+    左右・前後はモデルから見た向きです（モデルの前が +Z）。
+    続けて押した分は「↶」1回でまとめて戻せます。
+   </p>
+  </div>
+ `;
+}
+
+function nudgePart(dir) {
+ const id = state.selectedPartId;
+ assert(id && own(state.modelSpec.parts,id),'調整する部品を選んでください');
+
+ // 別の部品に切り替えたら、それまでの連続操作を確定する
+ if (state.nudge.id !== id) finishLive();
+ state.nudge.id = id;
+
+ const p = state.modelSpec.parts[id];
+ const r4 = v => Math.round(v*10000)/10000;
+ const sign = dir.endsWith('+') ? 1 : -1;
+
+ if (dir[0] === 's') {
+  const f = sign > 0 ? 1.1 : .9;
+  editDirect(
+   'parts',id,'scale',
+   p.scale.map(v => r4(Math.min(1000,Math.max(.001,v*f)))),
+   null,true
+  );
+ } else if (dir[0] === 'r') {
+  const i = 'xyz'.indexOf(dir[1]);
+  editDirect('parts',id,'rotation',r4(p.rotation[i]+sign*Math.PI/12),i,true);
+ } else {
+  const i = 'xyz'.indexOf(dir[0]);
+  editDirect('parts',id,'position',r4(p.position[i]+sign*nudgeStepSize()),i,true);
+ }
+
+ // 1.5秒操作がなければ、ここまでを1つの履歴として確定する
+ clearTimeout(state.nudgeTimer);
+ state.nudgeTimer = setTimeout(finishLive,1500);
+
+ renderPanel();
+}
+
+// 名前・IDの左右を入れ替える（left/right・左/右・単語としての L/R）
+function swapSide(text) {
+ const map = {
+  left:'right',right:'left',Left:'Right',Right:'Left',LEFT:'RIGHT',RIGHT:'LEFT',
+  '左':'右','右':'左'
+ };
+ const letter = {l:'r',r:'l',L:'R',R:'L'};
+
+ return String(text)
+  .replace(/left|right|Left|Right|LEFT|RIGHT|左|右/g,m => map[m])
+  .replace(/(^|[_\-\s])([lLrR])(?=$|[_\-\s])/g,(all,pre,c) => pre+letter[c]);
+}
+
+// 選んだ部品を子部品ごと左右反対側に複製する
+// 子部品も含めて X位置・Y回転・Z回転を反転すると、左右対称の形が正しく複製される
+function mirrorPart() {
+ const id = state.selectedPartId;
+ assert(id && own(state.modelSpec.parts,id),'複製する部品を選んでください');
+
+ const center = Math.abs(state.modelSpec.parts[id].position[0]) < 1e-6;
+ let newId;
+
+ mutate(s => {
+  const ids = descendants(id,s);
+  const taken = new Set(Object.keys(s.parts));
+  const map = {};
+
+  for (const old of ids) {
+   let nid = swapSide(old);
+   if (!validId(nid) || taken.has(nid)) nid = uid('part');
+   taken.add(nid);
+   map[old] = nid;
+  }
+
+  newId = map[id];
+
+  const flip = o => {
+   o.position[0] = -o.position[0] || 0;
+   o.rotation[1] = -o.rotation[1] || 0;
+   o.rotation[2] = -o.rotation[2] || 0;
+  };
+
+  for (const old of ids) {
+   const p = clone(s.parts[old]);
+   const name = swapSide(p.name);
+
+   p.id = map[old];
+   p.name = name === p.name ? p.name+'（反対側）' : name;
+   p.parent = map[p.parent] || p.parent;
+   flip(p);
+
+   s.parts[p.id] = p;
+  }
+
+  for (const a of Object.values(clone(s.anchors))) {
+   if (!map[a.parent]) continue;
+
+   a.id = uid('anchor');
+   a.name = swapSide(a.name);
+   a.parent = map[a.parent];
+   flip(a);
+
+   s.anchors[a.id] = a;
+  }
+ });
+
+ selectPart(newId);
+ toast(
+  center
+   ? '中央にある部品なので、同じ位置に複製しました。かんたん調整で位置を動かしてください'
+   : '左右反対側に複製しました（↶で取り消せます）',
+  3200
+ );
+}
+
+// 関節付きのひな形（人型・四足・車）
+function templateSpec(kind) {
+ const s = emptySpec();
+ const P = Math.PI;
+ const stamp = Date.now().toString(36);
+
+ const add = (
+  id,type,geometry,position,material,
+  parent = null,scale = [1,1,1],rotation = [0,0,0]
+ ) => {
+  s.parts[id] = {
+   id,
+   name: id.replace(/_/g,' '),
+   type,
+   geometry,
+   position,
+   rotation,
+   scale,
+   material,
+   parent,
+   visible: true
+  };
+ };
+
+ const group = (id,position,parent = null) => add(id,'group',undefined,position,undefined,parent);
+ const mat = (color,roughness = .6,metalness = 0,extra = {}) => ({
+  type: 'standard',
+  color,
+  roughness,
+  metalness,
+  ...extra
+ });
+ const sphere = (radius,w = 12,h = 8) => ({type:'sphere',radius,widthSegments:w,heightSegments:h});
+ const box = size => ({type:'box',size});
+ const capsule = (radius,length) => ({type:'capsule',radius,length,radialSegments:12,capSegments:4});
+
+ if (kind === 'biped') {
+  s.meta = {
+   name: '人型キャラクター',
+   id: 'humanoid_'+stamp,
+   version: 1,
+   description: '二足のキャラクター。頭・腕・脚に関節（group）付き。+Zが前方。'
+  };
+  s.materials = {
+   skin: mat('#f2c6a0',.7),
+   shirt: mat('#3a7bd5',.8),
+   pants: mat('#2d3440',.85),
+   shoe: mat('#5a3b2a',.7),
+   hair: mat('#3b2a20',.9),
+   dark: mat('#111418',.4)
+  };
+
+  group('body',[0,.9,0]);
+  add('pelvis','primitive',box([.32,.14,.2]),[0,0,0],'pants','body');
+  add('torso','primitive',box([.36,.46,.22]),[0,.28,0],'shirt','body');
+  add(
+   'neck','primitive',
+   {type:'cylinder',radiusTop:.05,radiusBottom:.055,height:.08,radialSegments:12},
+   [0,.54,0],'skin','body'
+  );
+
+  group('head_joint',[0,.58,0],'body');
+  add('head','primitive',sphere(.13,20,14),[0,.14,0],'skin','head_joint',[1,1.1,1]);
+  add('hair','primitive',sphere(.135,20,10),[0,.22,-.025],'hair','head_joint',[1.02,.6,1]);
+  add('eye_l','primitive',sphere(.018,8,6),[.045,.16,.12],'dark','head_joint');
+  add('eye_r','primitive',sphere(.018,8,6),[-.045,.16,.12],'dark','head_joint');
+
+  for (const [side,x] of [['l',1],['r',-1]]) {
+   group('arm_'+side+'_joint',[x*.23,.48,0],'body');
+   add('arm_'+side,'primitive',capsule(.045,.42),[0,-.25,0],'shirt','arm_'+side+'_joint');
+   add('hand_'+side,'primitive',sphere(.055),[0,-.52,0],'skin','arm_'+side+'_joint');
+
+   group('leg_'+side+'_joint',[x*.1,-.05,0],'body');
+   add('leg_'+side,'primitive',capsule(.065,.66),[0,-.42,0],'pants','leg_'+side+'_joint');
+   add('foot_'+side,'primitive',box([.11,.07,.24]),[0,-.8,.05],'shoe','leg_'+side+'_joint');
+  }
+ }
+
+ if (kind === 'quad') {
+  s.meta = {
+   name: '四足の動物',
+   id: 'animal_'+stamp,
+   version: 1,
+   description: '四足の動物。頭・尾・4本の脚に関節（group）付き。+Zが前方。'
+  };
+  s.materials = {
+   fur: mat('#c8894f',.9),
+   fur2: mat('#8a5a33',.9),
+   dark: mat('#15181c',.4)
+  };
+
+  group('body',[0,.55,0]);
+  add(
+   'torso','primitive',
+   {type:'capsule',radius:.2,length:.55,radialSegments:16,capSegments:6},
+   [0,0,0],'fur','body',[1,1,1],[P/2,0,0]
+  );
+
+  group('head_joint',[0,.12,.38],'body');
+  add('head','primitive',box([.24,.22,.3]),[0,.1,.1],'fur','head_joint');
+  add('snout','primitive',box([.14,.1,.14]),[0,.04,.3],'fur2','head_joint');
+  add('nose','primitive',sphere(.03,10,8),[0,.08,.37],'dark','head_joint');
+  add('ear_l','primitive',{type:'cone',radius:.05,height:.12,radialSegments:10},[.08,.26,.05],'fur2','head_joint');
+  add('ear_r','primitive',{type:'cone',radius:.05,height:.12,radialSegments:10},[-.08,.26,.05],'fur2','head_joint');
+  add('eye_l','primitive',sphere(.025,8,6),[.07,.15,.25],'dark','head_joint');
+  add('eye_r','primitive',sphere(.025,8,6),[-.07,.15,.25],'dark','head_joint');
+
+  group('tail_joint',[0,.08,-.45],'body');
+  add(
+   'tail','primitive',
+   {type:'capsule',radius:.035,length:.3,radialSegments:10,capSegments:4},
+   [0,.09,-.16],'fur2','tail_joint',[1,1,1],[-1.05,0,0]
+  );
+
+  for (const [tag,x,z] of [['fl',1,1],['fr',-1,1],['bl',1,-1],['br',-1,-1]]) {
+   group('leg_'+tag+'_joint',[x*.12,-.08,z*.28],'body');
+   add('leg_'+tag,'primitive',capsule(.05,.32),[0,-.22,0],'fur','leg_'+tag+'_joint');
+   add('paw_'+tag,'primitive',sphere(.06),[0,-.44,.02],'fur2','leg_'+tag+'_joint',[1,.6,1.3]);
+  }
+ }
+
+ if (kind === 'vehicle') {
+  s.meta = {
+   name: '車',
+   id: 'car_'+stamp,
+   version: 1,
+   description: '4輪の車。車輪は中心の group をX軸で回す。前輪は steer_front で向きを変える。+Zが前方。'
+  };
+  s.materials = {
+   paint: mat('#d8433b',.35,.4),
+   glass: mat('#1d3346',.15,.5),
+   dark: mat('#1b1f24',.6,.3),
+   rubber: mat('#111316',.95),
+   metal: mat('#b8c0c8',.3,.8),
+   light: mat('#fff2c4',.3,0,{emissive:'#ffd98a',emissiveIntensity:.8})
+  };
+
+  group('body',[0,0,0]);
+  add('body_shell','primitive',box([1.7,.5,4]),[0,.6,0],'paint','body');
+  add('cabin','primitive',box([1.44,.46,2]),[0,1.08,-.2],'glass','body');
+  add('roof','primitive',box([1.36,.06,1.7]),[0,1.33,-.25],'paint','body');
+  add('bumper_front','primitive',box([1.72,.18,.15]),[0,.42,2.05],'dark','body');
+  add('bumper_back','primitive',box([1.72,.18,.15]),[0,.42,-2.05],'dark','body');
+  add('light_l','primitive',box([.32,.12,.05]),[.58,.68,2.01],'light','body');
+  add('light_r','primitive',box([.32,.12,.05]),[-.58,.68,2.01],'light','body');
+
+  group('steer_front',[0,.35,1.3],'body');
+
+  for (const [tag,x,front] of [['fl',1,true],['fr',-1,true],['bl',1,false],['br',-1,false]]) {
+   group(
+    'wheel_'+tag,
+    front ? [x*.85,0,0] : [x*.85,.35,-1.3],
+    front ? 'steer_front' : 'body'
+   );
+   add(
+    'tire_'+tag,'primitive',
+    {type:'cylinder',radiusTop:.35,radiusBottom:.35,height:.26,radialSegments:24},
+    [0,0,0],'rubber','wheel_'+tag,[1,1,1],[0,0,P/2]
+   );
+   add(
+    'hub_'+tag,'primitive',
+    {type:'cylinder',radiusTop:.2,radiusBottom:.2,height:.28,radialSegments:16},
+    [0,0,0],'metal','wheel_'+tag,[1,1,1],[0,0,P/2]
+   );
+  }
+ }
+
+ return normalizeSpec(s);
+}
+
+function showNewDialog() {
+ const kinds = [
+  ['biped','人型','二足で歩くキャラクター。頭・腕・脚に関節付き'],
+  ['quad','四足の動物','犬・馬などの四足。頭・尾・4本の脚に関節付き'],
+  ['vehicle','車','4輪の車。車輪の回転とハンドル付き'],
+  ['empty','空のモデル','何もない状態から作る（AI相談で形を作るとき）'],
+  ['sample','サンプル（ドローン）','完成例を見て使い方を知る']
+ ];
+
+ openDialog(
+  '新しいモデルを作る',
+  `<p class="hint">
+    ひな形から始めると、関節が付いているので、すぐに動きを付けられます。
+   </p>
+   ${kinds.map(([k,t,d]) => `
+    <button class="newkind" data-newkind="${k}"><b>${esc(t)}</b><br><small>${esc(d)}</small></button>
+   `).join('')}`,
+  button('close','キャンセル')
+ );
+}
+
+function startTemplate(kind) {
+ const spec = kind === 'sample' ? sampleSpec()
+  : kind === 'empty' ? emptySpec()
+  : templateSpec(kind);
+
+ replaceProject(spec);
+ state.activeTab = 'model';
+ renderPanel();
+
+ if (['biped','quad','vehicle'].includes(kind)) {
+  toast('ひな形を作りました。「動き」タブの②おまかせで動きを作れます',4000);
+ } else {
+  toast(kind === 'empty' ? '空のモデルを作りました' : 'サンプルを読み込みました');
+ }
+}
+
+// モデルをファイル（.json）としてダウンロードする
+function saveFile() {
+ const s = state.modelSpec;
+ const base = String(s.meta.name || 'model')
+  .replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_')
+  .trim()
+  .slice(0,80) || 'model';
+ const name = base+'.json';
+
+ const blob = new Blob([json(s)],{type:'application/json'});
+ const url = URL.createObjectURL(blob);
+ const a = document.createElement('a');
+
+ a.href = url;
+ a.download = name;
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+
+ setTimeout(() => URL.revokeObjectURL(url),1000);
+ toast('「'+name+'」を保存しました（ダウンロード）');
+}
+
+// ファイルから開く（AIの回答と同じ自動判別で読み込む）
+function openFile(file) {
+ assert(file.size <= LIMIT.bytes,'ファイルが大きすぎます（2MBまで）。別のファイルを選んでください');
+
+ file.text()
+  .then(text => {
+   replaceGuard(() => safe(() => {
+    const data = parseAIJSON(text);
+    const message = applyAIText(text);
+
+    if (obj(data) && data.format === 'MODEL_SPEC_V1') {
+     // 開いたモデルは新しいプロジェクトとして扱う（ライブラリの既存項目を上書きしない）
+     state.projectId = null;
+     state.dirty = true;
+     writeDraft();
+    }
+
+    toast(message);
+   }));
+  })
+  .catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）を選んでください')));
 }
 
 function addPart(type) {
@@ -4527,13 +4976,13 @@ function applyModelPatch(source,patch) {
  for (const [i,op] of patch.operations.entries()) {
   assert(
    obj(op) && ['add','replace','remove'].includes(op.op),
-   '操作'+(i+1)+': op不正'
+   '修正データの'+(i+1)+'番目の操作の種類（op）が正しくありません。add・replace・remove のどれかにするよう、AIに頼み直してください'
   );
   assert(
    typeof op.path === 'string'
     && op.path.startsWith('/')
     && !/~(?![01])/g.test(op.path),
-   'Patch path不正'
+   'AIの回答で、変更する場所の書き方（path）が正しくありません。AIに「pathは / で始まる形で書いて」と頼み直してください'
   );
 
   const keys = op.path.slice(1).split('/').map(k =>
@@ -4542,7 +4991,7 @@ function applyModelPatch(source,patch) {
 
   assert(
    ['meta','settings','parts','materials','anchors','animations'].includes(keys[0]),
-   'このルートは変更できません'
+   'AIの回答で、変更できない場所を変えようとしています。変更できるのは meta・settings・parts・materials・anchors・animations だけです。AIに頼み直してください'
   );
   assert(
    keys.every(k => k && !['__proto__','prototype','constructor'].includes(k)),
@@ -4554,7 +5003,7 @@ function applyModelPatch(source,patch) {
   for (const k of keys.slice(0,-1)) {
    assert(
     parent && typeof parent === 'object' && own(parent,k),
-    'Patch pathが存在しません: '+op.path
+    'AIの回答で、存在しない場所を変更しようとしています（'+op.path+'）。AIに「今のモデルに合わせて直して」と頼んでください'
    );
    parent = parent[k];
   }
@@ -4592,12 +5041,15 @@ function applyModelPatch(source,patch) {
    }
   } else {
    if (op.op !== 'add') {
-    assert(own(parent,key),'Patch pathが存在しません: '+op.path);
+    assert(
+     own(parent,key),
+     'AIの回答で、存在しない場所を変更しようとしています（'+op.path+'）。AIに「今のモデルに合わせて直して」と頼んでください'
+    );
    }
    if (op.op === 'add') {
     assert(
      !own(parent,key),
-     'add先は既存です。replaceを使用してください: '+op.path
+     'AIの回答で、すでにある項目を「追加（add）」しようとしています（'+op.path+'）。AIに「既存の項目は replace で書き直して」と頼んでください'
     );
    }
 
@@ -4913,7 +5365,20 @@ function saveProject() {
 
   if (state.activeTab === 'model') renderPanel();
 
-  toast('プロジェクトを保存しました');
+  // 初めて保存に成功したときだけ、ファイル保存も案内する
+  let tip = false;
+
+  try {
+   tip = !localStorage.getItem(SAVE_TIP);
+   if (tip) localStorage.setItem(SAVE_TIP,'1');
+  } catch (_) {}
+
+  toast(
+   tip
+    ? 'プロジェクトを保存しました。ブラウザのデータを消すと消えます。大切なモデルは『ファイルに保存』もしてください'
+    : 'プロジェクトを保存しました',
+   tip ? 6000 : 2400
+  );
  } catch (e) {
   state.storageError = true;
   showError(Error(
@@ -5315,6 +5780,9 @@ function updateHeader() {
   : '3D表示なし · データの編集のみ可能';
 
  $('stats').style.whiteSpace = 'pre-line';
+ $('stats').hidden = easy();
+ $('anchorBtn').hidden = easy();
+ $('levelBtn').textContent = easy() ? '表示: かんたん' : '表示: くわしく';
 }
 
 function modelPanel() {
@@ -5360,6 +5828,13 @@ function modelPanel() {
     ${button('import','コピーしたデータを読み込む','primary')}
     ${button('json','データをコピー')}
    </div>
+
+   <div class="row">
+    ${button('fileSave','ファイルに保存')}
+    ${button('fileOpen','ファイルから開く')}
+   </div>
+   <input type="file" id="fileInput" accept=".json,application/json" hidden>
+   <p class="hint">ファイルに保存しておくと、ブラウザのデータを消しても、別の端末でも開けます。</p>
 
    <h3>保存したモデル（ライブラリ）</h3>
    ${libraryGrid()}
@@ -5488,7 +5963,8 @@ function updateInspector() {
  let html = `
   <div class="card">
    <h3>${isAnchor ? '取付点' : '部品'}の設定</h3>
-   <small>識別名（ID）: ${esc(d.id)}</small>
+   ${easy() ? '' : `<small>識別名（ID）: ${esc(d.id)}</small>`}
+   ${isAnchor ? '' : nudgePad()}
 
    ${field('名前',attrs+' data-key="name"',d.name)}
 
@@ -5523,7 +5999,7 @@ function updateInspector() {
     d.material
    );
 
-   html += `
+   if (!easy()) html += `
     <h3>形状 · ${esc(geoLabel(d.geometry.type))}</h3>
     <p class="hint">
      形状のデータ（JSON）を書き換えると、この部品の形を変えられます（上級者向け）。
@@ -5550,6 +6026,7 @@ function updateInspector() {
   html += `
    <div class="row">
     ${button('duplicate','子部品ごと複製')}
+    ${button('mirror','左右反対側に複製')}
     ${button('delete','子部品ごと削除','danger')}
    </div>
   `;
@@ -5557,7 +6034,7 @@ function updateInspector() {
   html += button('delete','取付点を削除','danger');
  }
 
- return html+'</div>';
+ return html+moreHint()+'</div>';
 }
 
 function partsPanel() {
@@ -5581,7 +6058,7 @@ function partsPanel() {
 
   ${updateInspector()}
 
-  <div class="card">
+  <div class="card" ${easy() ? 'hidden' : ''}>
    <div class="row">
     <h3>取付点</h3>
     ${button('addAnchor','＋ 取付点を追加')}
@@ -5634,7 +6111,7 @@ function materialPanel() {
 
    <div class="grid2">
     ${field('色',attrs+' data-key="color" data-live="1"',m.color,'color')}
-    ${field(
+    ${easy() ? '' : field(
      '発光色（自分で光る色）',
      attrs+' data-key="emissive" data-live="1"',
      m.emissive || '#000000',
@@ -5647,7 +6124,7 @@ function materialPanel() {
     ['metalness',0,1,'金属っぽさ（0=普通／1=金属）'],
     ['opacity',1,1,'不透明度（1=透けない／0=見えない）'],
     ['emissiveIntensity',0,10,'発光の強さ']
-   ].map(([key,def,max,text]) => `
+   ].filter(([key]) => !easy() || key !== 'emissiveIntensity').map(([key,def,max,text]) => `
     <label>
      ${text} <output id="out_${key}">${m[key] ?? def}</output>
      <input
@@ -5672,6 +6149,7 @@ function materialPanel() {
     >
     透けさせる（不透明度を下げるときはON）
    </label>
+   ${moreHint()}
   </div>
  `;
 }
@@ -5744,9 +6222,10 @@ function exportPanel() {
       .join('、') || 'なし（「動き」タブで追加できます）'
     )}
    </p>
+   ${moreHint()}
   </div>
 
-  <details class="card">
+  <details class="card" ${easy() ? 'hidden' : ''}>
    <summary>詳しい書き出し（上級者向け）</summary>
 
    <h3>01 · モデルデータ（JSON）</h3>
@@ -5980,6 +6459,10 @@ function handleChange(e) {
   state.ai.batchSize = [2,3,4,6].includes(Number(el.value)) ? Number(el.value) : 3;
   saveQueue();
   renderPanel();
+ } else if (el.id === 'fileInput') {
+  const file = el.files?.[0];
+  el.value = '';
+  if (file) safe(() => openFile(file));
  } else if (el.id === 'background') {
   state.background = el.value;
   setPreviewMode();
@@ -6041,7 +6524,29 @@ const actions = {
 
  guide: showGuide,
 
- new: () => replaceGuard(() => replaceProject(emptySpec())),
+ new: showNewDialog,
+
+ level: () => {
+  state.uiLevel = easy() ? 'pro' : 'easy';
+
+  try {
+   localStorage.setItem(UI_KEY,state.uiLevel);
+  } catch (_) {}
+
+  if (easy()) state.selectedAnchorId = null;
+
+  updateHighlight();
+  renderPanel();
+  toast(
+   easy()
+    ? 'かんたん表示にしました（基本の項目だけを表示します）'
+    : 'くわしく表示にしました（すべての項目を表示します）'
+  );
+ },
+
+ mirror: mirrorPart,
+ fileSave: saveFile,
+ fileOpen: () => $('fileInput').click(),
  sample: () => replaceGuard(() => replaceProject(sampleSpec())),
  import: loadFromClipboard,
 
@@ -6242,10 +6747,20 @@ function handleClick(e) {
  const b = e.target.closest('button');
  if (!b) return;
 
- finishLive();
+ // かんたん調整の連続タップは1つの履歴にまとめるため、ここでは確定しない
+ if (b.dataset.nudge === undefined) finishLive();
 
  safe(() => {
-  if (b.dataset.tab) {
+  if (b.dataset.nudge !== undefined) {
+   nudgePart(b.dataset.nudge);
+  } else if (b.dataset.nudgestep !== undefined) {
+   state.nudgeStep = b.dataset.nudgestep;
+   renderPanel();
+  } else if (b.dataset.newkind !== undefined) {
+   const kind = b.dataset.newkind;
+   closeDialog();
+   replaceGuard(() => startTemplate(kind));
+  } else if (b.dataset.tab) {
    state.activeTab = b.dataset.tab;
    renderPanel();
   } else if (b.dataset.part) {
@@ -6348,6 +6863,11 @@ function handleKeyboard(e) {
 // ============================================================
 
 function init() {
+ try {
+  const level = localStorage.getItem(UI_KEY);
+  if (level === 'easy' || level === 'pro') state.uiLevel = level;
+ } catch (_) {}
+
  restoreProject();
  initScene();
 
