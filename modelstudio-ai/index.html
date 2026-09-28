@@ -213,7 +213,7 @@ const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
  <section id="viewport" aria-label="3Dプレビュー">
   <div id="renderMessage"></div>
  </section>
- <section id="panel"></section>
+ <section id="panel"><p class="hint">保存データを読み込んでいます…</p></section>
 </main>
 
 <div id="viewTools" data-startup-lock inert>
@@ -299,6 +299,7 @@ const GUIDE = STORE + '.guide';
 const UI_KEY = STORE + '.ui';
 const SAVE_TIP = STORE + '.saveTip';
 const PIN_VIEW_KEY = STORE + '.pinViewport';
+const DRAG_KEY = STORE + '.dragMove';
 
 const LIMIT = {
  parts: 300,
@@ -712,6 +713,9 @@ const state = {
  uiLevel: 'easy',
  // 固定時は3D表示を残し、編集パネルだけをスクロールする
  pinViewport: false,
+ // 3D画面で選択中の部品をドラッグして動かす（horizontal: 水平 / vertical: 上下）
+ dragMove: true,
+ dragMode: 'horizontal',
  // かんたん調整の刻みと、連続操作をまとめるための情報
  nudgeStep: 'normal',
  nudge: {id:null},
@@ -1977,6 +1981,14 @@ function bindOrbit(canvas) {
   r.dragStart = r.pointers.size === 1
    ? {x:e.clientX,y:e.clientY,moved:false}
    : null;
+
+  if (r.pointers.size === 1) {
+   // 選択中の部品に当たったら、視点の回転ではなく部品のドラッグ移動を始める
+   if (e.button === 0) startPartDrag(e);
+  } else if (r.partDrag) {
+   // 2本目の指が触れたら、ここまでの移動を確定してパン・ズームに任せる
+   endPartDrag();
+  }
  });
 
  canvas.addEventListener('pointermove',e => {
@@ -1995,6 +2007,15 @@ function bindOrbit(canvas) {
    && Math.hypot(e.clientX-r.dragStart.x,e.clientY-r.dragStart.y) > 5
   ) {
    r.dragStart.moved = true;
+  }
+
+  const pd = r.partDrag;
+
+  if (pd && pd.pointerId === e.pointerId && r.pointers.size === 1) {
+   pd.last = {x:e.clientX,y:e.clientY,shift:e.shiftKey};
+   // 5px以上動いてから反映する（それ未満で離せばタップとして扱う）
+   if (r.dragStart?.moved) queuePartDrag();
+   return;
   }
 
   if (r.pointers.size === 1) {
@@ -2024,6 +2045,8 @@ function bindOrbit(canvas) {
 
  function end(e) {
   const r = state.runtime;
+
+  if (r.partDrag && r.partDrag.pointerId === e.pointerId) endPartDrag();
 
   if (
    e.type === 'pointerup'
@@ -2057,6 +2080,229 @@ function bindOrbit(canvas) {
 
   invalidate();
  },{passive:false});
+}
+
+// ------------------------------------------------------------
+// 3D画面で選択中の部品をドラッグして動かす
+// ------------------------------------------------------------
+
+function canPartDrag() {
+ const m = state.motion;
+
+ return state.activeTab === 'parts'
+  && state.dragMove
+  && !!state.selectedPartId
+  && !state.selectedAnchorId
+  && own(state.modelSpec.parts,state.selectedPartId)
+  && !m.walk
+  && !m.assignRole
+  && !m.edit
+  && !!state.runtime?.root;
+}
+
+function pointerRay(p) {
+ const r = state.runtime;
+ const rect = r.renderer.domElement.getBoundingClientRect();
+ const ray = new THREE.Raycaster();
+
+ ray.setFromCamera(
+  new THREE.Vector2(
+   (p.x-rect.left)/rect.width*2-1,
+   -(p.y-rect.top)/rect.height*2+1
+  ),
+  r.camera
+ );
+
+ return ray;
+}
+
+function partDragPlane(mode,base) {
+ if (mode === 'vertical') {
+  const n = new THREE.Vector3();
+  state.runtime.camera.getWorldDirection(n);
+  n.y = 0;
+  if (n.lengthSq() < 1e-8) n.set(0,0,1);
+  return new THREE.Plane().setFromNormalAndCoplanarPoint(n.normalize(),base);
+ }
+
+ return new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0,1,0),base);
+}
+
+// 現在のポインタ位置とモードで、移動の基準（開始位置・面・交点）を取り直す
+function rebasePartDrag(d) {
+ const r = state.runtime;
+ const o = r.root.userData.parts[d.id];
+ if (!o) return false;
+
+ const mode = state.dragMode === 'vertical' || d.last.shift ? 'vertical' : 'horizontal';
+
+ r.root.updateMatrixWorld(true);
+
+ const base = o.getWorldPosition(new THREE.Vector3());
+ const plane = partDragPlane(mode,base);
+ const hit = pointerRay(d.last).ray.intersectPlane(plane,new THREE.Vector3());
+
+ if (!hit) {
+  d.mode = null;
+  return false;
+ }
+
+ Object.assign(d,{mode,base,plane,startHit:hit});
+ return true;
+}
+
+function startPartDrag(e) {
+ try {
+  if (!canPartDrag()) return;
+
+  const r = state.runtime;
+  const id = state.selectedPartId;
+  const o = r.root.userData.parts[id];
+  if (!o) return;
+
+  const p = {x:e.clientX,y:e.clientY,shift:e.shiftKey};
+
+  const hit = pointerRay(p).intersectObjects([r.anchorLayer,r.root],true).find(h => {
+   let yes = h.object.visible;
+   h.object.traverseAncestors(a => {
+    yes = yes && a.visible;
+   });
+   return yes;
+  });
+  if (!hit) return;
+
+  // 当たったのが選択中の部品か、その子孫のときだけ動かす
+  let n = hit.object;
+  while (n && n !== o) n = n.parent;
+  if (!n) return;
+
+  // かんたん調整などの未確定の連続操作を先に確定して、履歴を分ける
+  clearTimeout(state.nudgeTimer);
+  finishLive();
+
+  const d = {
+   pointerId: e.pointerId,
+   id,
+   last: p,
+   mode: null,
+   base: null,
+   plane: null,
+   startHit: null,
+   raf: 0,
+   changed: false,
+   limit: modelSpan()*10
+  };
+
+  rebasePartDrag(d);
+  r.partDrag = d;
+  r.renderer.domElement.style.cursor = 'grabbing';
+ } catch (_) {
+  if (state.runtime) state.runtime.partDrag = null;
+ }
+}
+
+function queuePartDrag() {
+ const d = state.runtime?.partDrag;
+ if (!d || d.raf) return;
+
+ d.raf = requestAnimationFrame(() => {
+  d.raf = 0;
+  if (state.runtime?.partDrag === d) applyPartDrag(d);
+ });
+}
+
+function applyPartDrag(d) {
+ const r = state.runtime;
+ const o = r?.root?.userData.parts[d.id];
+ if (!o || !own(state.modelSpec.parts,d.id) || !d.last) return;
+
+ const mode = state.dragMode === 'vertical' || d.last.shift ? 'vertical' : 'horizontal';
+
+ // モードが変わったら（Shift の押し始め・離しなど）、その時点を新しい基準にする
+ if (mode !== d.mode) {
+  rebasePartDrag(d);
+  return;
+ }
+
+ const hit = pointerRay(d.last).ray.intersectPlane(d.plane,new THREE.Vector3());
+ if (!hit) return;
+
+ const delta = hit.sub(d.startHit);
+
+ if (mode === 'vertical') delta.set(0,delta.y,0);
+ else delta.y = 0;
+
+ // 視線が面とほぼ平行なときに遠くへ飛ばないよう、移動量を制限する
+ if (delta.length() > d.limit) delta.setLength(d.limit);
+
+ const local = o.parent.worldToLocal(d.base.clone().add(delta));
+ const pos = local.toArray().map(v => Math.round(v*10000)/10000 || 0);
+ const cur = state.modelSpec.parts[d.id].position;
+
+ if (pos.every((v,i) => v === cur[i])) return;
+
+ try {
+  editDirect('parts',d.id,'position',pos,null,true);
+  d.changed = true;
+ } catch (_) {}
+
+ invalidate();
+}
+
+function endPartDrag() {
+ const r = state.runtime;
+ const d = r?.partDrag;
+ if (!d) return;
+
+ // 反映待ちの移動があれば、確定の前に当てる
+ if (d.raf) {
+  cancelAnimationFrame(d.raf);
+  d.raf = 0;
+  applyPartDrag(d);
+ }
+
+ r.partDrag = null;
+ r.renderer.domElement.style.cursor = '';
+
+ if (d.changed) {
+  finishLive();
+  renderPanel();
+ }
+
+ invalidate();
+}
+
+function saveDragPrefs() {
+ try {
+  localStorage.setItem(DRAG_KEY,JSON.stringify({on:state.dragMove,mode:state.dragMode}));
+ } catch (_) {}
+}
+
+function dragMoveControls() {
+ const chip = (mode,label) => `
+  <button
+   data-dragmode="${mode}"
+   class="${state.dragMode === mode ? 'selected' : ''}"
+   aria-pressed="${state.dragMode === mode}"
+  >${label}</button>
+ `;
+
+ return `
+  <div class="nudge">
+   <label>
+    <input type="checkbox" id="dragMove" ${state.dragMove ? 'checked' : ''}>
+    3D画面でドラッグして動かす
+   </label>
+   <div class="chips">
+    ${chip('horizontal','水平に動かす')}
+    ${chip('vertical','上下に動かす')}
+   </div>
+   <p class="hint">
+    選んだ部品を3D画面でドラッグすると動かせます（何もない所をドラッグすると視点が回ります）。
+    PCでは Shift を押しながらドラッグすると上下に動かせます。
+   </p>
+  </div>
+ `;
 }
 
 function panCamera(dx,dy) {
@@ -6702,7 +6948,7 @@ function fillThumbs() {
  if (!changed) return;
 
  try {
-  localStorage.setItem(STORE,JSON.stringify(data));
+  writeStore(data,{silent:true}).catch(() => {});
  } catch (_) {}
 
  state.projects = data.projects;
@@ -6715,7 +6961,7 @@ function deleteProject(id) {
  data.projects = data.projects.filter(p => p.projectId !== id);
  if (data.last === id) data.last = null;
 
- localStorage.setItem(STORE,JSON.stringify(data));
+ const pending = writeStore(data);
  state.projects = data.projects;
 
  if (state.projectId === id) {
@@ -6727,7 +6973,7 @@ function deleteProject(id) {
 
  renderPanel();
  renderLibraryGrid();
- toast('ライブラリから削除しました');
+ pending.then(() => toast('ライブラリから削除しました'),() => {});
 }
 
 // ------------------------------------------------------------
@@ -7157,6 +7403,16 @@ function storageUsage() {
 }
 
 function storageMeter() {
+ if (libraryBackend === 'idb') {
+  refreshStorageEstimate();
+
+  return `
+   <p class="hint">
+    保存先: ブラウザ内のデータベース（IndexedDB） · 使用量: <span class="storage-usage">${esc(storageEstimateText())}</span>
+   </p>
+  `;
+ }
+
  const bytes = storageUsage();
  if (bytes === null) return '';
 
@@ -7171,18 +7427,404 @@ function storageMeter() {
  `;
 }
 
+// ------------------------------------------------------------
+// ライブラリの保存先（IndexedDB。使えないときは従来の localStorage）
+// アプリ内ではメモリ上の写し（libraryData）を同期的に読み書きし、
+// IndexedDB へは順番に非同期で保存する
+// ------------------------------------------------------------
+
+const LIB_DB = 'modelstudio-ai';
+const LIB_OS = 'kv';
+const LIB_KEY = 'library';
+const LIB_LEGACY = 'legacyLocalStorage_';
+// v2: プロジェクト単位のストアと、last を入れる meta レコード
+const LIB_VERSION = 2;
+const LIB_PS = 'projects';
+const LIB_META = 'meta';
+const LIB_CHANNEL = 'modelstudio-ai-library';
+
+let libDb = null;
+let libraryBackend = 'local';
+let libraryData = {projects:[],last:null};
+let libWriteChain = Promise.resolve();
+let libChannel = null;
+// このタブの未完了の書き込み数と、完了後に読み直しが必要かどうか
+let libPending = 0;
+let libReloadAgain = false;
+let storageEstimate = null;
+let storageEstimateAt = 0;
+
+function validLibrary(d) {
+ return obj(d) && Array.isArray(d.projects);
+}
+
+function parseLibraryRaw(raw) {
+ const data = parseJSON(raw,20000000);
+
+ assert(validLibrary(data),'保存領域の形式が不正です');
+
+ return data;
+}
+
+function withTimeout(p,ms) {
+ return new Promise((resolve,reject) => {
+  const t = setTimeout(() => reject(Error('timeout')),ms);
+  p.then(
+   v => {
+    clearTimeout(t);
+    resolve(v);
+   },
+   e => {
+    clearTimeout(t);
+    reject(e);
+   }
+  );
+ });
+}
+
+function idbOpen() {
+ return new Promise((resolve,reject) => {
+  const req = indexedDB.open(LIB_DB,LIB_VERSION);
+
+  req.onupgradeneeded = e => {
+   const db = req.result;
+   const tx = req.transaction;
+
+   if (!db.objectStoreNames.contains(LIB_OS)) db.createObjectStore(LIB_OS);
+
+   if (!db.objectStoreNames.contains(LIB_PS)) {
+    const ps = db.createObjectStore(LIB_PS,{keyPath:'projectId'});
+
+    // v1 で1件にまとめていたライブラリを、同じトランザクションでプロジェクト単位へ移す
+    // 元の library レコードは削除せず、控えとして残す
+    if (e.oldVersion >= 1) {
+     const kv = tx.objectStore(LIB_OS);
+     const get = kv.get(LIB_KEY);
+
+     get.onsuccess = () => {
+      const lib = get.result;
+      if (!validLibrary(lib)) return;
+
+      for (const p of lib.projects) {
+       if (obj(p) && typeof p.projectId === 'string' && p.projectId) ps.put(p);
+      }
+
+      kv.put({last:lib.last ?? null},LIB_META);
+     };
+    }
+   }
+  };
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error || Error('IndexedDBを開けません'));
+  // 古いバージョンを開いている別のタブが閉じるのを待つ（待ちすぎたら呼び出し側のタイムアウトで代替動作へ）
+  req.onblocked = () => {};
+ });
+}
+
+function idbRequest(mode,fn) {
+ return new Promise((resolve,reject) => {
+  const tx = libDb.transaction(LIB_OS,mode);
+  const req = fn(tx.objectStore(LIB_OS));
+  let result;
+
+  req.onsuccess = () => {
+   result = req.result;
+  };
+  tx.oncomplete = () => resolve(result);
+  tx.onerror = () => reject(tx.error || req.error || Error('IndexedDBの処理に失敗しました'));
+  tx.onabort = () => reject(tx.error || Error('IndexedDBの処理が中断されました'));
+ });
+}
+
+const idbGet = key => idbRequest('readonly',s => s.get(key));
+const idbPut = (key,value) => idbRequest('readwrite',s => s.put(value,key));
+
+// projects ストアと meta レコードから、ライブラリ全体を組み立てる
+function idbLoadLibrary() {
+ return new Promise((resolve,reject) => {
+  const tx = libDb.transaction([LIB_PS,LIB_OS],'readonly');
+  const all = tx.objectStore(LIB_PS).getAll();
+  const meta = tx.objectStore(LIB_OS).get(LIB_META);
+
+  tx.oncomplete = () => resolve({
+   projects: (all.result || []).filter(p => obj(p)),
+   last: meta.result?.last ?? null
+  });
+  tx.onerror = () => reject(tx.error || Error('IndexedDBを読めません'));
+  tx.onabort = () => reject(tx.error || Error('IndexedDBの読み込みが中断されました'));
+ });
+}
+
+// 写し（prev）と新しいデータ（next）の差分。削除は prev にあって next に無いものだけ
+function libraryDiff(prev,next) {
+ const before = new Map(
+  prev.projects
+   .filter(p => obj(p) && typeof p.projectId === 'string' && p.projectId)
+   .map(p => [p.projectId,p])
+ );
+ const nextIds = new Set();
+ const puts = [];
+
+ for (const p of next.projects) {
+  if (!obj(p) || typeof p.projectId !== 'string' || !p.projectId) continue;
+
+  nextIds.add(p.projectId);
+
+  const old = before.get(p.projectId);
+  if (!old || JSON.stringify(old) !== JSON.stringify(p)) puts.push(p);
+ }
+
+ const dels = [...before.keys()].filter(id => !nextIds.has(id));
+ const last = (prev.last ?? null) !== (next.last ?? null) ? {last:next.last ?? null} : null;
+
+ return {puts,dels,last};
+}
+
+// 差分を1つの読み書きトランザクションで適用する
+function idbApplyDiff(diff) {
+ return new Promise((resolve,reject) => {
+  const tx = libDb.transaction([LIB_PS,LIB_OS],'readwrite');
+
+  tx.oncomplete = () => resolve();
+  tx.onerror = () => reject(tx.error || Error('IndexedDBに書き込めません'));
+  tx.onabort = () => reject(tx.error || Error('IndexedDBへの書き込みが中断されました'));
+
+  try {
+   const ps = tx.objectStore(LIB_PS);
+   diff.puts.forEach(p => ps.put(p));
+   diff.dels.forEach(id => ps.delete(id));
+   if (diff.last) tx.objectStore(LIB_OS).put(diff.last,LIB_META);
+  } catch (e) {
+   try {
+    tx.abort();
+   } catch (_) {}
+   reject(e);
+  }
+ });
+}
+
+function postLibraryChange(ids) {
+ try {
+  libChannel?.postMessage({type:'library',ids});
+ } catch (_) {}
+}
+
+// 自分の書き込みの後ろに並べて読み直す
+function queueLibraryReload() {
+ libWriteChain = libWriteChain.then(() => applyLibraryReload()).catch(() => {});
+}
+
+// IndexedDB から読み直して、写しと画面を合わせる
+// 自分の未完了の書き込みがあるときは（force でない限り）完了後に回す
+async function applyLibraryReload(force=false) {
+ if (libraryBackend !== 'idb' || !libDb) return;
+
+ if (libPending && !force) {
+  libReloadAgain = true;
+  return;
+ }
+
+ const data = await idbLoadLibrary();
+
+ if (libPending && !force) {
+  libReloadAgain = true;
+  return;
+ }
+
+ libraryData = data;
+ state.projects = clone(data.projects);
+
+ // 編集中のプロジェクトが消えていたら、画面上のモデルは残して未保存扱いにする
+ if (state.projectId && !data.projects.some(p => p.projectId === state.projectId)) {
+  state.projectId = null;
+  state.dirty = true;
+  writeDraft();
+ }
+
+ if (!state.initialized) return;
+
+ renderLibraryGrid();
+ if (state.activeTab === 'model') renderPanel();
+ else updateHeader();
+}
+
+// 同じプロジェクトは更新日時が新しい方を残し、片方にしかないものはすべて残す
+function mergeLibrary(base,local) {
+ const out = {
+  projects: [...base.projects],
+  last: base.last ?? local.last ?? null
+ };
+
+ for (const p of local.projects) {
+  if (!obj(p) || typeof p.projectId !== 'string') continue;
+
+  const i = out.projects.findIndex(q => q.projectId === p.projectId);
+
+  if (i < 0) out.projects.push(p);
+  else if (String(p.updatedAt || '') > String(out.projects[i].updatedAt || '')) out.projects[i] = p;
+ }
+
+ return out;
+}
+
+// 起動時に1回だけ呼ぶ。従来データは移行を確かめてからでないと消さない
+async function initLibraryStorage() {
+ let raw = null;
+ let local = null;
+
+ try {
+  raw = localStorage.getItem(STORE);
+  if (raw) local = parseLibraryRaw(raw);
+ } catch (_) {
+  // 読めない従来データは消さずにそのまま残す
+  local = null;
+ }
+
+ try {
+  assert(window.indexedDB,'IndexedDBが使えません');
+
+  libDb = await withTimeout(idbOpen(),4000);
+  libDb.onversionchange = () => libDb.close();
+
+  let data = await withTimeout(idbLoadLibrary(),4000);
+
+  if (local) {
+   // 統合した結果との差分（追加・更新のみ）をプロジェクト単位で書き込む
+   await withTimeout(idbApplyDiff(libraryDiff(data,mergeLibrary(data,local))),8000);
+
+   // 書き込んだ内容を読み直し、従来のプロジェクトがすべて入っていることを確かめる
+   const check = await withTimeout(idbLoadLibrary(),4000);
+   const ids = new Set(validLibrary(check) ? check.projects.map(p => p?.projectId) : []);
+
+   assert(
+    validLibrary(check)
+     && local.projects
+      .filter(p => obj(p) && typeof p.projectId === 'string')
+      .every(p => ids.has(p.projectId)),
+    '移行の確認に失敗しました'
+   );
+
+   // 従来データの原文を控えとして残してから、localStorage から削除する
+   await withTimeout(idbPut(LIB_LEGACY+Date.now(),{savedAt:new Date().toISOString(),raw}),8000);
+
+   try {
+    localStorage.removeItem(STORE);
+   } catch (_) {}
+
+   data = check;
+  }
+
+  libraryData = data;
+  libraryBackend = 'idb';
+
+  // 別のタブの保存・削除を受け取ったら読み直す
+  try {
+   if (typeof BroadcastChannel === 'function') {
+    libChannel = new BroadcastChannel(LIB_CHANNEL);
+    libChannel.onmessage = e => {
+     if (e.data?.type === 'library') queueLibraryReload();
+    };
+   }
+  } catch (_) {
+   libChannel = null;
+  }
+ } catch (_) {
+  // IndexedDB が使えない・移行に失敗したときは、従来どおり localStorage で動く
+  libDb = null;
+  libraryBackend = 'local';
+  libraryData = local || {projects:[],last:null};
+ }
+}
+
 function readStore() {
+ if (libraryBackend === 'idb') return clone(libraryData);
+
  const raw = localStorage.getItem(STORE);
  if (!raw) return {projects:[],last:null};
 
- const data = parseJSON(raw,20000000);
+ return parseLibraryRaw(raw);
+}
 
- assert(
-  obj(data) && Array.isArray(data.projects),
-  '保存領域の形式が不正です'
- );
+// ライブラリを保存する。完了を待てる Promise を返す。
+// localStorage のときはその場で書き込み、失敗すると例外（写しは変えない）
+function writeStore(data,{silent=false}={}) {
+ if (libraryBackend !== 'idb') {
+  localStorage.setItem(STORE,JSON.stringify(data));
+  libraryData = data;
+  return Promise.resolve();
+ }
 
- return data;
+ // 差分は呼び出し時点の写しと比べて決める（他のタブの追加分は削除しない）
+ const diff = libraryDiff(libraryData,data);
+ libraryData = clone(data);
+ libPending++;
+
+ const job = libWriteChain.then(async () => {
+  try {
+   await idbApplyDiff(diff);
+  } catch (e) {
+   // 失敗したら保存先から読み直して、写しと画面を実際の状態に合わせる
+   libReloadAgain = true;
+   try {
+    await applyLibraryReload(true);
+   } catch (_) {}
+   throw e;
+  }
+ });
+
+ libWriteChain = job.catch(() => {});
+
+ const settle = () => {
+  libPending--;
+  if (!libPending && libReloadAgain) {
+   libReloadAgain = false;
+   queueLibraryReload();
+  }
+ };
+
+ job.then(() => {
+  settle();
+  const ids = [...diff.puts.map(p => p.projectId),...diff.dels];
+  if (ids.length || diff.last) postLibraryChange(ids);
+ },e => {
+  settle();
+  if (!silent) {
+   showError(Error(
+    'ライブラリをIndexedDBに保存できませんでした（'+(e?.message || e)
+    +'）。ライブラリの「すべて書き出す」や「ファイルに保存」で控えを取ってください'
+   ));
+  }
+ });
+
+ return job;
+}
+
+function storageEstimateText() {
+ if (!navigator.storage?.estimate) return '不明';
+ if (!storageEstimate) return '計算中…';
+
+ const mb = v => (v/1024/1024).toFixed(1);
+ const usage = storageEstimate.usage || 0;
+ const quota = storageEstimate.quota || 0;
+
+ return '約'+mb(usage)+'MB'
+  + (quota ? ' / 上限の目安 約'+mb(quota)+'MB' : '')
+  + (quota && usage > quota*.8 ? '（残りわずかです。使わないモデルを削除してください）' : '');
+}
+
+function refreshStorageEstimate() {
+ if (!navigator.storage?.estimate || Date.now()-storageEstimateAt < 5000) return;
+
+ storageEstimateAt = Date.now();
+
+ navigator.storage.estimate()
+  .then(est => {
+   storageEstimate = est;
+   document.querySelectorAll('.storage-usage').forEach(el => {
+    el.textContent = storageEstimateText();
+   });
+  })
+  .catch(() => {});
 }
 
 function saveProject() {
@@ -7209,33 +7851,57 @@ function saveProject() {
 
   data.last = id;
 
-  localStorage.setItem(STORE,JSON.stringify(data));
+  const saved = state.modelSpec;
+  const pending = writeStore(data,{silent:true});
 
   state.projectId = id;
   state.projects = data.projects;
-  state.dirty = false;
-  state.storageError = false;
 
-  writeDraft();
-  updateHeader();
+  const finish = () => {
+   // 保存中にモデルを編集していたら、その編集は未保存のまま残す
+   state.dirty = state.modelSpec !== saved;
+   state.storageError = false;
 
-  if (state.activeTab === 'model') renderPanel();
+   writeDraft();
+   updateHeader();
+
+   if (state.activeTab === 'model') renderPanel();
+   renderLibraryGrid();
+
+   // 初めて保存に成功したときだけ、ファイル保存も案内する
+   let tip = false;
+
+   try {
+    tip = !localStorage.getItem(SAVE_TIP);
+    if (tip) localStorage.setItem(SAVE_TIP,'1');
+   } catch (_) {}
+
+   toast(
+    tip
+     ? 'プロジェクトを保存しました。ブラウザのデータを消すと消えます。大切なモデルは『ファイルに保存』もしてください'
+     : 'プロジェクトを保存しました',
+    tip ? 6000 : 2400
+   );
+  };
+
+  if (libraryBackend !== 'idb') {
+   finish();
+   return;
+  }
+
+  // IndexedDB では書き込みの完了を待ってから保存済みにする
+  toast('保存しています…',8000);
   renderLibraryGrid();
 
-  // 初めて保存に成功したときだけ、ファイル保存も案内する
-  let tip = false;
-
-  try {
-   tip = !localStorage.getItem(SAVE_TIP);
-   if (tip) localStorage.setItem(SAVE_TIP,'1');
-  } catch (_) {}
-
-  toast(
-   tip
-    ? 'プロジェクトを保存しました。ブラウザのデータを消すと消えます。大切なモデルは『ファイルに保存』もしてください'
-    : 'プロジェクトを保存しました',
-   tip ? 6000 : 2400
-  );
+  pending.then(finish,e => {
+   state.dirty = true;
+   writeDraft();
+   state.storageError = true;
+   updateHeader();
+   showError(Error(
+    '保存できません: '+(e?.message || e)+'。「データをコピー」や「ファイルに保存」で控えを取ってください。'
+   ));
+  });
  } catch (e) {
   state.storageError = true;
   showError(Error(
@@ -7293,7 +7959,7 @@ function loadProject(id) {
  data.last = id;
 
  try {
-  localStorage.setItem(STORE,JSON.stringify(data));
+  writeStore(data);
  } catch (e) {
   showError(e);
  }
@@ -7966,13 +8632,16 @@ let libraryRenameId = null;
 
 // 保存に失敗したときは localStorage も state.projects も変えない
 function writeLibrary(data) {
+ let pending;
+
  try {
-  localStorage.setItem(STORE,JSON.stringify(data));
+  pending = writeStore(data);
  } catch (_) {
   throw Error('保存領域が足りないため保存できませんでした。既存のデータは変わっていません。使わないモデルを削除してから、もう一度お試しください');
  }
 
  state.projects = data.projects;
+ return pending;
 }
 
 function newModelId(base,data) {
@@ -8022,7 +8691,7 @@ function applyRename(id,raw) {
  p.modelSpec = spec;
  p.updatedAt = new Date().toISOString();
 
- writeLibrary(data);
+ const pending = writeLibrary(data);
 
  // 編集中のプロジェクトなら、表示中のモデル名もそろえる（履歴に積む。保存状態は変えない）
  if (state.projectId === id && state.modelSpec.meta.name !== name) {
@@ -8039,7 +8708,7 @@ function applyRename(id,raw) {
  }
 
  renderLibraryGrid();
- toast('名前を「'+name+'」に変えました');
+ pending.then(() => toast('名前を「'+name+'」に変えました'),() => {});
 }
 
 function duplicateProject(id) {
@@ -8062,9 +8731,9 @@ function duplicateProject(id) {
   updatedAt: new Date().toISOString()
  });
 
- writeLibrary(data);
+ const pending = writeLibrary(data);
  renderLibraryGrid();
- toast('「'+name+'」を作りました');
+ pending.then(() => toast('「'+name+'」を作りました'),() => {});
 }
 
 function exportLibrary() {
@@ -8134,9 +8803,12 @@ function importLibrary(file) {
 
    assert(added,'読み込めるモデルがありませんでした（失敗 '+failed+'件）');
 
-   writeLibrary(data);
+   const pending = writeLibrary(data);
    renderLibraryGrid();
-   toast(added+'件を追加しました'+(failed ? '（'+failed+'件は読み込めませんでした）' : ''),3200);
+   pending.then(
+    () => toast(added+'件を追加しました'+(failed ? '（'+failed+'件は読み込めませんでした）' : ''),3200),
+    () => {}
+   );
   }))
   .catch(() => showError(Error('ファイルを読み込めませんでした。書き出したJSONファイルを選んでください')));
 }
@@ -8209,7 +8881,7 @@ function updateInspector() {
   <div class="card" id="inspectorCard">
    <h3 id="inspectorHeading">${isAnchor ? '取付点' : '部品'}の設定 · ${esc(d.name)}</h3>
    ${easy() ? '' : `<small>識別名（ID）: ${esc(d.id)}</small>`}
-   ${isAnchor ? '' : nudgePad()}
+   ${isAnchor ? '' : dragMoveControls()+nudgePad()}
 
    ${field('名前',attrs+' data-key="name"',d.name)}
 
@@ -8877,6 +9549,9 @@ function handleChangeNow(e) {
   renderPanel();
  } else if (el.id === 'editFine') {
   if (state.motion.edit) state.motion.edit.fine = el.checked;
+ } else if (el.id === 'dragMove') {
+  state.dragMove = el.checked;
+  saveDragPrefs();
  } else if (el.id === 'paintOnly') {
   state.paintOnly = el.checked;
  } else if (d.geotype) {
@@ -9351,6 +10026,10 @@ function handleClick(e) {
    editMove(b.dataset.epos);
   } else if (b.dataset.paint) {
    paintPart(b.dataset.paint);
+  } else if (b.dataset.dragmode) {
+   state.dragMode = b.dataset.dragmode === 'vertical' ? 'vertical' : 'horizontal';
+   saveDragPrefs();
+   renderPanel();
   } else if (b.dataset.nudgestep !== undefined) {
    state.nudgeStep = b.dataset.nudgestep;
    renderPanel();
@@ -9527,6 +10206,15 @@ function init() {
   state.pinViewport = localStorage.getItem(PIN_VIEW_KEY) === '1';
  } catch (_) {}
 
+ try {
+  const drag = JSON.parse(localStorage.getItem(DRAG_KEY) || 'null');
+
+  if (obj(drag)) {
+   if (typeof drag.on === 'boolean') state.dragMove = drag.on;
+   if (drag.mode === 'vertical' || drag.mode === 'horizontal') state.dragMode = drag.mode;
+  }
+ } catch (_) {}
+
  applyViewportLayout();
  bindMoreMenu();
 
@@ -9604,8 +10292,11 @@ function init() {
 
 // タイトルの初回描画後、終了を待たずに準備する。
 // タイトルの除去は独立したタイマーなので、初期化エラーでも解除される。
-startupPainted.then(() => {
- setTimeout(() => {
+// ライブラリの保存先（IndexedDB）を準備し、従来データを移行してから初期化する
+startupPainted
+ .then(() => initLibraryStorage())
+ .catch(() => {})
+ .then(() => {
   try {
    init();
   } catch (e) {
@@ -9614,8 +10305,7 @@ startupPainted.then(() => {
    // 成功・失敗にかかわらず、スプラッシュを閉じられる状態にする
    startupReadyMark();
   }
- },0);
-});
+ });
 </script>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
 <script>
