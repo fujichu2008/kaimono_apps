@@ -86,6 +86,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
 .chips button{min-height:40px;padding:6px 12px;border-radius:999px}
 details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
+.beat{display:grid;grid-template-columns:76px minmax(0,1fr) 44px;gap:6px;margin:6px 0;align-items:center}
+.card.review{border-color:var(--cyan)}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -496,7 +498,18 @@ const state = {
   patch: '',
   prompt: '',
   motion: '',
-  motionFix: ''
+  motionFix: '',
+  motionDraft: {
+   id: 'attack',
+   custom: '',
+   name: '攻撃',
+   duration: .7,
+   loop: false,
+   strength: 'normal',
+   parts: null,
+   ref: '',
+   beats: [[0,'構え'],[100,'元に戻る']]
+  }
  },
  stats: {
   parts: 0,
@@ -528,7 +541,8 @@ const state = {
   trySpeed: 0,
   trying: false,
   tester: null,
-  exported: false
+  exported: false,
+  review: null
  }
 };
 
@@ -810,6 +824,10 @@ function validateAnimations(s) {
   assert(a.name === undefined || typeof a.name === 'string',label+': nameは文字列です');
   number(a.duration,label+'の長さ(duration)',.1,30);
   assert(a.loop === undefined || typeof a.loop === 'boolean',label+': loopはtrue/falseです');
+  assert(
+   a.ease === undefined || ['linear','smooth'].includes(a.ease),
+   label+': easeは "linear" か "smooth" です'
+  );
   assert(a.tracks === undefined || obj(a.tracks),label+': tracksは部品IDをキーにしたObjectです');
 
   let keys = 0;
@@ -1246,7 +1264,19 @@ function createModelRenderer(THREE) {
    });
   }
 
-  function sample(list,t) {
+  // Catmull-Rom 補間（ease:"smooth" のとき、前後のキーを使って滑らかにつなぐ）
+  function catmull(p0,p1,p2,p3,k) {
+   const k2 = k*k;
+   const k3 = k2*k;
+   return .5*(
+    2*p1
+    +(-p0+p2)*k
+    +(2*p0-5*p1+4*p2-p3)*k2
+    +(-p0+3*p1-3*p2+p3)*k3
+   );
+  }
+
+  function sample(list,t,c) {
    if (!Array.isArray(list) || !list.length) return null;
    if (t <= list[0][0]) return list[0][1];
 
@@ -1257,6 +1287,16 @@ function createModelRenderer(THREE) {
     if (t <= b[0]) {
      const span = b[0]-a[0];
      const k = span > 0 ? (t-a[0])/span : 1;
+
+     if (c && c.ease === 'smooth' && list.length > 2) {
+      const n = list.length;
+      const loop = c.loop !== false;
+      // くり返す動きは端の前後キーを反対側から、一回きりの動きは端のキーを使う
+      const prev = i-2 >= 0 ? list[i-2][1] : loop ? list[n-2][1] : a[1];
+      const next = i+1 < n ? list[i+1][1] : loop ? list[1][1] : b[1];
+      return [0,1,2].map(j => catmull(prev[j],a[1][j],b[1][j],next[j],k));
+     }
+
      return [0,1,2].map(j => a[1][j]+(b[1][j]-a[1][j])*k);
     }
    }
@@ -1306,8 +1346,8 @@ function createModelRenderer(THREE) {
     if (!parts[id]) continue;
 
     const a = acc[id] || (acc[id] = {r:[0,0,0],p:[0,0,0]});
-    const r = sample(tr.rotation,layer.time);
-    const p = sample(tr.position,layer.time);
+    const r = sample(tr.rotation,layer.time,c);
+    const p = sample(tr.position,layer.time,c);
 
     for (let j=0;j<3;j++) {
      if (r) a.r[j] += r[j]*w;
@@ -2709,21 +2749,26 @@ function motionPromptBase(tail) {
   + '座標: 単位メートル、+Yが上、+Zが前方。位置・回転は親から見た値。回転はXYZ順のオイラー角。\n'
   + '各部品は自分の「位置」を中心に回ります。脚や腕は、付け根にある group（関節）を回すと自然に動きます。\n'
   + '\n部品一覧:\n'+partLines+'\n'
+  + motionGuideText()
   + '\n既存の動きID: '+existing+'\n'
   + '\n動きの形式:\n'
   + '{"name":"表示名","duration":秒(0.1〜30),"loop":true/false,'
   + '"tracks":{"部品ID":{"rotation":[[時刻,[x,y,z]],...],"position":[[時刻,[x,y,z]],...]}},'
   + '"spins":[{"part":"部品ID","axis":"x|y|z","degPerSec":数値}],'
-  + '"events":[[時刻,"英数字の合図名"]]}\n'
+  + '"events":[[時刻,"英数字の合図名"]],"ease":"smooth"}\n'
   + 'ルール:\n'
   + '- rotation は基本姿勢からの差分を「度」で、position は差分を「メートル」で書く（0 = いつもの姿勢）。\n'
   + '- 時刻は0〜durationの範囲で小さい順。くり返す動きは最初と最後のキーを同じ値にする。\n'
   + '- 1つの動きのキーは合計300個まで。tracks/spinsの部品IDは上の一覧に実在するものだけ。\n'
   + '- spinsは車輪やプロペラなど回り続ける部品に使う。攻撃が当たる瞬間などは events に "hit" などの合図を入れる。\n'
   + '- 動きIDは英字で始まる英数字・_・-（64文字以内）。部品やその他の項目は変更しない。\n'
+  + '- "ease":"smooth" を付けると、キーの間が滑らかな曲線でつながる（推奨）。付けないと直線でつながる。\n'
+  + '- 回転の符号と軸は、上の「関節ガイド」の実測（+30°回したときの先端の動き）に必ず従う。推測で決めない。\n'
+  + '- 地面の高さより下に部品が出ないようにする。\n'
+  + '- 出力の最上位に "plan"（文字列）を必ず書き、各キーの時刻と姿勢を短く説明してから operations を書く。\n'
   + '\n出力: MODELSTUDIO_PATCH_V1 のJSONのみ。新しい動きは {"op":"add","path":"/animations/動きID","value":{...}}、'
   + '既存の動きIDを作り直す場合は op を "replace" にする。\n'
-  + '例: {"format":"MODELSTUDIO_PATCH_V1","operations":[{"op":"add","path":"/animations/wave","value":'
+  + '例: {"format":"MODELSTUDIO_PATCH_V1","plan":"0秒 腕を下ろした構え → 0.5秒 右腕を横に上げる → 1秒 元に戻る","operations":[{"op":"add","path":"/animations/wave","value":'
   + '{"name":"手を振る","duration":1,"loop":true,"tracks":{"arm_r":{"rotation":[[0,[0,0,0]],[0.5,[0,0,-60]],[1,[0,0,0]]]}}}}]}\n'
   + '出力はプレーンテキストとし、Markdown・コードフェンス（```）・見出し・説明文は禁止。先頭文字は{、末尾文字は}としてください。\n'
   + tail;
@@ -2825,6 +2870,8 @@ function motionPanel() {
  )).join('');
 
  return `
+  ${motionReviewBar()}
+
   <h2>動きをつける</h2>
 
   ${motionReadinessCard()}
@@ -2907,6 +2954,11 @@ function motionPanel() {
    </label>
 
    ${button('promptMotion','指示文をコピー（まとめて作る）','primary')}
+
+   <p class="hint">
+    タイミングごとの姿勢まで細かく指示したいときは、AI相談タブの「④ 動きをAIで作る（詳しく指示）」を使ってください。
+   </p>
+   <button data-tab="ai">AI相談タブで詳しく指示する</button>
 
    <p class="hint">
     ChatGPTなどに貼り付けて送信し、返ってきた回答をコピーしてから下のボタンを押してください。
@@ -3118,6 +3170,562 @@ function stepBar() {
   </div>
   <p class="hint">次は: ${esc(next)}</p>
  `;
+}
+
+// ------------------------------------------------------------
+// 動きの精度向上: 関節ガイド・詳しく指示・品質チェック
+// ------------------------------------------------------------
+
+// 先端の移動量を「前へ0.12m・上へ0.05m」のような言葉にする
+function describeMove(v,len) {
+ const f = x => Math.round(Math.abs(x)*100)/100;
+
+ const list = [
+  [v.z,v.z > 0 ? '前へ' : '後ろへ'],
+  [v.y,v.y > 0 ? '上へ' : '下へ'],
+  [v.x,v.x > 0 ? '左(+X)へ' : '右(-X)へ']
+ ]
+  .filter(([x]) => Math.abs(x) > Math.max(len*.05,.001))
+  .sort((a,b) => Math.abs(b[0])-Math.abs(a[0]))
+  .map(([x,t]) => t+f(x)+'m');
+
+ return list.length ? list.join('・') : 'ほとんど動かない（その場でねじれる回転）';
+}
+
+// 指示文に入れる「関節ガイド」と動きの基準。一時モデルで実測し、プレビューには触れない。
+function motionGuideText() {
+ const s = state.modelSpec;
+ const e = state.engine;
+ const f = v => Math.round(v*1000)/1000;
+ const lines = [];
+
+ if (e && window.THREE && Object.keys(s.parts).length) {
+  ensureMotionRoles();
+
+  const m = state.motion;
+  const root = e.buildModel(s);
+
+  try {
+   root.updateMatrixWorld(true);
+
+   const box = new THREE.Box3().setFromObject(root);
+   const size = box.getSize(new THREE.Vector3());
+
+   lines.push('\n関節ガイド（アプリが3Dから計算した実測値。回転は基本姿勢からの差分）:');
+   lines.push(
+    '- モデルの大きさ: 幅'+f(size.x)+'m・高さ'+f(size.y)+'m・奥行き'+f(size.z)
+    +'m。地面の高さ y='+f(box.min.y)+'（これより下に部品を出さない）'
+   );
+   lines.push('- 向き: +Zがモデルの前、+Yが上、+Xがモデルから見て左。');
+
+   for (const role of MOTION_KINDS[m.kind].roles) {
+    const id = m.roles[role];
+    if (!id) continue;
+
+    if (id === '*') {
+     const tops = Object.values(s.parts).filter(p => p.parent === null).map(p => p.id);
+     lines.push(
+      '- '+ROLE_INFO[role].label+'（'+role+'）: モデル全体。体全体を上下・前後に動かすときは、'
+      +'最上位の部品（'+tops.join(', ')+'）すべてに同じ position の差分を入れる。'
+     );
+     continue;
+    }
+
+    const o = root.userData.parts[id];
+    if (!o) continue;
+
+    const pb = new THREE.Box3().setFromObject(o);
+    if (pb.isEmpty()) continue;
+
+    const pivot = o.getWorldPosition(new THREE.Vector3());
+    const ps = pb.getSize(new THREE.Vector3());
+    const len = Math.max(ps.x,ps.y,ps.z);
+    const center = pb.getCenter(new THREE.Vector3());
+    const off = center.clone().sub(pivot);
+    let tip;
+
+    if (off.length() > len*.1) {
+     // 関節から見て形の中心の反対側の端を先端とみなす
+     tip = pivot.clone().addScaledVector(off,2);
+    } else {
+     // 関節が形の中心にあるときは、いちばん遠い角を先端とみなす
+     let far = -1;
+     for (const x of [pb.min.x,pb.max.x]) {
+      for (const y of [pb.min.y,pb.max.y]) {
+       for (const z of [pb.min.z,pb.max.z]) {
+        const c = new THREE.Vector3(x,y,z);
+        const d = c.distanceTo(pivot);
+        if (d > far) {
+         far = d;
+         tip = c;
+        }
+       }
+      }
+     }
+    }
+
+    const dir = tip.clone().sub(pivot).normalize();
+    const localTip = o.worldToLocal(tip.clone());
+
+    // 実際に部品を+30°回して先端の動きを測り、測った後は元に戻す
+    const effects = ['x','y','z'].map(ax => {
+     const before = o.rotation[ax];
+     o.rotation[ax] = before+Math.PI/6;
+     o.updateMatrixWorld(true);
+     const moved = o.localToWorld(localTip.clone()).sub(tip);
+     o.rotation[ax] = before;
+     o.updateMatrixWorld(true);
+     return ax.toUpperCase()+'+30°: 先端が'+describeMove(moved,len);
+    });
+
+    lines.push(
+     '- '+ROLE_INFO[role].label+'（'+role+'） = 部品 '+id
+     +' | 関節の位置 ['+pivot.toArray().map(f).join(',')+']'
+     +' | 長さ '+f(len)+'m'
+     +' | 先端の向き ['+dir.toArray().map(v => Math.round(v*100)/100).join(',')+']'
+     +' | '+effects.join(' / ')
+    );
+   }
+  } finally {
+   e.dispose(root);
+  }
+ }
+
+ lines.push('\n動きの基準:');
+ lines.push('- 推奨の振り幅: 脚の歩き±20〜30°、走り±40〜60°、腕の振り±20〜35°、頭の揺れ±3〜10°、胴の上下は身長の1〜4%。');
+ lines.push('- 二足の歩き方: 左右の脚は半周期ずらし、腕は同じ側の脚と逆向きに振る。');
+ lines.push('- 四足の歩き方: 歩き＝左後→左前→右後→右前を周期の1/4ずつずらす。速歩＝対角の脚（左前と右後、右前と左後）が同時。駆け足＝前脚ペアと後脚ペアが半周期ずれる。');
+ lines.push('- キーの目安: くり返す動きは1秒あたり6〜12キー。一回きりの動きは台本の各タイミングと、その前後に1つずつ。');
+
+ return lines.join('\n')+'\n';
+}
+
+// 現在の種類で、部品が割り当てられている役割 [役割, 部品ID]
+function usableRoles() {
+ ensureMotionRoles();
+
+ const m = state.motion;
+ const parts = state.modelSpec.parts;
+
+ return MOTION_KINDS[m.kind].roles
+  .map(r => [r,m.roles[r]])
+  .filter(([,id]) => id && (id === '*' || own(parts,id)));
+}
+
+const DRAFT_DURATION = {
+ idle: 2.4,
+ walk: 1,
+ run: .6,
+ jump: 1,
+ attack: .7,
+ hurt: .5,
+ die: 1.2,
+ emote: 1.2,
+ drive: 1,
+ turn: 2,
+ bump: .8
+};
+
+// 標準IDを選んだときの既定値（表示名・長さ・くり返し）
+function applyDraftDefaults() {
+ const d = state.ai.motionDraft;
+ const std = STANDARD_MOTIONS.find(x => x[0] === d.id);
+ if (!std) return;
+
+ d.name = std[1];
+ d.loop = std[2];
+ d.duration = DRAFT_DURATION[d.id] || 1;
+}
+
+// AI相談タブ「詳しく指示」の指示文
+function createMotionDetailPrompt() {
+ const d = state.ai.motionDraft;
+ const s = state.modelSpec;
+ const id = d.id === '*' ? String(d.custom || '').trim() : d.id;
+
+ assert(validId(id),'動きIDは英字で始まる英数字・_・-（64文字以内）で入力してください');
+
+ const dur = Number(d.duration);
+ assert(Number.isFinite(dur) && dur >= .1 && dur <= 30,'長さは0.1〜30秒で入力してください');
+
+ const beats = d.beats
+  .filter(b => String(b[1] || '').trim())
+  .map(([t,x]) => [Math.min(100,Math.max(0,Number(t) || 0)),String(x).trim()])
+  .sort((a,b) => a[0]-b[0]);
+
+ assert(beats.length,'台本に姿勢の説明を1行以上入力してください');
+
+ const roles = usableRoles();
+ const picked = d.parts ? roles.filter(([r]) => d.parts.includes(r)) : roles;
+ const std = STANDARD_MOTIONS.find(x => x[0] === id);
+ const name = String(d.name || '').trim() || std?.[1] || id;
+ const exists = own(s.animations || {},id);
+ const ref = d.ref && s.animations?.[d.ref];
+ const loop = !!d.loop;
+
+ const strength = {
+  soft: '控えめ（推奨の振り幅の下限寄り）',
+  normal: '普通（推奨の振り幅の中央）',
+  big: '大げさ（推奨の振り幅の上限〜1.3倍。メリハリを強く）'
+ }[d.strength] || '普通（推奨の振り幅の中央）';
+
+ return motionPromptBase(
+  '\n作る動き: ID "'+id+'"（'+name+'） / 長さ '+dur+'秒 / loop:'+loop
+  +' / op は "'+(exists ? 'replace' : 'add')+'"\n'
+  + '強さ: '+strength+'\n'
+  + '\n台本（この流れどおりにキーを置く）:\n'
+  + beats.map(([t,x]) => '- '+t+'%（'+r3(dur*t/100)+'秒）: '+x).join('\n')+'\n'
+  + (picked.length
+   ? '\n使う部位（これ以外の部品は動かさない）:\n'
+    + picked.map(([r,pid]) =>
+     '- '+ROLE_INFO[r].label+': '+(pid === '*' ? 'モデル全体（最上位の部品すべて）' : pid)
+    ).join('\n')+'\n'
+   : '')
+  + (ref ? '\n参考にする既存の動き "'+d.ref+'"（雰囲気やタイミングを参考にする）:\n'+JSON.stringify(ref)+'\n' : '')
+  + '\n作り方のルール:\n'
+  + '- name は "'+name+'"、duration は '+dur+'、loop は '+loop+' にする。ease は "smooth" を推奨。\n'
+  + (loop ? '- くり返す動きなので、各キー列の最初と最後を同じ値にする。\n' : '')
+  + (id === 'attack' ? '- events に "hit"（当たる瞬間）を入れる。\n' : '')
+  + (id === 'jump' ? '- events に "land"（着地の瞬間）を入れる。\n' : '')
+  + (id === 'die' ? '- 最後のキーを倒れた姿勢にして、その姿勢で止まるようにする。\n' : '')
+  + '\nこの1つの動きだけを1操作で出力すること。最上位に "plan" を必ず書く。'
+  + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
+ );
+}
+
+function motionDraftCard() {
+ const d = state.ai.motionDraft;
+ const s = state.modelSpec;
+ const roles = usableRoles();
+ const ids = STANDARD_MOTIONS.map(([id,label]) => [id,label+'（'+id+'）']);
+ const refs = Object.entries(s.animations || {}).map(([id,a]) => [id,(a.name || id)+'（'+id+'）']);
+ const checked = r => !d.parts || d.parts.includes(r);
+
+ return `
+  <div class="card">
+   <h3>④ 動きをAIで作る（詳しく指示）</h3>
+   <p class="hint">
+    タイミングごとの姿勢を書くと、AIが体の正確な情報（関節の位置・回す向き）を使って動きを作ります。
+    読み込んだ後は、品質チェックが自動で行われます。
+   </p>
+
+   ${selectField('動きID','data-draft="id"',[...ids,['*','自由入力（新しい名前）']],d.id)}
+   ${d.id === '*' ? field('新しい動きID（英字で始まる英数字）','data-draft="custom"',d.custom) : ''}
+   ${field('表示名','data-draft="name"',d.name)}
+
+   <div class="grid2">
+    ${field('長さ（秒）','data-draft="duration" step=".1" min=".1" max="30"',d.duration,'number')}
+    ${selectField('強さ','data-draft="strength"',[['soft','控えめ'],['normal','普通'],['big','大げさ']],d.strength)}
+   </div>
+
+   <label>
+    <input type="checkbox" data-draft="loop" ${d.loop ? 'checked' : ''}>
+    くり返す動き
+   </label>
+
+   <h3>台本（タイミングと姿勢）</h3>
+   ${d.beats.map(([t,x],i) => `
+    <div class="beat">
+     <input
+      type="number"
+      min="0"
+      max="100"
+      step="1"
+      data-beat-t="${i}"
+      value="${esc(t)}"
+      aria-label="タイミング（%）"
+     >
+     <input
+      type="text"
+      data-beat-d="${i}"
+      value="${esc(x)}"
+      placeholder="例: 右腕を後ろに大きく振りかぶる"
+      aria-label="姿勢の説明"
+     >
+     <button class="toggle danger" data-delbeat="${i}" aria-label="この行を削除">✕</button>
+    </div>
+   `).join('')}
+   ${button('addBeat','＋ 行を追加')}
+   <p class="hint">左の数字は動き全体を100%としたタイミングです（例: 長さ1秒なら30% = 0.3秒）。</p>
+
+   <h3>使う部位</h3>
+   ${roles.length ? roles.map(([r,pid]) => `
+    <label>
+     <input type="checkbox" data-draft-part="${r}" ${checked(r) ? 'checked' : ''}>
+     ${esc(ROLE_INFO[r].label)} <small>${esc(pid === '*' ? 'モデル全体' : pid)}</small>
+    </label>
+   `).join('') : `
+    <p class="hint">役割が決まっていません。「動き」タブの②で部品の役割を選べます。</p>
+   `}
+
+   ${selectField('参考にする既存の動き（任意）','data-draft="ref"',[['','なし'],...refs],d.ref)}
+
+   <div class="row">
+    ${button('promptDetail','指示文をコピー（詳しく指示）','primary')}
+    ${button('import','AIの回答を読み込む')}
+   </div>
+  </div>
+ `;
+}
+
+// 修正データがすべて /animations 配下なら、追加・変更された動きIDを返す
+function changedAnimationIds(ops,next) {
+ if (
+  !Array.isArray(ops)
+  || !ops.length
+  || !ops.every(op => obj(op) && typeof op.path === 'string' && op.path.startsWith('/animations'))
+ ) {
+  return [];
+ }
+
+ const anims = next.animations || {};
+ const ids = new Set();
+
+ for (const op of ops) {
+  const key = op.path.split('/')[2];
+
+  if (key) {
+   if (own(anims,key)) ids.add(key);
+  } else if (obj(op.value)) {
+   Object.keys(op.value).forEach(k => {
+    if (own(anims,k)) ids.add(k);
+   });
+  }
+ }
+
+ return [...ids];
+}
+
+// 動きの品質チェック。地面へのめり込みは一時モデルで実際に再生して測る。
+function reviewMotions(ids) {
+ const s = state.modelSpec;
+ const e = state.engine;
+ const out = {};
+ const problemParts = (jointIssues() || []).map(j => j.id);
+ let root = null;
+ let anim = null;
+ let baseMin = 0;
+ let H = 1;
+
+ if (e && window.THREE) {
+  root = e.buildModel(s);
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  baseMin = box.min.y;
+  H = Math.max(.05,box.max.y-box.min.y);
+  anim = e.createAnimator(root,s);
+ }
+
+ try {
+  for (const id of ids) {
+   const a = s.animations?.[id];
+   if (!a) continue;
+
+   const list = [];
+   const loop = a.loop !== false;
+   let keys = 0;
+   let tracked = 0;
+
+   for (const [pid,tr] of Object.entries(a.tracks || {})) {
+    tracked++;
+
+    for (const [ch,k] of Object.entries(tr)) {
+     keys += k.length;
+
+     if (ch === 'rotation') {
+      const big = k.find(x => x[1].some(v => Math.abs(v) > 170));
+      if (big) list.push(pid+' の回転が170°を超えています（'+big[0]+'秒）');
+     }
+
+     if (loop && k.length) {
+      const first = k[0][1];
+      const last = k[k.length-1][1];
+      const lim = ch === 'rotation' ? 1 : .01;
+      const gap = first.some((v,j) => Math.abs(v-last[j]) > lim)
+       || k[0][0] > .001
+       || k[k.length-1][0] < a.duration-.001;
+
+      if (gap) {
+       list.push(pid+' の'+(ch === 'rotation' ? '回転' : '位置')+'が、くり返しのつなぎ目でずれています');
+      }
+     }
+    }
+   }
+
+   if (loop && tracked && keys/tracked < 3) {
+    list.push('部品あたりのキーが少なく、動きが単調です（'+keys+'キー／'+tracked+'部品）');
+   }
+
+   if (id === 'attack' && !(a.events || []).some(ev => ev[1] === 'hit')) {
+    list.push('攻撃の合図「hit」がありません');
+   }
+   if (id === 'jump' && !(a.events || []).some(ev => ev[1] === 'land')) {
+    list.push('着地の合図「land」がありません');
+   }
+
+   const moving = Object.keys(a.tracks || {}).filter(pid => problemParts.includes(pid));
+   if (moving.length) {
+    list.push('関節がない部品を動かしています（先端を中心に回ります）: '+moving.join('、'));
+   }
+
+   if (anim) {
+    anim.play(id,{fade:0,restart:true});
+
+    const n = 24;
+    const floor = baseMin-H*.03;
+    let worst = null;
+
+    for (let i=0;i<=n;i++) {
+     if (i) anim.update(a.duration/n);
+     root.updateMatrixWorld(true);
+     const y = new THREE.Box3().setFromObject(root).min.y;
+     if (y < floor && (!worst || y < worst.y)) worst = {y,t:r3(a.duration*i/n)};
+    }
+
+    if (worst) {
+     list.push('地面にめり込みます（'+worst.t+'秒ごろ、約'+r3(baseMin-worst.y)+'m）');
+    }
+
+    anim.stop();
+   }
+
+   out[id] = list;
+  }
+ } finally {
+  if (root) e.dispose(root);
+ }
+
+ return out;
+}
+
+// AIの動きを読み込んだ後の確認を始める
+function startReview(ids,plan) {
+ const m = state.motion;
+
+ m.review = {
+  ids,
+  plan: typeof plan === 'string' ? plan.slice(0,2000) : '',
+  report: reviewMotions(ids)
+ };
+
+ state.activeTab = 'motion';
+
+ if (m.animator && ids[0]) playMotion(ids[0]);
+ else renderPanel();
+}
+
+function motionReviewBar() {
+ const m = state.motion;
+ const rv = m.review;
+ if (!rv) return '';
+
+ const anims = state.modelSpec.animations || {};
+ const ids = rv.ids.filter(id => own(anims,id));
+
+ if (!ids.length) {
+  m.review = null;
+  return '';
+ }
+
+ const hasIssue = ids.some(id => (rv.report[id] || []).length);
+
+ const rows = ids.map(id => {
+  const issues = rv.report[id] || [];
+
+  return `
+   <div class="partrow">
+    <button
+     class="pick ${m.playing === id ? 'selected' : ''}"
+     data-play="${esc(id)}"
+    >${m.playing === id ? '■' : '▶'} ${esc(anims[id].name || id)}<small>${esc(id)}</small></button>
+   </div>
+   ${issues.length
+    ? `<p class="error">${issues.map(esc).join('\n')}</p>`
+    : '<p class="success">✓ 問題は見つかりませんでした</p>'}
+  `;
+ }).join('');
+
+ return `
+  <div class="card review">
+   <h3>AIの動きを確認</h3>
+   ${rv.plan ? `<p class="hint"><b>AIの計画:</b> ${esc(rv.plan)}</p>` : ''}
+   ${rows}
+   <div class="row">
+    ${button('reviewAccept','採用','primary')}
+    ${button('reviewUndo','取り消す')}
+    ${hasIssue ? button('reviewFix','自動で直す') : ''}
+    ${hasIssue ? button('reviewAsk','AIに直してもらう') : ''}
+   </div>
+   <p class="hint">
+    「取り消す」は読み込む前の状態に戻します。「自動で直す」は、くり返しのつなぎ目のずれを直します。
+    「AIに直してもらう」は、問題のある動きだけを直す指示文をコピーします。
+   </p>
+  </div>
+ `;
+}
+
+// くり返しのつなぎ目をそろえる（最後のキーを最初と同じ値に。時刻は範囲内に丸める）
+function autoFixMotions() {
+ const m = state.motion;
+ const rv = m.review;
+ assert(rv,'確認中の動きがありません');
+
+ const ids = rv.ids.filter(id => own(state.modelSpec.animations || {},id));
+
+ stopMotion();
+
+ mutate(s => {
+  for (const id of ids) {
+   const a = s.animations[id];
+   if (a.loop === false) continue;
+
+   for (const tr of Object.values(a.tracks || {})) {
+    for (const k of Object.values(tr)) {
+     if (!k.length) continue;
+
+     k.forEach(x => {
+      x[0] = Math.min(a.duration,Math.max(0,x[0]));
+     });
+
+     const first = k[0][1].slice();
+
+     if (k[0][0] > 0) k.unshift([0,first.slice()]);
+
+     const last = k[k.length-1];
+
+     if (last[0] < a.duration) k.push([a.duration,first.slice()]);
+     else last[1] = first.slice();
+    }
+   }
+  }
+ });
+
+ m.review = {...rv,report:reviewMotions(ids)};
+ renderPanel();
+ toast('つなぎ目を直しました（↶で取り消せます）');
+}
+
+// 品質チェックの結果を入れて、問題のある動きだけを直してもらう指示文
+function createReviewFixPrompt() {
+ const rv = state.motion.review;
+ assert(rv,'確認中の動きがありません');
+
+ const anims = state.modelSpec.animations || {};
+ const bad = rv.ids.filter(id => own(anims,id) && (rv.report[id] || []).length);
+
+ assert(bad.length,'直す必要のある動きはありません');
+
+ return motionPromptBase(
+  '\n次の動きに、アプリの品質チェックで問題が見つかりました。問題を直した動きを返してください。\n'
+  + bad.map(id =>
+   '\n動きID: '+id+'\n問題:\n'
+   + rv.report[id].map(x => '- '+x).join('\n')
+   + '\n現在の中身:\n'+JSON.stringify(anims[id])
+  ).join('\n')
+  + '\n\n各動きを {"op":"replace","path":"/animations/動きID","value":{...}} で返すこと。'
+  + 'IDは変えない。ほかの動きや部品は変更しない。最上位に "plan" を書く。'
+  + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
+ );
 }
 
 // ============================================================
@@ -3508,6 +4116,15 @@ function applyAIText(text) {
    {...data,format:'MODELSTUDIO_PATCH_V1'}
   );
   commitSpec(next);
+
+  // 動きだけを変更した修正データは、品質チェック付きの確認バーを出す
+  const ids = changedAnimationIds(data.operations,next);
+
+  if (ids.length) {
+   startReview(ids,data.plan);
+   return '動きを読み込みました。確認バーで品質を確かめてください';
+  }
+
   return '修正を反映しました（↶で取り消せます）';
  }
 
@@ -3519,6 +4136,14 @@ function applyAIText(text) {
  const s = normalizeSpec(data);
  validateModelSpec(s);
  commitSpec(s,{fit:true});
+
+ const ids = Object.keys(s.animations || {});
+
+ if (ids.length) {
+  startReview(ids,data.plan);
+  return '新しいモデルを読み込みました。動きは確認バーで品質を確かめてください';
+ }
+
  return '新しいモデルを読み込みました（↶で取り消せます）';
 }
 
@@ -4368,6 +4993,8 @@ function aiPanel() {
     ※初回は「ペースト」の確認が表示されることがあります。
    </p>
   </div>
+
+  ${motionDraftCard()}
  `;
 }
 
@@ -4603,6 +5230,22 @@ function handleChange(e) {
   renderPanel();
  } else if (d.role) {
   state.motion.roles[d.role] = el.value;
+ } else if (d.draft) {
+  const draft = state.ai.motionDraft;
+
+  draft[d.draft] = el.type === 'checkbox' ? el.checked : el.value;
+
+  if (d.draft === 'id') applyDraftDefaults();
+  if (d.draft === 'id' || d.draft === 'ref') renderPanel();
+ } else if (d.draftPart) {
+  const draft = state.ai.motionDraft;
+  const all = usableRoles().map(x => x[0]);
+  const on = new Set(draft.parts || all);
+
+  if (el.checked) on.add(d.draftPart);
+  else on.delete(d.draftPart);
+
+  draft.parts = all.filter(r => on.has(r));
  } else if (el.id === 'background') {
   state.background = el.value;
   setPreviewMode();
@@ -4614,6 +5257,14 @@ function handleInput(e) {
 
  if (d.ai) {
   state.ai[d.ai] = e.target.value;
+ } else if (d.draft && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
+  state.ai.motionDraft[d.draft] = e.target.value;
+ } else if (d.beatT !== undefined) {
+  const beat = state.ai.motionDraft.beats[Number(d.beatT)];
+  if (beat) beat[0] = e.target.value;
+ } else if (d.beatD !== undefined) {
+  const beat = state.ai.motionDraft.beats[Number(d.beatD)];
+  if (beat) beat[1] = e.target.value;
  } else if (d.motion) {
   state.motion[d.motion] = Number(e.target.value);
   const out = $('out_m_'+d.motion);
@@ -4690,6 +5341,34 @@ const actions = {
   state.motion.fixId = null;
   renderPanel();
  },
+ addBeat: () => {
+  const beats = state.ai.motionDraft.beats;
+  const t = beats.length > 1
+   ? Math.round((Number(beats[beats.length-2][0])+Number(beats[beats.length-1][0]))/2)
+   : 50;
+  beats.splice(Math.max(0,beats.length-1),0,[t,'']);
+  renderPanel();
+ },
+ promptDetail: () => copyText(
+  createMotionDetailPrompt(),
+  '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
+ ),
+ reviewAccept: () => {
+  state.motion.review = null;
+  renderPanel();
+  toast('動きを採用しました');
+ },
+ reviewUndo: () => {
+  undoRedo();
+  state.motion.review = null;
+  renderPanel();
+  toast('読み込む前の状態に戻しました');
+ },
+ reviewFix: autoFixMotions,
+ reviewAsk: () => copyText(
+  createReviewFixPrompt(),
+  '直してもらう指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
+ ),
  tryReset: () => {
   assert(state.motion.tester,'3D表示が使えないため、試せません');
   state.motion.tester.reset();
@@ -4789,6 +5468,10 @@ function handleClick(e) {
    renderPanel();
   } else if (b.dataset.try) {
    tryAction(b.dataset.try);
+  } else if (b.dataset.delbeat !== undefined) {
+   const beats = state.ai.motionDraft.beats;
+   if (beats.length > 1) beats.splice(Number(b.dataset.delbeat),1);
+   renderPanel();
   } else if (b.dataset.delmotion) {
    const id = b.dataset.delmotion;
    const name = state.modelSpec.animations?.[id]?.name || id;
