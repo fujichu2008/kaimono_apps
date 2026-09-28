@@ -129,9 +129,9 @@ body.library-open #viewTools{display:none}
 .libacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:6px}
 .libacts button{padding:6px 4px;font-size:12px}
 .keybar{position:relative;height:44px;margin:0 8px;border-bottom:1px solid var(--line)}
-.keymark{position:absolute;top:0;width:24px;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;transform:translateX(-50%)}
-.keymark::after{content:'';position:absolute;left:50%;top:50%;width:10px;height:10px;border-radius:2px;background:#ffc66f;transform:translate(-50%,-50%) rotate(45deg)}
-.keymark.on::after{background:var(--cyan)}
+.keymark{position:absolute;top:0;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;z-index:1}
+.keydot{position:absolute;top:50%;width:10px;height:10px;border-radius:2px;background:#ffc66f;transform:translate(-50%,-50%) rotate(45deg);pointer-events:none}
+.keydot.on{background:var(--cyan)}
 #startupSplash{cursor:pointer}
 @media(min-width:950px){
  .libhead,.libtools,.libbody{padding-left:max(24px,calc((100vw - 1100px)/2));padding-right:max(24px,calc((100vw - 1100px)/2))}
@@ -701,7 +701,9 @@ const state = {
   // 3D画面のタップで割り当てる役割
   assignRole: null,
   // ②おまかせの開閉（null のときは自動）
-  autoOpen: null
+  autoOpen: null,
+  // 準備チェック・③・④の開閉（キーが無いときは自動）
+  openCards: {}
  },
  thumb: null,
  thumbTried: new Set(),
@@ -3208,6 +3210,12 @@ function createMotionFixPrompt() {
  );
 }
 
+// 動きタブの開閉式カード。ユーザーが開閉していなければ既定値を使う
+function motionCardOpen(key,def) {
+ const v = state.motion.openCards?.[key];
+ return typeof v === 'boolean' ? v : !!def;
+}
+
 function motionPanel() {
  ensureMotionRoles();
 
@@ -3322,10 +3330,11 @@ function motionPanel() {
    ${moreHint()}
   </details>
 
-  <div class="card">
-   <h3>③ AIに頼む（まとめて作る）</h3>
+  <details class="card" id="aiDetails" ${motionCardOpen('ai',false) ? 'open' : ''}>
+   <summary><b>③ AIに頼む</b></summary>
    <p class="hint">
-    作りたい動きを選んでください（複数可）。ゲーム側はこの名前で動きを呼び出します。
+    作りたい動きを選んで注文リストに追加し、AI相談タブの④で台本（タイミングごとの姿勢）を確かめてから指示文をコピーします。
+    ゲーム側はこの名前で動きを呼び出します（複数選べます）。
    </p>
 
    <div class="chips">
@@ -3340,19 +3349,19 @@ function motionPanel() {
      `).join('')}
    </div>
 
-   <label>追加の要望（任意）
-    <textarea
-     data-ai="motion"
-     placeholder="攻撃は剣を大きく振り下ろす感じ。やられは後ろにのけぞる。"
-    >${esc(state.ai.motion || '')}</textarea>
-   </label>
+   ${button('queuePicks','選んだ動きを注文リストに追加して詳しく指示','primary')}
 
-   ${button('promptMotion','指示文をコピー（まとめて作る）','primary')}
+   ${easy() ? '' : `
+    <h3>まとめて1回で頼む（上級者向け）</h3>
+    <label>追加の要望（任意）
+     <textarea
+      data-ai="motion"
+      placeholder="攻撃は剣を大きく振り下ろす感じ。やられは後ろにのけぞる。"
+     >${esc(state.ai.motion || '')}</textarea>
+    </label>
 
-   <p class="hint">
-    タイミングごとの姿勢まで細かく指示したいときは、AI相談タブの「④ 動きをAIで作る（詳しく指示）」を使ってください。
-   </p>
-   ${button('queuePicks','選んだ動きを注文リストに追加して詳しく指示')}
+    ${button('promptMotion','指示文をコピー（まとめて作る）')}
+   `}
 
    <p class="hint">
     ChatGPTなどに貼り付けて送信し、返ってきた回答をコピーしてから下のボタンを押してください。
@@ -3360,10 +3369,10 @@ function motionPanel() {
    </p>
 
    ${button('import','AIの回答を読み込む')}
-  </div>
+  </details>
 
-  <div class="card">
-   <h3>④ 試してみる（ゲームと同じ切り替え）</h3>
+  <details class="card" id="tryDetails" ${motionCardOpen('try',clips.length > 0) ? 'open' : ''}>
+   <summary><b>④ 試してみる（ゲームと同じ切り替え）</b></summary>
 
    ${slider(
     'trySpeed',
@@ -3397,7 +3406,7 @@ function motionPanel() {
     ゲームでは hero.setSpeed(速さ) と hero.action("attack") で同じように動きます。
     止めるときは①の「停止」を押してください。
    </p>
-  </div>
+  </details>
  `;
 }
 
@@ -3704,11 +3713,27 @@ function editKeyMarkers(a,e) {
 
  return `
   <div class="keybar" aria-label="${label}">
-   ${times.map(t => {
-    const pct = a.duration > 0 ? Math.min(100,Math.max(0,t/a.duration*100)) : 0;
-    const on = Math.abs(t-e.time) <= .01;
-    return `<button class="keymark ${on ? 'on' : ''}" data-ekeyt="${t}" style="left:${pct}%" aria-label="${t}秒のキーへ移動"></button>`;
-   }).join('')}
+   ${(() => {
+    const pos = times.map(t =>
+     a.duration > 0 ? Math.min(100,Math.max(0,t/a.duration*100)) : 0
+    );
+
+    // 左右それぞれ「22px」と「隣との中点」の小さい方（片側最小8px＝合計16px以上）
+    const half = (i,dir) => {
+     const j = i+dir;
+     if (j < 0 || j >= pos.length) return '22px';
+     return 'max(8px,min(22px,'+r3(Math.abs(pos[j]-pos[i])/2)+'%))';
+    };
+
+    return times.map((t,i) => {
+     const on = Math.abs(t-e.time) <= .01;
+     const L = half(i,-1);
+     const R = half(i,1);
+
+     return `<span class="keydot ${on ? 'on' : ''}" style="left:${pos[i]}%"></span>`
+      + `<button class="keymark" data-ekeyt="${t}" style="left:calc(${pos[i]}% - ${L});width:calc(${L} + ${R})" aria-label="${t}秒のキーへ移動"></button>`;
+    }).join('');
+   })()}
   </div>
   <p class="hint">${label}: ${times.length}個（◆をタップするとその時刻へ移動）</p>
  `;
@@ -4083,8 +4108,8 @@ function motionReadinessCard() {
  const good = !r.missing.length && !r.pivots.length;
 
  return `
-  <div class="card">
-   <h3>準備チェック（参考）</h3>
+  <details class="card" id="readyDetails" ${motionCardOpen('ready',!good) ? 'open' : ''}>
+   <summary><b>準備チェック（参考）</b>${good ? ' ✓' : ' · 要確認'}</summary>
 
    ${good ? `
     <p class="success">✓ 主要な部位がそろっていて、回転の中心にも目立つずれは見つかりませんでした（基本姿勢で計測）。</p>
@@ -4115,7 +4140,7 @@ function motionReadinessCard() {
    ${assignButtons(r)}
 
    <p class="hint">このチェックは参考です。動きの作成・読み込み・書き出しはいつでもできます。</p>
-  </div>
+  </details>
  `;
 }
 
@@ -8072,6 +8097,8 @@ function importLibrary(file) {
    const data = readStore();
    let added = 0;
    let failed = 0;
+   // 既存のプロジェクトと、このファイルから先に追加したモデルの meta.id
+   const taken = new Set(data.projects.map(x => x.modelSpec?.meta?.id).filter(Boolean));
 
    for (const p of src.projects) {
     try {
@@ -8079,6 +8106,13 @@ function importLibrary(file) {
 
      const spec = normalizeSpec(p.modelSpec);
      validateModelSpec(spec);
+
+     // 重なるときだけ新しい meta.id に振り直す
+     if (taken.has(spec.meta.id)) {
+      spec.meta.id = newModelId(spec.meta.id,data);
+      validateModelSpec(spec);
+     }
+     taken.add(spec.meta.id);
 
      const name = typeof p.name === 'string' && p.name.trim()
       ? p.name.trim().slice(0,100)
@@ -8532,7 +8566,16 @@ function panelFocusKey(el) {
   .map(a => a.name+'='+a.value)
   .sort();
 
- return data.length ? el.tagName+'['+data.join('][')+']' : null;
+ if (data.length) return el.tagName+'['+data.join('][')+']';
+
+ // id も data-* もない summary は、親の details の id で見分ける
+ const parent = el.parentElement;
+
+ if (el.tagName === 'SUMMARY' && parent?.tagName === 'DETAILS' && parent.id) {
+  return 'SUMMARY@'+parent.id;
+ }
+
+ return null;
 }
 
 function capturePanelFocus(panel) {
@@ -9409,6 +9452,18 @@ function handleKeyboard(e) {
  }
 
  if (!$('modal').hidden) {
+  // 名前変更の入力欄では Enter で確定する（IME変換中は除く）
+  if (
+   e.key === 'Enter'
+   && e.target.id === 'renameText'
+   && !e.isComposing
+   && e.keyCode !== 229
+  ) {
+   e.preventDefault();
+   actions.doRename();
+   return;
+  }
+
   if (e.key === 'Escape') closeDialog();
 
   if (e.key === 'Tab') {
@@ -9506,6 +9561,9 @@ function init() {
   if (details.id === 'partList') state.partListOpen = !details.open;
   if (details.id === 'queueDetails') state.ai.queueOpen = !details.open;
   if (details.id === 'autoDetails') state.motion.autoOpen = !details.open;
+
+  const motionCard = {readyDetails:'ready',aiDetails:'ai',tryDetails:'try'}[details.id];
+  if (motionCard) state.motion.openCards[motionCard] = !details.open;
  },true);
 
  document.addEventListener('focusout',e => {
