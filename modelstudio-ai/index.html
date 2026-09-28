@@ -102,6 +102,9 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 .nudgegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:8px 0}
 .nudgegrid button{min-height:44px;padding:6px 4px;font-size:13px}
 .newkind{display:block;width:100%;text-align:left;margin:6px 0}
+.swatches{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin:6px 0}
+.swatch{min-height:40px;padding:0;border-radius:10px;border:2px solid var(--line)}
+.swatch.on{border-color:#fff;box-shadow:0 0 0 2px var(--cyan)}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -127,7 +130,7 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
  <div class="row">
   <button id="undoBtn" data-action="undo" aria-label="元に戻す">↶</button>
   <button id="redoBtn" data-action="redo" aria-label="やり直す">↷</button>
-  <button id="levelBtn" data-action="level" aria-label="表示の切り替え（かんたん／くわしく）">表示: かんたん</button>
+  <button id="levelBtn" data-action="level" aria-label="表示の切り替え（現在: かんたん）">かんたん</button>
   <button data-action="save" class="primary">保存</button>
  </div>
 </header>
@@ -516,6 +519,9 @@ const state = {
   prompt: '',
   motion: '',
   motionFix: '',
+  // 貼り付け欄の内容と、直前にコピーした指示文（共有ボタン用）
+  paste: '',
+  lastPrompt: '',
   // 動きの注文リスト。motionDraft は編集中の項目を指す
   motionQueue: [{
    id: 'attack',
@@ -580,7 +586,11 @@ const state = {
  // かんたん調整の刻みと、連続操作をまとめるための情報
  nudgeStep: 'normal',
  nudge: {id:null},
- nudgeTimer: null
+ nudgeTimer: null,
+ // 色見本で「この部品だけ変える」
+ paintOnly: true,
+ // 初回起動のひな形選択（置き換えの確認を出さない）
+ newFirst: false
 };
 
 // ============================================================
@@ -2173,11 +2183,28 @@ function pickObject(e) {
 
  if (anchor) {
   selectAnchor(anchor.object.userData.anchorId);
+  scrollToInspector();
   return;
  }
 
  const hit = hits.find(h => h.object.userData.partId);
- if (hit) selectPart(hit.object.userData.partId);
+
+ if (hit) {
+  selectPart(hit.object.userData.partId);
+  scrollToInspector();
+ }
+}
+
+// 3D画面で選んだとき、設定カードが見えるようにスクロールする
+// PC（パネル内スクロール）は先頭に合わせ、スマホは3D表示を残すため最小限だけ動かす
+function scrollToInspector() {
+ requestAnimationFrame(() => {
+  const card = $('inspectorCard');
+  if (!card) return;
+
+  const inPanel = getComputedStyle($('panel')).overflowY === 'auto';
+  card.scrollIntoView({block: inPanel ? 'start' : 'nearest',behavior:'smooth'});
+ });
 }
 
 // ============================================================
@@ -3708,7 +3735,7 @@ function copyBatch(i) {
  const n = Math.max(1,Math.ceil(a.motionQueue.length/a.batchSize));
  const items = a.motionQueue.slice(i*a.batchSize,(i+1)*a.batchSize);
 
- copyText(
+ copyPrompt(
   createMotionBatchPrompt(items),
   n > 1
    ? '指示文（'+(i+1)+'/'+n+'）をコピーしました。AIの回答を読み込んでから次をコピーしてください'
@@ -4759,7 +4786,9 @@ function templateSpec(kind) {
  return normalizeSpec(s);
 }
 
-function showNewDialog() {
+function showNewDialog(first=false) {
+ state.newFirst = first === true;
+
  const kinds = [
   ['biped','人型','二足で歩くキャラクター。頭・腕・脚に関節付き'],
   ['quad','四足の動物','犬・馬などの四足。頭・尾・4本の脚に関節付き'],
@@ -4769,8 +4798,16 @@ function showNewDialog() {
  ];
 
  openDialog(
-  '新しいモデルを作る',
-  `<p class="hint">
+  state.newFirst ? 'ようこそ！何を作りますか？' : '新しいモデルを作る',
+  `${state.newFirst ? `
+   <div class="helpsteps">
+    <div>1 · ひな形を選ぶ → 部品をタップして調整</div>
+    <div>2 · 「動き」タブで動きを付ける</div>
+    <div>3 · 「書き出し」タブでゲームへ</div>
+   </div>
+   <p class="hint">使い方は、3D画面右上の「?」でいつでも見られます。</p>
+  ` : ''}
+   <p class="hint">
     ひな形から始めると、関節が付いているので、すぐに動きを付けられます。
    </p>
    ${kinds.map(([k,t,d]) => `
@@ -4842,24 +4879,357 @@ function openFile(file) {
   .catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）を選んでください')));
 }
 
+// ------------------------------------------------------------
+// 初心者向け: 形の変更・寸法・色見本・部品の追加・指示文の共有
+// ------------------------------------------------------------
+
+const round4 = v => Math.round(v*10000)/10000;
+
+// かんたん表示で選べる形
+const EASY_GEO = ['box','sphere','cylinder','cone','capsule','torus','plane'];
+
+// 形ごとの寸法スライダー [キー, 配列の番号(なければnull), 表示名]
+const DIM_FIELDS = {
+ box: [['size',0,'幅'],['size',1,'高さ'],['size',2,'奥行き']],
+ sphere: [['radius',null,'半径']],
+ cylinder: [['radiusTop',null,'上の半径'],['radiusBottom',null,'下の半径'],['height',null,'高さ']],
+ cone: [['radius',null,'半径'],['height',null,'高さ']],
+ capsule: [['radius',null,'半径'],['length',null,'長さ']],
+ torus: [['radius',null,'半径'],['tube',null,'太さ']],
+ plane: [['size',0,'幅'],['size',1,'高さ']]
+};
+
+const PALETTE = [
+ '#e53935','#fb8c00','#fdd835','#43a047','#00acc1','#1e88e5',
+ '#5e35b1','#d81b60','#795548','#9e9e9e','#212121','#fafafa'
+];
+
+// モデル全体の最大辺（3D表示がなければ2m）
+function modelSpan() {
+ const r = state.runtime;
+
+ if (r?.root) {
+  const box = new THREE.Box3().setFromObject(r.root);
+  if (!box.isEmpty()) {
+   const size = box.getSize(new THREE.Vector3());
+   return Math.max(size.x,size.y,size.z,.05);
+  }
+ }
+
+ return 2;
+}
+
+// 形状パラメータから見た目の大きさ [幅, 高さ, 奥行き] を概算する
+function geoSize(g) {
+ const d = {...GEO[g.type],...g};
+
+ switch (g.type) {
+  case 'box':
+   return d.size.slice();
+  case 'sphere':
+   return [2*d.radius,2*d.radius,2*d.radius];
+  case 'cylinder': {
+   const r = Math.max(d.radiusTop,d.radiusBottom);
+   return [2*r,d.height,2*r];
+  }
+  case 'cone':
+   return [2*d.radius,d.height,2*d.radius];
+  case 'capsule':
+   return [2*d.radius,d.length+2*d.radius,2*d.radius];
+  case 'torus': {
+   const o = 2*(d.radius+d.tube);
+   return [o,o,2*d.tube];
+  }
+  case 'plane':
+   return [d.size[0],d.size[1],.01];
+  case 'lathe': {
+   const r = Math.max(...d.points.map(p => p[0]));
+   const ys = d.points.map(p => p[1]);
+   return [2*r,Math.max(...ys)-Math.min(...ys),2*r];
+  }
+  case 'extrude': {
+   const xs = d.points.map(p => p[0]);
+   const ys = d.points.map(p => p[1]);
+   return [Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys),d.depth];
+  }
+  case 'tube': {
+   const span = i => {
+    const v = d.points.map(p => p[i]);
+    return Math.max(...v)-Math.min(...v)+2*d.radius;
+   };
+   return [span(0),span(1),span(2)];
+  }
+ }
+
+ return [1,1,1];
+}
+
+// 形状の長さ系の値をまとめて f 倍する（分割数・closed はそのまま）
+function scaleGeometry(g,f) {
+ const k = v => Math.max(.001,round4(v*f));
+
+ for (const key of Object.keys(g)) {
+  const v = g[key];
+
+  if (key === 'type' || key === 'closed' || /Segments$|^segments$/.test(key)) continue;
+
+  if (key === 'points') {
+   g.points = v.map(p => p.map(x => round4(x*f)));
+  } else if (Array.isArray(v)) {
+   g[key] = v.map(k);
+  } else if (typeof v === 'number') {
+   g[key] = ['radiusTop','radiusBottom','length'].includes(key) && v === 0 ? 0 : k(v);
+  }
+ }
+
+ return g;
+}
+
+// 見た目の大きさ [幅, 高さ, 奥行き] に近い新しい形を作る
+function geometryForSize(type,[w,h,z]) {
+ const g = clone(GEO[type]);
+ const m = v => Math.max(.01,round4(v));
+ const r = Math.max(w,z)/2;
+
+ switch (type) {
+  case 'box':
+   g.size = [m(w),m(h),m(z)];
+   break;
+  case 'sphere':
+   g.radius = m(Math.max(w,h,z)/2);
+   break;
+  case 'cylinder':
+   g.radiusTop = m(r);
+   g.radiusBottom = m(r);
+   g.height = m(h);
+   break;
+  case 'cone':
+   g.radius = m(r);
+   g.height = m(h);
+   break;
+  case 'capsule':
+   g.radius = m(r);
+   g.length = m(h-2*r);
+   break;
+  case 'torus': {
+   const o = Math.max(w,h)/2;
+   g.tube = m(o*.2);
+   g.radius = m(o-g.tube);
+   break;
+  }
+  case 'plane':
+   g.size = [m(w),m(h)];
+   break;
+  default: {
+   // 回転体・押し出し・管は、既定の形を全体の大きさに合わせて拡大縮小する
+   const base = Math.max(...geoSize(g),.001);
+   scaleGeometry(g,Math.max(w,h,z)/base);
+  }
+ }
+
+ return g;
+}
+
+function shapeEditor(d) {
+ const g = d.geometry;
+ const types = easy() ? EASY_GEO : Object.keys(GEO);
+ const items = types.includes(g.type) ? types : [g.type,...types];
+
+ let html = `
+  <h3>形</h3>
+  ${selectField('形の種類','data-geotype="1"',items.map(t => [t,geoLabel(t)]),g.type)}
+ `;
+
+ const fields = DIM_FIELDS[g.type];
+
+ if (!fields) {
+  return html+'<p class="hint">この形の寸法は、くわしく表示の形状データで変えられます。</p>';
+ }
+
+ for (const [key,idx,label] of fields) {
+  const raw = g[key] ?? GEO[g.type][key];
+  const cur = round4(idx === null ? raw : raw[idx]);
+  const max = round4(Math.max(1,cur*3));
+  const step = Math.max(.0001,round4((max-.01)/100));
+
+  html += `
+   <label>${esc(label)}（m） <output id="dim_${key}_${idx ?? 'v'}">${cur}</output>
+    <input
+     type="range"
+     min=".01"
+     max="${max}"
+     step="${step}"
+     value="${cur}"
+     data-dim="${key}"
+     data-dimi="${idx ?? ''}"
+    >
+   </label>
+  `;
+ }
+
+ return html+'<p class="hint">スライダーから指を離すと形に反映します（↶で戻せます）。</p>';
+}
+
+function colorPalette(d) {
+ const now = String(state.modelSpec.materials[d.material]?.color || '').toLowerCase();
+
+ return `
+  <label>色を選ぶ</label>
+  <div class="swatches">
+   ${PALETTE.map(c => `
+    <button
+     class="swatch ${now === c ? 'on' : ''}"
+     data-paint="${c}"
+     style="background:${c}"
+     aria-label="色 ${c}"
+    ></button>
+   `).join('')}
+  </div>
+  <label>
+   <input type="checkbox" id="paintOnly" ${state.paintOnly ? 'checked' : ''}>
+   この部品だけ変える
+  </label>
+ `;
+}
+
+function changeGeoType(type) {
+ const id = state.selectedPartId;
+ assert(id && own(state.modelSpec.parts,id) && own(GEO,type),'部品と形を選んでください');
+
+ const p = state.modelSpec.parts[id];
+ if (p.type !== 'primitive' || p.geometry.type === type) return;
+
+ stopMotion();
+
+ const size = geoSize(p.geometry);
+
+ mutate(s => {
+  s.parts[id].geometry = geometryForSize(type,size);
+ });
+
+ toast('形を「'+geoLabel(type)+'」に変えました（↶で戻せます）');
+}
+
+function setDimension(key,idx,v) {
+ const id = state.selectedPartId;
+ assert(id && own(state.modelSpec.parts,id),'寸法を変える部品を選んでください');
+ assert(Number.isFinite(v) && v > 0,'寸法は0より大きい数にしてください');
+
+ stopMotion();
+
+ mutate(s => {
+  const g = s.parts[id].geometry;
+
+  if (idx === null) {
+   g[key] = round4(v);
+  } else {
+   const arr = (g[key] ?? GEO[g.type][key]).slice();
+   arr[idx] = round4(v);
+   g[key] = arr;
+  }
+ });
+}
+
+// 色見本で色を変える（共有している色・質感は、必要なときだけ分ける）
+function paintPart(color) {
+ const id = state.selectedPartId;
+ const spec = state.modelSpec;
+
+ assert(
+  id && own(spec.parts,id) && spec.parts[id].type === 'primitive',
+  '色を変える部品を選んでください'
+ );
+
+ const mid = spec.parts[id].material;
+ const users = Object.values(spec.parts)
+  .filter(p => p.type === 'primitive' && p.material === mid).length;
+
+ const norm = m => ({
+  type: m.type,
+  color: String(m.color).toLowerCase(),
+  roughness: m.roughness ?? .6,
+  metalness: m.metalness ?? 0,
+  opacity: m.opacity ?? 1,
+  transparent: m.transparent ?? false,
+  emissive: String(m.emissive ?? '#000000').toLowerCase(),
+  emissiveIntensity: m.emissiveIntensity ?? 0
+ });
+ const keys = Object.keys(norm(spec.materials[mid]));
+
+ stopMotion();
+
+ mutate(s => {
+  const cur = s.materials[mid];
+
+  if (users <= 1 || !state.paintOnly) {
+   cur.color = color;
+   return;
+  }
+
+  const want = norm({...cur,color});
+  const same = Object.entries(s.materials).find(([,m]) => {
+   const n = norm(m);
+   return keys.every(k => n[k] === want[k]);
+  });
+
+  if (same) {
+   s.parts[id].material = same[0];
+   return;
+  }
+
+  assert(
+   Object.keys(s.materials).length < LIMIT.materials,
+   '色・質感が100個に達しています。使っていない色・質感を減らすか、「この部品だけ変える」をオフにしてください'
+  );
+
+  const nid = uid('material');
+  s.materials[nid] = {...clone(cur),name:'色 '+color,color};
+  s.parts[id].material = nid;
+ });
+}
+
+// 指示文をコピーし、共有ボタン用に覚えておく
+function copyPrompt(text,message) {
+ state.ai.lastPrompt = text;
+ const done = copyText(text,message);
+ if (state.activeTab === 'ai') renderPanel();
+ return done;
+}
+
+// 部品を追加する。選んだ部品があればその子として、モデルに合う大きさで追加する
 function addPart(type) {
  const id = uid(type);
+ const spec = state.modelSpec;
+ const parent = own(spec.parts,state.selectedPartId) ? state.selectedPartId : null;
+ const span = modelSpan();
+
+ let geometry = null;
+
+ if (type !== 'group') {
+  const g = clone(GEO[type]);
+  const base = Math.max(...geoSize(g),.001);
+  geometry = scaleGeometry(g,span*.15/base);
+ }
+
+ const material = parent && spec.parts[parent].type === 'primitive'
+  ? spec.parts[parent].material
+  : Object.keys(spec.materials)[0];
 
  mutate(s => {
   s.parts[id] = {
    id,
    name: geoLabel(type),
    type: type === 'group' ? 'group' : 'primitive',
-   parent: null,
-   position: [0,1,0],
+   parent,
+   position: parent ? [0,round4(span*.1),0] : [0,1,0],
    rotation: [0,0,0],
    scale: [1,1,1],
    visible: true
   };
 
   if (type !== 'group') {
-   s.parts[id].geometry = clone(GEO[type]);
-   s.parts[id].material = Object.keys(s.materials)[0];
+   s.parts[id].geometry = geometry;
+   s.parts[id].material = material;
   }
  });
 
@@ -5782,7 +6152,8 @@ function updateHeader() {
  $('stats').style.whiteSpace = 'pre-line';
  $('stats').hidden = easy();
  $('anchorBtn').hidden = easy();
- $('levelBtn').textContent = easy() ? '表示: かんたん' : '表示: くわしく';
+ $('levelBtn').textContent = easy() ? 'かんたん' : 'くわしく';
+ $('levelBtn').setAttribute('aria-label','表示の切り替え（現在: '+(easy() ? 'かんたん' : 'くわしく')+'）');
 }
 
 function modelPanel() {
@@ -5961,7 +6332,7 @@ function updateInspector() {
  const excluded = isAnchor ? [] : descendants(d.id);
 
  let html = `
-  <div class="card">
+  <div class="card" id="inspectorCard">
    <h3>${isAnchor ? '取付点' : '部品'}の設定</h3>
    ${easy() ? '' : `<small>識別名（ID）: ${esc(d.id)}</small>`}
    ${isAnchor ? '' : nudgePad()}
@@ -5998,6 +6369,8 @@ function updateInspector() {
     Object.entries(s.materials).map(([id,m]) => [id,m.name || id]),
     d.material
    );
+
+   html += colorPalette(d)+shapeEditor(d);
 
    if (!easy()) html += `
     <h3>形状 · ${esc(geoLabel(d.geometry.type))}</h3>
@@ -6038,25 +6411,37 @@ function updateInspector() {
 }
 
 function partsPanel() {
- return `
-  <h2>部品と取付点</h2>
+ const selected = !!(state.selectedPartId || state.selectedAnchorId);
+ const count = Object.keys(state.modelSpec.parts).length;
+ const addTypes = easy() ? [...EASY_GEO,'group'] : [...Object.keys(GEO),'group'];
 
-  <div class="card">
+ // 部品一覧は、選んでいるときは閉じ、何も選んでいないときは開く
+ const list = `
+  <details class="card" id="partList" ${selected ? '' : 'open'}>
+   <summary>部品一覧（${count}個）</summary>
+
    <div class="row fill">
     <select id="newGeometry" aria-label="追加する形">
-     ${options([...Object.keys(GEO),'group'].map(x => [x,geoLabel(x)]),'box')}
+     ${options(addTypes.map(x => [x,geoLabel(x)]),'box')}
     </select>
     ${button('addPart','＋ 部品を追加')}
    </div>
 
-   <p class="hint">◉／○ で表示・非表示を切り替えます。部品名をタップすると編集できます。</p>
+   <p class="hint">
+    部品を選んでいると、その部品にくっつけて追加します。
+    ◉／○ で表示・非表示を切り替えます。部品名をタップすると編集できます。
+   </p>
 
    ${hierarchyRows() || `
     <p class="hint">部品を追加するか、「モデル」タブからデータを読み込んでください。</p>
    `}
-  </div>
+  </details>
+ `;
 
-  ${updateInspector()}
+ return `
+  <h2>部品と取付点</h2>
+
+  ${selected ? updateInspector()+list : list+updateInspector()}
 
   <div class="card" ${easy() ? 'hidden' : ''}>
    <div class="row">
@@ -6158,6 +6543,19 @@ function aiPanel() {
  return `
   <h2>AIと相談して作る</h2>
 
+  ${navigator.share ? `
+   <div class="row">
+    <button
+     data-action="sharePrompt"
+     class="primary"
+     ${state.ai.lastPrompt ? '' : 'disabled'}
+    >直前の指示文をAIアプリに送る（共有）</button>
+   </div>
+   <p class="hint">${state.ai.lastPrompt
+    ? 'ChatGPTなどのアプリを選ぶと、コピーした指示文をそのまま送れます。'
+    : '指示文をコピーすると、ここからAIアプリへ送れるようになります。'}</p>
+  ` : ''}
+
   <div class="card">
    <h3>① ゼロからモデルを作る</h3>
    <label>どんなモデルを作りますか？
@@ -6198,6 +6596,17 @@ function aiPanel() {
     「↶（元に戻す）」で取り消せます。
     ※初回は「ペースト」の確認が表示されることがあります。
    </p>
+
+   <label>または、ここに貼り付けて読み込む
+    <textarea
+     data-ai="paste"
+     placeholder="{ ... }（AIの回答をそのまま貼り付け）"
+    >${esc(state.ai.paste || '')}</textarea>
+   </label>
+
+   ${button('pasteImport','貼り付けた内容を読み込む')}
+
+   <p id="pasteError" class="error" hidden></p>
   </div>
 
   ${motionDraftCard()}
@@ -6459,6 +6868,12 @@ function handleChange(e) {
   state.ai.batchSize = [2,3,4,6].includes(Number(el.value)) ? Number(el.value) : 3;
   saveQueue();
   renderPanel();
+ } else if (el.id === 'paintOnly') {
+  state.paintOnly = el.checked;
+ } else if (d.geotype) {
+  safe(() => changeGeoType(el.value));
+ } else if (d.dim) {
+  safe(() => setDimension(d.dim,d.dimi === '' ? null : Number(d.dimi),Number(el.value)));
  } else if (el.id === 'fileInput') {
   const file = el.files?.[0];
   el.value = '';
@@ -6495,6 +6910,10 @@ function handleInput(e) {
   const out = $('out_m_'+d.motion);
   if (out) out.value = e.target.value;
   if (d.motion === 'trySpeed') startTry();
+ } else if (d.dim) {
+  // 形の寸法は指を離したときに反映する（ここでは数値表示だけ更新）
+  const out = $('dim_'+d.dim+'_'+(d.dimi || 'v'));
+  if (out) out.value = e.target.value;
  } else if (d.live) {
   safe(() => handleEdit(e.target,true));
  }
@@ -6547,6 +6966,40 @@ const actions = {
  mirror: mirrorPart,
  fileSave: saveFile,
  fileOpen: () => $('fileInput').click(),
+
+ pasteImport: () => {
+  const text = String(state.ai.paste || '');
+  const box = $('pasteError');
+
+  try {
+   assert(text.trim(),'AIの回答を貼り付けてから押してください');
+
+   const message = applyAIText(text);
+
+   state.ai.paste = '';
+   renderPanel();
+   toast(message);
+  } catch (e) {
+   if (box) {
+    box.hidden = false;
+    box.textContent = e.message;
+   } else {
+    showError(e);
+   }
+  }
+ },
+
+ sharePrompt: () => {
+  const text = state.ai.lastPrompt;
+  assert(text,'先に指示文をコピーしてください');
+
+  navigator.share({text}).catch(e => {
+   // 共有メニューを閉じた（キャンセル）ときは何もしない
+   if (e && e.name !== 'AbortError') {
+    toast('共有できませんでした。コピー済みの指示文をAIアプリに貼り付けてください');
+   }
+  });
+ },
  sample: () => replaceGuard(() => replaceProject(sampleSpec())),
  import: loadFromClipboard,
 
@@ -6565,11 +7018,11 @@ const actions = {
  capsule: () => copyText(json(exportAssetCapsule())),
  integration: () => copyText(integrationPrompt()),
  renderer: () => copyText(rendererCode()),
- promptNew: () => copyText(
+ promptNew: () => copyPrompt(
   createAIPrompt('new'),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
- promptEdit: () => copyText(
+ promptEdit: () => copyPrompt(
   createAIPrompt('edit'),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
@@ -6580,7 +7033,7 @@ const actions = {
  },
  generateMotion,
  autoJoints,
- promptFix: () => copyText(
+ promptFix: () => copyPrompt(
   createMotionFixPrompt(),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
@@ -6597,7 +7050,7 @@ const actions = {
   scheduleQueueSave();
   renderPanel();
  },
- promptDetail: () => copyText(
+ promptDetail: () => copyPrompt(
   createMotionDetailPrompt(),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
@@ -6673,7 +7126,7 @@ const actions = {
     : '選んだ動きは、すでに注文リストにあります'
   );
  },
- reviewAsk: () => copyText(
+ reviewAsk: () => copyPrompt(
   createReviewFixPrompt(),
   '直してもらう指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
@@ -6694,7 +7147,7 @@ const actions = {
   renderPanel();
  },
  makeJoint: () => makeJoint($('jointAt').value),
- promptMotion: () => copyText(
+ promptMotion: () => copyPrompt(
   createMotionPrompt(),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
@@ -6753,13 +7206,21 @@ function handleClick(e) {
  safe(() => {
   if (b.dataset.nudge !== undefined) {
    nudgePart(b.dataset.nudge);
+  } else if (b.dataset.paint) {
+   paintPart(b.dataset.paint);
   } else if (b.dataset.nudgestep !== undefined) {
    state.nudgeStep = b.dataset.nudgestep;
    renderPanel();
   } else if (b.dataset.newkind !== undefined) {
    const kind = b.dataset.newkind;
+   const first = state.newFirst;
+
+   state.newFirst = false;
    closeDialog();
-   replaceGuard(() => startTemplate(kind));
+
+   // 初回起動のサンプルは作業中のデータではないので、置き換えの確認を出さない
+   if (first) startTemplate(kind);
+   else replaceGuard(() => startTemplate(kind));
   } else if (b.dataset.tab) {
    state.activeTab = b.dataset.tab;
    renderPanel();
@@ -6900,7 +7361,17 @@ function init() {
  window.addEventListener('pagehide',writeDraft);
 
  try {
-  if (!localStorage.getItem(GUIDE)) showGuide();
+  if (!localStorage.getItem(GUIDE)) {
+   // 保存したモデルも一時保存もない初回は、ひな形の選択から始める
+   const fresh = !state.projects.length && !localStorage.getItem(DRAFT);
+
+   if (fresh) {
+    localStorage.setItem(GUIDE,'1');
+    showNewDialog(true);
+   } else {
+    showGuide();
+   }
+  }
  } catch (_) {
   showGuide();
  }
