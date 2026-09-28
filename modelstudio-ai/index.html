@@ -110,6 +110,7 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 #walkKnob{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:#63d9f5cc;pointer-events:none}
 #walkActs{position:absolute;right:12px;bottom:44px;display:flex;flex-direction:column;gap:8px;pointer-events:auto}
 #walkActs button{background:#175d75e6;min-width:92px}
+.warnbox{border:1px solid #b98b52;background:#3a2e1c;color:#ffe2b8;border-radius:10px;padding:10px}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -613,7 +614,9 @@ const state = {
  partListOpen: null,
  // 試遊モードの入力
  walkStick: {x:0,y:0,id:null},
- walkKeys: {}
+ walkKeys: {},
+ // 準備チェックの計測結果（ModelSpec と役割が同じ間だけ使い回す）
+ readyCache: null
 };
 
 // ============================================================
@@ -2077,8 +2080,8 @@ function rebuildScene(candidate) {
  const r = state.runtime;
  if (!r) return;
 
- // モデルを作り直すときは試遊を終える
- if (state.motion.walk) stopWalk();
+ // モデルを作り直すときは試遊を終える（入力・UI・位置の後片付け）
+ endWalk();
 
  clearHighlight(r);
 
@@ -2300,8 +2303,8 @@ const ROLE_INFO = {
 function stopMotion() {
  const m = state.motion;
 
- // 停止・部品の編集などでは試遊も終える
- if (m.walk) stopWalk();
+ // 停止・部品の編集などでは試遊も終える（後片付けだけを行い、再帰しない）
+ if (m.walk) endWalk();
 
  m.animator?.stop();
  m.playing = null;
@@ -2330,6 +2333,9 @@ function resetAnimator() {
 
 function playMotion(id) {
  const m = state.motion;
+
+ // 試遊中に通常の再生へ切り替えたら、試遊の入力・UI・位置を元に戻す
+ if (m.walk) endWalk();
 
  if (m.playing === id) {
   stopMotion();
@@ -2418,7 +2424,9 @@ function guessRoles(kind) {
   for (const c of info) {
    if (used.has(c.p.id) || !want.re.test(c.text)) continue;
 
-   const side = c.side || (c.p.position[0] < 0 ? 'L' : 'R');
+   // 座標規約: +X がモデルから見て左。中央（x≈0）の部品は左右を決めない
+   const x = c.p.position[0];
+   const side = c.side || (x > 1e-4 ? 'L' : x < -1e-4 ? 'R' : null);
    const end = c.end || (c.p.position[2] >= 0 ? 'F' : 'B');
 
    if (want.side && side !== want.side) continue;
@@ -3143,71 +3151,144 @@ function defaultPicks(kind) {
   : ['idle','walk','run','jump','attack','hurt'];
 }
 
-// 脚・腕・翼の回転の中心が付け根から離れていないかを調べる（3D表示がなければ null）
-function jointIssues() {
- const r = state.runtime;
- if (!r?.root || !Object.keys(state.modelSpec.parts).length) return null;
+// 回転の中心を調べる部位（脚・腕・翼）
+const LIMB_ROLES = ['legL','legR','legFL','legFR','legBL','legBR','armL','armR','wingL','wingR'];
+
+// 種類ごとの主要部位（ないと、おまかせ生成やチェックが正しく働かない）。それ以外は任意部位
+const REQUIRED_ROLES = {
+ biped: ['legL','legR'],
+ quad: ['legFL','legFR','legBL','legBR'],
+ flyer: ['wingL','wingR'],
+ vehicle: []
+};
+
+// 準備チェック（参考情報）。ModelSpec の基本姿勢から作った一時モデルで計測し、画面のモデルには触れない。
+// 結果は、ModelSpec（編集のたびに新しい参照になる）と種類・役割が同じ間だけ使い回す。3D表示がなければ null
+function readiness() {
+ const e = state.engine;
+ const s = state.modelSpec;
+ if (!e || !window.THREE || !Object.keys(s.parts).length) return null;
 
  ensureMotionRoles();
 
  const m = state.motion;
- const out = [];
+ const key = m.kind+'|'+JSON.stringify(m.roles);
+ const c = state.readyCache;
 
- r.root.updateMatrixWorld(true);
+ if (c && c.spec === s && c.key === key) return c.result;
 
- for (const role of ['legL','legR','legFL','legFR','legBL','legBR','armL','armR','wingL','wingR']) {
-  const id = m.roles[role];
-  const o = id && r.root.userData.parts[id];
-  if (!o) continue;
+ const result = measureReadiness(s,m.kind,m.roles);
+ state.readyCache = {spec:s,key,result};
+ return result;
+}
 
-  const box = new THREE.Box3().setFromObject(o);
-  if (box.isEmpty()) continue;
+function measureReadiness(s,kind,roles) {
+ const e = state.engine;
+ const kindRoles = MOTION_KINDS[kind].roles;
+ const required = REQUIRED_ROLES[kind] || [];
+ const wheelRoles = ['wheelFL','wheelFR','wheelBL','wheelBR'];
+ const assigned = role => {
+  const id = roles[role];
+  return !!id && (id === '*' || own(s.parts,id));
+ };
 
-  const origin = o.getWorldPosition(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const wing = role.startsWith('wing');
-  const size = wing ? box.max.x-box.min.x : box.max.y-box.min.y;
+ const missing = required.filter(role => !assigned(role));
 
-  // 付け根: 脚・腕は上端の中心、翼は体に近い側の端
-  const pivot = wing
-   ? new THREE.Vector3(
-     Math.abs(box.min.x) < Math.abs(box.max.x) ? box.min.x : box.max.x,
-     center.y,
-     center.z
-    )
-   : new THREE.Vector3(center.x,box.max.y,center.z);
+ // 乗り物は、車輪が2つ以上あれば動かせる
+ if (kind === 'vehicle' && wheelRoles.filter(assigned).length < 2) missing.push('wheels');
 
-  if (size > 0 && origin.distanceTo(pivot) > size*.25) out.push({role,id});
+ const optionalMissing = kindRoles.filter(role =>
+  !assigned(role)
+  && !required.includes(role)
+  && !(kind === 'vehicle' && wheelRoles.includes(role))
+ );
+
+ const pivots = [];
+ const root = e.buildModel(s);
+
+ try {
+  root.updateMatrixWorld(true);
+
+  for (const role of LIMB_ROLES) {
+   if (!kindRoles.includes(role)) continue;
+
+   const id = roles[role];
+   const o = id && id !== '*' && root.userData.parts[id];
+   if (!o) continue;
+
+   const box = new THREE.Box3().setFromObject(o);
+   if (box.isEmpty()) continue;
+
+   const origin = o.getWorldPosition(new THREE.Vector3());
+   const center = box.getCenter(new THREE.Vector3());
+   const wing = role.startsWith('wing');
+   const size = wing ? box.max.x-box.min.x : box.max.y-box.min.y;
+
+   // 付け根: 脚・腕は上端の中心、翼は体に近い側の端
+   const pivot = wing
+    ? new THREE.Vector3(
+      Math.abs(box.min.x) < Math.abs(box.max.x) ? box.min.x : box.max.x,
+      center.y,
+      center.z
+     )
+    : new THREE.Vector3(center.x,box.max.y,center.z);
+
+   if (size > 0 && origin.distanceTo(pivot) > size*.25) pivots.push({role,id});
+  }
+ } finally {
+  e.dispose(root);
  }
 
- return out;
+ return {missing,optionalMissing,pivots};
+}
+
+// 回転の中心が付け根から離れている可能性のある部位（既存の呼び出し元との互換用。3D表示がなければ null）
+function jointIssues() {
+ const r = readiness();
+ return r ? r.pivots : null;
 }
 
 function motionReadinessCard() {
- const issues = jointIssues();
- if (issues === null) return '';
+ const r = readiness();
+ if (r === null) return '';
 
- if (!issues.length) {
-  return `
-   <div class="card">
-    <h3>準備チェック</h3>
-    <p class="success">✓ 回転の中心に問題は見つかりませんでした。</p>
-   </div>
-  `;
- }
-
- const names = issues.map(i => ROLE_INFO[i.role].label+'（'+i.id+'）').join('、');
- const limbs = issues.some(i => !i.role.startsWith('wing'));
+ const label = role => role === 'wheels' ? '車輪（2つ以上）' : ROLE_INFO[role].label;
+ const names = r.pivots.map(i => ROLE_INFO[i.role].label+'（'+i.id+'）').join('、');
+ const limbs = r.pivots.some(i => !i.role.startsWith('wing'));
+ const wings = r.pivots.some(i => i.role.startsWith('wing'));
+ const good = !r.missing.length && !r.pivots.length;
 
  return `
   <div class="card">
-   <h3>準備チェック</h3>
-   <p class="error">関節がないため先端を中心に回ります: ${esc(names)}</p>
-   ${limbs ? `<div class="row">${button('autoJoints','脚・腕の付け根に関節を作る','primary')}</div>` : ''}
-   <p class="hint">
-    翼は「部品」タブで翼を選び、付け根側に関節を作ってください。
-    役割の部品が違うときは、下の②で選び直せます。
-   </p>
+   <h3>準備チェック（参考）</h3>
+
+   ${good ? `
+    <p class="success">✓ 主要な部位がそろっていて、回転の中心にも目立つずれは見つかりませんでした（基本姿勢で計測）。</p>
+   ` : ''}
+
+   ${r.missing.length ? `
+    <p class="warnbox">
+     主要な部位の役割が決まっていません: ${esc(r.missing.map(label).join('、'))}<br>
+     ${easy()
+      ? '部品の名前から自動で見つけられませんでした。くわしく表示にすると、下の②で部品を選べます。'
+      : '下の②で、それぞれの部位に当たる部品を選んでください。'}
+    </p>
+   ` : ''}
+
+   ${r.pivots.length ? `
+    <p class="warnbox">
+     回転の中心が付け根から離れている可能性があります: ${esc(names)}<br>
+     このままだと、付け根ではなく真ん中や先端を中心に回ることがあります。
+    </p>
+    ${limbs ? `<div class="row">${button('autoJoints','脚・腕の付け根に関節を作る','primary')}</div>` : ''}
+    ${wings ? '<p class="hint">翼は「部品」タブで翼を選び、付け根側に関節を作ってください。</p>' : ''}
+   ` : ''}
+
+   ${r.optionalMissing.length ? `
+    <p class="hint">見つからなかった部位（なくても使えます）: ${esc(r.optionalMissing.map(label).join('、'))}</p>
+   ` : ''}
+
+   <p class="hint">このチェックは参考です。動きの作成・読み込み・書き出しはいつでもできます。</p>
   </div>
  `;
 }
@@ -3271,14 +3352,15 @@ function stepBar() {
  const s = state.modelSpec;
  const parts = Object.keys(s.parts).length;
  const anims = Object.keys(s.animations || {}).length;
- const issues = parts ? jointIssues() : null;
- const warn = !!issues?.length;
+ // 準備チェックは参考情報。要確認の表示はするが、動きの完了や書き出しは妨げない
+ const ready = parts ? readiness() : null;
+ const warn = !!(ready && (ready.missing.length || ready.pivots.length));
  const shapeDone = parts > 0;
- const motionDone = anims > 0 && !warn;
+ const motionDone = anims > 0;
  const exported = state.motion.exported;
 
  const next = !shapeDone ? '「AI相談」タブで作りたいモデルを書いて、形を作りましょう'
-  : warn ? '「動き」タブの準備チェックで、脚・腕に関節を作りましょう'
+  : !anims && warn ? '「動き」タブで準備チェック（参考）を確かめてから、動きを付けましょう'
   : !anims ? '「動き」タブで動きを付けましょう（おまかせ・AIに頼む）'
   : !exported ? '「書き出し」タブの一括コピーで、ゲームに組み込めます'
   : 'コピーした内容をAppStudioのAI指示に貼り付けてください。動きはいつでも追加できます';
@@ -4150,7 +4232,7 @@ function reviewMotions(ids) {
 
    const moving = Object.keys(a.tracks || {}).filter(pid => problemParts.includes(pid));
    if (moving.length) {
-    list.push('関節がない部品を動かしています（先端を中心に回ります）: '+moving.join('、'));
+    list.push('回転の中心が付け根から離れている可能性がある部品を動かしています: '+moving.join('、'));
    }
 
    if (anim) {
@@ -4184,7 +4266,8 @@ function reviewMotions(ids) {
 }
 
 // AIの動きを読み込んだ後の確認を始める
-function startReview(ids,plan,failed=[]) {
+// base は AIの回答を適用する直前の状態（{spec, projectId, dirty}）。「取り消す」の復元基準になる
+function startReview(ids,plan,failed=[],base=null) {
  const m = state.motion;
  const plans = {};
 
@@ -4200,7 +4283,10 @@ function startReview(ids,plan,failed=[]) {
   plan: typeof plan === 'string' ? plan.slice(0,2000) : '',
   plans,
   failed: failed.map(f => ({id:f.id,reason:String(f.reason).slice(0,500)})),
-  report: reviewMotions(ids)
+  report: reviewMotions(ids),
+  base,
+  // 確認処理が作った最新のモデル（これと違えば、確認中に別の編集があった）
+  owned: state.modelSpec
  };
 
  state.activeTab = 'motion';
@@ -4300,7 +4386,7 @@ function autoFixMotions() {
   }
  });
 
- m.review = {...rv,report:reviewMotions(ids)};
+ m.review = {...rv,report:reviewMotions(ids),owned:state.modelSpec};
  renderPanel();
  toast('つなぎ目を直しました（↶で取り消せます）');
 }
@@ -4352,8 +4438,9 @@ function snapshot() {
  return clone(state.modelSpec);
 }
 
+// 履歴は「モデル」と「保存先（projectId）」を組で持つ（元に戻したときに保存先も対応させる）
 function remember(before) {
- state.undo.push(before);
+ state.undo.push({spec:before,projectId:state.projectId});
  if (state.undo.length > LIMIT.history) state.undo.shift();
  state.redo = [];
 }
@@ -4470,15 +4557,19 @@ function undoRedo(redo=false) {
 
  if (!from.length) return;
 
- const next = clone(from[from.length-1]);
+ const entry = from[from.length-1];
+ const next = clone(entry.spec);
  validateModelSpec(next);
 
  const candidate = state.runtime ? state.engine.buildModel(next) : null;
 
- to.push(snapshot());
+ to.push({spec:snapshot(),projectId:state.projectId});
  from.pop();
 
  state.modelSpec = next;
+ state.projectId = entry.projectId;
+ // 履歴を移動したら確認バーは閉じる（取り消しの基準と食い違わないようにする）
+ state.motion.review = null;
  state.selectedPartId = null;
  state.selectedAnchorId = null;
 
@@ -4911,17 +5002,8 @@ function openFile(file) {
  file.text()
   .then(text => {
    replaceGuard(() => safe(() => {
-    const data = parseAIJSON(text);
-    const message = applyAIText(text);
-
-    if (obj(data) && data.format === 'MODEL_SPEC_V1') {
-     // 開いたモデルは新しいプロジェクトとして扱う（ライブラリの既存項目を上書きしない）
-     state.projectId = null;
-     state.dirty = true;
-     writeDraft();
-    }
-
-    toast(message);
+    // 完全なモデルを新しい未保存プロジェクトとして扱う処理は applyAIText に統一
+    toast(applyAIText(text));
    }));
   })
   .catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）を選んでください')));
@@ -5486,9 +5568,14 @@ function applyModelPatch(source,patch) {
 // ============================================================
 
 function applyAIText(text) {
+ finishLive();
+
  const data = parseAIJSON(text);
 
  assert(obj(data),'AIの回答がモデルデータの形になっていません');
+
+ // 確認バーの「取り消す」で戻す基準（適用する直前のモデルと保存先）
+ const base = {spec:snapshot(),projectId:state.projectId,dirty:state.dirty};
 
  if (data.format === 'MODELSTUDIO_PATCH_V1' || Array.isArray(data.operations)) {
   const patch = {...data,format:'MODELSTUDIO_PATCH_V1'};
@@ -5524,7 +5611,7 @@ function applyAIText(text) {
 
   if (ids.length) {
    markQueueLoaded(ids);
-   startReview(ids,data.plan,failed);
+   startReview(ids,data.plan,failed,base);
 
    return failed.length
     ? ids.length+'件の動きを読み込みました（'+failed.length+'件は読み込めませんでした。確認バーを見てください）'
@@ -5541,16 +5628,23 @@ function applyAIText(text) {
 
  const s = normalizeSpec(data);
  validateModelSpec(s);
+
+ // 検証や描画モデルの構築に失敗したら、ここで止まり、現在のモデルと保存先は変わらない
  commitSpec(s,{fit:true});
+
+ // 完全なモデルは新しい未保存プロジェクトとして扱う（元の保存済みモデルは上書きしない）
+ state.projectId = null;
+ state.dirty = true;
+ writeDraft();
 
  const ids = Object.keys(s.animations || {});
 
  if (ids.length) {
-  startReview(ids,data.plan);
-  return '新しいモデルを読み込みました。動きは確認バーで品質を確かめてください';
+  startReview(ids,data.plan,[],base);
+  return '新しいモデルを読み込みました（未保存の新しいプロジェクトです）。動きは確認バーで品質を確かめてください';
  }
 
- return '新しいモデルを読み込みました（↶で取り消せます）';
+ return '新しいモデルを読み込みました（未保存の新しいプロジェクトです。↶で取り消せます）';
 }
 
 async function loadFromClipboard() {
@@ -5761,13 +5855,13 @@ function startWalk() {
  invalidate();
 }
 
-function stopWalk() {
+// 試遊の後片付けだけを行う（入力・UI・表示用 root の位置と向き）。再生の停止は呼び出し側が行う
+function endWalk() {
  const m = state.motion;
  if (!m.walk) return;
 
  m.walk = false;
- state.walkStick = {x:0,y:0,id:null};
- state.walkKeys = {};
+ resetWalkInput();
  $('walkUI')?.remove();
 
  const r = state.runtime;
@@ -5779,8 +5873,42 @@ function stopWalk() {
  }
 
  m.tester?.reset();
- stopMotion();
  fitCamera();
+}
+
+// 試遊を終えて元の姿勢で止める（stopMotion の中で endWalk が呼ばれる）
+function stopWalk() {
+ if (state.motion.walk) stopMotion();
+}
+
+// キーとスティックの入力を解除する（フォーカス喪失・非表示・終了時）
+function resetWalkInput() {
+ state.walkKeys = {};
+ state.walkStick = {x:0,y:0,id:null};
+
+ const knob = $('walkKnob');
+ if (knob) knob.style.transform = '';
+}
+
+// 確認バーの「取り消す」: AIの回答を適用する直前のモデルと保存先へ戻す。
+// 通常の履歴にも積むので、戻した後に ↶ で「戻す前」の状態へ戻れる
+function restoreReviewBase() {
+ const rv = state.motion.review;
+ if (!rv?.base) return false;
+
+ const b = rv.base;
+ const next = clone(b.spec);
+
+ stopMotion();
+ commitSpec(next,{fit: next.meta.id !== state.modelSpec.meta.id});
+
+ state.projectId = b.projectId;
+ state.dirty = b.dirty;
+ state.motion.review = null;
+
+ writeDraft();
+ renderPanel();
+ return true;
 }
 
 function buildWalkUI() {
@@ -5798,6 +5926,7 @@ function buildWalkUI() {
    ${ids.map(id => `
     <button data-try="${id}">${esc(STANDARD_MOTIONS.find(x => x[0] === id)?.[1] || id)}</button>
    `).join('')}
+   ${own(clips,'die') ? button('tryReset','起き上がる') : ''}
    <button data-action="walkStop">終了</button>
   </div>
  `;
@@ -5852,6 +5981,12 @@ function updateWalk(dt) {
  const r = state.runtime;
  const m = state.motion;
  const k = state.walkKeys;
+
+ // 倒れている間は移動しない（起き上がると再び操作できる）
+ if (m.tester.dead) {
+  m.tester.setSpeed(0);
+  return;
+ }
 
  let x = state.walkStick.x;
  let y = state.walkStick.y;
@@ -5966,7 +6101,9 @@ function demoHtmlText() {
   'const keys = {};',
   'addEventListener("keydown",e => { keys[e.key.toLowerCase()] = true; });',
   'addEventListener("keyup",e => { keys[e.key.toLowerCase()] = false; });',
-  'addEventListener("blur",() => { for (const k in keys) keys[k] = false; });',
+  'function clearInput(){ for (const k in keys) keys[k] = false; endStick(); }',
+  'addEventListener("blur",clearInput);',
+  'document.addEventListener("visibilitychange",() => { if (document.hidden) clearInput(); });',
   'const stick = document.getElementById("stick");',
   'const knob = document.getElementById("knob");',
   'let sx = 0, sy = 0, sid = null;',
@@ -5989,8 +6126,9 @@ function demoHtmlText() {
   ' const l = Math.hypot(x,z);',
   ' if (l > 1) { x /= l; z /= l; }',
   ' const mag = Math.min(1,Math.hypot(x,z));',
-  ' hero.setSpeed(mag*5);',
-  ' if (mag > .05) {',
+  ' const down = hero.current === "die";',
+  ' hero.setSpeed(down ? 0 : mag*5);',
+  ' if (!down && mag > .05) {',
   '  const o = hero.object, lim = span*10;',
   '  o.position.x = Math.max(-lim,Math.min(lim,o.position.x+x*5*dt));',
   '  o.position.z = Math.max(-lim,Math.min(lim,o.position.z+z*5*dt));',
@@ -6232,6 +6370,8 @@ function replaceProject(spec,id=null,dirty=true) {
  state.undo = [];
  state.redo = [];
  state.partListOpen = null;
+ // 別のモデルに置き換えたら、前のモデルの確認バーは残さない
+ state.motion.review = null;
  state.dirty = dirty;
 
  writeDraft();
@@ -7561,10 +7701,22 @@ const actions = {
   toast('動きを採用しました');
  },
  reviewUndo: () => {
-  undoRedo();
-  state.motion.review = null;
-  renderPanel();
-  toast('読み込む前の状態に戻しました');
+  const rv = state.motion.review;
+  assert(rv?.base,'読み込む前の状態が見つかりません。↶（元に戻す）を使ってください');
+
+  const run = () => {
+   if (restoreReviewBase()) toast('読み込む前の状態に戻しました');
+  };
+
+  // 確認中に別の編集をしていたら、その編集も戻ることを確かめてから戻す
+  if (rv.owned !== state.modelSpec) {
+   askConfirm(
+    '確認中に別の編集をしています。読み込む前の状態に戻すと、その編集も元に戻ります（戻した後に ↶ でやり直せます）。戻しますか？',
+    run
+   );
+  } else {
+   run();
+  }
  },
  reviewFix: autoFixMotions,
  queueAdd: () => {
@@ -7860,9 +8012,7 @@ function init() {
   state.walkKeys[String(e.key).toLowerCase()] = false;
  });
 
- window.addEventListener('blur',() => {
-  state.walkKeys = {};
- });
+ window.addEventListener('blur',resetWalkInput);
 
  // 折りたたみの開閉をユーザーが操作したときだけ覚える（summary のクリックで判定）
  document.addEventListener('click',e => {
@@ -7882,6 +8032,7 @@ function init() {
   if (document.hidden) {
    finishLive();
    writeDraft();
+   resetWalkInput();
   } else {
    invalidate();
   }
