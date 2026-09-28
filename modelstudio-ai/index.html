@@ -105,6 +105,11 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 .swatches{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin:6px 0}
 .swatch{min-height:40px;padding:0;border-radius:10px;border:2px solid var(--line)}
 .swatch.on{border-color:#fff;box-shadow:0 0 0 2px var(--cyan)}
+#walkUI{position:absolute;inset:0;pointer-events:none;z-index:3}
+#walkStick{position:absolute;left:16px;bottom:44px;width:120px;height:120px;border-radius:50%;background:#ffffff1f;border:2px solid #ffffff55;pointer-events:auto;touch-action:none}
+#walkKnob{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:#63d9f5cc;pointer-events:none}
+#walkActs{position:absolute;right:12px;bottom:44px;display:flex;flex-direction:column;gap:8px;pointer-events:auto}
+#walkActs button{background:#175d75e6;min-width:92px}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -114,6 +119,10 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 }
 @media(max-width:500px){
  input,select,textarea{font-size:16px}
+ .steps{gap:4px}
+ .steps button{padding:5px 7px;min-height:40px}
+ .steps small{font-size:11px}
+ .stephint{font-size:11px;margin:2px 0 6px}
  .grid3 input{padding:8px 5px}
  header{padding:8px 12px}
  #viewTools{gap:4px}
@@ -173,6 +182,10 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+// 1つ目のCDNから読み込めなかったときだけ、予備のCDNから読み込む
+if (!window.THREE) document.write('<script src="https://unpkg.com/three@0.128.0/build/three.min.js"><\/script>');
+</script>
 <script>
 'use strict';
 
@@ -522,6 +535,8 @@ const state = {
   // 貼り付け欄の内容と、直前にコピーした指示文（共有ボタン用）
   paste: '',
   lastPrompt: '',
+  // かんたん表示でのAI相談④（注文リスト）の開閉
+  queueOpen: false,
   // 動きの注文リスト。motionDraft は編集中の項目を指す
   motionQueue: [{
    id: 'attack',
@@ -576,7 +591,10 @@ const state = {
   trying: false,
   tester: null,
   exported: false,
-  review: null
+  review: null,
+  // 試遊モード（歩かせてみる）
+  walk: false,
+  walkLimit: 20
  },
  thumb: null,
  thumbTried: new Set(),
@@ -590,7 +608,12 @@ const state = {
  // 色見本で「この部品だけ変える」
  paintOnly: true,
  // 初回起動のひな形選択（置き換えの確認を出さない）
- newFirst: false
+ newFirst: false,
+ // 部品一覧の開閉（null のときは自動）
+ partListOpen: null,
+ // 試遊モードの入力
+ walkStick: {x:0,y:0,id:null},
+ walkKeys: {}
 };
 
 // ============================================================
@@ -1783,6 +1806,7 @@ function renderLoop() {
 
  if (m.animator && !document.hidden && !r.contextLost) {
   if (m.trying && m.tester) {
+   if (m.walk) updateWalk(dt);
    m.tester.update(dt);
    r.needsRender = true;
   } else if (m.playing) {
@@ -2053,6 +2077,9 @@ function rebuildScene(candidate) {
  const r = state.runtime;
  if (!r) return;
 
+ // モデルを作り直すときは試遊を終える
+ if (state.motion.walk) stopWalk();
+
  clearHighlight(r);
 
  const old = r.root;
@@ -2159,6 +2186,9 @@ function selectAnchor(id) {
 }
 
 function pickObject(e) {
+ // 試遊中は3D画面のタップで部品を選ばない
+ if (state.motion.walk) return;
+
  const r = state.runtime;
  const rect = r.renderer.domElement.getBoundingClientRect();
  const ray = new THREE.Raycaster();
@@ -2269,6 +2299,10 @@ const ROLE_INFO = {
 
 function stopMotion() {
  const m = state.motion;
+
+ // 停止・部品の編集などでは試遊も終える
+ if (m.walk) stopWalk();
+
  m.animator?.stop();
  m.playing = null;
  m.trying = false;
@@ -3063,6 +3097,20 @@ function motionPanel() {
     ${button('tryReset','起き上がる（最初から）')}
    </div>
 
+   <div class="row">
+    ${button(
+     'walkToggle',
+     m.walk
+      ? '■ 試遊を終わる'
+      : m.kind === 'vehicle' ? '走らせてみる（画面で操作）' : '歩かせてみる（画面で操作）',
+     'primary'
+    )}
+   </div>
+   <p class="hint">
+    3D画面の左下のスティック（PCは W/A/S/D・矢印キー）で動かせます。
+    速さに合わせて、待機・歩く・走るが自動で切り替わります。
+   </p>
+
    <p class="hint">
     スライダーを動かすと試しが始まり、速さに合わせて動きが自動で切り替わります。
     ゲームでは hero.setSpeed(速さ) と hero.action("attack") で同じように動きます。
@@ -3247,7 +3295,7 @@ function stepBar() {
     <b>${exported ? '✓' : '③'} ゲームへ</b><small>一括コピー</small>
    </button>
   </div>
-  <p class="hint">次は: ${esc(next)}</p>
+  ${shapeDone && motionDone && exported ? '' : `<p class="hint stephint">次は: ${esc(next)}</p>`}
  `;
 }
 
@@ -5685,6 +5733,402 @@ function deleteProject(id) {
  toast('ライブラリから削除しました');
 }
 
+// ------------------------------------------------------------
+// 試遊モード「歩かせてみる」
+// 表示用の root だけを動かし、ModelSpec は変更しない
+// ------------------------------------------------------------
+
+const WALK_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'];
+
+function startWalk() {
+ const m = state.motion;
+ const r = state.runtime;
+
+ assert(r?.root && m.tester,'3D表示が使えないため、試遊できません');
+
+ stopMotion();
+
+ m.walk = true;
+ m.trying = true;
+ m.walkLimit = modelSpan()*10;
+ m.tester.reset();
+ m.tester.setSpeed(0);
+
+ state.walkStick = {x:0,y:0,id:null};
+ state.walkKeys = {};
+
+ buildWalkUI();
+ invalidate();
+}
+
+function stopWalk() {
+ const m = state.motion;
+ if (!m.walk) return;
+
+ m.walk = false;
+ state.walkStick = {x:0,y:0,id:null};
+ state.walkKeys = {};
+ $('walkUI')?.remove();
+
+ const r = state.runtime;
+
+ if (r?.root) {
+  r.root.position.set(0,0,0);
+  r.root.rotation.set(0,0,0);
+  r.root.updateMatrixWorld(true);
+ }
+
+ m.tester?.reset();
+ stopMotion();
+ fitCamera();
+}
+
+function buildWalkUI() {
+ $('walkUI')?.remove();
+
+ const m = state.motion;
+ const clips = state.modelSpec.animations || {};
+ const ids = (m.kind === 'vehicle' ? ['bump'] : ['jump','attack']).filter(id => own(clips,id));
+
+ const ui = document.createElement('div');
+ ui.id = 'walkUI';
+ ui.innerHTML = `
+  <div id="walkStick" aria-label="移動スティック"><div id="walkKnob"></div></div>
+  <div id="walkActs">
+   ${ids.map(id => `
+    <button data-try="${id}">${esc(STANDARD_MOTIONS.find(x => x[0] === id)?.[1] || id)}</button>
+   `).join('')}
+   <button data-action="walkStop">終了</button>
+  </div>
+ `;
+ $('viewport').appendChild(ui);
+
+ const stick = $('walkStick');
+
+ const set = e => {
+  const rect = stick.getBoundingClientRect();
+  let x = (e.clientX-rect.left-rect.width/2)/(rect.width/2);
+  let y = (e.clientY-rect.top-rect.height/2)/(rect.height/2);
+  const len = Math.hypot(x,y);
+
+  if (len > 1) {
+   x /= len;
+   y /= len;
+  }
+
+  state.walkStick.x = x;
+  state.walkStick.y = y;
+  $('walkKnob').style.transform = 'translate('+x*40+'px,'+y*40+'px)';
+ };
+
+ const end = e => {
+  e.stopPropagation();
+  if (e.pointerId !== state.walkStick.id) return;
+
+  state.walkStick = {x:0,y:0,id:null};
+  $('walkKnob').style.transform = '';
+ };
+
+ stick.addEventListener('pointerdown',e => {
+  e.stopPropagation();
+  e.preventDefault();
+  state.walkStick.id = e.pointerId;
+  stick.setPointerCapture(e.pointerId);
+  set(e);
+ });
+
+ stick.addEventListener('pointermove',e => {
+  e.stopPropagation();
+  if (e.pointerId === state.walkStick.id) set(e);
+ });
+
+ stick.addEventListener('pointerup',end);
+ stick.addEventListener('pointercancel',end);
+ stick.addEventListener('lostpointercapture',end);
+}
+
+// 毎フレーム: スティック・キーの入力から速さと向きを決め、root とカメラの注視点を動かす
+function updateWalk(dt) {
+ const r = state.runtime;
+ const m = state.motion;
+ const k = state.walkKeys;
+
+ let x = state.walkStick.x;
+ let y = state.walkStick.y;
+
+ if (k.a || k.arrowleft) x -= 1;
+ if (k.d || k.arrowright) x += 1;
+ if (k.w || k.arrowup) y -= 1;
+ if (k.s || k.arrowdown) y += 1;
+
+ const len = Math.hypot(x,y);
+
+ if (len > 1) {
+  x /= len;
+  y /= len;
+ }
+
+ const mag = Math.min(1,Math.hypot(x,y));
+ m.tester.setSpeed(mag*5);
+
+ if (mag < .05 || !r?.root) return;
+
+ // カメラから見た「右」と「奥」を基準に、スティックの向きを地面の向きに変換する
+ const th = r.theta;
+ const fx = -Math.sin(th);
+ const fz = -Math.cos(th);
+ const rx = Math.cos(th);
+ const rz = -Math.sin(th);
+ const dx = rx*x-fx*y;
+ const dz = rz*x-fz*y;
+
+ const o = r.root;
+ const lim = m.walkLimit;
+ const oldX = o.position.x;
+ const oldZ = o.position.z;
+
+ o.position.x = Math.max(-lim,Math.min(lim,oldX+dx*5*dt));
+ o.position.z = Math.max(-lim,Math.min(lim,oldZ+dz*5*dt));
+ o.rotation.y = Math.atan2(dx,dz);
+
+ r.target.x += o.position.x-oldX;
+ r.target.z += o.position.z-oldZ;
+}
+
+// ------------------------------------------------------------
+// アプリの外で使う（確認用HTML・GLB）と保存領域
+// ------------------------------------------------------------
+
+function fileBase() {
+ return String(state.modelSpec.meta.name || 'model')
+  .replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_')
+  .trim()
+  .slice(0,80) || 'model';
+}
+
+function downloadBlob(data,name,type) {
+ const blob = data instanceof Blob ? data : new Blob([data],{type});
+ const url = URL.createObjectURL(blob);
+ const a = document.createElement('a');
+
+ a.href = url;
+ a.download = name;
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+
+ setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+
+// ファイルを開くだけで動く確認用HTML
+function demoHtmlText() {
+ const s = state.modelSpec;
+ const clips = s.animations || {};
+
+ const code = createModelRenderer.toString()
+  + '\nconst MODEL_DATA = '+JSON.stringify(s).replace(/</g,'\\u003c')+';\n';
+
+ const buttons = Object.entries(clips)
+  .filter(([,a]) => a.loop === false)
+  .map(([id,a]) => '<button data-act="'+esc(id)+'">'+esc(a.name || id)+'</button>')
+  .join('')
+  + (own(clips,'die') ? '<button data-act="reset">起き上がる</button>' : '');
+
+ const demo = [
+  'const ModelRenderer = createModelRenderer(THREE);',
+  'const renderer = new THREE.WebGLRenderer({antialias:true});',
+  'renderer.setPixelRatio(Math.min(devicePixelRatio,2));',
+  'renderer.outputEncoding = THREE.sRGBEncoding;',
+  'renderer.shadowMap.enabled = true;',
+  'document.body.appendChild(renderer.domElement);',
+  'const scene = new THREE.Scene();',
+  'scene.background = new THREE.Color("#1c2633");',
+  'scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,.9));',
+  'const sun = new THREE.DirectionalLight(0xfff2dc,1.4);',
+  'sun.position.set(4,8,5);',
+  'scene.add(sun);',
+  'const hero = ModelRenderer.createCharacter(MODEL_DATA);',
+  'scene.add(hero.object);',
+  'const box = new THREE.Box3().setFromObject(hero.object);',
+  'const size = box.getSize(new THREE.Vector3());',
+  'const span = Math.max(size.x,size.y,size.z,.5);',
+  'const ground = new THREE.Mesh(new THREE.PlaneGeometry(span*40,span*40),new THREE.MeshStandardMaterial({color:0x2b3a4a,roughness:.95}));',
+  'ground.rotation.x = -Math.PI/2;',
+  'ground.position.y = box.min.y;',
+  'scene.add(ground);',
+  'const grid = new THREE.GridHelper(span*40,40,0x4d6a80,0x344656);',
+  'grid.position.y = box.min.y+.002;',
+  'scene.add(grid);',
+  'const camera = new THREE.PerspectiveCamera(50,1,.01,span*400);',
+  'function resize(){ renderer.setSize(innerWidth,innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); }',
+  'addEventListener("resize",resize);',
+  'resize();',
+  'const keys = {};',
+  'addEventListener("keydown",e => { keys[e.key.toLowerCase()] = true; });',
+  'addEventListener("keyup",e => { keys[e.key.toLowerCase()] = false; });',
+  'addEventListener("blur",() => { for (const k in keys) keys[k] = false; });',
+  'const stick = document.getElementById("stick");',
+  'const knob = document.getElementById("knob");',
+  'let sx = 0, sy = 0, sid = null;',
+  'function setStick(e){ const r = stick.getBoundingClientRect(); let x = (e.clientX-r.left-r.width/2)/(r.width/2); let y = (e.clientY-r.top-r.height/2)/(r.height/2); const l = Math.hypot(x,y); if (l > 1) { x /= l; y /= l; } sx = x; sy = y; knob.style.transform = "translate(" + x*40 + "px," + y*40 + "px)"; }',
+  'function endStick(){ sid = null; sx = 0; sy = 0; knob.style.transform = ""; }',
+  'stick.addEventListener("pointerdown",e => { sid = e.pointerId; stick.setPointerCapture(sid); setStick(e); });',
+  'stick.addEventListener("pointermove",e => { if (e.pointerId === sid) setStick(e); });',
+  'stick.addEventListener("pointerup",endStick);',
+  'stick.addEventListener("pointercancel",endStick);',
+  'document.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click",() => { if (b.dataset.act === "reset") hero.reset(); else hero.action(b.dataset.act); }));',
+  'const clock = new THREE.Clock();',
+  'function loop(){',
+  ' requestAnimationFrame(loop);',
+  ' const dt = Math.min(.1,clock.getDelta());',
+  ' let x = sx, z = sy;',
+  ' if (keys.a || keys.arrowleft) x -= 1;',
+  ' if (keys.d || keys.arrowright) x += 1;',
+  ' if (keys.w || keys.arrowup) z -= 1;',
+  ' if (keys.s || keys.arrowdown) z += 1;',
+  ' const l = Math.hypot(x,z);',
+  ' if (l > 1) { x /= l; z /= l; }',
+  ' const mag = Math.min(1,Math.hypot(x,z));',
+  ' hero.setSpeed(mag*5);',
+  ' if (mag > .05) {',
+  '  const o = hero.object, lim = span*10;',
+  '  o.position.x = Math.max(-lim,Math.min(lim,o.position.x+x*5*dt));',
+  '  o.position.z = Math.max(-lim,Math.min(lim,o.position.z+z*5*dt));',
+  '  o.rotation.y = Math.atan2(x,z);',
+  ' }',
+  ' hero.update(dt);',
+  ' const t = hero.object.position;',
+  ' camera.position.set(t.x,t.y+size.y*.5+span*1.2,t.z+span*3);',
+  ' camera.lookAt(t.x,t.y+size.y*.5,t.z);',
+  ' renderer.render(scene,camera);',
+  '}',
+  'loop();'
+ ].join('\n');
+
+ return [
+  '<!DOCTYPE html>',
+  '<html lang="ja">',
+  '<head>',
+  '<meta charset="UTF-8">',
+  '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">',
+  '<title>'+esc(s.meta.name)+' - 動作確認</title>',
+  '<style>',
+  'html,body{margin:0;height:100%;overflow:hidden;background:#1c2633;font:14px system-ui,sans-serif;color:#edf4fc}',
+  'canvas{display:block;touch-action:none}',
+  '#info{position:fixed;left:12px;right:12px;top:10px;text-shadow:0 1px 3px #000}',
+  '#stick{position:fixed;left:24px;bottom:24px;width:120px;height:120px;border-radius:50%;background:#ffffff22;border:2px solid #ffffff55;touch-action:none}',
+  '#knob{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:#63d9f5cc;pointer-events:none}',
+  '#acts{position:fixed;right:16px;bottom:24px;display:flex;flex-direction:column;gap:8px}',
+  '#acts button{min-width:96px;min-height:48px;border-radius:12px;border:1px solid #63d9f5;background:#175d75;color:#fff;font:inherit}',
+  '</style>',
+  '</head>',
+  '<body>',
+  '<div id="info">'+esc(s.meta.name)+' · 左下のスティック（PCは W/A/S/D・矢印キー）で移動</div>',
+  '<div id="stick"><div id="knob"></div></div>',
+  '<div id="acts">'+buttons+'</div>',
+  '<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"><\/script>',
+  '<script>if (!window.THREE) document.write(\'<script src="https://unpkg.com/three@0.128.0/build/three.min.js"><\\/script>\');<\/script>',
+  '<script>',
+  code,
+  demo,
+  '<\/script>',
+  '</body>',
+  '</html>'
+ ].join('\n');
+}
+
+function saveDemoHtml() {
+ const name = fileBase()+'_demo.html';
+ downloadBlob(demoHtmlText(),name,'text/html');
+ toast('「'+name+'」を保存しました。開くとキャラを歩かせられます',3200);
+}
+
+let gltfLoading = null;
+
+function loadGLTFExporter() {
+ if (THREE.GLTFExporter) return Promise.resolve();
+
+ if (!gltfLoading) {
+  gltfLoading = new Promise((ok,ng) => {
+   const sc = document.createElement('script');
+   sc.src = 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js';
+   sc.onload = () => THREE.GLTFExporter ? ok() : ng(Error('load'));
+   sc.onerror = () => ng(Error('load'));
+   document.head.appendChild(sc);
+  }).catch(() => {
+   gltfLoading = null;
+   throw Error('GLB書き出しの仕組みを読み込めませんでした。インターネットにつないで、もう一度お試しください');
+  });
+ }
+
+ return gltfLoading;
+}
+
+function exportGLB() {
+ assert(window.THREE && state.engine,'3D表示が使えないため、GLBを書き出せません');
+
+ toast('GLBを作っています…');
+
+ loadGLTFExporter()
+  .then(() => {
+   const root = state.engine.buildModel(state.modelSpec);
+   // 描画用の参照（userData）は書き出せないため、書き出しの間だけ外す
+   const data = root.userData;
+   root.userData = {name:state.modelSpec.meta.name};
+
+   const finish = () => {
+    root.userData = data;
+    state.engine.dispose(root);
+   };
+
+   try {
+    new THREE.GLTFExporter().parse(root,result => {
+     try {
+      downloadBlob(result,fileBase()+'.glb','model/gltf-binary');
+      toast('GLBを保存しました（動きは含まれません）');
+     } finally {
+      finish();
+     }
+    },{binary:true});
+   } catch (e) {
+    finish();
+    throw e;
+   }
+  })
+  .catch(e => showError(e));
+}
+
+// 保存領域の使用量（STORE で始まるキーの合計の目安）
+function storageUsage() {
+ let bytes = 0;
+
+ try {
+  for (let i=0;i<localStorage.length;i++) {
+   const k = localStorage.key(i);
+   if (k && k.startsWith(STORE)) bytes += (k.length+(localStorage.getItem(k) || '').length)*2;
+  }
+ } catch (_) {
+  return null;
+ }
+
+ return bytes;
+}
+
+function storageMeter() {
+ const bytes = storageUsage();
+ if (bytes === null) return '';
+
+ const cap = 5*1024*1024;
+ const mb = (bytes/1024/1024).toFixed(1);
+
+ return `
+  <p class="hint">保存領域の使用量: 約${mb}MB / 5MB（目安）</p>
+  ${bytes > cap*.8
+   ? '<p class="error">保存領域が残りわずかです。使わないモデルを削除するか、『ファイルに保存』で控えを取ってください</p>'
+   : ''}
+ `;
+}
+
 function readStore() {
  const raw = localStorage.getItem(STORE);
  if (!raw) return {projects:[],last:null};
@@ -5787,6 +6231,7 @@ function replaceProject(spec,id=null,dirty=true) {
  state.projectId = id;
  state.undo = [];
  state.redo = [];
+ state.partListOpen = null;
  state.dirty = dirty;
 
  writeDraft();
@@ -6209,6 +6654,7 @@ function modelPanel() {
 
    <h3>保存したモデル（ライブラリ）</h3>
    ${libraryGrid()}
+   ${storageMeter()}
 
    <div class="row">
     ${button('saveAs','別プロジェクトとして保存')}
@@ -6417,7 +6863,7 @@ function partsPanel() {
 
  // 部品一覧は、選んでいるときは閉じ、何も選んでいないときは開く
  const list = `
-  <details class="card" id="partList" ${selected ? '' : 'open'}>
+  <details class="card" id="partList" ${(state.partListOpen ?? !selected) ? 'open' : ''}>
    <summary>部品一覧（${count}個）</summary>
 
    <div class="row fill">
@@ -6489,6 +6935,7 @@ function materialPanel() {
    )}
 
    ${button('addMaterial','＋ 色・質感を追加')}
+   ${button('pruneMaterials','使っていない色・質感を整理')}
 
    <p class="hint">この色・質感を使っているすべての部品に反映されます。</p>
 
@@ -6609,7 +7056,12 @@ function aiPanel() {
    <p id="pasteError" class="error" hidden></p>
   </div>
 
-  ${motionDraftCard()}
+  ${easy() ? `
+   <details class="card" id="queueDetails" ${state.ai.queueOpen ? 'open' : ''}>
+    <summary>④ 動きをAIで作る（詳しく指示）</summary>
+    ${motionDraftCard()}
+   </details>
+  ` : motionDraftCard()}
  `;
 }
 
@@ -6632,6 +7084,19 @@ function exportPanel() {
     )}
    </p>
    ${moreHint()}
+  </div>
+
+  <div class="card">
+   <h3>アプリの外で使う</h3>
+   <p class="hint">
+    確認用のHTMLは、ファイルを開くだけでキャラを歩かせられます。人に送って見てもらうのにも使えます。
+   </p>
+   ${button('demoHtml','確認用のHTMLを保存')}
+   <p class="hint">
+    GLB（glTF）は、ほかの3Dツールやゲームエンジンで読み込める一般的な形式です。
+    動き（animations）は独自形式のため GLB には含まれません。
+   </p>
+   ${button('glb','GLB（glTF）で保存')}
   </div>
 
   <details class="card" ${easy() ? 'hidden' : ''}>
@@ -6967,6 +7432,42 @@ const actions = {
  fileSave: saveFile,
  fileOpen: () => $('fileInput').click(),
 
+ walkToggle: () => {
+  if (state.motion.walk) stopWalk();
+  else startWalk();
+  renderPanel();
+ },
+
+ walkStop: () => {
+  stopWalk();
+  renderPanel();
+ },
+
+ demoHtml: saveDemoHtml,
+ glb: exportGLB,
+
+ pruneMaterials: () => {
+  const spec = state.modelSpec;
+  const used = new Set(
+   Object.values(spec.parts)
+    .filter(p => p.type === 'primitive')
+    .map(p => p.material)
+  );
+
+  let unused = Object.keys(spec.materials).filter(id => !used.has(id));
+
+  // 色・質感は最低1つ残す
+  if (unused.length === Object.keys(spec.materials).length) unused = unused.slice(1);
+
+  if (!unused.length) {
+   toast('使っていない色・質感はありません');
+   return;
+  }
+
+  mutate(s => unused.forEach(id => delete s.materials[id]));
+  toast(unused.length+'個の色・質感を整理しました（↶で戻せます）');
+ },
+
  pasteImport: () => {
   const text = String(state.ai.paste || '');
   const box = $('pasteError');
@@ -7117,6 +7618,7 @@ const actions = {
   saveQueue();
 
   state.activeTab = 'ai';
+  state.ai.queueOpen = true;
   renderPanel();
   $('motionQueueCard')?.scrollIntoView({block:'start'});
 
@@ -7222,6 +7724,8 @@ function handleClick(e) {
    if (first) startTemplate(kind);
    else replaceGuard(() => startTemplate(kind));
   } else if (b.dataset.tab) {
+   // 別のタブへ移るときは試遊を終える
+   if (b.dataset.tab !== state.activeTab) stopWalk();
    state.activeTab = b.dataset.tab;
    renderPanel();
   } else if (b.dataset.part) {
@@ -7313,6 +7817,13 @@ function handleKeyboard(e) {
 
  if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
 
+ // 試遊中は W/A/S/D・矢印キーで操作する
+ if (state.motion.walk && WALK_KEYS.includes(e.key.toLowerCase())) {
+  e.preventDefault();
+  state.walkKeys[e.key.toLowerCase()] = true;
+  return;
+ }
+
  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
   e.preventDefault();
   safe(() => undoRedo(e.shiftKey));
@@ -7344,6 +7855,24 @@ function init() {
  document.addEventListener('input',handleInput);
  document.addEventListener('change',handleChange);
  document.addEventListener('keydown',handleKeyboard);
+
+ document.addEventListener('keyup',e => {
+  state.walkKeys[String(e.key).toLowerCase()] = false;
+ });
+
+ window.addEventListener('blur',() => {
+  state.walkKeys = {};
+ });
+
+ // 折りたたみの開閉をユーザーが操作したときだけ覚える（summary のクリックで判定）
+ document.addEventListener('click',e => {
+  const summary = e.target.closest?.('summary');
+  const details = summary?.parentElement;
+  if (!details) return;
+
+  if (details.id === 'partList') state.partListOpen = !details.open;
+  if (details.id === 'queueDetails') state.ai.queueOpen = !details.open;
+ },true);
 
  document.addEventListener('focusout',e => {
   if (e.target.dataset.live) finishLive();
