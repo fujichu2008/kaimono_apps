@@ -114,6 +114,21 @@ details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 .libopen small{font-size:11px}
 .libcard.current .libopen{border-color:var(--cyan);background:#1f3442}
 .libdel{position:absolute;top:10px;right:10px;min-height:32px;width:32px;padding:0;background:#18212de6}
+body.library-open{overflow:hidden}
+body.library-open #viewTools{display:none}
+#libraryScreen{position:fixed;inset:0;z-index:9;background:var(--bg);display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left)}
+#libraryScreen[hidden]{display:none}
+.libhead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);background:#121b27}
+.libhead h2{flex:1;margin:0;min-width:0}
+.libtools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:10px 14px 0}
+.libtools select{width:auto}
+.libbody{flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:4px 14px calc(24px + env(safe-area-inset-bottom))}
+#libraryScreen .library{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.libmeta{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:11px;color:#d8e7f2}
+.libdesc{font-size:11px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+@media(min-width:950px){
+ .libhead,.libtools,.libbody{padding-left:max(24px,calc((100vw - 1100px)/2));padding-right:max(24px,calc((100vw - 1100px)/2))}
+}
 #levelBtn{font-size:12px;padding:9px 8px}
 .nudge{border:1px solid var(--line);border-radius:12px;padding:9px;margin:8px 0;background:#16202b}
 .nudgegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:8px 0}
@@ -191,6 +206,7 @@ const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
     <button id="redoBtn" data-action="redo" aria-label="やり直す">↷ やり直す</button>
    </div>
    <p><button data-action="save" class="primary menu-wide">保存</button></p>
+   <p><button data-action="library" class="menu-wide">▦ ライブラリ</button></p>
 
    <p class="menu-heading">表示設定</p>
    <label class="menu-check">
@@ -229,6 +245,8 @@ const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
  <button data-tab="ai"><span>✧</span>AI相談</button>
  <button data-tab="export"><span>↗</span>書き出し</button>
 </nav>
+
+<section id="libraryScreen" role="dialog" aria-modal="true" aria-labelledby="libraryTitle" hidden></section>
 
 <div id="toast" role="status" aria-live="polite"></div>
 
@@ -684,7 +702,12 @@ const state = {
  walkStick: {x:0,y:0,id:null},
  walkKeys: {},
  // 準備チェックの計測結果（ModelSpec と役割が同じ間だけ使い回す）
- readyCache: null
+ readyCache: null,
+ // ライブラリ専用画面
+ libraryOpen: false,
+ libraryQuery: '',
+ librarySort: 'new',
+ libraryReturn: null
 };
 
 // ============================================================
@@ -6567,7 +6590,7 @@ function fillThumbs() {
  } catch (_) {}
 
  state.projects = data.projects;
- if (state.activeTab === 'model') renderPanel();
+ renderLibraryGrid();
 }
 
 function deleteProject(id) {
@@ -6587,6 +6610,7 @@ function deleteProject(id) {
  }
 
  renderPanel();
+ renderLibraryGrid();
  toast('ライブラリから削除しました');
 }
 
@@ -7080,6 +7104,7 @@ function saveProject() {
   updateHeader();
 
   if (state.activeTab === 'model') renderPanel();
+  renderLibraryGrid();
 
   // 初めて保存に成功したときだけ、ファイル保存も案内する
   let tip = false;
@@ -7613,7 +7638,10 @@ function modelPanel() {
    <p class="hint">ファイルに保存しておくと、ブラウザのデータを消しても、別の端末でも開けます。</p>
 
    <h3>保存したモデル（ライブラリ）</h3>
-   ${libraryGrid()}
+   <p class="hint">保存したモデルを、サムネイルと情報の一覧から選んで開けます。</p>
+   <div class="row">
+    ${button('library','▦ ライブラリを開く（'+state.projects.length+'件）','primary')}
+   </div>
    ${storageMeter()}
 
    <div class="row">
@@ -7628,24 +7656,61 @@ function modelPanel() {
  `;
 }
 
-// 保存プロジェクトをサムネイル付きカードで並べる（新しい順）
+// ライブラリ専用画面の一覧（検索・並び替え済み）
+function libraryItems() {
+ const q = String(state.libraryQuery || '').trim().toLowerCase();
+
+ const list = state.projects.filter(p => {
+  if (!q) return true;
+  const meta = p.modelSpec?.meta || {};
+  return [p.name,meta.id,meta.description]
+   .some(x => String(x ?? '').toLowerCase().includes(q));
+ });
+
+ const count = p => Object.keys(p.modelSpec?.parts || {}).length;
+ const time = p => String(p.updatedAt || '');
+
+ const sorters = {
+  new: (a,b) => time(b).localeCompare(time(a)),
+  old: (a,b) => time(a).localeCompare(time(b)),
+  name: (a,b) => String(a.name).localeCompare(String(b.name),'ja'),
+  parts: (a,b) => count(b)-count(a)
+ };
+
+ return list.sort(sorters[state.librarySort] || sorters.new);
+}
+
+function libraryDate(v) {
+ const d = new Date(v);
+ return isNaN(d.getTime())
+  ? '不明'
+  : d.toLocaleString([],{year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+
+// 保存プロジェクトをサムネイルと情報付きのカードで並べる
 function libraryGrid() {
- const list = [...state.projects].sort((a,b) =>
-  String(b.updatedAt).localeCompare(String(a.updatedAt))
- );
+ if (!state.projects.length) {
+  return '<p class="hint">まだ保存したモデルはありません。上の「今のモデルを保存」を押すと、ここに追加されます。</p>';
+ }
+
+ const list = libraryItems();
 
  if (!list.length) {
-  return '<p class="hint">まだ保存したモデルはありません。上の「保存」を押すと、ここに追加されます。</p>';
+  return '<p class="hint">「'+esc(state.libraryQuery.trim())+'」に一致するモデルはありません。</p>';
  }
 
  queueThumbs();
 
  return `
+  <p class="hint">${list.length}件 / 全${state.projects.length}件</p>
   <div class="library">
    ${list.map(p => {
     const s = p.modelSpec || {};
     const parts = Object.keys(s.parts || {}).length;
     const anims = Object.keys(s.animations || {}).length;
+    const mats = Object.keys(s.materials || {}).length;
+    const anchors = Object.keys(s.anchors || {}).length;
+    const desc = String(s.meta?.description || '').trim();
     const current = p.projectId === state.projectId;
 
     return `
@@ -7659,7 +7724,14 @@ function libraryGrid() {
         ? `<img src="${esc(p.thumb)}" alt="" loading="lazy">`
         : '<span class="nothumb">◈</span>'}
        <b>${esc(p.name)}</b>
-       <small>${esc(new Date(p.updatedAt).toLocaleDateString())} · 部品${parts}${anims ? ' · 動き'+anims : ''}${current ? ' · 編集中' : ''}</small>
+       <span class="libmeta">
+        <span>部品 ${parts}</span>
+        <span>動き ${anims}</span>
+        <span>色 ${mats}</span>
+        ${anchors ? `<span>取付点 ${anchors}</span>` : ''}
+       </span>
+       <small>更新: ${esc(libraryDate(p.updatedAt))}${current ? (state.dirty ? ' · 編集中（未保存あり）' : ' · 編集中') : ''}</small>
+       ${desc ? `<span class="libdesc">${esc(desc)}</span>` : ''}
       </button>
       <button
        class="libdel danger"
@@ -7671,6 +7743,85 @@ function libraryGrid() {
    }).join('')}
   </div>
  `;
+}
+
+function renderLibrary() {
+ $('libraryScreen').innerHTML = `
+  <div class="libhead">
+   <button id="libraryBack" data-action="libraryClose" aria-label="ライブラリを閉じて編集に戻る">← 戻る</button>
+   <h2 id="libraryTitle">ライブラリ</h2>
+   ${button('save','今のモデルを保存','primary')}
+  </div>
+  <div class="libtools">
+   <input
+    type="search"
+    id="librarySearch"
+    placeholder="名前・説明で検索"
+    aria-label="モデルを検索"
+    value="${esc(state.libraryQuery)}"
+   >
+   <select id="librarySort" aria-label="並び順">
+    ${options([['new','新しい順'],['old','古い順'],['name','名前順'],['parts','部品が多い順']],state.librarySort)}
+   </select>
+  </div>
+  <div class="libbody">
+   <p class="hint">カードをタップすると、そのモデルを開いて編集画面に戻ります。</p>
+   <div id="libraryGrid">${libraryGrid()+storageMeter()}</div>
+  </div>
+ `;
+}
+
+// 一覧部分だけを描き直す（検索欄の入力中のフォーカスを保つ）
+function renderLibraryGrid() {
+ if (!state.libraryOpen) return;
+ const grid = $('libraryGrid');
+ if (grid) grid.innerHTML = libraryGrid()+storageMeter();
+}
+
+function libraryBackground() {
+ return document.querySelectorAll('main.workspace,nav,#viewTools');
+}
+
+function openLibrary() {
+ if (state.libraryOpen) return;
+
+ stopWalk();
+ closeMoreMenu();
+
+ try {
+  state.projects = readStore().projects;
+ } catch (e) {
+  showError(Error('保存データを読み込めません: '+e.message));
+ }
+
+ state.libraryOpen = true;
+ state.libraryReturn = document.activeElement;
+
+ document.body.classList.add('library-open');
+ libraryBackground().forEach(el => el.setAttribute('inert',''));
+
+ renderLibrary();
+ $('libraryScreen').hidden = false;
+ $('libraryScreen').scrollTop = 0;
+
+ setTimeout(() => $('libraryBack')?.focus(),0);
+}
+
+function closeLibrary() {
+ if (!state.libraryOpen) return;
+
+ state.libraryOpen = false;
+ $('libraryScreen').hidden = true;
+ $('libraryScreen').innerHTML = '';
+
+ document.body.classList.remove('library-open');
+ libraryBackground().forEach(el => el.removeAttribute('inert'));
+
+ const back = state.libraryReturn;
+ state.libraryReturn = null;
+ if (back && document.contains(back)) back.focus({preventScroll:true});
+
+ invalidate();
 }
 
 function hierarchyRows(parent=null,depth=0) {
@@ -8247,6 +8398,12 @@ function handleChange(e) {
  const el = e.target;
  const d = el.dataset;
 
+ if (el.id === 'librarySort') {
+  state.librarySort = el.value;
+  renderLibraryGrid();
+  return;
+ }
+
  if (d.live) {
   finishLive();
   return;
@@ -8318,6 +8475,12 @@ function handleChange(e) {
 
 function handleInput(e) {
  const d = e.target.dataset;
+
+ if (e.target.id === 'librarySearch') {
+  state.libraryQuery = e.target.value;
+  renderLibraryGrid();
+  return;
+ }
 
  if (d.ai) {
   state.ai[d.ai] = e.target.value;
@@ -8413,6 +8576,9 @@ const actions = {
     : 'くわしく表示にしました（すべての項目を表示します）'
   );
  },
+
+ library: openLibrary,
+ libraryClose: closeLibrary,
 
  mirror: mirrorPart,
  fileSave: saveFile,
@@ -8718,7 +8884,7 @@ function handleClick(e) {
  // ダイアログを開く操作は先に閉じ、戻り先をメニューボタンにする
  if (
   b.closest('#moreMenu')
-  && ['guide','fit','studio','save'].includes(b.dataset.action)
+  && ['guide','fit','studio','save','library'].includes(b.dataset.action)
  ) {
   closeMoreMenu(true);
  }
@@ -8780,7 +8946,13 @@ function handleClick(e) {
    tryAction(b.dataset.try);
   } else if (b.dataset.open) {
    const id = b.dataset.open;
-   replaceGuard(() => loadProject(id));
+
+   replaceGuard(() => {
+    loadProject(id);
+    closeLibrary();
+    window.scrollTo(0,0);
+    toast('「'+state.modelSpec.meta.name+'」を開きました');
+   });
   } else if (b.dataset.delproject) {
    const id = b.dataset.delproject;
    const name = state.projects.find(p => p.projectId === id)?.name || id;
@@ -8852,6 +9024,15 @@ function handleKeyboard(e) {
    }
   }
 
+  return;
+ }
+
+ // ライブラリ表示中は、Escで閉じる以外のショートカットを受け取らない
+ if (state.libraryOpen) {
+  if (e.key === 'Escape') {
+   e.preventDefault();
+   closeLibrary();
+  }
   return;
  }
 
