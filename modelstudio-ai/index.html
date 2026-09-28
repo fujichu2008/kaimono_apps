@@ -88,6 +88,15 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 details.card summary{cursor:pointer;padding:6px 0;color:var(--muted)}
 .beat{display:grid;grid-template-columns:76px minmax(0,1fr) 44px;gap:6px;margin:6px 0;align-items:center}
 .card.review{border-color:var(--cyan)}
+.library{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
+.libcard{position:relative;min-width:0}
+.libopen{display:flex;flex-direction:column;align-items:stretch;gap:4px;width:100%;padding:6px;text-align:left}
+.libopen img,.nothumb{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;background:#1c2633}
+.nothumb{display:flex;align-items:center;justify-content:center;font-size:28px;color:var(--muted)}
+.libopen b{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.libopen small{font-size:11px}
+.libcard.current .libopen{border-color:var(--cyan);background:#1f3442}
+.libdel{position:absolute;top:10px;right:10px;min-height:32px;width:32px;padding:0;background:#18212de6}
 @media(min-width:950px){
  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 420px;height:calc(100dvh - 68px)}
  #viewport{height:100%;min-height:0}
@@ -499,7 +508,8 @@ const state = {
   prompt: '',
   motion: '',
   motionFix: '',
-  motionDraft: {
+  // 動きの注文リスト。motionDraft は編集中の項目を指す
+  motionQueue: [{
    id: 'attack',
    custom: '',
    name: '攻撃',
@@ -508,7 +518,17 @@ const state = {
    strength: 'normal',
    parts: null,
    ref: '',
-   beats: [[0,'構え'],[100,'元に戻る']]
+   beats: [[0,'構え'],[30,'大きく振りかぶる'],[50,'振り下ろす（当たる瞬間）'],[75,'振り抜いた姿勢'],[100,'元に戻る']],
+   loaded: false,
+   note: ''
+  }],
+  queueIndex: 0,
+  queueFor: null,
+  batchSize: 3,
+  // 注文リスト全体への自由記述（すべての動きに共通する細かい指示）
+  batchNote: '',
+  get motionDraft() {
+   return this.motionQueue[this.queueIndex] || this.motionQueue[0];
   }
  },
  stats: {
@@ -543,7 +563,10 @@ const state = {
   tester: null,
   exported: false,
   review: null
- }
+ },
+ thumb: null,
+ thumbTried: new Set(),
+ thumbQueued: false
 };
 
 // ============================================================
@@ -2958,7 +2981,7 @@ function motionPanel() {
    <p class="hint">
     タイミングごとの姿勢まで細かく指示したいときは、AI相談タブの「④ 動きをAIで作る（詳しく指示）」を使ってください。
    </p>
-   <button data-tab="ai">AI相談タブで詳しく指示する</button>
+   ${button('queuePicks','選んだ動きを注文リストに追加して詳しく指示')}
 
    <p class="hint">
     ChatGPTなどに貼り付けて送信し、返ってきた回答をコピーしてから下のボタンを押してください。
@@ -3326,9 +3349,426 @@ const DRAFT_DURATION = {
  bump: .8
 };
 
+// ------------------------------------------------------------
+// 動きの注文リスト（複数の動きをまとめてAIに頼む）
+// ------------------------------------------------------------
+
+const DEFAULT_BEATS = [[0,'構え'],[100,'元に戻る']];
+
+// 標準IDのひな形台本 [タイミング(%), 姿勢の説明]
+const DRAFT_BEATS = {
+ idle: [[0,'自然に立つ'],[50,'息を吸って胸が少し上がる・頭がわずかに揺れる'],[100,'最初と同じ姿勢']],
+ walk: [[0,'左脚を前・右脚を後ろ、腕は脚と逆に振る'],[25,'脚がそろい、体が少し上がる'],[50,'右脚を前・左脚を後ろ、腕は逆'],[75,'脚がそろい、体が少し上がる'],[100,'最初と同じ姿勢']],
+ run: [[0,'体を前に傾け、左脚を大きく前・右脚を後ろ'],[25,'体が一番高く浮く'],[50,'右脚を大きく前・左脚を後ろ、腕も大きく振る'],[75,'体が一番高く浮く'],[100,'最初と同じ姿勢']],
+ jump: [[0,'立ち姿勢'],[20,'しゃがんで力をためる'],[45,'伸び上がって跳ぶ・腕を上へ'],[70,'空中で脚をたたむ'],[85,'着地して少し沈む（着地の瞬間）'],[100,'元に戻る']],
+ attack: [[0,'構え'],[30,'大きく振りかぶる'],[50,'振り下ろす（当たる瞬間）'],[75,'振り抜いた姿勢'],[100,'元に戻る']],
+ hurt: [[0,'立ち姿勢'],[25,'後ろにのけぞる・頭が後ろへ'],[60,'よろける'],[100,'元に戻る']],
+ die: [[0,'立ち姿勢'],[30,'よろけて膝が崩れる'],[70,'横に倒れ始める'],[100,'地面に倒れて止まる']],
+ emote: [[0,'立ち姿勢'],[25,'両腕を上げて喜ぶ'],[50,'小さく跳ねる'],[75,'もう一度腕を上げる'],[100,'元に戻る']],
+ drive: [[0,'車輪が回る・車体がわずかに揺れる'],[50,'車体が少し沈む'],[100,'最初と同じ状態']],
+ turn: [[0,'ハンドルを切り、車体が外側へ少し傾く'],[100,'同じ状態を保つ']],
+ bump: [[0,'通常の姿勢'],[20,'車体が跳ね上がる'],[45,'着地して沈む'],[70,'小さく揺り返す'],[100,'元に戻る']]
+};
+
+const QUEUE = STORE+'.motionQueue';
+let queueTimer = null;
+
+// 注文の動きID（自由入力なら入力値）
+function itemId(it) {
+ return it.id === '*' ? String(it.custom || '').trim() : it.id;
+}
+
+function newDraftItem(id='attack') {
+ const std = STANDARD_MOTIONS.find(x => x[0] === id);
+
+ return {
+  id: std ? id : '*',
+  custom: std || id === '*' ? '' : String(id).slice(0,64),
+  name: std ? std[1] : '',
+  duration: DRAFT_DURATION[id] || 1,
+  loop: std ? std[2] : false,
+  strength: 'normal',
+  parts: null,
+  ref: '',
+  beats: clone(DRAFT_BEATS[id] || DEFAULT_BEATS),
+  loaded: false,
+  note: ''
+ };
+}
+
+function normalizeQueueItem(x) {
+ const o = obj(x) ? x : {};
+ const beats = Array.isArray(o.beats)
+  ? o.beats
+   .filter(b => Array.isArray(b))
+   .slice(0,40)
+   .map(b => [Number(b[0]) || 0,String(b[1] ?? '').slice(0,300)])
+  : [];
+
+ return {
+  id: o.id === '*' || STANDARD_MOTIONS.some(s => s[0] === o.id) ? o.id : 'attack',
+  custom: String(o.custom ?? '').slice(0,64),
+  name: String(o.name ?? '').slice(0,100),
+  duration: Number(o.duration) || 1,
+  loop: !!o.loop,
+  strength: ['soft','normal','big'].includes(o.strength) ? o.strength : 'normal',
+  parts: Array.isArray(o.parts) ? o.parts.filter(r => typeof r === 'string') : null,
+  ref: typeof o.ref === 'string' ? o.ref : '',
+  beats: beats.length ? beats : clone(DEFAULT_BEATS),
+  loaded: !!o.loaded,
+  note: String(o.note ?? '').slice(0,2000)
+ };
+}
+
+// 台本が初期状態・空・未編集のひな形なら true
+function isTemplateBeats(beats) {
+ const filled = (beats || []).filter(b => String(b[1] || '').trim());
+ if (!filled.length) return true;
+
+ const same = (a,t) => a.length === t.length
+  && a.every((x,i) => Number(x[0]) === t[i][0] && String(x[1]).trim() === t[i][1]);
+
+ return [DEFAULT_BEATS,...Object.values(DRAFT_BEATS)].some(t => same(filled,t));
+}
+
+function readQueueStore() {
+ try {
+  const v = JSON.parse(localStorage.getItem(QUEUE) || '{}');
+  return obj(v) ? v : {};
+ } catch (_) {
+  return {};
+ }
+}
+
+// 表示中のモデルの注文リストを用意する（モデルIDごとに保存・復元）
+function ensureQueue() {
+ const a = state.ai;
+ const key = state.modelSpec.meta.id;
+ if (a.queueFor === key) return;
+
+ a.queueFor = key;
+
+ const saved = readQueueStore()[key];
+
+ if (obj(saved) && Array.isArray(saved.queue) && saved.queue.length) {
+  a.motionQueue = saved.queue.slice(0,LIMIT.animations).map(normalizeQueueItem);
+  a.queueIndex = Math.min(Math.max(0,Number(saved.index) || 0),a.motionQueue.length-1);
+  a.batchSize = [2,3,4,6].includes(saved.batchSize) ? saved.batchSize : 3;
+  a.batchNote = typeof saved.note === 'string' ? saved.note.slice(0,2000) : '';
+ } else {
+  a.motionQueue = [newDraftItem('attack')];
+  a.queueIndex = 0;
+  a.batchSize = 3;
+  a.batchNote = '';
+ }
+}
+
+function saveQueue() {
+ clearTimeout(queueTimer);
+
+ try {
+  const a = state.ai;
+  if (!a.queueFor) return;
+
+  const all = readQueueStore();
+  delete all[a.queueFor];
+  all[a.queueFor] = {
+   queue: a.motionQueue,
+   index: a.queueIndex,
+   batchSize: a.batchSize,
+   note: String(a.batchNote || '').slice(0,2000)
+  };
+
+  // 古いモデルの分が増えすぎないよう、新しい30モデル分だけ残す
+  const keys = Object.keys(all);
+  keys.slice(0,Math.max(0,keys.length-30)).forEach(k => delete all[k]);
+
+  localStorage.setItem(QUEUE,JSON.stringify(all));
+ } catch (_) {}
+}
+
+function scheduleQueueSave() {
+ clearTimeout(queueTimer);
+ queueTimer = setTimeout(saveQueue,400);
+}
+
+function standardIdsForKind() {
+ ensureMotionRoles();
+ const vehicle = state.motion.kind === 'vehicle';
+ return STANDARD_MOTIONS
+  .filter(([id]) => vehicle === VEHICLE_MOTIONS.includes(id))
+  .map(x => x[0]);
+}
+
+function queueItemById(id) {
+ ensureQueue();
+ return state.ai.motionQueue.find(it => itemId(it) === id) || null;
+}
+
+function markQueueLoaded(ids) {
+ ensureQueue();
+ state.ai.motionQueue.forEach(it => {
+  if (ids.includes(itemId(it))) it.loaded = true;
+ });
+ saveQueue();
+}
+
+function validateQueue() {
+ ensureQueue();
+
+ const seen = new Set();
+
+ state.ai.motionQueue.forEach((it,i) => {
+  const id = itemId(it);
+  assert(validId(id),(i+1)+'件目: 動きIDは英字で始まる英数字・_・-（64文字以内）で入力してください');
+  assert(!seen.has(id),'注文リストで動きID「'+id+'」が重複しています。どちらかのIDを変えてください');
+  seen.add(id);
+ });
+}
+
+function editQueueItem(i) {
+ const a = state.ai;
+ if (!a.motionQueue[i]) return;
+
+ a.queueIndex = i;
+ saveQueue();
+ renderPanel();
+}
+
+function copyQueueItem(i) {
+ const q = state.ai.motionQueue;
+ const src = q[i];
+ if (!src) return;
+
+ assert(q.length < LIMIT.animations,'注文リストは'+LIMIT.animations+'件までです');
+
+ const copy = normalizeQueueItem(clone(src));
+ copy.id = '*';
+ copy.custom = (itemId(src) || 'motion').slice(0,58)+'_copy';
+ copy.name = (src.name || itemId(src) || '')+'（コピー）';
+ copy.loaded = false;
+
+ q.splice(i+1,0,copy);
+ state.ai.queueIndex = i+1;
+ saveQueue();
+ renderPanel();
+ toast('複製しました。動きIDを変えてください');
+}
+
+function deleteQueueItem(i) {
+ const q = state.ai.motionQueue;
+ if (q.length <= 1 || !q[i]) return;
+
+ const name = q[i].name || itemId(q[i]) || (i+1)+'件目';
+
+ askConfirm('注文リストから「'+name+'」を削除しますか？',() => {
+  const a = state.ai;
+  q.splice(i,1);
+
+  if (a.queueIndex >= q.length) a.queueIndex = q.length-1;
+  else if (a.queueIndex > i) a.queueIndex--;
+
+  saveQueue();
+  renderPanel();
+ });
+}
+
+function queueListHtml() {
+ const a = state.ai;
+ const q = a.motionQueue;
+
+ const rows = q.map((it,i) => {
+  const id = itemId(it) || '（ID未入力）';
+  const lines = it.beats.filter(b => String(b[1] || '').trim()).length;
+
+  return `
+   <div class="partrow">
+    <button
+     class="pick ${i === a.queueIndex ? 'selected' : ''}"
+     data-qedit="${i}"
+    >${it.loaded ? '✓ ' : ''}${i+1}. ${esc(it.name || id)}<small>${esc(id)} · ${esc(it.duration)}秒 · 台本${lines}行${String(it.note || '').trim() ? ' · 自由記述あり' : ''}${it.loaded ? ' · 読み込み済み' : ''}</small></button>
+    <button class="toggle" data-qedit="${i}" aria-label="${i+1}件目を編集">✎</button>
+    <button class="toggle" data-qcopy="${i}" aria-label="${i+1}件目を複製">⧉</button>
+    <button
+     class="toggle danger"
+     data-qdel="${i}"
+     aria-label="${i+1}件目を削除"
+     ${q.length <= 1 ? 'disabled' : ''}
+    >✕</button>
+   </div>
+  `;
+ }).join('');
+
+ return `
+  <h3>注文リスト（${q.length}件）</h3>
+  ${rows}
+  <div class="row">
+   ${button('queueAdd','＋ 動きを追加')}
+   ${button('queueStandard','標準セットを追加')}
+  </div>
+  <p class="hint">行をタップ（または✎）すると、その動きを下で編集できます。</p>
+ `;
+}
+
+function batchButtons() {
+ const a = state.ai;
+ const q = a.motionQueue;
+ const n = Math.max(1,Math.ceil(q.length/a.batchSize));
+
+ const copies = n === 1
+  ? `<button data-batchcopy="0" class="primary">指示文をコピー（まとめて）<small> ${q.length}件</small></button>`
+  : Array.from({length:n},(_,i) => `
+    <button data-batchcopy="${i}" class="primary">指示文をコピー（${i+1}/${n}）<small> ${esc(
+     q.slice(i*a.batchSize,(i+1)*a.batchSize).map(it => itemId(it) || '？').join(', ')
+    )}</small></button>
+   `).join('');
+
+ return `
+  ${selectField(
+   '1回にAIへ頼む数（多すぎると回答が途中で切れます）',
+   'data-batch="1"',
+   [['2','2件'],['3','3件'],['4','4件'],['6','6件']],
+   String(a.batchSize)
+  )}
+  <div class="row">${copies}</div>
+  <p class="hint">${n > 1
+   ? '注文リストを'+n+'回に分けています。1つずつAIに送り、回答を読み込んでから次へ進んでください。'
+   : '注文リストの動きを1回でまとめて頼みます。'}</p>
+ `;
+}
+
+// 注文リスト全体への自由記述（空なら何も足さない）
+function commonNoteText() {
+ const n = String(state.ai.batchNote || '').trim().slice(0,2000);
+
+ return n
+  ? '\n全体への自由記述の指示（すべての動きに共通。部品IDやデータ形式のルールと矛盾する場合は、そちらのルールを優先する）:\n'+n+'\n'
+  : '';
+}
+
+// まとめて頼む指示文。共通部分（部品一覧・関節ガイド）は1回だけ入れる
+function createMotionBatchPrompt(items) {
+ assert(items.length,'注文リストに動きがありません');
+
+ const sections = items.map((it,i) => {
+  try {
+   return '\n■ '+(i+1)+'件目'+motionOrderSection(it).text;
+  } catch (e) {
+   throw Error('注文リストの「'+(it.name || itemId(it) || (i+1)+'件目')+'」: '+e.message);
+  }
+ });
+
+ const ids = items.map(itemId);
+
+ return motionPromptBase(
+  '\n今回作る動きは次の'+items.length+'件です（'+ids.join(', ')+'）。それぞれの注文どおりに作ってください。\n'
+  + sections.join('\n')
+  + '\n'+commonNoteText()
+  + '\n\nまとめ方のルール:\n'
+  + '- '+items.length+'件すべてを1つの MODELSTUDIO_PATCH_V1 の operations にまとめ、1つの動きにつき1操作にする。注文にない動きは作らない。\n'
+  + '- 今回の "plan" は文字列ではなく、{"動きID":"その動きの計画"} のオブジェクトで、全'+items.length+'件について書く。\n'
+  + '- 形の例: {"format":"MODELSTUDIO_PATCH_V1","plan":{"'+ids[0]+'":"0秒 … → 0.3秒 …"},"operations":[{"op":"各注文の op","path":"/animations/'+ids[0]+'","value":{...}}]}\n'
+  + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
+ );
+}
+
+function copyBatch(i) {
+ validateQueue();
+
+ const a = state.ai;
+ const n = Math.max(1,Math.ceil(a.motionQueue.length/a.batchSize));
+ const items = a.motionQueue.slice(i*a.batchSize,(i+1)*a.batchSize);
+
+ copyText(
+  createMotionBatchPrompt(items),
+  n > 1
+   ? '指示文（'+(i+1)+'/'+n+'）をコピーしました。AIの回答を読み込んでから次をコピーしてください'
+   : '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
+ );
+}
+
+function orderTextSafe(item) {
+ try {
+  return motionOrderSection(item).text;
+ } catch (_) {
+  return '';
+ }
+}
+
+// ---- 読み込みの強化 ----
+
+function parseAIJSON(text) {
+ const t = cleanPastedJSON(text);
+
+ try {
+  return parseJSON(t);
+ } catch (e) {
+  if (/構文エラー/.test(e.message) && t.startsWith('{') && !t.endsWith('}')) {
+   throw Error('AIの回答が途中で切れている可能性があります。1回に頼む数を減らして分割コピーを使うか、AIに続きを出すよう頼んでください');
+  }
+  throw e;
+ }
+}
+
+function motionOpId(op) {
+ return String(op.path).split('/')[2].replace(/~1/g,'/').replace(/~0/g,'~');
+}
+
+// 全操作が /animations/<id> 直下の add/replace なら true
+function isMotionOnlyPatch(ops) {
+ return Array.isArray(ops)
+  && ops.length > 0
+  && ops.every(op =>
+   obj(op)
+   && ['add','replace'].includes(op.op)
+   && typeof op.path === 'string'
+   && /^\/animations\/[^/]+$/.test(op.path)
+  );
+}
+
+// add と replace の取り違えを読み替える
+function fixMotionOps(spec,ops) {
+ const present = new Set(Object.keys(spec.animations || {}));
+
+ return ops.map(op => {
+  const id = motionOpId(op);
+  const fixed = {...op};
+
+  if (op.op === 'add' && present.has(id)) fixed.op = 'replace';
+  if (op.op === 'replace' && !present.has(id)) fixed.op = 'add';
+
+  present.add(id);
+  return fixed;
+ });
+}
+
+// 動きごとに適用・検証し、成功した分だけを重ねる
+function applyMotionOpsOneByOne(source,ops) {
+ let cur = source;
+ let ok = 0;
+ const failed = [];
+
+ for (const op of ops) {
+  try {
+   cur = applyModelPatch(cur,{format:'MODELSTUDIO_PATCH_V1',operations:[op]});
+   ok++;
+  } catch (e) {
+   failed.push({id:motionOpId(op),reason:e.message});
+  }
+ }
+
+ return {next: ok ? cur : null,failed};
+}
+
 // 標準IDを選んだときの既定値（表示名・長さ・くり返し）
 function applyDraftDefaults() {
  const d = state.ai.motionDraft;
+
+ d.loaded = false;
+
+ // 前の動きの台本が残らないよう、未編集のときだけひな形に置き換える
+ if (isTemplateBeats(d.beats)) d.beats = clone(DRAFT_BEATS[d.id] || DEFAULT_BEATS);
+
  const std = STANDARD_MOTIONS.find(x => x[0] === d.id);
  if (!std) return;
 
@@ -3337,11 +3777,10 @@ function applyDraftDefaults() {
  d.duration = DRAFT_DURATION[d.id] || 1;
 }
 
-// AI相談タブ「詳しく指示」の指示文
-function createMotionDetailPrompt() {
- const d = state.ai.motionDraft;
+// 動き1件分の注文文（「詳しく指示」と「まとめて頼む」で共通）。{id, text} を返す
+function motionOrderSection(d) {
  const s = state.modelSpec;
- const id = d.id === '*' ? String(d.custom || '').trim() : d.id;
+ const id = itemId(d);
 
  assert(validId(id),'動きIDは英字で始まる英数字・_・-（64文字以内）で入力してください');
 
@@ -3369,10 +3808,16 @@ function createMotionDetailPrompt() {
   big: '大げさ（推奨の振り幅の上限〜1.3倍。メリハリを強く）'
  }[d.strength] || '普通（推奨の振り幅の中央）';
 
- return motionPromptBase(
+ return {
+  id,
+  text:
   '\n作る動き: ID "'+id+'"（'+name+'） / 長さ '+dur+'秒 / loop:'+loop
   +' / op は "'+(exists ? 'replace' : 'add')+'"\n'
   + '強さ: '+strength+'\n'
+  + (String(d.note || '').trim()
+   ? '\n自由記述の指示（台本より細かい指示。できるだけ忠実に反映する。部品IDやデータ形式のルールと矛盾する場合は、そちらのルールを優先する）:\n'
+    + String(d.note).trim().slice(0,2000)+'\n'
+   : '')
   + '\n台本（この流れどおりにキーを置く）:\n'
   + beats.map(([t,x]) => '- '+t+'%（'+r3(dur*t/100)+'秒）: '+x).join('\n')+'\n'
   + (picked.length
@@ -3388,12 +3833,22 @@ function createMotionDetailPrompt() {
   + (id === 'attack' ? '- events に "hit"（当たる瞬間）を入れる。\n' : '')
   + (id === 'jump' ? '- events に "land"（着地の瞬間）を入れる。\n' : '')
   + (id === 'die' ? '- 最後のキーを倒れた姿勢にして、その姿勢で止まるようにする。\n' : '')
+ };
+}
+
+// AI相談タブ「詳しく指示」の指示文（編集中の1件だけ）
+function createMotionDetailPrompt() {
+ return motionPromptBase(
+  motionOrderSection(state.ai.motionDraft).text
+  + commonNoteText()
   + '\nこの1つの動きだけを1操作で出力すること。最上位に "plan" を必ず書く。'
   + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
  );
 }
 
 function motionDraftCard() {
+ ensureQueue();
+
  const d = state.ai.motionDraft;
  const s = state.modelSpec;
  const roles = usableRoles();
@@ -3402,12 +3857,16 @@ function motionDraftCard() {
  const checked = r => !d.parts || d.parts.includes(r);
 
  return `
-  <div class="card">
+  <div class="card" id="motionQueueCard">
    <h3>④ 動きをAIで作る（詳しく指示）</h3>
    <p class="hint">
-    タイミングごとの姿勢を書くと、AIが体の正確な情報（関節の位置・回す向き）を使って動きを作ります。
-    読み込んだ後は、品質チェックが自動で行われます。
+    作りたい動きを注文リストに並べ、1つずつ台本（タイミングごとの姿勢）を書くと、まとめてAIに頼めます。
+    AIは体の正確な情報（関節の位置・回す向き）を使って動きを作り、読み込んだ後は品質チェックが自動で行われます。
    </p>
+
+   ${queueListHtml()}
+
+   <h3>編集中: ${state.ai.queueIndex+1}件目「${esc(d.name || itemId(d) || '名前なし')}」</h3>
 
    ${selectField('動きID','data-draft="id"',[...ids,['*','自由入力（新しい名前）']],d.id)}
    ${d.id === '*' ? field('新しい動きID（英字で始まる英数字）','data-draft="custom"',d.custom) : ''}
@@ -3448,6 +3907,16 @@ function motionDraftCard() {
    ${button('addBeat','＋ 行を追加')}
    <p class="hint">左の数字は動き全体を100%としたタイミングです（例: 長さ1秒なら30% = 0.3秒）。</p>
 
+   <label>自由記述（細かい指示・任意）
+    <textarea
+     data-draft="note"
+     placeholder="例: 剣は右手に持っている想定。振り下ろしは速く、戻りはゆっくり。振り抜いたら一瞬止めてから戻る。頭は常に前を向いたまま。"
+    >${esc(d.note || '')}</textarea>
+   </label>
+   <p class="hint">
+    台本では書ききれない細かい指示（速さの緩急、止め、向き、雰囲気、動かさない部位、キャラの性格など）を自由に書けます。
+   </p>
+
    <h3>使う部位</h3>
    ${roles.length ? roles.map(([r,pid]) => `
     <label>
@@ -3460,8 +3929,19 @@ function motionDraftCard() {
 
    ${selectField('参考にする既存の動き（任意）','data-draft="ref"',[['','なし'],...refs],d.ref)}
 
+   <h3>AIに頼む</h3>
+
+   <label>全体への自由記述（すべての動きに共通・任意）
+    <textarea
+     data-ai="batchNote"
+     placeholder="例: 重い鎧を着た騎士なので、全体的に動きは重め。どの動きも最後は必ず構えの姿勢に戻す。尾は常に少し揺らしておく。"
+    >${esc(state.ai.batchNote || '')}</textarea>
+   </label>
+
+   ${batchButtons()}
+
    <div class="row">
-    ${button('promptDetail','指示文をコピー（詳しく指示）','primary')}
+    ${button('promptDetail','この動きだけの指示文をコピー')}
     ${button('import','AIの回答を読み込む')}
    </div>
   </div>
@@ -3599,12 +4079,22 @@ function reviewMotions(ids) {
 }
 
 // AIの動きを読み込んだ後の確認を始める
-function startReview(ids,plan) {
+function startReview(ids,plan,failed=[]) {
  const m = state.motion;
+ const plans = {};
+
+ // plan は文字列（全体の計画）か、{動きID: 計画} のオブジェクト
+ if (obj(plan)) {
+  for (const [k,v] of Object.entries(plan)) {
+   if (typeof v === 'string') plans[k] = v.slice(0,1000);
+  }
+ }
 
  m.review = {
   ids,
   plan: typeof plan === 'string' ? plan.slice(0,2000) : '',
+  plans,
+  failed: failed.map(f => ({id:f.id,reason:String(f.reason).slice(0,500)})),
   report: reviewMotions(ids)
  };
 
@@ -3627,7 +4117,7 @@ function motionReviewBar() {
   return '';
  }
 
- const hasIssue = ids.some(id => (rv.report[id] || []).length);
+ const hasIssue = ids.some(id => (rv.report[id] || []).length) || !!(rv.failed || []).length;
 
  const rows = ids.map(id => {
   const issues = rv.report[id] || [];
@@ -3639,6 +4129,7 @@ function motionReviewBar() {
      data-play="${esc(id)}"
     >${m.playing === id ? '■' : '▶'} ${esc(anims[id].name || id)}<small>${esc(id)}</small></button>
    </div>
+   ${rv.plans?.[id] ? `<p class="hint"><b>計画:</b> ${esc(rv.plans[id])}</p>` : ''}
    ${issues.length
     ? `<p class="error">${issues.map(esc).join('\n')}</p>`
     : '<p class="success">✓ 問題は見つかりませんでした</p>'}
@@ -3650,6 +4141,10 @@ function motionReviewBar() {
    <h3>AIの動きを確認</h3>
    ${rv.plan ? `<p class="hint"><b>AIの計画:</b> ${esc(rv.plan)}</p>` : ''}
    ${rows}
+   ${(rv.failed || []).length ? `
+    <h3>読み込めなかった動き</h3>
+    <p class="error">${rv.failed.map(f => esc(f.id+': '+f.reason)).join('\n')}</p>
+   ` : ''}
    <div class="row">
     ${button('reviewAccept','採用','primary')}
     ${button('reviewUndo','取り消す')}
@@ -3713,16 +4208,31 @@ function createReviewFixPrompt() {
  const anims = state.modelSpec.animations || {};
  const bad = rv.ids.filter(id => own(anims,id) && (rv.report[id] || []).length);
 
- assert(bad.length,'直す必要のある動きはありません');
+ const failed = rv.failed || [];
+
+ assert(bad.length || failed.length,'直す必要のある動きはありません');
 
  return motionPromptBase(
-  '\n次の動きに、アプリの品質チェックで問題が見つかりました。問題を直した動きを返してください。\n'
-  + bad.map(id =>
-   '\n動きID: '+id+'\n問題:\n'
-   + rv.report[id].map(x => '- '+x).join('\n')
-   + '\n現在の中身:\n'+JSON.stringify(anims[id])
-  ).join('\n')
-  + '\n\n各動きを {"op":"replace","path":"/animations/動きID","value":{...}} で返すこと。'
+  (bad.length
+   ? '\n次の動きに、アプリの品質チェックで問題が見つかりました。問題を直した動きを返してください。\n'
+    + bad.map(id =>
+     '\n動きID: '+id+'\n問題:\n'
+     + rv.report[id].map(x => '- '+x).join('\n')
+     + '\n現在の中身:\n'+JSON.stringify(anims[id])
+    ).join('\n')
+   : '')
+  + (failed.length
+   ? '\n\n次の動きは、データの誤りで読み込めませんでした。理由を直して作り直してください。\n'
+    + failed.map(f => {
+     const item = queueItemById(f.id);
+     const order = item ? orderTextSafe(item) : '';
+
+     return '\n動きID: '+f.id+'\n理由: '+f.reason
+      + (own(anims,f.id) ? '\n現在の中身:\n'+JSON.stringify(anims[f.id]) : '')
+      + (order ? '\n注文内容:'+order : '');
+    }).join('\n')
+   : '')
+  + '\n\n各動きを {"op":"replace","path":"/animations/動きID","value":{...}} で返すこと（まだ登録されていない動きは op を "add" にする）。'
   + 'IDは変えない。ほかの動きや部品は変更しない。最上位に "plan" を書く。'
   + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。先頭文字は{、末尾文字は}。'
  );
@@ -4106,23 +4616,49 @@ function applyModelPatch(source,patch) {
 // ============================================================
 
 function applyAIText(text) {
- const data = parseJSON(cleanPastedJSON(text));
+ const data = parseAIJSON(text);
 
  assert(obj(data),'AIの回答がモデルデータの形になっていません');
 
  if (data.format === 'MODELSTUDIO_PATCH_V1' || Array.isArray(data.operations)) {
-  const next = applyModelPatch(
-   state.modelSpec,
-   {...data,format:'MODELSTUDIO_PATCH_V1'}
-  );
+  const patch = {...data,format:'MODELSTUDIO_PATCH_V1'};
+  let next = null;
+  let failed = [];
+
+  if (isMotionOnlyPatch(patch.operations)) {
+   // 動きだけの修正データは、add と replace の取り違えを読み替える
+   patch.operations = fixMotionOps(state.modelSpec,patch.operations);
+
+   try {
+    next = applyModelPatch(state.modelSpec,patch);
+   } catch (e) {
+    // 全体で失敗したら、動きごとに確かめて読み込めた分だけ反映する（↶1回で戻せる）
+    const part = applyMotionOpsOneByOne(state.modelSpec,patch.operations);
+    failed = part.failed;
+    next = part.next;
+
+    assert(
+     next,
+     '読み込めた動きがありませんでした。\n'+failed.map(f => f.id+': '+f.reason).join('\n')
+    );
+   }
+  } else {
+   next = applyModelPatch(state.modelSpec,patch);
+  }
+
   commitSpec(next);
 
   // 動きだけを変更した修正データは、品質チェック付きの確認バーを出す
-  const ids = changedAnimationIds(data.operations,next);
+  const failedIds = failed.map(f => f.id);
+  const ids = changedAnimationIds(patch.operations,next).filter(id => !failedIds.includes(id));
 
   if (ids.length) {
-   startReview(ids,data.plan);
-   return '動きを読み込みました。確認バーで品質を確かめてください';
+   markQueueLoaded(ids);
+   startReview(ids,data.plan,failed);
+
+   return failed.length
+    ? ids.length+'件の動きを読み込みました（'+failed.length+'件は読み込めませんでした。確認バーを見てください）'
+    : '動きを読み込みました。確認バーで品質を確かめてください';
   }
 
   return '修正を反映しました（↶で取り消せます）';
@@ -4172,6 +4708,161 @@ async function loadFromClipboard() {
 // 名前付き複数プロジェクトと、編集中の復旧用Draftを分離。
 // ============================================================
 
+// ライブラリ用のサムネイル。画面とは別の小さな描画領域で、モデルを斜め上から撮影する。
+function makeThumbnail(spec) {
+ if (!window.THREE || !state.engine) return null;
+
+ let t = state.thumb;
+
+ if (!t) {
+  try {
+   const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: true
+   });
+
+   renderer.setPixelRatio(1);
+   renderer.setSize(240,180,false);
+   renderer.outputEncoding = THREE.sRGBEncoding;
+   renderer.toneMapping = THREE.ACESFilmicToneMapping;
+   renderer.toneMappingExposure = 1.15;
+
+   const scene = new THREE.Scene();
+   scene.background = new THREE.Color('#1c2633');
+   scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,.9));
+
+   const key = new THREE.DirectionalLight(0xfff2dc,1.5);
+   key.position.set(4,8,5);
+   scene.add(key);
+
+   const rim = new THREE.DirectionalLight(0x73bfff,1.1);
+   rim.position.set(-4,3,-5);
+   scene.add(rim);
+
+   const camera = new THREE.PerspectiveCamera(35,240/180,.01,10000);
+
+   t = state.thumb = {renderer,scene,camera};
+  } catch (_) {
+   return null;
+  }
+ }
+
+ let root = null;
+
+ try {
+  root = state.engine.buildModel(spec);
+  t.scene.add(root);
+  root.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(root);
+
+  if (box.isEmpty()) {
+   box.set(new THREE.Vector3(-1,0,-1),new THREE.Vector3(1,2,1));
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = box.getSize(new THREE.Vector3()).length()/2 || 1;
+  const fov = t.camera.fov*Math.PI/180;
+  const dist = radius/Math.sin(fov/2)*1.05;
+
+  // 編集画面の初期カメラと同じく、斜め前・少し上から見る
+  const dir = new THREE.Vector3(
+   Math.sin(.65)*Math.sin(1.1),
+   Math.cos(1.1),
+   Math.cos(.65)*Math.sin(1.1)
+  ).normalize();
+
+  t.camera.position.copy(center).addScaledVector(dir,dist);
+  t.camera.near = Math.max(.001,dist/100);
+  t.camera.far = dist*10;
+  t.camera.updateProjectionMatrix();
+  t.camera.lookAt(center);
+
+  t.renderer.render(t.scene,t.camera);
+  return t.renderer.domElement.toDataURL('image/jpeg',.82);
+ } catch (_) {
+  return null;
+ } finally {
+  if (root) {
+   t.scene.remove(root);
+   state.engine.dispose(root);
+  }
+ }
+}
+
+// サムネイルがない既存プロジェクトを、描画の後で少しずつ作る
+function queueThumbs() {
+ if (state.thumbQueued || !state.engine) return;
+
+ const missing = state.projects.some(p =>
+  !p.thumb && !state.thumbTried.has(p.projectId)
+ );
+ if (!missing) return;
+
+ state.thumbQueued = true;
+
+ setTimeout(() => {
+  state.thumbQueued = false;
+  safe(fillThumbs);
+ },60);
+}
+
+function fillThumbs() {
+ const data = readStore();
+ let changed = false;
+ let count = 0;
+
+ for (const p of data.projects) {
+  if (p.thumb || state.thumbTried.has(p.projectId)) continue;
+  if (count >= 6) break;
+
+  state.thumbTried.add(p.projectId);
+  count++;
+
+  try {
+   const spec = normalizeSpec(p.modelSpec);
+   validateModelSpec(spec);
+
+   const thumb = makeThumbnail(spec);
+
+   if (thumb) {
+    p.thumb = thumb;
+    changed = true;
+   }
+  } catch (_) {}
+ }
+
+ if (!changed) return;
+
+ try {
+  localStorage.setItem(STORE,JSON.stringify(data));
+ } catch (_) {}
+
+ state.projects = data.projects;
+ if (state.activeTab === 'model') renderPanel();
+}
+
+function deleteProject(id) {
+ const data = readStore();
+
+ data.projects = data.projects.filter(p => p.projectId !== id);
+ if (data.last === id) data.last = null;
+
+ localStorage.setItem(STORE,JSON.stringify(data));
+ state.projects = data.projects;
+
+ if (state.projectId === id) {
+  // 画面上のモデルは残し、未保存の扱いにする
+  state.projectId = null;
+  state.dirty = true;
+  writeDraft();
+ }
+
+ renderPanel();
+ toast('ライブラリから削除しました');
+}
+
 function readStore() {
  const raw = localStorage.getItem(STORE);
  if (!raw) return {projects:[],last:null};
@@ -4197,6 +4888,9 @@ function saveProject() {
    projectId: id,
    name: state.modelSpec.meta.name,
    modelSpec: snapshot(),
+   thumb: makeThumbnail(state.modelSpec)
+    || data.projects.find(p => p.projectId === id)?.thumb
+    || null,
    updatedAt: new Date().toISOString()
   };
 
@@ -4667,21 +5361,10 @@ function modelPanel() {
     ${button('json','データをコピー')}
    </div>
 
-   ${selectField(
-    '保存プロジェクト',
-    'id="projectSelect"',
-    [
-     ['','選択してください'],
-     ...state.projects.map(p => [
-      p.projectId,
-      p.name+' · '+new Date(p.updatedAt).toLocaleDateString()
-     ])
-    ],
-    state.projectId
-   )}
+   <h3>保存したモデル（ライブラリ）</h3>
+   ${libraryGrid()}
 
    <div class="row">
-    ${button('load','開く')}
     ${button('saveAs','別プロジェクトとして保存')}
    </div>
 
@@ -4689,6 +5372,51 @@ function modelPanel() {
     このブラウザの中に保存します。「データをコピー」で別の端末へ移せます。
     インターネットにつながっていないと3D表示だけ使えません（編集・保存はできます）。
    </p>
+  </div>
+ `;
+}
+
+// 保存プロジェクトをサムネイル付きカードで並べる（新しい順）
+function libraryGrid() {
+ const list = [...state.projects].sort((a,b) =>
+  String(b.updatedAt).localeCompare(String(a.updatedAt))
+ );
+
+ if (!list.length) {
+  return '<p class="hint">まだ保存したモデルはありません。上の「保存」を押すと、ここに追加されます。</p>';
+ }
+
+ queueThumbs();
+
+ return `
+  <div class="library">
+   ${list.map(p => {
+    const s = p.modelSpec || {};
+    const parts = Object.keys(s.parts || {}).length;
+    const anims = Object.keys(s.animations || {}).length;
+    const current = p.projectId === state.projectId;
+
+    return `
+     <div class="libcard ${current ? 'current' : ''}">
+      <button
+       class="libopen"
+       data-open="${esc(p.projectId)}"
+       aria-label="${esc(p.name)}を開く"
+      >
+       ${p.thumb
+        ? `<img src="${esc(p.thumb)}" alt="" loading="lazy">`
+        : '<span class="nothumb">◈</span>'}
+       <b>${esc(p.name)}</b>
+       <small>${esc(new Date(p.updatedAt).toLocaleDateString())} · 部品${parts}${anims ? ' · 動き'+anims : ''}${current ? ' · 編集中' : ''}</small>
+      </button>
+      <button
+       class="libdel danger"
+       data-delproject="${esc(p.projectId)}"
+       aria-label="${esc(p.name)}を削除"
+      >✕</button>
+     </div>
+    `;
+   }).join('')}
   </div>
  `;
 }
@@ -5236,6 +5964,7 @@ function handleChange(e) {
   draft[d.draft] = el.type === 'checkbox' ? el.checked : el.value;
 
   if (d.draft === 'id') applyDraftDefaults();
+  scheduleQueueSave();
   if (d.draft === 'id' || d.draft === 'ref') renderPanel();
  } else if (d.draftPart) {
   const draft = state.ai.motionDraft;
@@ -5246,6 +5975,11 @@ function handleChange(e) {
   else on.delete(d.draftPart);
 
   draft.parts = all.filter(r => on.has(r));
+  scheduleQueueSave();
+ } else if (d.batch) {
+  state.ai.batchSize = [2,3,4,6].includes(Number(el.value)) ? Number(el.value) : 3;
+  saveQueue();
+  renderPanel();
  } else if (el.id === 'background') {
   state.background = el.value;
   setPreviewMode();
@@ -5257,14 +5991,22 @@ function handleInput(e) {
 
  if (d.ai) {
   state.ai[d.ai] = e.target.value;
- } else if (d.draft && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
+  if (d.ai === 'batchNote') scheduleQueueSave();
+ } else if (
+  d.draft
+  && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')
+  && e.target.type !== 'checkbox'
+ ) {
   state.ai.motionDraft[d.draft] = e.target.value;
+  scheduleQueueSave();
  } else if (d.beatT !== undefined) {
   const beat = state.ai.motionDraft.beats[Number(d.beatT)];
   if (beat) beat[0] = e.target.value;
+  scheduleQueueSave();
  } else if (d.beatD !== undefined) {
   const beat = state.ai.motionDraft.beats[Number(d.beatD)];
   if (beat) beat[1] = e.target.value;
+  scheduleQueueSave();
  } else if (d.motion) {
   state.motion[d.motion] = Number(e.target.value);
   const out = $('out_m_'+d.motion);
@@ -5347,6 +6089,7 @@ const actions = {
    ? Math.round((Number(beats[beats.length-2][0])+Number(beats[beats.length-1][0]))/2)
    : 50;
   beats.splice(Math.max(0,beats.length-1),0,[t,'']);
+  scheduleQueueSave();
   renderPanel();
  },
  promptDetail: () => copyText(
@@ -5365,6 +6108,66 @@ const actions = {
   toast('読み込む前の状態に戻しました');
  },
  reviewFix: autoFixMotions,
+ queueAdd: () => {
+  ensureQueue();
+
+  const q = state.ai.motionQueue;
+  assert(q.length < LIMIT.animations,'注文リストは'+LIMIT.animations+'件までです');
+
+  const have = new Set(q.map(itemId));
+  const nextId = standardIdsForKind().find(id => !have.has(id));
+
+  q.push(newDraftItem(nextId || '*'));
+  state.ai.queueIndex = q.length-1;
+  saveQueue();
+  renderPanel();
+ },
+ queueStandard: () => {
+  ensureQueue();
+  ensureMotionRoles();
+
+  const q = state.ai.motionQueue;
+  const have = new Set(q.map(itemId));
+  const add = defaultPicks(state.motion.kind).filter(id => !have.has(id));
+
+  if (!add.length) {
+   toast('標準セットの動きは、すべて注文リストにあります');
+   return;
+  }
+
+  assert(q.length+add.length <= LIMIT.animations,'注文リストは'+LIMIT.animations+'件までです');
+
+  add.forEach(id => q.push(newDraftItem(id)));
+  state.ai.queueIndex = q.length-add.length;
+  saveQueue();
+  renderPanel();
+  toast(add.length+'件を注文リストに追加しました');
+ },
+ queuePicks: () => {
+  ensureQueue();
+
+  const q = state.ai.motionQueue;
+  const have = new Set(q.map(itemId));
+  const add = state.motion.picks.filter(id =>
+   STANDARD_MOTIONS.some(x => x[0] === id) && !have.has(id)
+  );
+
+  assert(q.length+add.length <= LIMIT.animations,'注文リストは'+LIMIT.animations+'件までです');
+
+  add.forEach(id => q.push(newDraftItem(id)));
+  if (add.length) state.ai.queueIndex = q.length-add.length;
+  saveQueue();
+
+  state.activeTab = 'ai';
+  renderPanel();
+  $('motionQueueCard')?.scrollIntoView({block:'start'});
+
+  toast(
+   add.length
+    ? add.length+'件を注文リストに追加しました。台本を確かめてから指示文をコピーしてください'
+    : '選んだ動きは、すでに注文リストにあります'
+  );
+ },
  reviewAsk: () => copyText(
   createReviewFixPrompt(),
   '直してもらう指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
@@ -5418,11 +6221,6 @@ const actions = {
   renderPanel();
  },
 
- load: () => {
-  const id = $('projectSelect').value;
-  assert(id,'保存プロジェクトを選択してください');
-  replaceGuard(() => loadProject(id));
- },
 
  saveAs: () => {
   state.projectId = null;
@@ -5468,9 +6266,26 @@ function handleClick(e) {
    renderPanel();
   } else if (b.dataset.try) {
    tryAction(b.dataset.try);
+  } else if (b.dataset.open) {
+   const id = b.dataset.open;
+   replaceGuard(() => loadProject(id));
+  } else if (b.dataset.delproject) {
+   const id = b.dataset.delproject;
+   const name = state.projects.find(p => p.projectId === id)?.name || id;
+
+   askConfirm('「'+name+'」をライブラリから削除しますか？（元に戻せません）',() => deleteProject(id));
+  } else if (b.dataset.qedit !== undefined) {
+   editQueueItem(Number(b.dataset.qedit));
+  } else if (b.dataset.qcopy !== undefined) {
+   copyQueueItem(Number(b.dataset.qcopy));
+  } else if (b.dataset.qdel !== undefined) {
+   deleteQueueItem(Number(b.dataset.qdel));
+  } else if (b.dataset.batchcopy !== undefined) {
+   copyBatch(Number(b.dataset.batchcopy));
   } else if (b.dataset.delbeat !== undefined) {
    const beats = state.ai.motionDraft.beats;
    if (beats.length > 1) beats.splice(Number(b.dataset.delbeat),1);
+   scheduleQueueSave();
    renderPanel();
   } else if (b.dataset.delmotion) {
    const id = b.dataset.delmotion;
