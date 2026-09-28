@@ -126,6 +126,13 @@ body.library-open #viewTools{display:none}
 #libraryScreen .library{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
 .libmeta{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:11px;color:#d8e7f2}
 .libdesc{font-size:11px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.libacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:6px}
+.libacts button{padding:6px 4px;font-size:12px}
+.keybar{position:relative;height:44px;margin:0 8px;border-bottom:1px solid var(--line)}
+.keymark{position:absolute;top:0;width:24px;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;transform:translateX(-50%)}
+.keymark::after{content:'';position:absolute;left:50%;top:50%;width:10px;height:10px;border-radius:2px;background:#ffc66f;transform:translate(-50%,-50%) rotate(45deg)}
+.keymark.on::after{background:var(--cyan)}
+#startupSplash{cursor:pointer}
 @media(min-width:950px){
  .libhead,.libtools,.libbody{padding-left:max(24px,calc((100vw - 1100px)/2));padding-right:max(24px,calc((100vw - 1100px)/2))}
 }
@@ -174,14 +181,29 @@ const startupPainted = new Promise(resolve => {
  });
 });
 
+// init の完了（成功・失敗とも）を知らせる
+let startupReadyMark = () => {};
+const startupReady = new Promise(resolve => {
+ startupReadyMark = resolve;
+});
+
+// 最短400ms経過と init 完了の両方で閉じる。最大1500ms、タップ/クリックで即座に閉じる
 const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
- setTimeout(() => {
+ let closed = false;
+
+ const close = () => {
+  if (closed) return;
+  closed = true;
   document.getElementById('startupSplash')?.remove();
   document.querySelectorAll('[data-startup-lock]').forEach(el => {
    el.removeAttribute('inert');
   });
   resolve();
- },1500);
+ };
+
+ document.getElementById('startupSplash')?.addEventListener('click',close);
+ Promise.all([new Promise(r => setTimeout(r,400)),startupReady]).then(close);
+ setTimeout(close,1500);
 }));
 </script>
 
@@ -3638,9 +3660,12 @@ function editMove(dir) {
 
  if (!e.pending) e.pending = currentOffset();
 
- const step = modelSpan()*.02*(dir === 'y+' ? 1 : -1);
+ const i = 'xyz'.indexOf(dir[0]);
+ assert(i >= 0,'移動の向きが分かりません');
 
- e.pending.pos[1] = Math.round((e.pending.pos[1]+step)*10000)/10000;
+ const step = modelSpan()*.02*(dir[1] === '+' ? 1 : -1);
+
+ e.pending.pos[i] = Math.round((e.pending.pos[i]+step)*10000)/10000;
  showEditPose();
  renderPanel();
 }
@@ -3654,6 +3679,68 @@ function stepEdit(dir) {
  e.pending = null;
  showEditPose();
  renderPanel();
+}
+
+// キーの時刻一覧（部品を選んでいればその部品だけ、未選択なら全トラック）
+function editKeyTimes(a,pid) {
+ const set = new Set();
+ const tracks = pid ? {[pid]:a.tracks?.[pid]} : (a.tracks || {});
+
+ for (const tr of Object.values(tracks)) {
+  if (!tr) continue;
+  for (const list of Object.values(tr)) {
+   list.forEach(k => set.add(r3(k[0])));
+  }
+ }
+
+ return [...set].sort((x,y) => x-y);
+}
+
+function editKeyMarkers(a,e) {
+ const times = editKeyTimes(a,e.partId);
+ const label = e.partId ? '選択中の部品のキー' : 'すべてのキー';
+
+ if (!times.length) return `<p class="hint">${label}: まだありません</p>`;
+
+ return `
+  <div class="keybar" aria-label="${label}">
+   ${times.map(t => {
+    const pct = a.duration > 0 ? Math.min(100,Math.max(0,t/a.duration*100)) : 0;
+    const on = Math.abs(t-e.time) <= .01;
+    return `<button class="keymark ${on ? 'on' : ''}" data-ekeyt="${t}" style="left:${pct}%" aria-label="${t}秒のキーへ移動"></button>`;
+   }).join('')}
+  </div>
+  <p class="hint">${label}: ${times.length}個（◆をタップするとその時刻へ移動）</p>
+ `;
+}
+
+function seekEditTime(t) {
+ const e = state.motion.edit;
+ const a = e && state.modelSpec.animations?.[e.clipId];
+ if (!a) return;
+
+ e.time = r3(Math.min(a.duration,Math.max(0,Number(t) || 0)));
+ e.pending = null;
+ showEditPose();
+ renderPanel();
+}
+
+function jumpEditKey(dir) {
+ const e = state.motion.edit;
+ const a = e && state.modelSpec.animations?.[e.clipId];
+ if (!a) return;
+
+ const times = editKeyTimes(a,e.partId);
+ const t = dir > 0
+  ? times.find(x => x > e.time+.01)
+  : [...times].reverse().find(x => x < e.time-.01);
+
+ if (t === undefined) {
+  toast(dir > 0 ? 'この先にキーはありません' : 'この前にキーはありません');
+  return;
+ }
+
+ seekEditTime(t);
 }
 
 // ±0.01秒以内に既存のキーがあれば値を置き換え、なければ時刻順に挿入する
@@ -3840,9 +3927,12 @@ function motionEditCard() {
    <label>時刻 <output id="editTimeOut">${r3(e.time)}</output>秒 / ${a.duration}秒
     <input type="range" min="0" max="${a.duration}" step="${step}" value="${e.time}" data-etime="1">
    </label>
+   ${editKeyMarkers(a,e)}
    <div class="row">
+    ${b('data-ekey="-1"','◀ 前のキー')}
     ${b('data-estep="-1"','◀ 1コマ')}
     ${b('data-estep="1"','1コマ ▶')}
+    ${b('data-ekey="1"','次のキー ▶')}
    </div>
 
    <p class="hint">${part
@@ -3853,7 +3943,8 @@ function motionEditCard() {
     <div class="nudgegrid">
      ${b('data-erot="x+"','X ＋')}${b('data-erot="y+"','Y ＋')}${b('data-erot="z+"','Z ＋')}
      ${b('data-erot="x-"','X −')}${b('data-erot="y-"','Y −')}${b('data-erot="z-"','Z −')}
-     ${b('data-epos="y+"','↑ 上へ')}${b('data-epos="y-"','↓ 下へ')}<span></span>
+     ${b('data-epos="x-"','← 右へ')}${b('data-epos="y+"','↑ 上へ')}${b('data-epos="x+"','左へ →')}
+     ${b('data-epos="z+"','前へ')}${b('data-epos="y-"','↓ 下へ')}${b('data-epos="z-"','後ろへ')}
     </div>
     <label>
      <input type="checkbox" id="editFine" ${e.fine ? 'checked' : ''}>
@@ -7738,6 +7829,16 @@ function libraryGrid() {
        data-delproject="${esc(p.projectId)}"
        aria-label="${esc(p.name)}を削除"
       >✕</button>
+      <div class="libacts">
+       <button
+        data-renproject="${esc(p.projectId)}"
+        aria-label="${esc(p.name)}の名前を変更"
+       >名前変更</button>
+       <button
+        data-dupproject="${esc(p.projectId)}"
+        aria-label="${esc(p.name)}を複製"
+       >複製</button>
+      </div>
      </div>
     `;
    }).join('')}
@@ -7765,6 +7866,11 @@ function renderLibrary() {
    </select>
   </div>
   <div class="libbody">
+   <div class="row">
+    ${button('libraryExport','すべて書き出す')}
+    ${button('libraryImport','まとめて読み込む')}
+   </div>
+   <input type="file" id="libraryFile" accept=".json,application/json" hidden>
    <p class="hint">カードをタップすると、そのモデルを開いて編集画面に戻ります。</p>
    <div id="libraryGrid">${libraryGrid()+storageMeter()}</div>
   </div>
@@ -7817,11 +7923,188 @@ function closeLibrary() {
  document.body.classList.remove('library-open');
  libraryBackground().forEach(el => el.removeAttribute('inert'));
 
+ // ライブラリでの操作（件数など）を編集パネルにも反映する
+ renderPanel();
+
  const back = state.libraryReturn;
  state.libraryReturn = null;
  if (back && document.contains(back)) back.focus({preventScroll:true});
 
  invalidate();
+}
+
+// ------------------------------------------------------------
+// ライブラリの管理（名前変更・複製・一括書き出し／読み込み）
+// ------------------------------------------------------------
+
+let libraryRenameId = null;
+
+// 保存に失敗したときは localStorage も state.projects も変えない
+function writeLibrary(data) {
+ try {
+  localStorage.setItem(STORE,JSON.stringify(data));
+ } catch (_) {
+  throw Error('保存領域が足りないため保存できませんでした。既存のデータは変わっていません。使わないモデルを削除してから、もう一度お試しください');
+ }
+
+ state.projects = data.projects;
+}
+
+function newModelId(base,data) {
+ const stem = (validId(base) ? base : 'model').slice(0,40);
+ const taken = new Set(data.projects.map(p => p.modelSpec?.meta?.id));
+ taken.add(state.modelSpec?.meta?.id);
+
+ let id;
+ do {
+  id = stem+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+ } while (taken.has(id));
+
+ return id;
+}
+
+function renameProject(id) {
+ const p = state.projects.find(x => x.projectId === id);
+ assert(p,'プロジェクトが見つかりません');
+
+ libraryRenameId = id;
+
+ openDialog(
+  '名前を変更',
+  `<label>新しい名前
+    <input type="text" id="renameText" maxlength="100" value="${esc(p.name)}">
+   </label>
+   <p id="dialogError" class="error" hidden></p>`,
+  button('close','キャンセル')+button('doRename','変更','primary')
+ );
+}
+
+function applyRename(id,raw) {
+ const name = String(raw ?? '').trim();
+
+ assert(name,'名前を入力してください');
+ assert(name.length <= 100,'名前は100文字以内にしてください');
+
+ const data = readStore();
+ const p = data.projects.find(x => x.projectId === id);
+ assert(p,'プロジェクトが見つかりません');
+
+ const spec = normalizeSpec(p.modelSpec);
+ spec.meta.name = name;
+ validateModelSpec(spec);
+
+ p.name = name;
+ p.modelSpec = spec;
+ p.updatedAt = new Date().toISOString();
+
+ writeLibrary(data);
+
+ // 編集中のプロジェクトなら、表示中のモデル名もそろえる（履歴に積む。保存状態は変えない）
+ if (state.projectId === id && state.modelSpec.meta.name !== name) {
+  finishLive();
+
+  const wasDirty = state.dirty;
+
+  mutate(s => {
+   s.meta.name = name;
+  });
+
+  state.dirty = wasDirty;
+  writeDraft();
+ }
+
+ renderLibraryGrid();
+ toast('名前を「'+name+'」に変えました');
+}
+
+function duplicateProject(id) {
+ const data = readStore();
+ const src = data.projects.find(x => x.projectId === id);
+ assert(src,'プロジェクトが見つかりません');
+
+ const spec = normalizeSpec(src.modelSpec);
+ const name = String(src.name || spec.meta.name).slice(0,95)+'（コピー）';
+
+ spec.meta.name = name;
+ spec.meta.id = newModelId(spec.meta.id,data);
+ validateModelSpec(spec);
+
+ data.projects.push({
+  projectId: uid('project'),
+  name,
+  modelSpec: spec,
+  thumb: src.thumb || null,
+  updatedAt: new Date().toISOString()
+ });
+
+ writeLibrary(data);
+ renderLibraryGrid();
+ toast('「'+name+'」を作りました');
+}
+
+function exportLibrary() {
+ const data = readStore();
+ assert(data.projects.length,'書き出すモデルがありません');
+
+ const out = {
+  format: 'MODELSTUDIO_LIBRARY_V1',
+  exportedAt: new Date().toISOString(),
+  projects: data.projects
+ };
+ const stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
+
+ downloadBlob(JSON.stringify(out),'modelstudio_library_'+stamp+'.json','application/json');
+ toast(data.projects.length+'件のモデルを書き出しました');
+}
+
+function importLibrary(file) {
+ assert(file.size <= 20000000,'ファイルが大きすぎます（20MBまで）');
+
+ file.text()
+  .then(text => safe(() => {
+   const src = parseJSON(text,20000000);
+
+   assert(
+    obj(src) && src.format === 'MODELSTUDIO_LIBRARY_V1' && Array.isArray(src.projects),
+    'ライブラリの書き出しファイル（MODELSTUDIO_LIBRARY_V1）を選んでください'
+   );
+
+   const data = readStore();
+   let added = 0;
+   let failed = 0;
+
+   for (const p of src.projects) {
+    try {
+     assert(obj(p),'形式が不正です');
+
+     const spec = normalizeSpec(p.modelSpec);
+     validateModelSpec(spec);
+
+     const name = typeof p.name === 'string' && p.name.trim()
+      ? p.name.trim().slice(0,100)
+      : spec.meta.name;
+     const thumb = typeof p.thumb === 'string'
+      && /^data:image\/(jpeg|png|webp);base64,/.test(p.thumb)
+      ? p.thumb
+      : null;
+     const updatedAt = typeof p.updatedAt === 'string' && !isNaN(Date.parse(p.updatedAt))
+      ? p.updatedAt
+      : new Date().toISOString();
+
+     data.projects.push({projectId:uid('project'),name,modelSpec:spec,thumb,updatedAt});
+     added++;
+    } catch (_) {
+     failed++;
+    }
+   }
+
+   assert(added,'読み込めるモデルがありませんでした（失敗 '+failed+'件）');
+
+   writeLibrary(data);
+   renderLibraryGrid();
+   toast(added+'件を追加しました'+(failed ? '（'+failed+'件は読み込めませんでした）' : ''),3200);
+  }))
+  .catch(() => showError(Error('ファイルを読み込めませんでした。書き出したJSONファイルを選んでください')));
 }
 
 function hierarchyRows(parent=null,depth=0) {
@@ -8237,7 +8520,81 @@ function exportPanel() {
  `;
 }
 
+// 再描画の前後で、パネル内のフォーカス・選択範囲・スクロール位置を保つ
+let panelRenderTimer = null;
+let panelRenderDefer = 0;
+
+function panelFocusKey(el) {
+ if (el.id) return el.tagName+'#'+el.id;
+
+ const data = [...el.attributes]
+  .filter(a => a.name.startsWith('data-'))
+  .map(a => a.name+'='+a.value)
+  .sort();
+
+ return data.length ? el.tagName+'['+data.join('][')+']' : null;
+}
+
+function capturePanelFocus(panel) {
+ const info = {tab:state.activeTab,scroll:panel.scrollTop,focus:null};
+ const el = document.activeElement;
+
+ if (!el || el === panel || !panel.contains(el)) return info;
+
+ const key = panelFocusKey(el);
+ if (!key) return info;
+
+ const same = [...panel.querySelectorAll(el.tagName)].filter(n => panelFocusKey(n) === key);
+ let sel = null;
+
+ if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+  try {
+   if (typeof el.selectionStart === 'number') sel = [el.selectionStart,el.selectionEnd];
+  } catch (_) {}
+ }
+
+ info.focus = {tag:el.tagName,key,index:same.indexOf(el),sel};
+ return info;
+}
+
+function restorePanelFocus(panel,info) {
+ if (!info || info.tab !== state.activeTab) return;
+
+ panel.scrollTop = info.scroll;
+
+ const f = info.focus;
+ if (!f || f.index < 0) return;
+
+ const same = [...panel.querySelectorAll(f.tag)].filter(n => panelFocusKey(n) === f.key);
+ const n = same[f.index];
+ if (!n || n.disabled) return;
+
+ n.focus({preventScroll:true});
+
+ if (f.sel) {
+  try {
+   n.setSelectionRange(f.sel[0],f.sel[1]);
+  } catch (_) {}
+ }
+
+ panel.scrollTop = info.scroll;
+}
+
 function renderPanel() {
+ // change の処理中は、Tab によるフォーカス移動が終わってから描き直す
+ if (panelRenderDefer) {
+  if (panelRenderTimer === null) {
+   panelRenderTimer = setTimeout(() => {
+    panelRenderTimer = null;
+    renderPanel();
+   },0);
+  }
+  return;
+ }
+
+ clearTimeout(panelRenderTimer);
+ panelRenderTimer = null;
+
  const views = {
   model: modelPanel,
   parts: partsPanel,
@@ -8247,7 +8604,11 @@ function renderPanel() {
   export: exportPanel
  };
 
- $('panel').innerHTML = stepBar()+views[state.activeTab]();
+ const panel = $('panel');
+ const keep = capturePanelFocus(panel);
+
+ panel.innerHTML = stepBar()+views[state.activeTab]();
+ restorePanelFocus(panel,keep);
 
  document.querySelectorAll('[data-tab]').forEach(b => {
   b.classList.toggle('active',b.dataset.tab === state.activeTab);
@@ -8394,13 +8755,31 @@ function handleEdit(el,live=false) {
  if ($('out_'+d.key)) $('out_'+d.key).value = value;
 }
 
+// change の中で起きたパネルの再描画は、フォーカス移動の後へ遅らせる
 function handleChange(e) {
+ panelRenderDefer++;
+
+ try {
+  return handleChangeNow(e);
+ } finally {
+  panelRenderDefer--;
+ }
+}
+
+function handleChangeNow(e) {
  const el = e.target;
  const d = el.dataset;
 
  if (el.id === 'librarySort') {
   state.librarySort = el.value;
   renderLibraryGrid();
+  return;
+ }
+
+ if (el.id === 'libraryFile') {
+  const file = el.files?.[0];
+  el.value = '';
+  if (file) safe(() => importLibrary(file));
   return;
  }
 
@@ -8579,6 +8958,23 @@ const actions = {
 
  library: openLibrary,
  libraryClose: closeLibrary,
+ libraryExport: exportLibrary,
+ libraryImport: () => $('libraryFile')?.click(),
+
+ doRename: () => {
+  const id = libraryRenameId;
+
+  try {
+   applyRename(id,$('renameText').value);
+   closeDialog();
+   $('libraryGrid')
+    ?.querySelector('[data-renproject="'+CSS.escape(id)+'"]')
+    ?.focus({preventScroll:true});
+  } catch (e) {
+   $('dialogError').hidden = false;
+   $('dialogError').textContent = e.message;
+  }
+ },
 
  mirror: mirrorPart,
  fileSave: saveFile,
@@ -8900,6 +9296,10 @@ function handleClick(e) {
    renderPanel();
   } else if (b.dataset.editClip) {
    toggleEdit(b.dataset.editClip);
+  } else if (b.dataset.ekeyt !== undefined) {
+   seekEditTime(Number(b.dataset.ekeyt));
+  } else if (b.dataset.ekey !== undefined) {
+   jumpEditKey(Number(b.dataset.ekey));
   } else if (b.dataset.estep !== undefined) {
    stepEdit(Number(b.dataset.estep));
   } else if (b.dataset.erot) {
@@ -8958,6 +9358,10 @@ function handleClick(e) {
    const name = state.projects.find(p => p.projectId === id)?.name || id;
 
    askConfirm('「'+name+'」をライブラリから削除しますか？（元に戻せません）',() => deleteProject(id));
+  } else if (b.dataset.renproject) {
+   renameProject(b.dataset.renproject);
+  } else if (b.dataset.dupproject) {
+   duplicateProject(b.dataset.dupproject);
   } else if (b.dataset.qedit !== undefined) {
    editQueueItem(Number(b.dataset.qedit));
   } else if (b.dataset.qcopy !== undefined) {
@@ -9148,6 +9552,9 @@ startupPainted.then(() => {
    init();
   } catch (e) {
    showError(e);
+  } finally {
+   // 成功・失敗にかかわらず、スプラッシュを閉じられる状態にする
+   startupReadyMark();
   }
  },0);
 });
