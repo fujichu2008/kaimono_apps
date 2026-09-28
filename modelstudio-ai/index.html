@@ -798,6 +798,7 @@ const state = {
  io: {
   session: 0,
   saveSerial: 0,
+  nameRevision: 0,
   saving: null,
   libraryError: false,
   draftError: false,
@@ -3904,10 +3905,15 @@ function handleMotionPick(id) {
  }
 
  if (m.edit) {
-  m.edit.partId = id;
-  m.edit.pending = null;
-  showEditPose();
-  renderPanel();
+  if (m.edit.partId === id) return;
+
+  requestPoseChange(() => {
+   if (!m.edit || !own(state.modelSpec.parts,id)) return;
+   m.edit.partId = id;
+   m.edit.pending = null;
+   showEditPose();
+   renderPanel();
+  });
  }
 }
 
@@ -3915,6 +3921,316 @@ function handleMotionPick(id) {
 // 手で直す（ポーズ編集）
 // 表示は seek と部品への直接の当てはめだけで行い、記録するまで ModelSpec は変えない
 // ------------------------------------------------------------
+
+// ユーザー操作の入口だけで未記録ポーズを確認する。
+// 記録後の再構築・refreshEdit・showEditPoseには確認処理を入れない。
+// poseTransitionは、同じ本体スクリプト内の既存宣言を共用する。
+
+function requestPoseChange(run,{message='',onCancel=null}={}) {
+ if (poseTransition) return false;
+
+ const edit = state.motion.edit;
+ if (!edit?.pending) {
+  run();
+  return true;
+ }
+
+ // DOMノード自体を保持し、貼り付け欄などの現在の入力値も維持する。
+ const prior = {
+  hidden: $('modal').hidden,
+  title: $('dialogTitle').textContent,
+  body: [...$('dialogBody').childNodes],
+  actions: [...$('dialogActions').childNodes],
+  action: state.modalAction,
+  returnTo: state.modalReturn,
+  focus: document.activeElement
+ };
+
+ poseTransition = {
+  edit,
+  session: state.io.session,
+  run,
+  onCancel,
+  prior
+ };
+
+ state.modalAction = null;
+
+ openDialog(
+  '未記録のポーズがあります',
+  `<p>現在の姿勢を記録してから続けますか？</p>
+   ${message ? `<p class="warnbox">${esc(message)}</p>` : ''}
+   <p class="hint">
+    「破棄して続行」は未記録の姿勢だけを破棄します。
+    「キャンセル」は元の編集へ戻ります。
+   </p>
+   <p id="poseTransitionError" class="error" hidden></p>`,
+  button('poseCancel','キャンセル')
+   +button('poseDiscard','破棄して続行')
+   +button('poseRecord','記録して続行','primary')
+ );
+
+ return false;
+}
+
+function restorePoseDialog(prior) {
+ $('dialogTitle').textContent = prior.title;
+ $('dialogBody').replaceChildren(...prior.body);
+ $('dialogActions').replaceChildren(...prior.actions);
+ $('modal').hidden = prior.hidden;
+ state.modalAction = prior.action;
+ state.modalReturn = prior.returnTo;
+
+ if (prior.focus && document.contains(prior.focus)) {
+  prior.focus.focus({preventScroll:true});
+ }
+}
+
+function resolvePoseChange(choice) {
+ const task = poseTransition;
+ if (!task) return;
+
+ const stillCurrent = state.io.session === task.session
+  && state.motion.edit === task.edit;
+
+ if (choice !== 'cancel' && !stillCurrent) {
+  poseTransition = null;
+  restorePoseDialog(task.prior);
+  showError(Error('編集対象が変わったため、保留していた操作を中止しました。'));
+  return;
+ }
+
+ if (choice === 'record') {
+  const pending = clone(task.edit.pending);
+
+  try {
+   recordEditKey();
+  } catch (e) {
+   // 検証・記録に失敗した場合、続行せず調整中の姿勢を残す。
+   if (state.motion.edit === task.edit) {
+    task.edit.pending = pending;
+    showEditPose();
+   }
+
+   const box = $('poseTransitionError');
+   if (box) {
+    box.hidden = false;
+    box.textContent = e.message || String(e);
+   } else {
+    showError(e);
+   }
+   return;
+  }
+ } else if (choice === 'discard') {
+  task.edit.pending = null;
+  showEditPose();
+ }
+
+ poseTransition = null;
+ restorePoseDialog(task.prior);
+
+ if (choice === 'cancel') {
+  if (stillCurrent && task.onCancel) safe(task.onCancel);
+  return;
+ }
+
+ safe(task.run);
+}
+
+// 確認済みの操作を再実行する。記録・破棄後はpendingがないので再確認しない。
+function guardPoseClick(b) {
+ const action = b.dataset.action;
+
+ if (poseTransition) {
+  return !['poseRecord','poseDiscard','poseCancel','close'].includes(action);
+ }
+
+ if (!state.motion.edit?.pending) return false;
+
+ const dataKeys = [
+  'editClip','play','try','assign','ekeyt','ekey','estep',
+  'paint','visible','nudge'
+ ];
+ const actionKeys = [
+  'undo','redo','stopMotion','editClose','editDeleteKey',
+  'editApplyLen','editApplyAmp','walkToggle','walkStop','tryReset',
+  'generateMotion','autoJoints','makeJoint','mirror','reviewFix',
+  'doImport','pasteImport'
+ ];
+
+ const destructive = dataKeys.some(k => b.dataset[k] !== undefined)
+  || actionKeys.includes(action);
+
+ if (!destructive) return false;
+
+ // 記録によるパネル再描画で、関節位置の選択が既定値に戻るのを防ぐ。
+ const jointAt = action === 'makeJoint' ? $('jointAt')?.value : null;
+ const message = ['doImport','pasteImport'].includes(action)
+  ? '読み込むデータによっては、モデル全体が置き換わります。'
+  : '';
+
+ requestPoseChange(() => {
+  if (jointAt !== null && $('jointAt')) $('jointAt').value = jointAt;
+  handleClick({target:b});
+ },{message});
+
+ return true;
+}
+
+// ユーザー操作の入口だけで未記録ポーズを確認する。
+// 記録後の再構築・refreshEdit・showEditPoseには確認処理を入れない。
+let poseTransition = null;
+
+function requestPoseChange(run,{message='',onCancel=null}={}) {
+ if (poseTransition) return false;
+
+ const edit = state.motion.edit;
+ if (!edit?.pending) {
+  run();
+  return true;
+ }
+
+ // DOMノード自体を保持し、貼り付け欄などの現在の入力値も維持する。
+ const prior = {
+  hidden: $('modal').hidden,
+  title: $('dialogTitle').textContent,
+  body: [...$('dialogBody').childNodes],
+  actions: [...$('dialogActions').childNodes],
+  action: state.modalAction,
+  returnTo: state.modalReturn,
+  focus: document.activeElement
+ };
+
+ poseTransition = {
+  edit,
+  session: state.io.session,
+  run,
+  onCancel,
+  prior
+ };
+
+ state.modalAction = null;
+
+ openDialog(
+  '未記録のポーズがあります',
+  `<p>現在の姿勢を記録してから続けますか？</p>
+   ${message ? `<p class="warnbox">${esc(message)}</p>` : ''}
+   <p class="hint">
+    「破棄して続行」は未記録の姿勢だけを破棄します。
+    「キャンセル」は元の編集へ戻ります。
+   </p>
+   <p id="poseTransitionError" class="error" hidden></p>`,
+  button('poseCancel','キャンセル')
+   +button('poseDiscard','破棄して続行')
+   +button('poseRecord','記録して続行','primary')
+ );
+
+ return false;
+}
+
+function restorePoseDialog(prior) {
+ $('dialogTitle').textContent = prior.title;
+ $('dialogBody').replaceChildren(...prior.body);
+ $('dialogActions').replaceChildren(...prior.actions);
+ $('modal').hidden = prior.hidden;
+ state.modalAction = prior.action;
+ state.modalReturn = prior.returnTo;
+
+ if (prior.focus && document.contains(prior.focus)) {
+  prior.focus.focus({preventScroll:true});
+ }
+}
+
+function resolvePoseChange(choice) {
+ const task = poseTransition;
+ if (!task) return;
+
+ const stillCurrent = state.io.session === task.session
+  && state.motion.edit === task.edit;
+
+ if (choice !== 'cancel' && !stillCurrent) {
+  poseTransition = null;
+  restorePoseDialog(task.prior);
+  showError(Error('編集対象が変わったため、保留していた操作を中止しました。'));
+  return;
+ }
+
+ if (choice === 'record') {
+  const pending = clone(task.edit.pending);
+
+  try {
+   recordEditKey();
+  } catch (e) {
+   // 検証・記録に失敗した場合、続行せず調整中の姿勢を残す。
+   if (state.motion.edit === task.edit) {
+    task.edit.pending = pending;
+    showEditPose();
+   }
+
+   const box = $('poseTransitionError');
+   if (box) {
+    box.hidden = false;
+    box.textContent = e.message || String(e);
+   } else {
+    showError(e);
+   }
+   return;
+  }
+ } else if (choice === 'discard') {
+  task.edit.pending = null;
+  showEditPose();
+ }
+
+ poseTransition = null;
+ restorePoseDialog(task.prior);
+
+ if (choice === 'cancel') {
+  if (stillCurrent && task.onCancel) safe(task.onCancel);
+  return;
+ }
+
+ safe(task.run);
+}
+
+// 確認済みの操作を再実行する。記録・破棄後はpendingがないので再確認しない。
+function guardPoseClick(b) {
+ const action = b.dataset.action;
+
+ if (poseTransition) {
+  return !['poseRecord','poseDiscard','poseCancel','close'].includes(action);
+ }
+
+ if (!state.motion.edit?.pending) return false;
+
+ const dataKeys = [
+  'editClip','play','try','assign','ekeyt','ekey','estep',
+  'paint','visible','nudge'
+ ];
+ const actionKeys = [
+  'undo','redo','stopMotion','editClose','editDeleteKey',
+  'editApplyLen','editApplyAmp','walkToggle','walkStop','tryReset',
+  'generateMotion','autoJoints','makeJoint','mirror','reviewFix',
+  'doImport','pasteImport'
+ ];
+
+ const destructive = dataKeys.some(k => b.dataset[k] !== undefined)
+  || actionKeys.includes(action);
+
+ if (!destructive) return false;
+
+ // 記録によるパネル再描画で、関節位置の選択が既定値に戻るのを防ぐ。
+ const jointAt = action === 'makeJoint' ? $('jointAt')?.value : null;
+ const message = ['doImport','pasteImport'].includes(action)
+  ? '読み込むデータによっては、モデル全体が置き換わります。'
+  : '';
+
+ requestPoseChange(() => {
+  if (jointAt !== null && $('jointAt')) $('jointAt').value = jointAt;
+  handleClick({target:b});
+ },{message});
+
+ return true;
+}
 
 function toggleEdit(id) {
  const m = state.motion;
@@ -5766,6 +6082,10 @@ function commitSpec(next,{history=true,fit=false,newSession=false}={}) {
  if (history) remember(snapshot());
  if (newSession) beginEditSession();
 
+ if (state.modelSpec?.meta.name !== next.meta.name) {
+  state.io.nameRevision++;
+ }
+
  state.modelSpec = next;
 
  if (!own(next.parts,state.selectedPartId)) {
@@ -6734,7 +7054,8 @@ function deleteSelected() {
     for (const [key,a] of Object.entries(s.anchors)) {
      if (ids.includes(a.parent)) delete s.anchors[key];
     }
-   })
+   }),
+   ids.includes(state.motion.edit?.partId)
   );
  }
 }
@@ -6972,7 +7293,11 @@ async function loadFromClipboard() {
   return;
  }
 
- safe(() => toast(applyAIText(text)));
+ // クリップボード読み取りの待機中に作られた未記録ポーズも確認する。
+ requestPoseChange(
+  () => safe(() => toast(applyAIText(text))),
+  {message:'読み込むデータによっては、モデル全体が置き換わります。'}
+ );
 }
 
 // ============================================================
@@ -8465,6 +8790,16 @@ function restoreProject() {
 }
 
 function replaceGuard(fn) {
+ if (state.motion.edit?.pending) {
+  requestPoseChange(fn,{
+   message: state.dirty
+    ? '続行するとモデルを置き換えます。未保存のモデル変更も置き換わります。'
+      +'ポーズの記録はライブラリへの保存ではありません。現在のモデルを残す場合は、キャンセルして先に記録・保存してください。'
+    : '続行するとモデルを置き換えます。現在のモデルにポーズを残す場合は、キャンセルして先に記録・保存してください。'
+  });
+  return;
+ }
+
  if (state.dirty) {
   askConfirm(
    '未保存の変更を置き換えますか？必要なら先に「保存」してください。',
@@ -9149,6 +9484,8 @@ function saveLegacyBackup() {
 }
 
 let libraryRenameId = null;
+// 同じプロジェクトの名前変更は、先行する要求の完了まで受け付けない。
+const renameJobs = new Map();
 
 // 保存に失敗したときは localStorage も state.projects も変えない
 function writeLibrary(data) {
@@ -9180,6 +9517,10 @@ function newModelId(base,data) {
 function renameProject(id) {
  const p = state.projects.find(x => x.projectId === id);
  assert(p,'プロジェクトが見つかりません');
+ assert(
+  !renameJobs.has(id),
+  'このプロジェクトの名前変更を保存中です。完了してからお試しください'
+ );
 
  libraryRenameId = id;
 
@@ -9193,11 +9534,15 @@ function renameProject(id) {
  );
 }
 
-function applyRename(id,raw) {
+async function applyRename(id,raw) {
  const name = String(raw ?? '').trim();
 
  assert(name,'名前を入力してください');
  assert(name.length <= 100,'名前は100文字以内にしてください');
+ assert(
+  !renameJobs.has(id),
+  'このプロジェクトの名前変更を保存中です。完了してからお試しください'
+ );
 
  const data = readStore();
  const p = data.projects.find(x => x.projectId === id);
@@ -9211,24 +9556,94 @@ function applyRename(id,raw) {
  p.modelSpec = spec;
  p.updatedAt = new Date().toISOString();
 
- const pending = writeLibrary(data);
+ const io = state.io;
+ const ticket = {
+  session: io.session,
+  projectId: id,
+  serial: null,
+  startSerial: io.saveSerial,
+  editing: state.projectId === id,
+  name: state.modelSpec.meta.name,
+  nameRevision: io.nameRevision
+ };
 
- // 編集中のプロジェクトなら、表示中のモデル名もそろえる（履歴に積む。保存状態は変えない）
- if (state.projectId === id && state.modelSpec.meta.name !== name) {
-  finishLive();
+ // 通常保存との前後関係も、既存のsaveSerialで判定する。
+ const current = () => ticket.editing
+  && io.session === ticket.session
+  && state.projectId === id
+  && io.saveSerial === (ticket.serial ?? ticket.startSerial);
 
-  const wasDirty = state.dirty;
+ let persisted = false;
+ renameJobs.set(id,ticket);
 
-  mutate(s => {
-   s.meta.name = name;
-  });
+ try {
+  // 楽観的な写しが同じ名前でも、対象レコードを必ず永続化する。
+  const saving = writeStore(data,{silent:true,forceIds:[id]});
+  state.projects = data.projects;
 
-  state.dirty = wasDirty;
-  writeDraft();
+  if (current()) {
+   ticket.serial = ++io.saveSerial;
+   io.saving = ticket;
+   writeDraft();
+   updateHeader();
+  }
+
+  await saving;
+  persisted = true;
+
+  if (current()) {
+   io.saving = null;
+   io.libraryError = false;
+   finishLive();
+
+   // 待機中に名前を編集していたら、元の名前に戻していても上書きしない。
+   if (
+    io.nameRevision === ticket.nameRevision
+    && state.modelSpec.meta.name === ticket.name
+   ) {
+    const wasDirty = state.dirty;
+
+    if (state.modelSpec.meta.name !== name) {
+     mutate(s => {
+      s.meta.name = name;
+     });
+    }
+
+    // 名前以外の未保存変更を維持する。
+    state.dirty = wasDirty
+     || JSON.stringify(state.modelSpec) !== JSON.stringify(spec);
+   } else {
+    state.dirty = true;
+   }
+
+   writeDraft();
+   renderPanel();
+  }
+
+  renderLibraryGrid();
+  toast('保存したモデルの名前を「'+name+'」に変更しました');
+ } catch (e) {
+  if (current()) {
+   if (io.saving === ticket) io.saving = null;
+   io.libraryError = !persisted;
+
+   // 書き込み失敗では編集内容・dirty・履歴を変更しない。
+   // 保存後の画面反映だけが失敗した場合は、不一致を未保存として示す。
+   if (persisted) state.dirty = true;
+
+   writeDraft();
+   updateHeader();
+  }
+
+  throw Error(
+   (persisted
+    ? '名前は保存できましたが、編集画面への反映に失敗しました: '
+    : '名前変更を保存できませんでした: ')
+   +(e?.message || e)
+  );
+ } finally {
+  if (renameJobs.get(id) === ticket) renameJobs.delete(id);
  }
-
- renderLibraryGrid();
- pending.then(() => toast('名前を「'+name+'」に変えました'),() => {});
 }
 
 function duplicateProject(id) {
@@ -9869,12 +10284,22 @@ function openDialog(title,body,actions) {
 }
 
 function closeDialog() {
+ if (poseTransition) {
+  resolvePoseChange('cancel');
+  return;
+ }
+
  $('modal').hidden = true;
  state.modalAction = null;
  state.modalReturn?.focus();
 }
 
-function askConfirm(message,fn) {
+function askConfirm(message,fn,protectPose=false) {
+ if (protectPose && state.motion.edit?.pending) {
+  requestPoseChange(fn,{message});
+  return;
+ }
+
  state.modalAction = fn;
 
  openDialog(
@@ -10004,6 +10429,25 @@ function handleEdit(el,live=false) {
 
 // change の中で起きたパネルの再描画は、フォーカス移動の後へ遅らせる
 function handleChange(e) {
+ const el = e.target;
+ const d = el.dataset;
+
+ if (
+  state.motion.edit?.pending
+  && (d.edit === 'parts' || d.geotype || d.dim)
+ ) {
+  // 確認中の再描画から、変更した値を独立して保持する。
+  const target = el.cloneNode(true);
+  target.value = el.value;
+  target.checked = el.checked;
+
+  requestPoseChange(
+   () => handleChange({target}),
+   {onCancel: () => renderPanel()}
+  );
+  return;
+ }
+
  panelRenderDefer++;
 
  try {
@@ -10105,6 +10549,28 @@ function handleChangeNow(e) {
 
 function handleInput(e) {
  const d = e.target.dataset;
+
+ if (
+  state.motion.edit?.pending
+  && (d.etime || d.motion === 'trySpeed')
+ ) {
+  const target = e.target.cloneNode(true);
+  target.value = e.target.value;
+
+  // 回答待ちの間は、スライダーと数値表示も現在の編集状態へ戻す。
+  const value = d.etime ? state.motion.edit.time : state.motion.trySpeed;
+  e.target.value = value;
+
+  const out = $(d.etime ? 'editTimeOut' : 'out_m_trySpeed');
+  if (out) out.value = d.etime ? r3(value) : value;
+
+  // 連続input中も、保留する操作と確認ダイアログは1つだけ。
+  requestPoseChange(() => {
+   handleInput({target});
+   renderPanel();
+  });
+  return;
+ }
 
  if (e.target.id === 'librarySearch') {
   state.libraryQuery = e.target.value;
@@ -10215,17 +10681,41 @@ const actions = {
 
  doRename: () => {
   const id = libraryRenameId;
+  const input = $('renameText');
+  if (!input) return;
 
-  try {
-   applyRename(id,$('renameText').value);
-   closeDialog();
-   $('libraryGrid')
-    ?.querySelector('[data-renproject="'+CSS.escape(id)+'"]')
-    ?.focus({preventScroll:true});
-  } catch (e) {
-   $('dialogError').hidden = false;
-   $('dialogError').textContent = e.message;
-  }
+  const submit = $('dialogActions').querySelector('[data-action="doRename"]');
+  if (submit?.disabled) return;
+  if (submit) submit.disabled = true;
+
+  const raw = input.value;
+
+  return applyRename(id,raw)
+   .then(() => {
+    // 待機中に開いた別のダイアログを閉じない。
+    if ($('renameText') !== input || libraryRenameId !== id) return;
+
+    closeDialog();
+    $('libraryGrid')
+     ?.querySelector('[data-renproject="'+CSS.escape(id)+'"]')
+     ?.focus({preventScroll:true});
+   },e => {
+    if ($('renameText') === input && libraryRenameId === id) {
+     const box = $('dialogError');
+     if (box) {
+      box.hidden = false;
+      box.textContent = e.message;
+     } else {
+      showError(e);
+     }
+    } else {
+     showError(e);
+    }
+   })
+   .finally(() => {
+    if (submit) submit.disabled = false;
+   })
+   .catch(e => showError(e));
  },
 
  mirror: mirrorPart,
@@ -10246,6 +10736,9 @@ const actions = {
  demoHtml: saveDemoHtml,
 
  editRecord: recordEditKey,
+ poseRecord: () => resolvePoseChange('record'),
+ poseDiscard: () => resolvePoseChange('discard'),
+ poseCancel: () => resolvePoseChange('cancel'),
  editDeleteKey: deleteEditKey,
  editApplyLen: () => applyEditScale('len'),
  editApplyAmp: () => applyEditScale('amp'),
@@ -10383,14 +10876,17 @@ const actions = {
    if (restoreReviewBase()) toast('読み込む前の状態に戻しました');
   };
 
-  // 確認中に別の編集をしていたら、その編集も戻ることを確かめてから戻す
+  // 既存の確認と未記録ポーズの確認を1つにまとめる。
   if (rv.owned !== state.modelSpec) {
    askConfirm(
     '確認中に別の編集をしています。読み込む前の状態に戻すと、その編集も元に戻ります（戻した後に ↶ でやり直せます）。戻しますか？',
-    run
+    run,
+    true
    );
   } else {
-   run();
+   requestPoseChange(run,{
+    message:'読み込む前のモデルへ戻します。記録して続行した場合も、その後の操作で読み込み前の状態へ戻ります。'
+   });
   }
  },
  reviewFix: autoFixMotions,
@@ -10545,6 +11041,11 @@ function handleClick(e) {
  const b = e.target.closest('button');
  if (!b) return;
 
+ if (guardPoseClick(b)) {
+  e.preventDefault?.();
+  return;
+ }
+
  // ダイアログを開く操作は先に閉じ、戻り先をメニューボタンにする
  if (
   b.closest('#moreMenu')
@@ -10653,7 +11154,7 @@ function handleClick(e) {
 
    askConfirm('動き「'+name+'」を削除しますか？',() => mutate(s => {
     delete s.animations[id];
-   }));
+   }),id === state.motion.edit?.clipId);
   } else if (b.dataset.visible) {
    const id = b.dataset.visible;
 
@@ -10738,7 +11239,8 @@ function handleKeyboard(e) {
 
  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
   e.preventDefault();
-  safe(() => undoRedo(e.shiftKey));
+  const redo = e.shiftKey;
+  requestPoseChange(() => safe(() => undoRedo(redo)));
  }
 }
 
