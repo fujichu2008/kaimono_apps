@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-【ハムスケ大冒険 v1.4】難易度の再調整（v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
+【ハムスケ大冒険 v1.5】照準の改善（v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
 ■ 作成内容
  - 単一HTML／Three.js r128（CDN 1回読込）。外部画像・モデル・音声なし。効果音は Web Audio で合成
  - 添付モデル「かわいいハムスター」のコードを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA,{walkSpeed:3,runSpeed:6}) で生成（scale 8）
@@ -42,6 +42,12 @@
  - 種補給の待ち時間を5秒に。補給された種ぶくろは5個（配置品・敵ドロップは10個のまま）
  - ボス戦の最低資源保証を種15個・ひまわり1回に。ミケ大将のHPを36に。ハチッピ・ヒノコウモリの地上休憩を2.0秒に
  - 空中にいるボス（クロウ将軍・ノクターン第2段階）にも偏差照準を効かせる
+■ v1.5 照準の改善（数値は初回調整値。実機での確認は未実施）
+ - 照準対象の選択を pickAimTarget に一本化（攻撃開始時の向き合わせ・発射・目印で共通）
+   順序：直前に狙った対象（0.5秒＋攻撃の長さ）→ 正面の照準範囲内で最も近い → 全方向で8m以内の最も近い。壁の向こうは対象外
+ - 通常攻撃・れんだ・ひまわりの開始時に対象へ振り向く（発射時は振り向かず、正面の範囲内だけを狙う）
+ - 突進中のゼンマイネズミ・転がり中のダンゴロにも偏差照準（先読み最大0.3秒）
+ - 狙う対象の足元に黄色い輪の目印を表示
 ■ 改善提案
  - セーブ（到達ステージ・黄金の種）を追加すると遊びやすくなる
  - 敵の出現数・HPを CONFIG の難易度倍率で一括調整できるようにする
@@ -237,6 +243,7 @@ html:not(.touch) #guide{bottom:max(24px,env(safe-area-inset-bottom))}
       移動 WASD ／ ダッシュ Shift ／ ジャンプ Space ／ カメラ：ドラッグ<br>
       ジャンプで敵に上から乗ると、着地までに最大3回まで連続で踏める（同じ敵へのダメージは2回まで。別の敵へ踏み継ぐと「わたりぶみ」）<br>
       J 種投げ：前方への基本攻撃（種1個）。投げている間はゆっくり移動できる。金の種を持っていると自動で2倍ダメージ<br>
+      攻撃は近くの敵へ自動で振り向く（狙う敵の足元に黄色い輪）<br>
       K 種連打：頬にためて大きな種を3連射（種5個）<br>
       L 押しつぶす：跳んで周囲の敵をまとめて攻撃（がんばり満タン）<br>
       H ひまわり：前方の扇形に強力な一撃（ひまわり1回分）<br>
@@ -1007,7 +1014,9 @@ const CONFIG = {
   // 最後の1回は stompCooldown・stompPush を使う
   stompChainMax: 3, stompChainCooldown: 0.35, stompChainPush: 1.0,
   // 1回の連続で同じ敵にダメージを与えられる最大回数と、別の敵へ踏み継いだとき（わたりぶみ）のスコア
-  stompSameMax: 2, stompHopScore: 100
+  stompSameMax: 2, stompHopScore: 100,
+  // 照準：直前に狙った対象を優先する秒数、正面に対象がいないとき振り向いて狙う距離（m）、地上の敵の先読み時間の上限（秒）
+  aimStickTime: 0.5, aimTurnRange: 8, groundLeadMax: 0.3
 };
 // 新規アクションを受け付けない動き（attack 中の連打による再始動・種の重複消費もこれで防ぐ）
 const LOCK_SET = new Set(['attack', 'Taneremda', 'oshitsubusu', 'hissatsu', 'emote', 'hurt', 'die']);
@@ -3157,6 +3166,10 @@ for (let i = 0; i < 4; i++) {
 const landMark = new THREE.Mesh(GEO.ring, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide }));
 landMark.rotation.x = -Math.PI / 2; landMark.scale.setScalar(0.45); landMark.visible = false;
 pools.add(landMark);
+// 照準の目印（いま攻撃したら狙う対象の足元に出す。常設の1個を使い回す）
+const aimMark = new THREE.Mesh(GEO.ring, new THREE.MeshBasicMaterial({ color: 0xffd23a, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }));
+aimMark.rotation.x = -Math.PI / 2; aimMark.visible = false;
+pools.add(aimMark);
 
 function spawnParticle(pos, vel, color, size, life, grav = 6) {
   const p = particles.find(x => !x.active);
@@ -3192,34 +3205,95 @@ function updateParticles(dt) {
 }
 
 /* 主人公の種 */
-function findAimTarget(origin, yaw) {
-  let best = null, bd = CONFIG.seedRange;
-  const tryT = (c, maxA, vel) => {
-    const d = c.distanceTo(origin);
-    if (d > bd) return;
-    const a = Math.atan2(c.x - origin.x, c.z - origin.z);
-    if (Math.abs(angDiff(yaw, a)) > maxA) return;
-    bd = d; best = c.clone();
-    // 飛行する敵は、種が届くまでの時間ぶん先の位置（偏差位置）を狙う
-    if (vel) best.addScaledVector(vel, Math.min(CONFIG.aimLeadMax, d / CONFIG.seedSpeed));
-  };
-  for (const e of world.enemies) {
-    if (e.dead) continue;
-    const fly = !!e.def.fly;
-    tryT(enemyCenter(e), fly ? CONFIG.flyAimAngle : CONFIG.aimAngle, fly ? e.vel : null);
+// 照準の記憶（直前に狙った対象を短時間優先して、狙いが敵から敵へ飛び移らないようにする）
+const aimMem = { ref: null, until: -1 };
+function rememberAim(ref, extra) {
+  const until = G.t + extra + CONFIG.aimStickTime;
+  aimMem.until = aimMem.ref === ref ? Math.max(aimMem.until, until) : until;
+  aimMem.ref = ref;
+}
+function forgetAim() { aimMem.ref = null; aimMem.until = -1; }
+// 照準対象の情報（中心・照準角度・偏差用の速度と先読み上限・半径）。対象にできなければ null
+function aimInfo(t) {
+  if (!t || t.dead) return null;
+  if (t === G.boss) {
+    if (!bossReachable(t)) return null;
+    return { c: bossCenter(t, new V3()), maxA: t.air ? CONFIG.flyAimAngle : CONFIG.aimAngle,
+      vel: t.air ? t.vel : null, lead: CONFIG.aimLeadMax, r: t.def.radius };
   }
-  // 空中にいるボスは飛行する雑魚と同じ照準角度・偏差照準。地上のボスは従来どおり
-  const b = G.boss;
-  if (b && !b.dead && bossReachable(b)) tryT(bossCenter(b), b.air ? CONFIG.flyAimAngle : CONFIG.aimAngle, b.air ? b.vel : null);
-  return best;
+  if (!world.enemies.includes(t)) return null;
+  const fly = !!t.def.fly;
+  // 突進中のゼンマイネズミ・転がり中のダンゴロにも控えめな偏差照準
+  const rush = (t.def.behavior === 'charge' && t.mode === 'charge') || (t.def.behavior === 'roll' && t.mode === 'roll');
+  return { c: enemyCenter(t, new V3()), maxA: fly ? CONFIG.flyAimAngle : CONFIG.aimAngle,
+    vel: fly || rush ? t.vel : null, lead: fly ? CONFIG.aimLeadMax : CONFIG.groundLeadMax, r: t.def.radius };
+}
+// 2点の間に壁（固体）がないか（0.5mおきに調べる軽い判定）
+const _losP = new V3();
+function clearLine(a, b) {
+  const n = Math.ceil(a.distanceTo(b) / 0.5);
+  for (let i = 1; i < n; i++) if (pointInSolid(_losP.lerpVectors(a, b, i / n))) return false;
+  return true;
+}
+// t を照準対象にできるか（距離と向き。allowTurn が false なら正面の範囲内だけ）
+function evalAim(t, origin, yaw, allowTurn) {
+  const info = aimInfo(t);
+  if (!info) return null;
+  const d = info.c.distanceTo(origin);
+  if (d > CONFIG.seedRange) return null;
+  const front = Math.abs(angDiff(yaw, Math.atan2(info.c.x - origin.x, info.c.z - origin.z))) <= info.maxA;
+  if (!front && !(allowTurn && d <= CONFIG.aimTurnRange)) return null;
+  return { ref: t, info, d, front };
+}
+// 狙う位置（偏差を含む）を決める
+function finishAim(r) {
+  const pos = r.info.c.clone();
+  if (r.info.vel) pos.addScaledVector(r.info.vel, Math.min(r.info.lead, r.d / CONFIG.seedSpeed));
+  return { ref: r.ref, pos, info: r.info };
+}
+// 照準対象を選ぶ（攻撃開始時の向き合わせ・発射・目印で共通）。見つからなければ null
+// 1. 直前に狙った対象 2. 正面の照準範囲内で最も近いもの 3. 全方向で aimTurnRange 以内の最も近いもの（allowTurn のときだけ）
+function pickAimTarget(origin, yaw, allowTurn = true) {
+  if (aimMem.ref && G.t <= aimMem.until) {
+    const r = evalAim(aimMem.ref, origin, yaw, allowTurn);
+    if (r && clearLine(origin, r.info.c)) return finishAim(r);
+  }
+  let front = null, back = null;
+  const consider = t => {
+    const r = evalAim(t, origin, yaw, allowTurn);
+    if (!r) return;
+    const cur = r.front ? front : back;
+    if (cur && cur.d <= r.d) return;
+    if (!clearLine(origin, r.info.c)) return;
+    if (r.front) front = r; else back = r;
+  };
+  for (const e of world.enemies) consider(e);
+  if (G.boss) consider(G.boss);
+  const r = front || back;
+  return r ? finishAim(r) : null;
+}
+// 照準の目印を更新する（1フレームに1回。操作できないときは消す）
+function updateAimMark() {
+  aimMark.visible = false;
+  if (!inControl() || P.dead) return;
+  const t = pickAimTarget(anchorPos('anchor_hands'), P.yaw);
+  if (!t) return;
+  const ref = t.ref, isBoss = ref === G.boss;
+  const foot = isBoss ? ref.y : ref.pos.y;
+  const g = groundAt(ref.pos.x, ref.pos.z, foot + 0.3);
+  aimMark.position.set(ref.pos.x, (isFinite(g) ? g : t.info.c.y) + 0.04, ref.pos.z);
+  aimMark.scale.setScalar(t.info.r + 0.35);
+  aimMark.material.opacity = 0.55 + Math.sin(G.t * 8) * 0.25;
+  aimMark.visible = true;
 }
 function fireSeed(origin, big, power = false) {
   const s = seeds.find(x => !x.active);
   if (!s) return;
   const yaw = hero.object.rotation.y;
   const dir = new V3(Math.sin(yaw), 0, Math.cos(yaw));
-  const t = findAimTarget(origin, yaw);
-  if (t) dir.copy(t).sub(origin).normalize();
+  // 発射時は向きを変えないので、振り向きなし（正面の範囲内と記憶した対象）で狙う
+  const t = pickAimTarget(origin, yaw, false);
+  if (t) { dir.copy(t.pos).sub(origin).normalize(); rememberAim(t.ref, 0); }
   if (big) { dir.applyAxisAngle(new V3(0, 1, 0), rand(-CONFIG.rendaSpread, CONFIG.rendaSpread)); dir.y += rand(-0.03, 0.03); dir.normalize(); }
   s.active = true; s.pos.copy(origin); s.vel.copy(dir).multiplyScalar(CONFIG.seedSpeed);
   s.life = CONFIG.seedRange / CONFIG.seedSpeed; s.dmg = big ? CONFIG.rendaDmg : CONFIG.seedDmg * (power ? CONFIG.powerMult : 1);
@@ -3401,10 +3475,10 @@ function doAction(act) {
     case 'seed':
       // 金の種があれば自動で優先して使う（発射時にダメージ2倍）。種を選ぶ操作はない
       if (P.power > 0) { P.power--; P.shotPower = true; } else { P.seeds--; P.shotPower = false; }
-      faceAimTarget(); hero.action('attack'); break;
-    case 'renda': P.seeds -= CONFIG.rendaCost; hero.action('Taneremda'); break;
+      faceAimTarget('attack'); hero.action('attack'); break;
+    case 'renda': P.seeds -= CONFIG.rendaCost; faceAimTarget('Taneremda'); hero.action('Taneremda'); break;
     case 'press': P.gauge = 0; hero.action('oshitsubusu'); break;
-    case 'sun': P.sun--; hero.action('hissatsu'); break;
+    case 'sun': P.sun--; faceAimTarget('hissatsu'); hero.action('hissatsu'); break;
     case 'fly': startFlight(); break;
   }
 }
@@ -3414,12 +3488,15 @@ function tryJump() {
   P.jumpPending = CONFIG.jumpDelay;
 }
 function forward() { const y = hero.object.rotation.y; return new V3(Math.sin(y), 0, Math.cos(y)); }
-// 通常攻撃の開始時、照準範囲内の敵・ボスへ向きを合わせる（攻撃中はこの向きのまま固定される）
-function faceAimTarget() {
+// 攻撃の開始時、照準対象へ向きを合わせる（攻撃中はこの向きのまま固定される）。clip はこれから始める動き
+// 対象は攻撃の長さ＋aimStickTime のあいだ記憶し、発射時も優先して狙う
+function faceAimTarget(clip) {
   const origin = anchorPos('anchor_hands');
-  const t = findAimTarget(origin, P.yaw);
+  const t = pickAimTarget(origin, P.yaw);
   if (!t) return;
-  P.yaw = Math.atan2(t.x - origin.x, t.z - origin.z);
+  const anim = MODEL_DATA.animations[clip];
+  rememberAim(t.ref, anim ? anim.duration : 0);
+  P.yaw = Math.atan2(t.pos.x - P.pos.x, t.pos.z - P.pos.z);
   hero.object.rotation.y = P.yaw;
 }
 // 主人公の中心と敵の中心の高さの差が h m 未満か（押しつぶす・ひまわり共通）
@@ -3803,6 +3880,7 @@ if (isTouch) {
   $('keysHelp').innerHTML = '移動：左下をドラッグ（大きく倒すとダッシュ）／カメラ：右側をドラッグ<br>'
     + '「ジャンプ」敵に上から乗ると、着地までに最大3回まで連続で踏める（同じ敵へのダメージは2回まで。別の敵へ踏み継ぐと「わたりぶみ」）<br>'
     + '「たね」前方への基本攻撃（種1個）。投げている間はゆっくり移動できる。金の種を持っていると自動で2倍ダメージ<br>'
+    + '攻撃は近くの敵へ自動で振り向く（狙う敵の足元に黄色い輪）<br>'
     + '「れんだ」頬にためて大きな種を3連射（種5個）<br>'
     + '「つぶす」跳んで周囲の敵をまとめて攻撃（がんばり満タン）<br>'
     + '「ひまわり」前方の扇形に強力な一撃（ひまわり1回分）<br>'
@@ -3814,6 +3892,7 @@ const SCREENS = ['title', 'pause', 'clear', 'over', 'ending'];
 function showScreen(id) { SCREENS.forEach(s => $(s).classList.toggle('hidden', s !== id)); }
 function setState(s) {
   G.state = s; G.stateT = 0;
+  if (s !== 'playing' && s !== 'bossBattle') aimMark.visible = false;
   if (s !== 'playing' && s !== 'bossBattle' && guideOpen) hideGuide();
   const playingLike = ['stageIntro', 'playing', 'bossBattle', 'stageClear', 'gameOver', 'ending'].includes(s);
   $('hud').classList.toggle('hidden', !playingLike || s === 'ending');
@@ -3838,6 +3917,7 @@ function loadStage(i) {
   resetInput();
   resetNotices();
   landMark.visible = false;
+  aimMark.visible = false; forgetAim();
   G.stageIndex = i;
   removeBoss(); clearShots();
   buildStage(i);
@@ -3860,7 +3940,7 @@ function nextStage() {
   setState('stageIntro');
 }
 function continueGame() {
-  P.hp = P.maxHp; P.dead = false; P.invuln = 2; P.blinkT = 2; P.flight = null; P.vy = 0; P.jumpPending = -1; P.stompChain = 0; P.shotPower = false;
+  P.hp = P.maxHp; P.dead = false; P.invuln = 2; P.blinkT = 2; P.flight = null; P.vy = 0; P.jumpPending = -1; P.stompChain = 0; P.shotPower = false; forgetAim();
   if (P.seeds < CONFIG.startSeeds) P.seeds = CONFIG.startSeeds;
   resetInput();
   resetNotices();
@@ -3884,6 +3964,7 @@ function togglePause() {
   if (!(G.state === 'playing' || G.state === 'bossBattle' || G.state === 'stageIntro')) return;
   G.paused = !G.paused;
   showScreen(G.paused ? 'pause' : null);
+  if (G.paused) aimMark.visible = false;
   resetInput();
   if (G.paused) Music.pause(); else Music.resume();
 }
@@ -3992,6 +4073,7 @@ function updateWorld(dt) {
     G.clearT -= dt;
     if (G.clearT <= 0) setState(world.stage.final ? 'ending' : 'stageClear');
   }
+  updateAimMark();
   updateCamera(dt);
   updateHUD();
 }
