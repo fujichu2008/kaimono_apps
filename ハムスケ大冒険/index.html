@@ -944,8 +944,10 @@ const CONFIG = {
   camDist: 6.5, camPitch: 0.42, pixelRatioMax: 2, projG: 15, hazardY: -0.45,
   // 扉に近づいたら半透明にする（この距離より近いと最小の不透明度、遠いと不透明）
   gateFadeNear: 3, gateFadeFar: 9, gateFadeMin: 0.2,
-  // ジャンプで敵にのしかかったときのダメージ（押しつぶす5・種1の間）と跳ね返りの初速
-  stompDmg: 2, stompBounce: 7
+  // ジャンプで敵にのしかかったときのダメージ・跳ね返りの初速・同じ敵への再使用待ち（秒）・離れる勢い（m/秒）
+  stompDmg: 1, stompBounce: 7, stompCooldown: 1.0, stompPush: 4,
+  // 閉鎖エリアで種が足りない状態が続いたら補給するまでの秒数
+  arenaSupplyWait: 3
 };
 // 移動入力を受け付けない動き
 const LOCK_SET = new Set(['attack', 'Taneremda', 'oshitsubusu', 'hissatsu', 'emote', 'hurt', 'die']);
@@ -1023,7 +1025,8 @@ const STAGES = [
     arenas: [['dangoro', 'hachippi', 'kamakiri', 'hokorin'], ['kamakiri', 'dangoro', 'hachippi', 'hachippi', 'zenmai']],
     path: [['hachippi', 0, 12], ['dangoro', 0, 33], ['tsumiki', -2, 88], ['hachippi', 2, 90], ['kamakiri', 0, 126]],
     extraItems: [['sunflower', -4, 0, 20], ['seed', -4, 0, 17], ['seed', -4, 0, 23]],
-    bushes: [[-5, 7], [5, 14], [-8, 60], [5, 88], [-5, 125], [4, 118]] },
+    bushes: [[-5, 7], [5, 14], [-8, 60], [5, 88], [-5, 125], [4, 118]],
+    crossing: 'bridge', fish: [[75, 3.2, 0], [78, 3.2, 1.1], [81, 3.2, 2.2]] },
   { id: 'volcano', label: 'ステージ3', name: 'ぐらぐら火山', hazard: 'lava', boss: 'lizard', rocks: true,
     theme: { bg: 0x2a1414, fog: [0x4a1c12, 28, 100], hemi: [0xffb08a, 0x2a0f08, 0.65], sun: [0xff9a5a, 0.95], floor: 0x3d3232, edge: 0x241b1b, block: 0x4d3c38, gate: 0x5a2a1a },
     arenas: [['slime', 'komori', 'dangoro', 'hokorin'], ['slime', 'slime', 'komori', 'kamakiri', 'komori']],
@@ -1517,7 +1520,7 @@ function updateFloaters(dt) {
 let world = null;
 function newWorld(stage) {
   return { stage, group: new THREE.Group(), solids: [], rects: [], camBlockers: [], gates: [], arenas: [],
-    checkpoints: [], items: [], enemies: [], bushes: [], updrafts: [], tiles: [], swayers: [], spinners: [], movers: [],
+    checkpoints: [], items: [], enemies: [], bushes: [], updrafts: [], tiles: [], swayers: [], spinners: [], movers: [], fish: [],
     bossRect: null, bossGate: null, bossZ: 0, bossSpawn: new V3(), bossTriggered: false,
     start: new V3(0, 0, -2), fallback: new V3(0, 0, -2), sunflowerFx: null };
 }
@@ -1705,7 +1708,8 @@ function buildCourse(S) {
   fl(-6, 6, -6, 46); fl(-10, 10, 46, 66);
   if (S.hazard) {
     fl(-6, 11, 66, L.gap[0]); fl(-6, 11, L.gap[1], 94);
-    for (const [x, z] of L.stones) addSolid(x - 0.8, x + 0.8, -1, 0.3, z - 0.8, z + 0.8, T.block, { cam: false });
+    if (S.crossing === 'bridge') buildBridge(L.gap[0], L.gap[1]);
+    else for (const [x, z] of L.stones) addSolid(x - 0.8, x + 0.8, -1, 0.3, z - 0.8, z + 0.8, T.block, { cam: false });
   } else fl(-6, 11, 66, 94);
   fl(-10, 10, 94, 114); fl(-6, 6, 114, 136); fl(-18, 18, 136, 176);
 
@@ -1727,7 +1731,7 @@ function buildCourse(S) {
   L.arenas.forEach((q, i) => {
     world.arenas.push(Object.assign({}, q, {
       types: S.arenas[i] || [], gateIn: addGate(q.x0, q.x1, q.z0, true), gateOut: addGate(q.x0, q.x1, q.z1, false),
-      triggered: false, cleared: false, enemies: [], seedT: 6
+      triggered: false, cleared: false, enemies: [], seedT: CONFIG.arenaSupplyWait
     }));
   });
   // ボス部屋
@@ -1754,6 +1758,7 @@ function buildCourse(S) {
     world.bushes.push({ x, z, mesh: g, used: false });
   });
   (S.movers || []).forEach(([z, speed, t0]) => addMover(z, speed, t0));
+  (S.fish || []).forEach(([z, period, offset]) => addFish(z, period, offset));
   edgeStrips(T.edge, S.id === 'living' ? 0.9 : 0.6);
 }
 function buildFinal(S) {
@@ -1824,6 +1829,57 @@ function updateMovers(dt) {
     m.mesh.rotation.y = m.t < 1 ? 0 : Math.PI;
     if (!P.dead && Math.abs(P.pos.x - x) < 1.05 && Math.abs(P.pos.z - m.z) < 0.8 && heightAbove() < 0.6) hurtPlayer(1, m.mesh.position);
   }
+}
+
+/* ---------- 丸太の橋（ステージ2の小川） ---------- */
+function buildBridge(z0, z1) {
+  addSolid(-1.5, 1.5, -1, 0.2, z0, z1, 0x8a5a36, { cam: false });
+  // 丸太の継ぎ目と、両側の手すり代わりの丸太（見た目だけ）
+  for (let z = z0 + 0.8; z < z1; z += 0.8) deco(GEO.box, 0x5a3a1e, 0, 0.205, z, 3, 0.01, 0.06, { shadow: false });
+  for (const x of [-1.65, 1.65]) deco(GEO.cyl, 0x6b4a2e, x, 0.1, (z0 + z1) / 2, 0.18, z1 - z0 + 1, 0.18, { rx: Math.PI / 2 });
+}
+
+/* ---------- 跳ねる魚（ステージ2の仕掛け・壁にはしない） ---------- */
+// 周期ごとに、0.6秒の水しぶきで予告してから、橋の片側の水面から反対側へ0.9秒かけて放物線で跳ぶ
+const FISH_TELE = 0.6, FISH_JUMP = 0.9, FISH_X = 4, FISH_WATER_Y = -0.55, FISH_PEAK = 1.4;
+function addFish(z, period, offset) {
+  const g = new THREE.Group();
+  part(g, GEO.sph, 0x7fa8c9, 0, 0, 0, 0.24, 0.22, 0.55, { mat: { metalness: 0.4, roughness: 0.35 } });
+  part(g, GEO.cone, 0x5f86a6, 0, 0, -0.62, 0.2, 0.3, 0.06, { rx: -Math.PI / 2 });
+  addEyes(g, 0.06, 0.4, 0.12, 0.06);
+  g.visible = false;
+  world.group.add(g);
+  world.fish.push({ mesh: g, z, period, t: offset % period, pos: new V3() });
+}
+function updateFish(dt) {
+  if (!world.fish.length || G.state !== 'playing') return;
+  for (const f of world.fish) {
+    f.t += dt;
+    const cycle = Math.floor(f.t / f.period), t = f.t - cycle * f.period;
+    const dir = cycle % 2 ? -1 : 1;
+    const sx = -FISH_X * dir;
+    if (t < FISH_TELE) {
+      f.mesh.visible = false;
+      if (Math.random() < 0.5) spawnParticle(new V3(sx + rand(-0.3, 0.3), FISH_WATER_Y + 0.05, f.z + rand(-0.3, 0.3)), new V3(rand(-0.5, 0.5), rand(1.5, 3), rand(-0.5, 0.5)), 0xdff4ff, 0.1, 0.4);
+      continue;
+    }
+    if (t >= FISH_TELE + FISH_JUMP) { f.mesh.visible = false; continue; }
+    const k = (t - FISH_TELE) / FISH_JUMP;
+    f.pos.set(lerp(sx, -sx, k), FISH_WATER_Y + (FISH_PEAK - FISH_WATER_Y) * 4 * k * (1 - k), f.z);
+    f.mesh.visible = true;
+    f.mesh.position.copy(f.pos);
+    f.mesh.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    if (!P.dead && fishHitsHero(f.pos)) hurtPlayer(1, f.pos);
+  }
+}
+// 主人公の体（中心から頭上まで）の線分と魚との距離が0.7m以内なら当たり
+const _seg = new V3(), _near = new V3();
+function fishHitsHero(p) {
+  _seg.copy(heroHead).sub(heroCenter);
+  const len2 = _seg.lengthSq();
+  const k = len2 > 0 ? clamp(_near.copy(p).sub(heroCenter).dot(_seg) / len2, 0, 1) : 0;
+  _near.copy(heroCenter).addScaledVector(_seg, k);
+  return _near.distanceTo(p) < 0.7;
 }
 
 /* ---------- 飾り（当たり判定なし） ---------- */
@@ -2031,15 +2087,27 @@ function enemyCenter(e, out = new V3()) { return out.set(e.pos.x, e.pos.y + e.de
 function setEM(e, m) { e.mode = m; e.mt = 0; e.once = false; }
 function turnTo(e, face, rate) { e.yaw += clamp(angDiff(e.yaw, face), -rate, rate); }
 
+// 敵の足元近くの有効な足場に種を1個落とす（はじかれた種の拾い直し・種不足時の追加ドロップ用）
+function dropSeedNear(e) {
+  const R = e.region;
+  for (let n = 0; n < 8; n++) {
+    const x = e.pos.x + rand(-1.2, 1.2), z = e.pos.z + rand(-1.2, 1.2);
+    if (x < R.x0 + 0.5 || x > R.x1 - 0.5 || z < R.z0 + 0.5 || z > R.z1 - 0.5) continue;
+    const g = groundAt(x, z, e.groundY + 0.6);
+    if (!isFinite(g) || pointInSolid(new V3(x, g + 0.5, z))) continue;
+    addItem('seed', x, g, z);
+    return;
+  }
+}
 function damageEnemy(e, dmg, kind, dir) {
   if (e.dead || P.dead) return false;
   const c = enemyCenter(e);
   if (kind === 'seed') {
-    if (e.curled) { floatText(c, 'カキン！', '#cfd8e8'); sfx('guard'); return false; }
+    if (e.curled) { floatText(c, 'カキン！', '#cfd8e8'); sfx('guard'); dropSeedNear(e); return false; }
     if (e.def.behavior === 'guard' && dir) {
       const fx = Math.sin(e.yaw), fz = Math.cos(e.yaw);
       const l = Math.hypot(dir.x, dir.z) || 1;
-      if (-(fx * dir.x + fz * dir.z) / l > 0.3 && e.mode !== 'slash') { floatText(c, 'ガード！', '#cfe8a0'); sfx('guard'); return false; }
+      if (-(fx * dir.x + fz * dir.z) / l > 0.3 && e.mode !== 'slash') { floatText(c, 'ガード！', '#cfe8a0'); sfx('guard'); dropSeedNear(e); return false; }
     }
   }
   e.hp -= dmg; e.flash = 0.15; e.aggro = true;
@@ -2057,7 +2125,14 @@ function killEnemy(e) {
   P.score += e.def.score; P.kills++;
   P.gauge = Math.min(100, P.gauge + CONFIG.gaugeKill);
   const g = groundAt(e.pos.x, e.pos.z, e.pos.y + 1);
-  if (isFinite(g)) for (const [t, p] of e.def.drop) if (Math.random() < p) addItem(t, e.pos.x + rand(-0.4, 0.4), g, e.pos.z + rand(-0.4, 0.4));
+  let seedDropped = false;
+  if (isFinite(g)) for (const [t, p] of e.def.drop) {
+    if (Math.random() >= p) continue;
+    addItem(t, e.pos.x + rand(-0.4, 0.4), g, e.pos.z + rand(-0.4, 0.4));
+    if (t === 'seed' || t === 'seedbag') seedDropped = true;
+  }
+  // 閉鎖エリアで種が5個未満なら、種が出なかったときに1個追加で落とす
+  if (e.arena && P.seeds < 5 && !seedDropped) dropSeedNear(e);
   if (e.def.split) for (const s of [-1, 1]) {
     const m = spawnEnemy(e.def.split, e.pos.x + s * 0.7, e.pos.z, e.region, e.arena);
     m.aggro = true; m.cool = 0.8;
@@ -2274,7 +2349,7 @@ function triggerArena(a) {
 function checkArenas() {
   for (const a of world.arenas) {
     if (a.triggered && !a.cleared && a.enemies.every(e => e.dead)) {
-      a.cleared = true; a.seedT = 6; setGate(a.gateIn, true); setGate(a.gateOut, true);
+      a.cleared = true; a.seedT = CONFIG.arenaSupplyWait; setGate(a.gateIn, true); setGate(a.gateOut, true);
       a.enemies = [];
       toast('エリアクリア！ とびらが開いた'); sfx('gate');
     }
@@ -2284,7 +2359,7 @@ function resetActiveArenas() {
   for (const a of world.arenas) {
     if (!a.triggered || a.cleared) continue;
     for (const e of a.enemies) { e.dead = true; disposeObject(e.mesh); }
-    a.enemies = []; a.triggered = false; a.seedT = 6; setGate(a.gateIn, true);
+    a.enemies = []; a.triggered = false; a.seedT = CONFIG.arenaSupplyWait; setGate(a.gateIn, true);
   }
   // 消滅演出の途中だった敵（道中の敵を含む）も、一覧から外す前に後始末する
   for (const e of world.enemies) if (e.dead && e.mesh.parent) disposeObject(e.mesh);
@@ -2485,7 +2560,7 @@ function updateSeedSupply(b, dt) {
   if (reachableSeedCount(world.bossRect) > 2) return;
   if (!spawnSupply(world.bossRect, [{ x: b.pos.x, z: b.pos.z, r: 4 }])) G.seedT = 1;
 }
-// 閉鎖エリア：種3個未満かつ回収できる種が0個の状態が6秒続いたら補給
+// 閉鎖エリア：種3個未満かつ回収できる種が0個の状態が CONFIG.arenaSupplyWait 秒続いたら補給
 function updateArenaSupply(dt) {
   if (!inControl()) return;
   for (const a of world.arenas) {
@@ -2493,10 +2568,10 @@ function updateArenaSupply(dt) {
     const inside = P.pos.x >= a.x0 && P.pos.x <= a.x1 && P.pos.z >= a.z0 && P.pos.z <= a.z1;
     const need = a.triggered && !a.cleared && !P.dead && inside && alive.length > 0
       && P.seeds < 3 && reachableSeedCount(a) === 0;
-    if (!need) { a.seedT = 6; continue; }
+    if (!need) { a.seedT = CONFIG.arenaSupplyWait; continue; }
     a.seedT -= dt;
     if (a.seedT > 0) continue;
-    a.seedT = spawnSupply(a, alive.map(e => ({ x: e.pos.x, z: e.pos.z, r: 2.5 }))) ? 6 : 1;
+    a.seedT = spawnSupply(a, alive.map(e => ({ x: e.pos.x, z: e.pos.z, r: 2.5 }))) ? CONFIG.arenaSupplyWait : 1;
   }
 }
 
@@ -2821,6 +2896,10 @@ for (let i = 0; i < 4; i++) {
   pools.add(sh, rk);
   rocks.push({ shadow: sh, rock: rk, pos: new V3(), t: 0, active: false });
 }
+// ジャンプ中に真下の足場へ出す着地点の印（常設の1個を使い回す）
+const landMark = new THREE.Mesh(GEO.ring, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide }));
+landMark.rotation.x = -Math.PI / 2; landMark.scale.setScalar(0.45); landMark.visible = false;
+pools.add(landMark);
 
 function spawnParticle(pos, vel, color, size, life, grav = 6) {
   const p = particles.find(x => !x.active);
@@ -3061,15 +3140,26 @@ function tryJump() {
   P.jumpPending = CONFIG.jumpDelay;
 }
 function forward() { const y = hero.object.rotation.y; return new V3(Math.sin(y), 0, Math.cos(y)); }
-// ジャンプで落下中に敵の頭上へ乗ったら、弱めのダメージを与えて跳ね返る（ボスは対象外）
+// ジャンプで落下中に敵の頭上へ乗ったら、弱いダメージを与えて跳ね返る（ボスは対象外）
+// 同じ敵には CONFIG.stompCooldown 秒は再判定しない。予兆中の攻撃は中断させ、丸まった敵には効かない
 function tryStomp() {
   if (!inControl() || P.dead) return;
   for (const e of world.enemies) {
-    if (e.dead) continue;
+    if (e.dead || (e.stompT || 0) > G.t) continue;
     const top = e.pos.y + e.def.cy + e.def.radius * 0.8;
     if (hdist(P.pos, e.pos) < e.def.radius + 0.35 && P.pos.y <= top + 0.25 && P.pos.y >= top - 0.6) {
-      damageEnemy(e, CONFIG.stompDmg, 'stomp');
+      e.stompT = G.t + CONFIG.stompCooldown;
+      if (e.curled) {
+        floatText(enemyCenter(e).setY(top + 0.4), 'カキン！', '#cfd8e8'); sfx('guard');
+      } else {
+        if (e.mode === 'tele') { setEM(e, 'idle'); e.cool = Math.max(e.cool, 1.0); }
+        damageEnemy(e, CONFIG.stompDmg, 'stomp');
+      }
       P.vy = CONFIG.stompBounce; P.onGround = false;
+      // 敵の中心から離れる向きに押し出して、同じ敵に続けて落ちないようにする
+      const dx = P.pos.x - e.pos.x, dz = P.pos.z - e.pos.z, l = Math.hypot(dx, dz);
+      const ux = l > 0.05 ? dx / l : Math.sin(P.yaw), uz = l > 0.05 ? dz / l : Math.cos(P.yaw);
+      P.kb.set(ux * CONFIG.stompPush, uz * CONFIG.stompPush);
       P.invuln = Math.max(P.invuln, 0.3);
       dust(P.pos);
       return;
@@ -3225,6 +3315,12 @@ function updatePlayer(dt) {
   hero.object.position.copy(P.pos);
   hero.object.rotation.y = P.yaw;
   hero.object.visible = !(P.blinkT > 0 && !P.dead && Math.floor(G.t * 20) % 2 === 0);
+  // ジャンプ中（飛行していない・地面にいない）は、真下に足場があるときだけ着地点の印を出す
+  landMark.visible = false;
+  if (!P.flight && !P.onGround && !P.dead) {
+    const lg = groundAt(P.pos.x, P.pos.z, P.pos.y);
+    if (isFinite(lg) && lg > CONFIG.hazardY) { landMark.position.set(P.pos.x, lg + 0.03, P.pos.z); landMark.visible = true; }
+  }
 }
 
 /* ========== アイテム・仕掛け ========== */
@@ -3415,6 +3511,7 @@ function setState(s) {
 function loadStage(i) {
   resetInput();
   resetNotices();
+  landMark.visible = false;
   G.stageIndex = i;
   removeBoss(); clearShots();
   buildStage(i);
@@ -3562,7 +3659,7 @@ function updateWorld(dt) {
   updateEnemies(dt);
   updateBoss(dt);
   updateSeeds(dt); updateShots(dt); updateRings(dt); updateRocks(dt);
-  updateItems(dt); updateGates(dt); updateTiles(dt); updateMovers(dt); updateArenaSupply(dt);
+  updateItems(dt); updateGates(dt); updateTiles(dt); updateMovers(dt); updateFish(dt); updateArenaSupply(dt);
   for (const s of world.swayers) s.o.rotation.z = Math.sin(G.t * 1.6 + s.ph) * 0.06;
   if (world.stage.id === 'volcano' && Math.random() < 0.15) spawnParticle(new V3(P.pos.x + rand(-10, 10), -0.3, P.pos.z + rand(-6, 14)), new V3(0, rand(1, 2.5), 0), pick([0xff7a20, 0xffc040]), 0.07, 2, 0);
   if (G.clearT > 0) {
