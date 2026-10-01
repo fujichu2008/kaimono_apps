@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-modelstudio-ai-b4703d9156e1356a0877";
+const CACHE_NAME = "appstudio-pwa-modelstudio-ai-52ed6e7cd4b10444dccf";
 const CACHE_PREFIX = "appstudio-pwa-modelstudio-ai-";
 const PRECACHE_URLS = [
     "./",

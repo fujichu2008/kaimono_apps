@@ -10,7 +10,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#10151c">
-<title>ModelStudio AI</title>
+<title>ModelStudio 3D</title>
 <style>
 :root{color-scheme:dark;--bg:#10151c;--panel:#191f29;--line:#303b49;--muted:#a6b4c5;--cyan:#63d9f5}
 *{box-sizing:border-box}
@@ -162,6 +162,9 @@ body.library-open #viewTools{display:none}
 #walkActs{position:absolute;right:12px;bottom:44px;display:flex;flex-direction:column;gap:8px;pointer-events:auto}
 #walkActs button{background:#175d75e6;min-width:92px}
 .warnbox{border:1px solid #b98b52;background:#3a2e1c;color:#ffe2b8;border-radius:10px;padding:10px}
+#recoverBar{position:fixed;left:50%;bottom:calc(150px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:15;display:flex;gap:6px;align-items:center;max-width:calc(100vw - 24px);padding:8px;background:#3a2e1c;border:1px solid #b98b52;border-radius:14px;box-shadow:0 8px 28px #0008}
+#recoverBar button{white-space:nowrap}
+body.library-open #recoverBar{display:none}
 #assignHint{position:absolute;left:10px;right:10px;top:58px;z-index:4;background:#204255f2;color:#e6f9ff;border:1px solid var(--cyan);border-radius:12px;padding:8px 10px;display:flex;gap:8px;align-items:center;justify-content:space-between}
 @media(min-width:950px){
  #panel{padding-left:max(24px,calc((100vw - 1000px)/2));padding-right:max(24px,calc((100vw - 1000px)/2))}
@@ -181,9 +184,9 @@ body.library-open #viewTools{display:none}
 </style>
 </head>
 <body>
-<div id="startupSplash" role="status" aria-label="ModelStudio AI 起動中">
+<div id="startupSplash" role="status" aria-label="ModelStudio 3D 起動中">
  <span class="logo" aria-hidden="true">◈</span>
- <strong>ModelStudio AI</strong>
+ <strong>ModelStudio 3D</strong>
 </div>
 <script>
 // 最初の描画機会を確保してから、タイトルの計時とアプリの準備を始める
@@ -779,6 +782,8 @@ const state = {
   // 貼り付け欄の内容と、直前にコピーした指示文（共有ボタン用）
   paste: '',
   lastPrompt: '',
+  // 読み込みエラーのリカバリー（{prompt}。エラーがないときは null）
+  recovery: null,
   // かんたん表示でのAI相談④（注文リスト）の開閉
   queueOpen: false,
   // 動きの注文リスト。motionDraft は編集中の項目を指す
@@ -7506,7 +7511,105 @@ function applyModelPatch(source,patch) {
 // 新規モデル（MODEL_SPEC_V1）か修正データ（MODELSTUDIO_PATCH_V1）かを自動判別する。
 // ============================================================
 
+// 読み込みに失敗したら、AIに直してもらう依頼文を用意してリカバリーボタンを出す
 function applyAIText(text) {
+ try {
+  const message = applyAITextCore(text);
+  clearRecovery();
+  return message;
+ } catch (e) {
+  offerRecovery(text,e);
+  throw e;
+ }
+}
+
+const RECOVERY_MAX = 200000;
+
+function recoveryButton() {
+ return button('recoverCopy','🛟 リカバリー依頼文をコピー','primary');
+}
+
+function clearRecovery() {
+ state.ai.recovery = null;
+ $('recoverBar')?.remove();
+}
+
+function showRecoveryBar() {
+ $('recoverBar')?.remove();
+ if (!state.ai.recovery) return;
+
+ const bar = document.createElement('div');
+ bar.id = 'recoverBar';
+ bar.setAttribute('role','alert');
+ bar.innerHTML = recoveryButton()
+  + '<button data-action="recoverClose" aria-label="リカバリーの案内を閉じる">✕</button>';
+ document.body.appendChild(bar);
+}
+
+function offerRecovery(text,e) {
+ try {
+  const raw = String(text ?? '');
+  // データらしいもの（{ を含む）だけを対象にする
+  if (!raw.includes('{')) return;
+
+  const message = String(e && e.message ? e.message : e).slice(0,2000);
+
+  state.ai.recovery = {prompt:createRecoveryPrompt(raw,message)};
+  showRecoveryBar();
+ } catch (_) {}
+}
+
+// 読み込めなかったデータを、AIに直してもらう依頼文
+function createRecoveryPrompt(raw,message) {
+ const cut = raw.length > RECOVERY_MAX;
+ const body = cut ? raw.slice(0,RECOVERY_MAX) : raw;
+ const isPatch = /MODELSTUDIO_PATCH_V1|"operations"\s*:/.test(raw);
+ const s = state.modelSpec;
+ let context = '';
+
+ if (isPatch && s) {
+  const parts = Object.values(s.parts).map(p =>
+   '- '+p.id
+   +' | 親:'+(p.parent || 'なし')
+   +' | 形:'+(p.type === 'group' ? 'group' : p.geometry.type)
+   +(p.effect === true ? ' | 効果部品' : '')
+  ).join('\n') || 'なし';
+
+  context = '\n修正データを適用する先の、現在のモデル「'+s.meta.name+'」（'+s.meta.id+'）:\n'
+   + '部品ID一覧:\n'+parts+'\n'
+   + '色・質感ID: '+(Object.keys(s.materials).join(', ') || 'なし')+'\n'
+   + '取付点ID: '+(Object.keys(s.anchors).join(', ') || 'なし')+'\n'
+   + '動きID: '+(Object.keys(s.animations || {}).join(', ') || 'なし')+'\n'
+   + '\n修正データの形式:\n'
+   + '{"format":"MODELSTUDIO_PATCH_V1","operations":[{"op":"add|replace|remove","path":"/parts/部品ID/position/1","value":0.6}]}\n'
+   + '- path は / で始まるJSON Pointer。最上位は meta・settings・parts・materials・anchors・animations のみ。\n'
+   + '- add は存在しないキーだけ、replace・remove は既存のキーだけに使う。部品を追加するときは必須項目をすべて書く。\n'
+   + '- 動き（/animations/動きID）の値: {"name":"表示名","duration":0.1〜30,"loop":true/false,'
+   + '"tracks":{"部品ID":{"rotation":[[時刻,[x,y,z]],...],"position":[[時刻,[x,y,z]],...],"scale":[[時刻,[x,y,z]],...]}},'
+   + '"spins":[{"part":"部品ID","axis":"x|y|z","degPerSec":数値}],"show":["部品ID"],"events":[[時刻,"英数字の合図名"]],"ease":"linear|smooth"}\n'
+   + '- 時刻は0〜durationで小さい順。rotation は度の差分、position はメートルの差分、scale は倍率（0.001〜1000）。1つの動きのキーは合計300個まで。\n'
+   + '- tracks・spins・show の部品IDは、上の一覧に実在するものか、同じ修正データで追加する部品だけ。\n';
+ }
+
+ return 'あなたはゲーム用3Dモデルデータの修復担当です。'
+  + '下の「読み込めなかったデータ」は、3Dモデル作成アプリで読み込みエラーになりました。エラーを解消した正しいデータを出力し直してください。\n'
+  + '\nアプリのエラーメッセージ:\n'+message+'\n'
+  + '\n修復のルール:\n'
+  + '- 元のデータの内容（形・色・動き・ID・名前）はできるだけ保ち、エラーの原因と、同じ種類の誤りを直す。\n'
+  + '- 直した後、下の契約に照らして全体を見直し、ほかの違反（必須項目の欠け、存在しないIDの参照、範囲外の数値、JSONの書き方の誤り）も直す。\n'
+  + '- データが途中で切れている場合は、切れた部分を補って完結させる。量が多くて出力しきれない場合は、分割数やキーの数を減らして簡略化する。\n'
+  + '- 出力は元と同じ種類のデータ（'
+  + (isPatch ? 'MODELSTUDIO_PATCH_V1 の修正データ' : '完全な MODEL_SPEC_V1')
+  + '）を、省略せず全体で出力する。\n'
+  + '- 出力はJSONのみのプレーンテキスト。Markdown・コードフェンス・見出し・説明文は禁止。先頭文字は{、末尾文字は}。\n'
+  + '\n'+schemaGuide()+'\n'
+  + context
+  + '\n読み込めなかったデータ'
+  + (cut ? '（長いため先頭'+RECOVERY_MAX+'文字まで。続きは切れている）' : '')
+  + ':\n'+body;
+}
+
+function applyAITextCore(text) {
  finishLive();
 
  const data = parseAIJSON(text);
@@ -9308,7 +9411,9 @@ function rendererCode() {
 }
 
 function integrationPrompt() {
- return '以下のASSET_CAPSULE_V1を現在の単一HTMLゲームへ追加してください。'
+ return '以下のASSET_CAPSULE_V1（3Dモデルデータ）を使ってゲームをつくってください。'
+  + 'ゲームのコードが一緒に提示されている場合は、そのゲームへ追加してください。'
+  + 'ゲームのコードがなく、つくるゲームの内容が指示されている場合は、このモデルを登場させた単一HTMLのゲームを新しくつくってください。'
   + 'Three.js r128、ビルド/ES Modules/外部モデル不要。'
   + 'モデルデータをMODEL_DATAに置き、'
   + '共通のcreateModelRenderer(THREE).buildModel(spec)で描画してください。'
@@ -9329,8 +9434,8 @@ function integrationPrompt() {
   + '下の参照実装を再利用し、Three.jsを重複ロードしないこと。'
   + 'キャラとして簡単に動かす場合は createModelRenderer(THREE).createCharacter(MODEL_DATA) を使い、'
   + 'setSpeed(速さ)・action(動きID)・update(dt) で操作すること。'
-  + '出力形式は依頼側（AppStudioなど）の指示に従うこと。'
-  + 'ただし対象ゲームコードが未提供なら推測で修正せず、コードの提示を求めること。'
+  + '出力形式は依頼側の指示に従うこと。'
+  + 'ゲームのコードも、つくるゲームの内容も示されていない場合は、推測で進めずに確認すること。'
   + '\n\nAsset Capsule:\n'+json(exportAssetCapsule(false))
   + '\n\n共通Renderer参照実装:\n'+rendererCode();
 }
@@ -9365,10 +9470,31 @@ function bundleText() {
   + '\n// 取付点: ModelRenderer.getAnchor(hero.object, "取付点ID").getWorldPosition(new THREE.Vector3());'
   + '\n// 倒れた後の復活: hero.reset(); / 破棄: scene.remove(hero.object); hero.dispose();\n';
 
+ // モデルの大きさ（効果部品を除く）。3D表示が使えないときは省く
+ let sizeLine = '';
+
+ if (state.engine && window.THREE && Object.keys(s.parts).length) {
+  let root = null;
+
+  try {
+   root = state.engine.buildModel(s);
+   const size = solidBox(root,s).getSize(new THREE.Vector3());
+   const f = v => Math.round(v*100)/100;
+   sizeLine = '- モデルの大きさ（効果部品を除く）: 幅'+f(size.x)+'m・高さ'+f(size.y)+'m・奥行き'+f(size.z)+'m。';
+  } catch (_) {
+  } finally {
+   if (root) state.engine.dispose(root);
+  }
+ }
+
  const guide = [
-  '【3Dキャラクターの組み込み依頼】',
-  '下のコードブロックにある3Dモデル「'+s.meta.name+'」を、現在の単一HTMLゲームに組み込んでください。',
-  '- Three.js r128 を使う。すでに読み込まれていれば重複して読み込まない。ビルド・ES Modules・外部モデルは不要。',
+  '【3Dモデルデータ（ゲーム用）】',
+  '下のコードブロックは、3Dモデル「'+s.meta.name+'」のデータと、表示・動き用のプログラムです。このモデルを使ってゲームをつくってください。次のどちらの依頼にも対応します。',
+  '- A. 既存のゲームに組み込む: ゲームのコードが一緒に提示されている場合は、そのゲームにこのモデルを組み込む。既存のゲームロジックは不要に変更しない。',
+  '- B. 新しいゲームをつくる: ゲームのコードがなく、つくるゲームの内容が指示されている場合は、このモデルを登場させた単一HTMLのゲームを新しくつくる。',
+  '- このモデルの役割（主人公・敵・乗り物・置物など）は依頼の指示に従う。指示がなければ、操作するキャラクターとして扱う。',
+  '- ゲームのコードも、つくるゲームの内容も示されていない場合は、推測で進めずに確認する。',
+  '- Three.js r128 を使う。既存のゲームですでに読み込まれていれば重複して読み込まない。新しくつくる場合は https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js を script タグで読み込む。ビルド・ES Modules・外部モデルは不要。',
   '- コードブロックを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA) でキャラを作る。モデル専用の描画関数を新たに書かない。',
   '- ゲームの移動速度（m/秒）を毎フレーム hero.setSpeed に渡し、hero.update(dt) を呼ぶ。待機・歩く・走るは速さに応じて自動で切り替わる。',
   '- ジャンプや攻撃などの入力では hero.action("動きID") を呼ぶ。終わると自動で移動の動きに戻る（die は戻らず、hero.reset() で復活）。',
@@ -9378,9 +9504,11 @@ function bundleText() {
   '- 合図の名前: '+events+'（hero.on("合図名", fn) で受け取る。hit は攻撃が当たる瞬間、land は着地の瞬間）',
   '- 取付点: '+anchors,
   '- モデルは単位メートル・+Yが上・+Zが前・足元が原点。ゲームのスケールと接地に合わせて hero.object の位置・大きさ・向きを調整する。',
-  '- 既存のゲームロジックは不要に変更しない。',
-  '- 対象のゲームコードが提示されていない場合は、推測で修正せず、コードの提示を求める。',
-  '- 出力形式は、依頼側（AppStudioなど）の指示に従う。'
+  ...(sizeLine ? [sizeLine] : []),
+  '- コード例の変数名 hero は例。役割に合わせて変えてよい。',
+  '- 同じモデルを複数出す場合（敵の群れなど）は、createCharacter を必要な数だけ呼ぶ（MODEL_DATA は共有してよい）。',
+  '- 別のモデルデータも一緒に与えられた場合は、createModelRenderer の定義は1つだけ残して共用し、各モデルのデータは MODEL_DATA_HERO・MODEL_DATA_ENEMY のように別の名前にして重ならないようにする。',
+  '- 出力形式は、依頼側の指示に従う。'
  ].join('\n');
 
  return guide+'\n\n```js\n'+code+'```\n';
@@ -10367,11 +10495,11 @@ function exportPanel() {
   <div class="card">
    <h3>ゲームに組み込む</h3>
    <p class="hint">
-    モデル・動き・組み込み指示をまとめてコピーします。
-    ゲームのコードと一緒にAppStudioのAI指示へ貼り付けてください。
+    モデルデータ・動き・使い方の指示をまとめてコピーします。AIへの指示に貼り付けて、ゲームをつくります。
+    既存のゲームに入れるときはゲームのコードと一緒に、新しいゲームをつくるときは作りたいゲームの説明と一緒に貼り付けてください。
    </p>
-   ${button('bundle','ゲームへの組み込み内容をコピー','primary')}
-   <p class="hint">コピー後、ゲーム側で組み込みを行います。このボタンだけでゲームが完成するわけではありません。</p>
+   ${button('bundle','ゲーム用のモデルデータをコピー','primary')}
+   <p class="hint">コピーした内容をAIに渡して、組み込みや新規作成を行います。このボタンだけでゲームが完成するわけではありません。</p>
    <p class="hint">
     含まれる動き: ${esc(
      Object.entries(state.modelSpec.animations || {})
@@ -10406,7 +10534,7 @@ function exportPanel() {
    <p class="hint">モデル・取付点・動きの一覧・重さの目安をひとまとめにしたデータです（Asset Capsule形式）。</p>
    ${button('capsule','まとめデータをコピー')}
 
-   <h3>03 · AppStudio用の組み込み指示（従来形式）</h3>
+   <h3>03 · 組み込み指示（従来形式）</h3>
    <p class="hint">
     組み込み指示・まとめデータ・プログラムを別々に並べた形式です。通常は上の一括コピーを使ってください。
    </p>
@@ -10646,7 +10774,7 @@ function showGuide() {
     <div>つくる · 作りたい形をAIに頼むか、ひな形を選びます。</div>
     <div>なおす · AIに修正を頼むか、3Dの部品をタップして手で整えます。</div>
     <div>動かす · 注文リストやおまかせ生成で動きを作り、再生・操作で確かめます。</div>
-    <div>ゲームへ · 組み込み内容をコピーし、ゲームのコードと一緒にAppStudioのAI指示へ貼り付けます。</div>
+    <div>ゲームへ · モデルデータをコピーし、AIに渡してゲームをつくります（既存ゲームへの組み込みにも、新しいゲームの作成にも使えます）。</div>
    </div>
    <p>下部の4工程は、いつでも自由に行き来できます。</p>
    <h3>AIとのやりとり</h3>
@@ -11075,6 +11203,17 @@ const actions = {
  sample: () => replaceGuard(() => replaceProject(sampleSpec())),
  import: loadFromClipboard,
 
+ recoverCopy: () => {
+  const rec = state.ai.recovery;
+  assert(rec,'リカバリーできる読み込みエラーがありません');
+
+  return copyPrompt(
+   rec.prompt,
+   'リカバリー依頼文をコピーしました。AIに送信し、返ってきた回答を読み込んでください'
+  );
+ },
+ recoverClose: clearRecovery,
+
  doImport: () => {
   try {
    const message = applyAIText($('importText').value);
@@ -11083,6 +11222,9 @@ const actions = {
   } catch (e) {
    $('dialogError').hidden = false;
    $('dialogError').textContent = e.message;
+   if (state.ai.recovery) {
+    $('dialogError').insertAdjacentHTML('beforeend','<br>'+recoveryButton());
+   }
   }
  },
 
@@ -11251,7 +11393,7 @@ const actions = {
      ? '「'+name+'」の操作開始時点の内容をコピーしました。現在のモデルはコピー済みにしていません。'
      : text.length > 200000
       ? 'コピーしました。ただし文字数が多いため、部品や動きのキーを減らすと安定します'
-      : 'コピーしました。AppStudioのAI指示に、ゲームのコードと一緒に貼り付けてください',
+      : 'コピーしました。AIへの指示に、ゲームのコードまたは作りたいゲームの説明と一緒に貼り付けてください',
     current ? 3200 : 5000
    );
   } catch (e) {
