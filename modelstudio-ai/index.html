@@ -393,6 +393,9 @@ const startupSplashDone = startupPainted.then(() => new Promise(resolve => {
     <input type="color" id="background" value="#202a36" aria-label="背景色">
    </label>
 
+   <p class="menu-heading">動作チェック</p>
+   <p><button data-action="selfTest" class="menu-wide">動作チェック</button></p>
+
    <p class="menu-heading">ヘルプ</p>
    <button data-action="guide" class="menu-wide">? 使い方</button>
    <div id="stats"></div>
@@ -780,13 +783,11 @@ const state = {
   // 演出付きの動き（炎・光など）をAIに頼む欄
   fxId: 'fly',
   fx: '',
-  // 貼り付け欄の内容と、直前にコピーした指示文（共有ボタン用）
-  paste: '',
+  // 直前にコピーした指示文（共有ボタン用）
   lastPrompt: '',
   // 読み込みエラーのリカバリー（{prompt}。エラーがないときは null）
   recovery: null,
-  // かんたん表示でのAI相談④（注文リスト）の開閉
-  queueOpen: false,
+
   // 動きの注文リスト。motionDraft は編集中の項目を指す
   motionQueue: [{
    id: 'attack',
@@ -831,7 +832,9 @@ const state = {
   libraryError: false,
   draftError: false,
   draftBlocked: false,
-  restoreNotice: ''
+  restoreNotice: '',
+  // 起動時に復元したモデルの名前（「前回の続き」カード用。別のモデルを開くと空にする）
+  restoredTitle: ''
  },
  get storageError() {
   return this.io.libraryError || this.io.draftError;
@@ -864,7 +867,9 @@ const state = {
   // ②おまかせの開閉（null のときは自動）
   autoOpen: null,
   // 準備チェック・③・④の開閉（キーが無いときは自動）
-  openCards: {}
+  openCards: {},
+  // 「動かす」の中のタブ（view: 見る・直す / make: つくる / try: 試す。null のときは自動）
+  view: null
  },
  thumb: null,
  thumbTried: new Set(),
@@ -3552,6 +3557,7 @@ function generateMotion() {
   x.animations = {...(x.animations || {}),...clips};
  });
 
+ m.view = 'view';
  toast(Object.keys(clips).length+'個の動きを作りました（↶で取り消せます）');
 
  if (state.motion.animator) playMotion(m.kind === 'vehicle' ? 'drive' : 'walk');
@@ -3820,6 +3826,12 @@ function fxMotionCard() {
  `;
 }
 
+function motionView() {
+ const v = state.motion.view;
+ if (v === 'view' || v === 'make' || v === 'try') return v;
+ return Object.keys(state.modelSpec.animations || {}).length ? 'view' : 'make';
+}
+
 // 動きタブの開閉式カード。ユーザーが開閉していなければ既定値を使う
 function motionCardOpen(key,def) {
  const v = state.motion.openCards?.[key];
@@ -3877,14 +3889,12 @@ function motionPanel() {
  )).join('');
 
  const viewing = `
-  ${motionReviewBar()}
-
   <div class="card">
    <h3>動きを見る・直す</h3>
 
    ${motionEditCard()}
 
-   ${clipRows || '<p class="hint">まだ動きがありません。下の「動きをつくる」から始めてください。</p>'}
+   ${clipRows || '<p class="hint">まだ動きがありません。上の「つくる」タブから始めてください。</p>'}
 
    ${motionFixArea()}
 
@@ -3985,14 +3995,7 @@ function motionPanel() {
 
  `;
 
- return `
-  ${viewing}
-  ${motionDraftCard()}
-  ${standard}
-  ${automatic}
-  ${fxMotionCard()}
-  ${motionReadinessCard()}
-
+ const trying = `
   <details class="card" id="tryDetails" ${motionCardOpen('try',clips.length > 0) ? 'open' : ''}>
    <summary><b>ゲームのように操作する</b></summary>
 
@@ -4007,6 +4010,10 @@ function motionPanel() {
      <button data-try="${id}">${esc(STANDARD_MOTIONS.find(x => x[0] === id)?.[1] || id)}</button>
     `).join('')}
     ${button('tryReset','起き上がる（最初から）')}
+   </div>
+
+   <div class="row">
+    ${button('stopMotion','■ 停止（元の姿勢に戻す）')}
    </div>
 
    <div class="row">
@@ -4026,10 +4033,17 @@ function motionPanel() {
    <p class="hint">
     スライダーを動かすと試しが始まり、速さに合わせて動きが自動で切り替わります。
     ゲームでは hero.setSpeed(速さ) と hero.action("attack") で同じように動きます。
-    止めるときは「動きを見る・直す」の「停止」を押してください。
+    止めるときは上の「停止」を押してください。
    </p>
   </details>
  `;
+
+ const view = motionView();
+ const body = view === 'view' ? viewing
+  : view === 'try' ? trying
+  : motionDraftCard()+standard+automatic+fxMotionCard()+motionReadinessCard();
+
+ return motionReviewBar()+body;
 }
 
 // 標準の動きID: [ID, 表示名, くり返すか]
@@ -4146,161 +4160,6 @@ function handleMotionPick(id) {
 // 手で直す（ポーズ編集）
 // 表示は seek と部品への直接の当てはめだけで行い、記録するまで ModelSpec は変えない
 // ------------------------------------------------------------
-
-// ユーザー操作の入口だけで未記録ポーズを確認する。
-// 記録後の再構築・refreshEdit・showEditPoseには確認処理を入れない。
-// poseTransitionは、同じ本体スクリプト内の既存宣言を共用する。
-
-function requestPoseChange(run,{message='',onCancel=null}={}) {
- if (poseTransition) return false;
-
- const edit = state.motion.edit;
- if (!edit?.pending) {
-  run();
-  return true;
- }
-
- // DOMノード自体を保持し、貼り付け欄などの現在の入力値も維持する。
- const prior = {
-  hidden: $('modal').hidden,
-  title: $('dialogTitle').textContent,
-  body: [...$('dialogBody').childNodes],
-  actions: [...$('dialogActions').childNodes],
-  action: state.modalAction,
-  returnTo: state.modalReturn,
-  focus: document.activeElement
- };
-
- poseTransition = {
-  edit,
-  session: state.io.session,
-  run,
-  onCancel,
-  prior
- };
-
- state.modalAction = null;
-
- openDialog(
-  '未記録のポーズがあります',
-  `<p>現在の姿勢を記録してから続けますか？</p>
-   ${message ? `<p class="warnbox">${esc(message)}</p>` : ''}
-   <p class="hint">
-    「破棄して続行」は未記録の姿勢だけを破棄します。
-    「キャンセル」は元の編集へ戻ります。
-   </p>
-   <p id="poseTransitionError" class="error" hidden></p>`,
-  button('poseCancel','キャンセル')
-   +button('poseDiscard','破棄して続行')
-   +button('poseRecord','記録して続行','primary')
- );
-
- return false;
-}
-
-function restorePoseDialog(prior) {
- $('dialogTitle').textContent = prior.title;
- $('dialogBody').replaceChildren(...prior.body);
- $('dialogActions').replaceChildren(...prior.actions);
- $('modal').hidden = prior.hidden;
- state.modalAction = prior.action;
- state.modalReturn = prior.returnTo;
-
- if (prior.focus && document.contains(prior.focus)) {
-  prior.focus.focus({preventScroll:true});
- }
-}
-
-function resolvePoseChange(choice) {
- const task = poseTransition;
- if (!task) return;
-
- const stillCurrent = state.io.session === task.session
-  && state.motion.edit === task.edit;
-
- if (choice !== 'cancel' && !stillCurrent) {
-  poseTransition = null;
-  restorePoseDialog(task.prior);
-  showError(Error('編集対象が変わったため、保留していた操作を中止しました。'));
-  return;
- }
-
- if (choice === 'record') {
-  const pending = clone(task.edit.pending);
-
-  try {
-   recordEditKey();
-  } catch (e) {
-   // 検証・記録に失敗した場合、続行せず調整中の姿勢を残す。
-   if (state.motion.edit === task.edit) {
-    task.edit.pending = pending;
-    showEditPose();
-   }
-
-   const box = $('poseTransitionError');
-   if (box) {
-    box.hidden = false;
-    box.textContent = e.message || String(e);
-   } else {
-    showError(e);
-   }
-   return;
-  }
- } else if (choice === 'discard') {
-  task.edit.pending = null;
-  showEditPose();
- }
-
- poseTransition = null;
- restorePoseDialog(task.prior);
-
- if (choice === 'cancel') {
-  if (stillCurrent && task.onCancel) safe(task.onCancel);
-  return;
- }
-
- safe(task.run);
-}
-
-// 確認済みの操作を再実行する。記録・破棄後はpendingがないので再確認しない。
-function guardPoseClick(b) {
- const action = b.dataset.action;
-
- if (poseTransition) {
-  return !['poseRecord','poseDiscard','poseCancel','close'].includes(action);
- }
-
- if (!state.motion.edit?.pending) return false;
-
- const dataKeys = [
-  'editClip','play','try','assign','ekeyt','ekey','estep',
-  'paint','visible','nudge'
- ];
- const actionKeys = [
-  'undo','redo','stopMotion','editClose','editDeleteKey',
-  'editApplyLen','editApplyAmp','walkToggle','walkStop','tryReset',
-  'generateMotion','autoJoints','makeJoint','mirror','reviewFix',
-  'doImport','pasteImport'
- ];
-
- const destructive = dataKeys.some(k => b.dataset[k] !== undefined)
-  || actionKeys.includes(action);
-
- if (!destructive) return false;
-
- // 記録によるパネル再描画で、関節位置の選択が既定値に戻るのを防ぐ。
- const jointAt = action === 'makeJoint' ? $('jointAt')?.value : null;
- const message = ['doImport','pasteImport'].includes(action)
-  ? '読み込むデータによっては、モデル全体が置き換わります。'
-  : '';
-
- requestPoseChange(() => {
-  if (jointAt !== null && $('jointAt')) $('jointAt').value = jointAt;
-  handleClick({target:b});
- },{message});
-
- return true;
-}
 
 // ユーザー操作の入口だけで未記録ポーズを確認する。
 // 記録後の再構築・refreshEdit・showEditPoseには確認処理を入れない。
@@ -5134,7 +4993,7 @@ function tryAction(id) {
   toast(
    m.tester.dead
     ? '倒れています。「起き上がる」を押してください'
-    : '「'+label+'」の動き（'+id+'）がまだありません。「動きをつくる」で追加できます'
+    : '「'+label+'」の動き（'+id+'）がまだありません。「つくる」タブで追加できます'
   );
  }
 }
@@ -5174,6 +5033,13 @@ function workflowHeading() {
    <div class="workflow-switch" role="group" aria-label="つくり方">
     <button data-createmode="new" class="${state.createMode === 'library' ? '' : 'active'}" aria-pressed="${state.createMode !== 'library'}">新しくつくる</button>
     <button data-createmode="library" class="${state.createMode === 'library' ? 'active' : ''}" aria-pressed="${state.createMode === 'library'}">ライブラリから続ける</button>
+   </div>
+  ` : ''}
+  ${group === 'motion' ? `
+   <div class="workflow-switch" role="group" aria-label="動かす画面の切り替え">
+    <button data-motionview="view" class="${motionView() === 'view' ? 'active' : ''}" aria-pressed="${motionView() === 'view'}">見る・直す</button>
+    <button data-motionview="make" class="${motionView() === 'make' ? 'active' : ''}" aria-pressed="${motionView() === 'make'}">つくる</button>
+    <button data-motionview="try" class="${motionView() === 'try' ? 'active' : ''}" aria-pressed="${motionView() === 'try'}">試す</button>
    </div>
   ` : ''}
   ${group === 'repair' ? `
@@ -6217,6 +6083,7 @@ function startReview(ids,plan,failed=[],base=null) {
   owned: state.modelSpec
  };
 
+ m.view = 'view';
  state.activeTab = 'motion';
 
  if (m.animator && ids[0]) playMotion(ids[0]);
@@ -7693,6 +7560,7 @@ function applyAITextCore(text) {
 
  // 完全なモデルは新しい未保存プロジェクトとして扱う（元の保存済みモデルは上書きしない）
  state.projectId = null;
+ state.io.restoredTitle = '';
  state.dirty = true;
  state.activeTab = 'repair';
  writeDraft();
@@ -7870,6 +7738,11 @@ function fillThumbs() {
 
  state.projects = data.projects;
  renderLibraryGrid();
+
+ // 「つくる → ライブラリから続ける」を表示中なら、できたサムネイルを反映する
+ if (!state.libraryOpen && state.activeTab === 'ai' && state.createMode === 'library') {
+  renderPanel();
+ }
 }
 
 function deleteProject(id) {
@@ -8579,115 +8452,6 @@ async function applyLibraryReload(force=false) {
  else updateHeader();
 }
 
-// projects ストアと meta レコードから、ライブラリ全体を組み立てる
-function idbLoadLibrary() {
- return new Promise((resolve,reject) => {
-  const tx = libDb.transaction([LIB_PS,LIB_OS],'readonly');
-  const all = tx.objectStore(LIB_PS).getAll();
-  const meta = tx.objectStore(LIB_OS).get(LIB_META);
-
-  tx.oncomplete = () => resolve({
-   projects: (all.result || []).filter(p => obj(p)),
-   last: meta.result?.last ?? null
-  });
-  tx.onerror = () => reject(tx.error || Error('IndexedDBを読めません'));
-  tx.onabort = () => reject(tx.error || Error('IndexedDBの読み込みが中断されました'));
- });
-}
-
-// 写し（prev）と新しいデータ（next）の差分。削除は prev にあって next に無いものだけ
-function libraryDiff(prev,next) {
- const before = new Map(
-  prev.projects
-   .filter(p => obj(p) && typeof p.projectId === 'string' && p.projectId)
-   .map(p => [p.projectId,p])
- );
- const nextIds = new Set();
- const puts = [];
-
- for (const p of next.projects) {
-  if (!obj(p) || typeof p.projectId !== 'string' || !p.projectId) continue;
-
-  nextIds.add(p.projectId);
-
-  const old = before.get(p.projectId);
-  if (!old || JSON.stringify(old) !== JSON.stringify(p)) puts.push(p);
- }
-
- const dels = [...before.keys()].filter(id => !nextIds.has(id));
- const last = (prev.last ?? null) !== (next.last ?? null) ? {last:next.last ?? null} : null;
-
- return {puts,dels,last};
-}
-
-// 差分を1つの読み書きトランザクションで適用する
-function idbApplyDiff(diff) {
- return new Promise((resolve,reject) => {
-  const tx = libDb.transaction([LIB_PS,LIB_OS],'readwrite');
-
-  tx.oncomplete = () => resolve();
-  tx.onerror = () => reject(tx.error || Error('IndexedDBに書き込めません'));
-  tx.onabort = () => reject(tx.error || Error('IndexedDBへの書き込みが中断されました'));
-
-  try {
-   const ps = tx.objectStore(LIB_PS);
-   diff.puts.forEach(p => ps.put(p));
-   diff.dels.forEach(id => ps.delete(id));
-   if (diff.last) tx.objectStore(LIB_OS).put(diff.last,LIB_META);
-  } catch (e) {
-   try {
-    tx.abort();
-   } catch (_) {}
-   reject(e);
-  }
- });
-}
-
-function postLibraryChange(ids) {
- try {
-  libChannel?.postMessage({type:'library',ids});
- } catch (_) {}
-}
-
-// 自分の書き込みの後ろに並べて読み直す
-function queueLibraryReload() {
- libWriteChain = libWriteChain.then(() => applyLibraryReload()).catch(() => {});
-}
-
-// IndexedDB から読み直して、写しと画面を合わせる
-// 自分の未完了の書き込みがあるときは（force でない限り）完了後に回す
-async function applyLibraryReload(force=false) {
- if (libraryBackend !== 'idb' || !libDb) return;
-
- if (libPending && !force) {
-  libReloadAgain = true;
-  return;
- }
-
- const data = await idbLoadLibrary();
-
- if (libPending && !force) {
-  libReloadAgain = true;
-  return;
- }
-
- libraryData = data;
- state.projects = clone(data.projects);
-
- // 編集中のプロジェクトが消えていたら、画面上のモデルは残して未保存扱いにする
- if (state.projectId && !data.projects.some(p => p.projectId === state.projectId)) {
-  state.projectId = null;
-  state.dirty = true;
-  writeDraft();
- }
-
- if (!state.initialized) return;
-
- renderLibraryGrid();
- if (state.activeTab === 'model') renderPanel();
- else updateHeader();
-}
-
 // 同じプロジェクトは更新日時が新しい方を残し、片方にしかないものはすべて残す
 function mergeLibrary(base,local) {
  const out = {
@@ -9074,6 +8838,7 @@ function replaceProject(spec,id=null,dirty=true) {
  state.partListOpen = null;
  // 別のモデルに置き換えたら、前のモデルの確認バーは残さない
  state.motion.review = null;
+ state.io.restoredTitle = '';
  state.dirty = dirty;
 
  writeDraft();
@@ -9223,6 +8988,7 @@ function restoreProject() {
 
  // 起動直後は、復元の有無にかかわらず「つくる」画面から始める
  state.activeTab = 'ai';
+ state.io.restoredTitle = restored ? chosen.spec.meta.name : '';
  state.modelSpec = chosen.spec;
  state.projectId = chosen.projectId;
  state.dirty = chosen.dirty;
@@ -9529,6 +9295,157 @@ function bundleText() {
 // JSON/ユーザー文字列は必ずエスケープ。evalは使用しない。
 // ============================================================
 
+// 「つくる → 新しくつくる」の先頭に出す、前回の続きカード
+function resumeCard() {
+ const t = state.io.restoredTitle;
+ if (!t) return '';
+
+ return `
+  <div class="card review">
+   <h3>前回の続き: ${esc(t)}</h3>
+   <p class="hint">前回のモデルが開いています。続きを編集するときは「なおす」へ進んでください。</p>
+   <div class="row">
+    <button data-tab="repair" class="primary">なおすへ進む</button>
+   </div>
+  </div>
+ `;
+}
+
+// 2体目以降のモデル用。表示プログラムは含めず、データと短い指示だけをまとめる
+function bundleDataText() {
+ const s = state.modelSpec;
+ const anims = Object.entries(s.animations || {});
+ const varName = 'MODEL_DATA_'+String(s.meta.id).toUpperCase().replace(/[^A-Z0-9]/g,'_');
+ const fence = '`'.repeat(3);
+
+ const list = anims
+  .map(([id,a]) => id+'（'+(a.name || id)+'・'+(a.loop === false ? '1回' : 'くり返し')+'）')
+  .join('、') || 'なし';
+
+ const events = [...new Set(
+  anims.flatMap(([,a]) => (a.events || []).map(e => e[1]))
+ )].join('、') || 'なし';
+
+ const anchors = Object.values(s.anchors)
+  .map(a => a.id+'（'+a.name+'）')
+  .join('、') || 'なし';
+
+ const guide = [
+  '【3Dモデルデータ（追加モデル用）】',
+  '下のコードブロックは、3Dモデル「'+s.meta.name+'」のデータだけです（表示プログラムは含みません）。このモデルをゲームに登場させてください。',
+  '- createModelRenderer は、すでにゲームにある定義を使う。なければ先に与えた「ゲーム用のモデルデータ」のコードから共用する。新しく書き足したり、重複して追加したりしない。',
+  '- 下の変数 '+varName+' を ModelRenderer.createCharacter('+varName+') に渡してキャラを作る（ModelRenderer = createModelRenderer(THREE)）。',
+  '- 操作は hero.setSpeed(速さ)・hero.action("動きID")・hero.update(dt)。変数名 hero は例なので、役割に合わせて変えてよい。',
+  '- 動きの一覧: '+list,
+  '- 合図の名前: '+events+'（hero.on("合図名", fn) で受け取る）',
+  '- 取付点: '+anchors,
+  '- モデルは単位メートル・+Yが上・+Zが前・足元が原点。ゲームのスケールと接地に合わせて hero.object の位置・大きさ・向きを調整する。',
+  '- 既存のゲームロジックは不要に変更しない。ゲームのコードも、つくるゲームの内容も示されていない場合は、推測で進めずに確認する。',
+  '- 出力形式は、依頼側の指示に従う。'
+ ].join('\n');
+
+ return guide+'\n\n'+fence+'js\nconst '+varName+' = '
+  + JSON.stringify(s).replace(/</g,'\\u003c')+';\n'+fence+'\n';
+}
+
+// 動作チェック。一時のサンプルだけを使い、編集中のモデル・履歴・保存データには触れない
+function selfTest() {
+ const rows = [];
+
+ const run = (label,fn) => {
+  try {
+   const r = fn();
+   if (r && r.skip) rows.push([label,'skip',r.skip]);
+   else rows.push([label,'ok',typeof r === 'string' ? r : '']);
+  } catch (e) {
+   rows.push([label,'ng',e && e.message ? e.message : String(e)]);
+  }
+ };
+
+ const spec = sampleSpec();
+ const have3D = !!(state.engine && window.THREE);
+
+ run('① モデルデータの検証',() => {
+  validateModelSpec(spec);
+  return '部品 '+Object.keys(spec.parts).length+'個';
+ });
+
+ run('② 3Dモデルの構築と破棄',() => {
+  if (!have3D) return {skip:'3D表示なし'};
+
+  const root = state.engine.buildModel(spec);
+
+  try {
+   assert(
+    Object.keys(root.userData.parts).length === Object.keys(spec.parts).length,
+    '構築された部品の数が合いません'
+   );
+  } finally {
+   state.engine.dispose(root);
+  }
+
+  return '構築・破棄できました';
+ });
+
+ run('③ 動きの再生',() => {
+  const ids = Object.keys(spec.animations || {});
+
+  if (!have3D) return {skip:'3D表示なし'};
+  if (!ids.length) return {skip:'サンプルに動きがありません'};
+
+  const root = state.engine.buildModel(spec);
+
+  try {
+   const anim = state.engine.createAnimator(root,spec);
+   const id = ids.includes('idle') ? 'idle' : ids[0];
+
+   assert(anim.play(id),'動きを再生できません: '+id);
+   for (let i=0;i<5;i++) anim.update(1/30);
+   anim.stop();
+
+   return '「'+id+'」を再生できました';
+  } finally {
+   state.engine.dispose(root);
+  }
+ });
+
+ run('④ JSONの往復',() => {
+  const back = parseModelSpec(JSON.stringify(spec));
+
+  assert(JSON.stringify(back) === JSON.stringify(spec),'往復後に内容が変わりました');
+  return '内容が一致しました';
+ });
+
+ run('⑤ 修正データの適用',() => {
+  const before = JSON.stringify(spec);
+  const next = applyModelPatch(spec,{
+   format: 'MODELSTUDIO_PATCH_V1',
+   operations: [{op:'replace',path:'/meta/description',value:'動作チェック'}]
+  });
+
+  assert(next.meta.description === '動作チェック','修正が反映されませんでした');
+  assert(JSON.stringify(spec) === before,'適用前のデータが書き換わりました');
+  return '適用でき、元のデータは変わりませんでした';
+ });
+
+ const ng = rows.filter(r => r[1] === 'ng').length;
+ const mark = {ok:'✓',ng:'✕',skip:'－'};
+
+ openDialog(
+  '動作チェックの結果',
+  `<p class="${ng ? 'error' : 'success'}">${ng
+   ? ng+'件の項目で問題が見つかりました。'
+   : '問題は見つかりませんでした。'}</p>
+   ${rows.map(([label,status,note]) => `
+    <p class="${status === 'ng' ? 'error' : status === 'ok' ? 'success' : 'muted'}">
+     ${mark[status]} ${esc(label)}${note ? '<br><small>'+esc(note)+'</small>' : ''}
+    </p>
+   `).join('')}
+   <p class="hint">一時のサンプルだけで確かめました。いま編集中のモデルや保存データには触れていません。</p>`,
+  button('close','閉じる','primary')
+ );
+}
+
 function button(action,text,cls='') {
  return `<button data-action="${action}" class="${cls}">${text}</button>`;
 }
@@ -9738,8 +9655,8 @@ function libraryGrid() {
      <div class="libcard ${current ? 'current' : ''}">
       <button
        class="libopen"
-       data-open="${esc(p.projectId)}"
-       aria-label="${esc(p.name)}を開く"
+       ${current ? 'data-libreturn="1"' : 'data-open="'+esc(p.projectId)+'"'}
+       aria-label="${esc(p.name)}${current ? 'の編集に戻る' : 'を開く'}"
       >
        ${p.thumb
         ? `<img src="${esc(p.thumb)}" alt="" loading="lazy">`
@@ -9761,9 +9678,9 @@ function libraryGrid() {
       >✕</button>
       <button
        class="primary libgo"
-       data-open="${esc(p.projectId)}"
-       aria-label="${esc(p.name)}を開いて続きをつくる"
-      >開いて続きをつくる</button>
+       ${current ? 'data-libreturn="1"' : 'data-open="'+esc(p.projectId)+'"'}
+       aria-label="${esc(p.name)}${current ? 'の編集に戻る' : 'を開いて続きをつくる'}"
+      >${current ? '編集に戻る' : '開いて続きをつくる'}</button>
       <div class="libacts">
        <button
         data-renproject="${esc(p.projectId)}"
@@ -10548,6 +10465,7 @@ function aiPanel() {
  if (creating && state.createMode === 'library') return createLibraryPanel();
 
  return `
+  ${creating ? resumeCard() : ''}
   <div class="card">
    <h3>${creating ? 'AIで形をつくる' : 'AIでなおす'}</h3>
    <label>${creating ? 'どんなモデルを作りますか？' : '今のモデルをどう直しますか？'}
@@ -10590,6 +10508,8 @@ function exportPanel() {
    </p>
    ${button('bundle','ゲーム用のモデルデータをコピー','primary')}
    <p class="hint">コピーした内容をAIに渡して、組み込みや新規作成を行います。このボタンだけでゲームが完成するわけではありません。</p>
+   ${button('bundleData','データだけコピー（2体目以降のモデル用）')}
+   <p class="hint">表示プログラムを含まず、データと短い指示だけをコピーします。すでにゲームに表示プログラムがあるときに使います。</p>
    <p class="hint">
     含まれる動き: ${esc(
      Object.entries(state.modelSpec.animations || {})
@@ -10869,6 +10789,10 @@ function showGuide() {
    <p>下部の4工程は、いつでも自由に行き来できます。</p>
    <h3>AIとのやりとり</h3>
    <p>依頼文をコピー → ChatGPTなどへ送信 → 回答をコピーして読み込む、の順です。共有できる端末では、コピー操作の近くにある「直前の依頼文を共有」も使えます。</p>
+   <h3>「つくる」の2つのタブ</h3>
+   <p class="hint">「新しくつくる」は、AIへの依頼やひな形から始めます。「ライブラリから続ける」は、保存したモデルを開いて続きをつくります。</p>
+   <h3>読み込みに失敗したとき</h3>
+   <p class="hint">AIの回答やファイルを読み込めないと「リカバリー依頼文をコピー」ボタンが出ます。コピーしてAIに送り、直った回答をもう一度読み込んでください。</p>
    <h3>3Dの操作</h3>
    <p class="hint">指1本で回転、2本指で拡大縮小・移動できます。選択中の部品のドラッグ移動は「手でなおす」で切り替えられます。</p>
    <p class="hint">3D上部の↶・↷で取り消し・やり直し、「保存」でライブラリへ保存します。モデル情報・ファイル・表示設定は「その他」にあります。</p>`,
@@ -11257,28 +11181,6 @@ const actions = {
   toast(unused.length+'個の色・質感を整理しました（↶で戻せます）');
  },
 
- pasteImport: () => {
-  const text = String(state.ai.paste || '');
-  const box = $('pasteError');
-
-  try {
-   assert(text.trim(),'AIの回答を貼り付けてから押してください');
-
-   const message = applyAIText(text);
-
-   state.ai.paste = '';
-   renderPanel();
-   toast(message);
-  } catch (e) {
-   if (box && document.contains(box)) {
-    box.hidden = false;
-    box.textContent = e.message;
-   } else {
-    showError(e);
-   }
-  }
- },
-
  sharePrompt: () => {
   const text = state.ai.lastPrompt;
   assert(text,'先に指示文をコピーしてください');
@@ -11290,7 +11192,6 @@ const actions = {
    }
   });
  },
- sample: () => replaceGuard(() => replaceProject(sampleSpec())),
  import: loadFromClipboard,
 
  recoverCopy: () => {
@@ -11439,6 +11340,7 @@ const actions = {
   if (add.length) state.ai.queueIndex = q.length-add.length;
   saveQueue();
 
+  state.motion.view = 'make';
   state.activeTab = 'motion';
   renderPanel();
   requestAnimationFrame(() => {
@@ -11490,6 +11392,35 @@ const actions = {
    showError(e);
   }
  },
+ bundleData: async () => {
+  const spec = state.modelSpec;
+  const session = state.io.session;
+  const name = spec.meta.name;
+  const text = bundleDataText();
+
+  try {
+   const copied = await copyText(text,null);
+   if (!copied) return;
+
+   const current = state.io.session === session
+    && state.modelSpec === spec;
+
+   if (current) {
+    state.motion.exported = true;
+    renderPanel();
+   }
+
+   toast(
+    !current
+     ? '「'+name+'」の操作開始時点の内容をコピーしました。現在のモデルはコピー済みにしていません。'
+     : 'データだけをコピーしました。AIへの指示に、ゲームのコードと一緒に貼り付けてください',
+    current ? 3200 : 5000
+   );
+  } catch (e) {
+   showError(e);
+  }
+ },
+ selfTest,
  makeJoint: () => makeJoint($('jointAt').value),
  promptMotion: () => copyPrompt(
   createMotionPrompt(),
@@ -11551,7 +11482,7 @@ function handleClick(e) {
   b.closest('#moreMenu')
   && (
    b.dataset.tab
-   || ['guide','fit','studio','library','fileOpen','fileSave','json','saveAs'].includes(b.dataset.action)
+   || ['guide','fit','studio','library','fileOpen','fileSave','json','saveAs','selfTest'].includes(b.dataset.action)
   )
  ) {
   closeMoreMenu(true);
@@ -11580,6 +11511,12 @@ function handleClick(e) {
    editMove(b.dataset.epos);
   } else if (b.dataset.paint) {
    paintPart(b.dataset.paint);
+  } else if (b.dataset.motionview) {
+   const v = b.dataset.motionview;
+   state.motion.view = ['view','make','try'].includes(v) ? v : null;
+   endAssign();
+   renderPanel();
+   scrollPanelTargetIntoView($('panel').querySelector('.workflow-head'));
   } else if (b.dataset.createmode) {
    state.createMode = b.dataset.createmode === 'library' ? 'library' : 'new';
    renderPanel();
@@ -11646,6 +11583,11 @@ function handleClick(e) {
     window.scrollTo(0,0);
     toast('「'+state.modelSpec.meta.name+'」を開きました。「なおす」「動かす」で続きをつくれます',3200);
    });
+  } else if (b.dataset.libreturn !== undefined) {
+   // いま開いているモデルは読み込み直さず、ライブラリを閉じて「なおす」へ戻る
+   state.activeTab = 'repair';
+   closeLibrary();
+   window.scrollTo(0,0);
   } else if (b.dataset.delproject) {
    const id = b.dataset.delproject;
    const name = state.projects.find(p => p.projectId === id)?.name || id;
@@ -11826,7 +11768,6 @@ function init() {
   if (!details) return;
 
   if (details.id === 'partList') state.partListOpen = !details.open;
-  if (details.id === 'queueDetails') state.ai.queueOpen = !details.open;
   if (details.id === 'autoDetails') state.motion.autoOpen = !details.open;
 
   const motionCard = {readyDetails:'ready',aiDetails:'ai',tryDetails:'try',fxDetails:'fx'}[details.id];
