@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-【ハムスケ大冒険 v1.5】照準の改善（v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
+【ハムスケ大冒険 v1.7】背後の敵の察知と振り向き（v1.6 戦闘負担と取得・判定の調整／v1.5 照準の改善／v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
 ■ 作成内容
  - 単一HTML／Three.js r128（CDN 1回読込）。外部画像・モデル・音声なし。効果音は Web Audio で合成
  - 添付モデル「かわいいハムスター」のコードを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA,{walkSpeed:3,runSpeed:6}) で生成（scale 8）
@@ -48,6 +48,17 @@
  - 通常攻撃・れんだ・ひまわりの開始時に対象へ振り向く（発射時は振り向かず、正面の範囲内だけを狙う）
  - 突進中のゼンマイネズミ・転がり中のダンゴロにも偏差照準（先読み最大0.3秒）
  - 狙う対象の足元に黄色い輪の目印を表示
+■ v1.6 戦闘負担と取得・判定の調整（数値は初回調整値。実機での確認は未実施）
+ - 閉鎖エリアの同時出現の上限（3体）を全ステージに適用（分裂体は数えない）
+ - 種連打の消費を種4個に（威力・発射数・動作は変更なし）
+ - HPが最大のときのりんご、種が上限のときの種・種ぶくろは拾わずに残し「まんたん」を表示（同じアイテムには約1.5秒に1回）。
+   上限の手前では実際に増えた量を表示
+ - 押しつぶす・ひまわりのボスへの上下判定を上下対称に（|中心どうしの高さの差| − ボスの半径 < 上限）
+■ v1.7 背後の敵の察知と振り向き（数値は初回調整値。実機での確認は未実施）
+ - 10m以内で画面外・カメラの後ろにいる敵・ボスを、近い順に最大3個、画面端の矢印で知らせる（攻撃の予兆中は赤）
+ - 振り向き操作（PC：Q／タッチ：「ふりむき」ボタン）：12m以内の壁の向こうでない最寄りの敵・ボスへ向き、
+   いなければ真後ろを向く。カメラは0.25秒かけてその背後へ回る（ドラッグすると中止）。攻撃・被弾中は不可、飛行中は可
+ - 新規操作ボタンは、この振り向き操作に限って追加
 ■ 改善提案
  - セーブ（到達ステージ・黄金の種）を追加すると遊びやすくなる
  - 敵の出現数・HPを CONFIG の難易度倍率で一括調整できるようにする
@@ -145,6 +156,11 @@ html,body{margin:0;height:100%;overflow:hidden;background:#1b120b;font-family:va
 .b[data-act=sun]{right:62px;bottom:96px;background:#ffe9a8}
 .b[data-act=fly]{right:30px;bottom:154px;background:#dff3ff}
 .b[data-act=down]{right:12px;bottom:92px;background:#dff3ff}
+.b[data-act=turn]{right:120px;bottom:158px;width:48px;height:48px;font-size:11px;background:#e8f7d8}
+/* 画面端の察知矢印（上向きの三角を回転させて使う） */
+.alertArrow{position:absolute;left:0;top:0;width:0;height:0;border-left:11px solid transparent;border-right:11px solid transparent;
+  border-bottom:22px solid var(--sun);filter:drop-shadow(0 1px 1px rgba(0,0,0,.6));pointer-events:none;display:none}
+.alertArrow.danger{border-bottom-color:#ff4a4a}
 
 /* ---------- 狭い縦画面のHUD配置（ステータスの下に通知の枠を置く） ---------- */
 @media (max-width:600px) and (orientation:portrait){
@@ -215,6 +231,7 @@ html:not(.touch) #guide{bottom:max(24px,env(safe-area-inset-bottom))}
   <button id="pauseBtn" aria-label="ポーズ">Ⅱ</button>
   <div id="banner"><div class="sub" id="bannerSub"></div><div class="main" id="bannerMain"></div></div>
   <div id="floaters"></div>
+  <div id="alerts"></div>
 </div>
 
 <div id="touch" class="hidden">
@@ -228,6 +245,7 @@ html:not(.touch) #guide{bottom:max(24px,env(safe-area-inset-bottom))}
     <button class="b" data-act="sun">ひまわり</button>
     <button class="b" data-act="fly">ふうせん</button>
     <button class="b hidden" data-act="down">さがる ▼</button>
+    <button class="b" data-act="turn">ふりむき</button>
   </div>
 </div>
 
@@ -244,10 +262,11 @@ html:not(.touch) #guide{bottom:max(24px,env(safe-area-inset-bottom))}
       ジャンプで敵に上から乗ると、着地までに最大3回まで連続で踏める（同じ敵へのダメージは2回まで。別の敵へ踏み継ぐと「わたりぶみ」）<br>
       J 種投げ：前方への基本攻撃（種1個）。投げている間はゆっくり移動できる。金の種を持っていると自動で2倍ダメージ<br>
       攻撃は近くの敵へ自動で振り向く（狙う敵の足元に黄色い輪）<br>
-      K 種連打：頬にためて大きな種を3連射（種5個）<br>
+      K 種連打：頬にためて大きな種を3連射（種4個）<br>
       L 押しつぶす：跳んで周囲の敵をまとめて攻撃（がんばり満タン）<br>
       H ひまわり：前方の扇形に強力な一撃（ひまわり1回分）<br>
       F ふうせん：14秒飛べる（ふうせんの実1個）。飛行中は Space 上昇・C 下降<br>
+      Q ふりむき：近くの敵（いなければ真後ろ）へ向き、カメラも回す。画面端の矢印は画面外の敵（赤は攻撃の予兆）<br>
       Esc でポーズ
     </div>
   </div>
@@ -972,7 +991,7 @@ const CONFIG = {
   gravity: 26, jumpVel: 10.0, jumpDelay: 0.08, stepUp: 0.55, heroRadius: 0.45, heroHeight: 1.0,
   maxHp: 5, hpCap: 8, maxSeeds: 30, startSeeds: 10,
   seedSpeed: 18, seedRange: 12, seedDmg: 1, aimAngle: 0.9,
-  rendaCost: 5, rendaDmg: 2, rendaSpread: 0.14,
+  rendaCost: 4, rendaDmg: 2, rendaSpread: 0.14,
   pressRadius: 3, pressDmg: 5, fanRange: 4, fanAngle: Math.PI / 3, fanDmg: 8, sunUses: 3,
   flyTime: 14, flyStartDur: 2.4, flyLandAt: 1.4, flyEndDur: 2.3, flyRise: 3.5, flyMaxAbove: 9, maxBalloons: 3,
   invuln: 1, gaugeKill: 20, gaugeBossHit: 5,
@@ -1008,7 +1027,7 @@ const CONFIG = {
   groundRestHeight: 0.35, groundRestTime: 2.0, batLandEvery: 2,
   // 金の種（通常攻撃で自動的に優先消費）：所持上限・ダメージ倍率・ステージ2以降の雑魚からの出現率
   maxPower: 10, powerMult: 2, powerDropRate: 0.25,
-  // 閉鎖エリアで同時に出す敵の上限（ステージ2以降。分裂体は数えない）と、次の敵が出るまでの秒数
+  // 閉鎖エリアで同時に出す敵の上限（全ステージ。分裂体は数えない）と、次の敵が出るまでの秒数
   arenaMaxAlive: 3, arenaNextDelay: 0.6,
   // 連続ジャンプ攻撃：着地までの最大回数、連続中の同じ敵への再使用待ち（秒）と離れる勢い（m/秒）。
   // 最後の1回は stompCooldown・stompPush を使う
@@ -1016,7 +1035,11 @@ const CONFIG = {
   // 1回の連続で同じ敵にダメージを与えられる最大回数と、別の敵へ踏み継いだとき（わたりぶみ）のスコア
   stompSameMax: 2, stompHopScore: 100,
   // 照準：直前に狙った対象を優先する秒数、正面に対象がいないとき振り向いて狙う距離（m）、地上の敵の先読み時間の上限（秒）
-  aimStickTime: 0.5, aimTurnRange: 8, groundLeadMax: 0.3
+  aimStickTime: 0.5, aimTurnRange: 8, groundLeadMax: 0.3,
+  // 画面端の察知矢印：知らせる距離（m）と最大個数
+  alertRange: 10, alertMax: 3,
+  // 振り向き：向く対象を探す距離（m）と、カメラが回りきるまでの秒数
+  turnRange: 12, turnCamTime: 0.25
 };
 // 新規アクションを受け付けない動き（attack 中の連打による再始動・種の重複消費もこれで防ぐ）
 const LOCK_SET = new Set(['attack', 'Taneremda', 'oshitsubusu', 'hissatsu', 'emote', 'hurt', 'die']);
@@ -1254,6 +1277,7 @@ function sfx(name) {
     case 'fire': S.noise(0.25, 0.15, 900); break;
     case 'gust': S.noise(0.9, 0.2, 700); break;
     case 'check': S.tone(660, 990, 0.2, 'triangle', 0.12); break;
+    case 'turn': S.tone(520, 760, 0.08, 'triangle', 0.08); break;
   }
 }
 
@@ -1398,6 +1422,8 @@ const keys = {};
 const input = { up: false, down: false, touchUp: false, touchDown: false };
 const stick = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0, mag: 0 };
 const cam = { yaw: Math.PI, pitch: CONFIG.camPitch, cur: new V3(), dragIdle: 9 };
+// 振り向き時のカメラの横回転（from から to へ turnCamTime 秒かけて回す）
+const camTurn = { active: false, from: 0, to: 0, t: 0 };
 let camDrag = null;
 
 addEventListener('keydown', e => {
@@ -1410,7 +1436,7 @@ addEventListener('keydown', e => {
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   if (e.repeat) { keys[e.code] = true; return; }
   keys[e.code] = true;
-  const map = { Space: 'jump', KeyJ: 'seed', KeyK: 'renda', KeyL: 'press', KeyH: 'sun', KeyF: 'fly' };
+  const map = { Space: 'jump', KeyJ: 'seed', KeyK: 'renda', KeyL: 'press', KeyH: 'sun', KeyF: 'fly', KeyQ: 'turn' };
   if (map[e.code]) doAction(map[e.code]);
   if (e.code === 'Escape') togglePause();
 });
@@ -1444,6 +1470,8 @@ canvas.addEventListener('pointermove', e => {
   cam.pitch = clamp(cam.pitch + (e.clientY - camDrag.y) * 0.004, 0.12, 1.1);
   camDrag.x = e.clientX; camDrag.y = e.clientY;
   cam.dragIdle = 0;
+  // 振り向きのカメラ回転中にドラッグしたら、ドラッグを優先して回転を止める
+  camTurn.active = false;
 });
 const endDrag = e => { if (camDrag && camDrag.id === e.pointerId) camDrag = null; };
 canvas.addEventListener('pointerup', endDrag);
@@ -1559,6 +1587,60 @@ function resetNotices() {
   toastTimer = 0; bannerTimer = 0; pendingToast = null;
   $('toast').classList.remove('show');
   $('banner').classList.remove('show');
+}
+/* ---------- 画面端の察知矢印 ---------- */
+// 要素は起動時に alertMax 個だけ作って使い回す（毎フレームDOMを生成しない）
+const alertEls = [];
+for (let i = 0; i < CONFIG.alertMax; i++) {
+  const d = document.createElement('div');
+  d.className = 'alertArrow';
+  $('alerts').appendChild(d);
+  alertEls.push(d);
+}
+// 矢印を置く範囲（上部の通知の枠の下〜タッチボタンの上）。画面サイズと通知の枠の高さが変わったときだけ計測する
+const alertBox = { l: 28, r: 0, t: 150, b: 0 };
+function measureAlertBox() {
+  alertBox.l = 28; alertBox.r = innerWidth - 28;
+  alertBox.t = Math.max(150, $('hudStack').getBoundingClientRect().bottom + 20);
+  alertBox.b = innerHeight - (isTouch ? 260 : 40);
+  if (alertBox.b < alertBox.t + 40) alertBox.b = alertBox.t + 40;
+}
+measureAlertBox();
+addEventListener('resize', measureAlertBox);
+if (window.ResizeObserver) new ResizeObserver(measureAlertBox).observe($('hudStack'));
+function hideAlerts() { for (const d of alertEls) d.style.display = 'none'; }
+const _alC = new V3(), _alP = new V3();
+// 10m以内で画面外・カメラの後ろにいる敵・ボスを近い順に選び、その方向の画面端に矢印を置く（予兆中は赤）
+function updateAlerts() {
+  if (!inControl() || P.dead) { hideAlerts(); return; }
+  const list = [];
+  const add = (pos, danger) => {
+    const d = hdist(pos, P.pos);
+    if (d > CONFIG.alertRange) return;
+    _alP.copy(pos).project(camera);
+    const behind = _alP.z > 1;
+    if (!behind && Math.abs(_alP.x) <= 1 && Math.abs(_alP.y) <= 1) return;
+    // カメラの後ろにいる対象は投影結果が反転するので向きを戻す
+    const sx = behind ? -_alP.x : _alP.x, sy = behind ? -_alP.y : _alP.y;
+    list.push({ d, dx: sx, dy: -sy, danger });
+  };
+  for (const e of world.enemies) if (!e.dead) add(enemyCenter(e, _alC), e.mode === 'tele');
+  const b = G.boss;
+  if (b && !b.dead) add(bossCenter(b, _alC), !!b.tele);
+  list.sort((p, q) => p.d - q.d);
+  const cx = (alertBox.l + alertBox.r) / 2, cy = (alertBox.t + alertBox.b) / 2;
+  const hw = (alertBox.r - alertBox.l) / 2, hh = (alertBox.b - alertBox.t) / 2;
+  for (let i = 0; i < alertEls.length; i++) {
+    const el = alertEls[i], a = list[i];
+    if (!a) { el.style.display = 'none'; continue; }
+    let dx = a.dx, dy = a.dy;
+    if (Math.abs(dx) < 1e-4 && Math.abs(dy) < 1e-4) dy = 1;
+    const s = Math.min(hw / (Math.abs(dx) || 1e-4), hh / (Math.abs(dy) || 1e-4));
+    const px = cx + dx * s, py = cy + dy * s, ang = Math.atan2(dx, -dy);
+    el.style.display = 'block';
+    el.style.transform = `translate(${px}px,${py}px) translate(-50%,-50%) rotate(${ang}rad)`;
+    el.classList.toggle('danger', a.danger);
+  }
 }
 const floaters = [];
 for (let i = 0; i < 14; i++) {
@@ -2511,8 +2593,8 @@ function applyEnemyVisual(e) {
 }
 
 /* ========== 閉鎖エリア ========== */
-// 閉鎖エリアで同時に出す敵の上限（ステージ2以降だけ。ステージ1は従来どおり全員を同時に出す）
-function arenaCap() { return G.stageIndex >= 1 ? CONFIG.arenaMaxAlive : Infinity; }
+// 閉鎖エリアで同時に出す敵の上限（全ステージ共通）
+function arenaCap() { return CONFIG.arenaMaxAlive; }
 function triggerArena(a) {
   a.triggered = true;
   a.seedT = seedWait();
@@ -3450,6 +3532,8 @@ function flightPhase() { return P.flight ? P.flight.phase : null; }
 function canUse(act) {
   const fp = flightPhase();
   if (act === 'up' || act === 'down') return inControl() && !P.dead && fp === 'fly';
+  // 振り向きは canAct() と同じ条件。飛行中は fly 段階だけ可
+  if (act === 'turn') return canAct() && (!fp || fp === 'fly');
   if (!canAct()) return false;
   if (act === 'jump') return !fp && P.onGround && P.jumpPending < 0;
   if (act === 'seed') return P.seeds + P.power >= 1 && (!fp || fp === 'fly');
@@ -3465,6 +3549,7 @@ const ACTION_NG = { seed: '種がない！', renda: '種が足りない！', pre
 function doAction(act) {
   Sound.init();
   if (act === 'jump') return tryJump();
+  if (act === 'turn') return turnAround();
   if (!canUse(act)) {
     const fp = flightPhase();
     if (canAct() && ACTION_NG[act] && (!fp || (act === 'seed' && fp === 'fly'))) floatText(anchorPos('anchor_head_top'), ACTION_NG[act], '#ff9a9a');
@@ -3499,9 +3584,37 @@ function faceAimTarget(clip) {
   P.yaw = Math.atan2(t.pos.x - P.pos.x, t.pos.z - P.pos.z);
   hero.object.rotation.y = P.yaw;
 }
+// 振り向きの対象：turnRange 以内で壁の向こうでない最寄りの敵・ボス（照準と同じ aimInfo・clearLine を使う）。いなければ null
+function nearestTurnTarget() {
+  const origin = anchorPos('anchor_hands');
+  let best = null, bd = CONFIG.turnRange;
+  const consider = t => {
+    const info = aimInfo(t);
+    if (!info) return;
+    const d = hdist(info.c, P.pos);
+    if (d > bd || !clearLine(origin, info.c)) return;
+    bd = d; best = info.c;
+  };
+  for (const e of world.enemies) consider(e);
+  if (G.boss) consider(G.boss);
+  return best;
+}
+// 振り向き：対象（いなければ真後ろ）へ向き、カメラをその背後（P.yaw＋π）へ turnCamTime 秒かけて回す。照準の記憶は消さない
+function turnAround() {
+  if (!canUse('turn')) return;
+  const c = nearestTurnTarget();
+  P.yaw = c ? Math.atan2(c.x - P.pos.x, c.z - P.pos.z) : P.yaw + Math.PI;
+  hero.object.rotation.y = P.yaw;
+  camTurn.active = true; camTurn.t = 0;
+  camTurn.from = cam.yaw;
+  camTurn.to = cam.yaw + angDiff(cam.yaw, P.yaw + Math.PI);
+  sfx('turn');
+}
 // 主人公の中心と敵の中心の高さの差が h m 未満か（押しつぶす・ひまわり共通）
 const _hc = new V3();
 function withinHeight(e, h) { return Math.abs(enemyCenter(e, _hc).y - heroCenter.y) < h; }
+// 主人公の中心とボスの体との高さの差が h m 未満か（中心どうしの差の絶対値からボスの半径を引く。上下対称・ボス共通）
+function bossWithinHeight(b, h) { return Math.abs(bossCenter(b, _hc).y - heroCenter.y) - b.def.radius < h; }
 // ジャンプで落下中に敵の頭上へ乗ったら、弱いダメージを与えて跳ね返る（ボスは対象外）
 // 同じ敵には CONFIG.stompCooldown 秒は再判定しない。予兆中の攻撃は中断させ、丸まった敵には効かない
 // 着地までに CONFIG.stompChainMax 回まで連続で踏める（1回のダメージは stompDmg のまま）
@@ -3562,7 +3675,7 @@ function pressImpact() {
     }
   }
   const b = G.boss;
-  if (b && !b.dead && hdist(b.pos, c) < CONFIG.pressRadius + b.def.radius && b.y - P.pos.y < 3) damageBoss(CONFIG.pressDmg);
+  if (b && !b.dead && hdist(b.pos, c) < CONFIG.pressRadius + b.def.radius && bossWithinHeight(b, CONFIG.pressHeight)) damageBoss(CONFIG.pressDmg);
 }
 function fanImpact() {
   const yaw = hero.object.rotation.y;
@@ -3575,7 +3688,7 @@ function fanImpact() {
   };
   for (const e of [...world.enemies]) if (!e.dead && inFan(e.pos, e.def.radius) && withinHeight(e, CONFIG.fanHeight)) damageEnemy(e, CONFIG.fanDmg, 'fan');
   const b = G.boss;
-  if (b && !b.dead && inFan(b.pos, b.def.radius) && b.y - P.pos.y < 3.5) damageBoss(CONFIG.fanDmg);
+  if (b && !b.dead && inFan(b.pos, b.def.radius) && bossWithinHeight(b, CONFIG.fanHeight)) damageBoss(CONFIG.fanDmg);
 }
 
 /* 被弾・転落 */
@@ -3713,19 +3826,34 @@ function updatePlayer(dt) {
 }
 
 /* ========== アイテム・仕掛け ========== */
+// 上限で拾えないときに「まんたん」を表示するアイテム（金の種・ふうせんの実は従来どおり表示しない）
+const FULL_NOTICE = new Set(['apple', 'seed', 'seedbag']);
 function applyItem(type, it = null) {
   switch (type) {
-    case 'seed': P.seeds = Math.min(CONFIG.maxSeeds, P.seeds + 1); return '+1';
+    // 種・種ぶくろ・りんごは実際に増えた量を表示し、上限で増えないときは拾わずに残す（false）
+    case 'seed': {
+      const add = Math.min(CONFIG.maxSeeds, P.seeds + 1) - P.seeds;
+      if (add <= 0) return false;
+      P.seeds += add;
+      return '+' + add;
+    }
     case 'seedbag': {
       // 補給された種ぶくろは中身が少ない（配置品・敵ドロップは10個）
       const n = it && it.supply ? CONFIG.supplyBagSeeds : 10;
-      P.seeds = Math.min(CONFIG.maxSeeds, P.seeds + n);
-      return '種ぶくろ +' + n;
+      const add = Math.min(CONFIG.maxSeeds, P.seeds + n) - P.seeds;
+      if (add <= 0) return false;
+      P.seeds += add;
+      return '種ぶくろ +' + add;
     }
     case 'powerseed': if (P.power >= CONFIG.maxPower) return false; P.power++; return '金の種 +1';
     case 'sunflower': P.sun += CONFIG.sunUses; return 'ひまわり ゲット！ 必殺3回';
     case 'balloon': if (P.balloons >= CONFIG.maxBalloons) return false; P.balloons++; return 'ふうせんの実 ゲット！';
-    case 'apple': P.hp = Math.min(P.maxHp, P.hp + 1); return 'HP +1';
+    case 'apple': {
+      const add = Math.min(P.maxHp, P.hp + 1) - P.hp;
+      if (add <= 0) return false;
+      P.hp += add;
+      return 'HP +' + add;
+    }
     case 'golden':
       P.stageGolden++; P.goldenTotal++;
       if (P.stageGolden === 3 && P.maxHp < CONFIG.hpCap) { P.maxHp++; P.hp = P.maxHp; return '黄金の種 3/3！ ハートがふえた'; }
@@ -3747,7 +3875,14 @@ function updateItems(dt) {
     if (!ctrl) continue;
     if (hdist(P.pos, it.pos) < 1.0 && Math.abs(P.pos.y + 0.4 - it.baseY) < 1.4) {
       const msg = applyItem(it.type, it);
-      if (msg === false) continue;
+      if (msg === false) {
+        // HP・種が上限で拾えないときは「まんたん」を表示（同じアイテムには約1.5秒に1回まで。得点・音・演出なし）
+        if (FULL_NOTICE.has(it.type) && G.t >= (it.fullT || 0)) {
+          it.fullT = G.t + 1.5;
+          floatText(anchorPos('anchor_head_top'), 'まんたん', '#cfe8ff', 0.7);
+        }
+        continue;
+      }
       it.taken = true; disposeObject(it.mesh);
       // 補給品（種ぶくろ・ふうせんの実）は得点なし
       if (!it.supply) P.score += ITEMS[it.type].score;
@@ -3796,12 +3931,19 @@ function updateCamera(dt, snap = false) {
   _tgt.set(P.pos.x, P.pos.y + 1.0, P.pos.z);
   let dist = CONFIG.camDist;
   cam.dragIdle += dt;
+  // 振り向きのカメラ回転（回転中はボス戦の自動回転を止める）
+  if (camTurn.active) {
+    camTurn.t += dt;
+    const k = smooth(Math.min(1, camTurn.t / CONFIG.turnCamTime));
+    cam.yaw = lerp(camTurn.from, camTurn.to, k);
+    if (k >= 1) camTurn.active = false;
+  }
   const b = G.boss;
   if (b && !b.dead && G.state === 'bossBattle') {
     const bc = bossCenter(b), sep = hdist(P.pos, b.pos);
     _tgt.lerp(bc, 0.3); _tgt.y = Math.max(_tgt.y, P.pos.y + 1);
     dist = clamp(7 + sep * 0.35, 7, 15);
-    if (cam.dragIdle > 3) {
+    if (cam.dragIdle > 3 && !camTurn.active) {
       const ease = Math.min(1, (cam.dragIdle - 3) / 1.5);
       cam.yaw += angDiff(cam.yaw, Math.atan2(P.pos.x - b.pos.x, P.pos.z - b.pos.z)) * (1 - Math.exp(-1.2 * ease * dt));
     }
@@ -3852,6 +3994,7 @@ function updateHUD() {
       let show = true, on;
       if (a === 'down') { show = inAir; on = canUse('down'); }
       else if (a === 'jump') on = inAir ? canUse('up') : canUse('jump');
+      else if (a === 'turn') on = canUse('turn');
       else if (a === 'seed') on = canUse('seed');
       else { show = !inAir; on = canUse(a); }
       b.classList.toggle('hidden', !show);
@@ -3881,10 +4024,11 @@ if (isTouch) {
     + '「ジャンプ」敵に上から乗ると、着地までに最大3回まで連続で踏める（同じ敵へのダメージは2回まで。別の敵へ踏み継ぐと「わたりぶみ」）<br>'
     + '「たね」前方への基本攻撃（種1個）。投げている間はゆっくり移動できる。金の種を持っていると自動で2倍ダメージ<br>'
     + '攻撃は近くの敵へ自動で振り向く（狙う敵の足元に黄色い輪）<br>'
-    + '「れんだ」頬にためて大きな種を3連射（種5個）<br>'
+    + '「れんだ」頬にためて大きな種を3連射（種4個）<br>'
     + '「つぶす」跳んで周囲の敵をまとめて攻撃（がんばり満タン）<br>'
     + '「ひまわり」前方の扇形に強力な一撃（ひまわり1回分）<br>'
-    + '「ふうせん」14秒飛べる（ふうせんの実1個）。飛行中は「あがる ▲」「さがる ▼」';
+    + '「ふうせん」14秒飛べる（ふうせんの実1個）。飛行中は「あがる ▲」「さがる ▼」<br>'
+    + '「ふりむき」近くの敵（いなければ真後ろ）へ向き、カメラも回す。画面端の矢印は画面外の敵（赤は攻撃の予兆）';
 }
 
 /* ========== 状態機械 ========== */
@@ -3892,7 +4036,7 @@ const SCREENS = ['title', 'pause', 'clear', 'over', 'ending'];
 function showScreen(id) { SCREENS.forEach(s => $(s).classList.toggle('hidden', s !== id)); }
 function setState(s) {
   G.state = s; G.stateT = 0;
-  if (s !== 'playing' && s !== 'bossBattle') aimMark.visible = false;
+  if (s !== 'playing' && s !== 'bossBattle') { aimMark.visible = false; hideAlerts(); }
   if (s !== 'playing' && s !== 'bossBattle' && guideOpen) hideGuide();
   const playingLike = ['stageIntro', 'playing', 'bossBattle', 'stageClear', 'gameOver', 'ending'].includes(s);
   $('hud').classList.toggle('hidden', !playingLike || s === 'ending');
@@ -3917,7 +4061,7 @@ function loadStage(i) {
   resetInput();
   resetNotices();
   landMark.visible = false;
-  aimMark.visible = false; forgetAim();
+  aimMark.visible = false; forgetAim(); hideAlerts(); camTurn.active = false;
   G.stageIndex = i;
   removeBoss(); clearShots();
   buildStage(i);
@@ -3964,7 +4108,7 @@ function togglePause() {
   if (!(G.state === 'playing' || G.state === 'bossBattle' || G.state === 'stageIntro')) return;
   G.paused = !G.paused;
   showScreen(G.paused ? 'pause' : null);
-  if (G.paused) aimMark.visible = false;
+  if (G.paused) { aimMark.visible = false; hideAlerts(); }
   resetInput();
   if (G.paused) Music.pause(); else Music.resume();
 }
@@ -4075,6 +4219,7 @@ function updateWorld(dt) {
   }
   updateAimMark();
   updateCamera(dt);
+  updateAlerts();
   updateHUD();
 }
 let last = performance.now();
