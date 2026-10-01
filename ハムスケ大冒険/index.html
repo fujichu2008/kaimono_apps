@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-【ハムスケ大冒険 v1.7】背後の敵の察知と振り向き（v1.6 戦闘負担と取得・判定の調整／v1.5 照準の改善／v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
+【ハムスケ大冒険 v1.8】マグマオオトカゲの調整（v1.7 背後の敵の察知と振り向き／v1.6 戦闘負担と取得・判定の調整／v1.5 照準の改善／v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
 ■ 作成内容
  - 単一HTML／Three.js r128（CDN 1回読込）。外部画像・モデル・音声なし。効果音は Web Audio で合成
  - 添付モデル「かわいいハムスター」のコードを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA,{walkSpeed:3,runSpeed:6}) で生成（scale 8）
@@ -59,6 +59,13 @@
  - 振り向き操作（PC：Q／タッチ：「ふりむき」ボタン）：12m以内の壁の向こうでない最寄りの敵・ボスへ向き、
    いなければ真後ろを向く。カメラは0.25秒かけてその背後へ回る（ドラッグすると中止）。攻撃・被弾中は不可、飛行中は可
  - 新規操作ボタンは、この振り向き操作に限って追加
+■ v1.8 マグマオオトカゲの調整（数値は初回調整値。実機での確認は未実施。以前の版の記載と数値が異なる場合はこちらが最新）
+ - HP 44→40。攻撃の間隔を2.3秒に。9m以上離れているときは速歩きで近づき、同じ技を2回続けて使わない
+ - 火炎・波のあとに「ハァハァ」2.5秒のスキ（被ダメージ1.5倍・種2個を落とす）
+ - 火炎：予兆0.8秒・射程6.5m・炎中の追従を弱く（0.35rad/秒）・1回の炎でダメージは1回まで
+ - 尻尾：予兆0.9秒・半径4.8m・高さ0.5m以上で回避。予兆中は足元に赤い範囲の輪を表示
+ - 波：2発目はHP50%以下のときだけ。判定幅を±0.5mにし、輪の見た目の帯幅も判定に合わせた
+ - 数値は CONFIG の lizard〜 で調整できる
 ■ 改善提案
  - セーブ（到達ステージ・黄金の種）を追加すると遊びやすくなる
  - 敵の出現数・HPを CONFIG の難易度倍率で一括調整できるようにする
@@ -1039,7 +1046,17 @@ const CONFIG = {
   // 画面端の察知矢印：知らせる距離（m）と最大個数
   alertRange: 10, alertMax: 3,
   // 振り向き：向く対象を探す距離（m）と、カメラが回りきるまでの秒数
-  turnRange: 12, turnCamTime: 0.25
+  turnRange: 12, turnCamTime: 0.25,
+  // マグマオオトカゲ：追跡（次の予兆までの秒数・歩く速さ・9m以上離れたときの速さ）
+  lizardChaseWait: 2.3, lizardWalk: 1.6, lizardApproach: 2.6,
+  // 火炎（予兆の秒数・射程m・炎中の追従rad/秒・1回の炎で与えるダメージの最大回数）
+  lizardFlameTele: 0.8, lizardFlameRange: 6.5, lizardFlameTurn: 0.35, lizardFlameMaxHits: 1,
+  // 尻尾（予兆の秒数・判定半径m・この高さ以上なら当たらない）
+  lizardTailTele: 0.9, lizardTailRadius: 4.8, lizardTailJump: 0.5,
+  // 波（判定幅±m・2発目を出すHPの割合）
+  lizardWaveTol: 0.5, lizardWaveSecondHp: 0.5,
+  // 火炎・波のあとのスキ（秒数・落とす種の数）
+  lizardTiredTime: 2.5, lizardTiredSeeds: 2
 };
 // 新規アクションを受け付けない動き（attack 中の連打による再始動・種の重複消費もこれで防ぐ）
 const LOCK_SET = new Set(['attack', 'Taneremda', 'oshitsubusu', 'hissatsu', 'emote', 'hurt', 'die']);
@@ -1076,7 +1093,7 @@ const ENEMIES = {
 const BOSSES = {
   mike:   { name: 'ミケ大将', hp: 36, radius: 2.1, cy: 1.6, score: 3000 },
   crow:   { name: 'クロウ将軍', hp: 36, radius: 1.7, cy: 1.4, score: 4000 },
-  lizard: { name: 'マグマオオトカゲ', hp: 44, radius: 2.3, cy: 1.3, score: 5000 },
+  lizard: { name: 'マグマオオトカゲ', hp: 40, radius: 2.3, cy: 1.3, score: 5000 },
   owl:    { name: '魔王ノクターン', hp: 72, radius: 2.2, cy: 2.4, score: 10000, final: true }
 };
 
@@ -2808,6 +2825,7 @@ function removeBoss() {
   if (!G.boss) return;
   disposeObject(G.boss.mesh);
   G.boss = null;
+  tailMark.visible = false;
   $('bossBar').classList.add('hidden');
 }
 
@@ -2915,6 +2933,20 @@ function updateArenaSupply(dt) {
 }
 
 /* ========== ボスの行動 ========== */
+// マグマオオトカゲのスキ（火炎・波のあと）。stun 中は damageBoss の1.5倍が効く
+function lizardTired(b) {
+  bossSetMode(b, 'tired');
+  b.stun = true;
+  dropSeeds(b, CONFIG.lizardTiredSeeds);
+  floatText(bossCenter(b).setY(3.8), 'ハァハァ… チャンス！', '#FFC21A', 1.4);
+}
+// 尻尾攻撃の範囲の輪をボスの足元に出す（そのフレームだけ。lizard の先頭で毎フレーム消す）
+function showTailMark(b) {
+  tailMark.visible = true;
+  tailMark.position.set(b.pos.x, b.y + 0.05, b.pos.z);
+  tailMark.scale.setScalar(CONFIG.lizardTailRadius);
+  tailFill.material.opacity = 0.14 + Math.sin(G.t * 12) * 0.06;
+}
 const BOSS_AI = {
   mike(b, dt, dist, face) {
     const p = b.parts;
@@ -3023,45 +3055,73 @@ const BOSS_AI = {
     }
   },
   lizard(b, dt, dist, face) {
-    const p = b.parts;
+    const p = b.parts, C = CONFIG;
     p.tail.rotation.y = Math.sin(G.t * 2) * 0.3;
+    tailMark.visible = false;
     switch (b.mode) {
       case 'intro': if (b.mt > 1.5) bossSetMode(b, 'chase'); break;
-      case 'chase':
+      case 'chase': {
         bossFace(b, face, 2 * dt);
-        if (dist > 5) { b.pos.x += Math.sin(b.yaw) * 1.6 * dt; b.pos.z += Math.cos(b.yaw) * 1.6 * dt; }
-        if (b.mt > 1.6) bossSetMode(b, 'tele_' + (dist < 5.5 ? pick(['tail', 'flame', 'wave']) : dist < 9 ? pick(['flame', 'wave']) : 'wave'));
+        p.body.position.y = lerp(p.body.position.y, 0, dt * 6);
+        p.body.rotation.x = lerp(p.body.rotation.x, 0, dt * 6);
+        // 9m以上離れているときは速歩きで近づく
+        const spd = dist >= 9 ? C.lizardApproach : C.lizardWalk;
+        if (dist > 5) { b.pos.x += Math.sin(b.yaw) * spd * dt; b.pos.z += Math.cos(b.yaw) * spd * dt; }
+        if (b.mt > C.lizardChaseWait) {
+          // 同じ技は2回続けて使わない（候補がなければ近づきながら待つ）
+          const cands = (dist < 5.5 ? ['tail', 'flame', 'wave'] : dist < 9 ? ['flame', 'wave'] : ['wave']).filter(a => a !== b.lastAtk);
+          if (cands.length) { b.lastAtk = pick(cands); bossSetMode(b, 'tele_' + b.lastAtk); }
+        }
         break;
+      }
       case 'tele_flame':
         bossFace(b, face, 3 * dt); p.mouth.visible = true; p.mouth.scale.setScalar(0.3 + Math.sin(G.t * 30) * 0.1);
-        if (b.mt > 0.6) { b.tick = 0; bossSetMode(b, 'flame'); sfx('fire'); }
+        if (b.mt > C.lizardFlameTele) { b.tick = 0; b.flameHits = 0; bossSetMode(b, 'flame'); sfx('fire'); }
         break;
       case 'flame': {
-        bossFace(b, face, 0.8 * dt); p.mouth.scale.setScalar(0.4);
+        bossFace(b, face, C.lizardFlameTurn * dt); p.mouth.scale.setScalar(0.4);
         const m = p.mouth.getWorldPosition(new V3());
         for (let i = 0; i < 3; i++) {
           const a = b.yaw + rand(-0.3, 0.3), s = rand(7, 10);
           spawnParticle(m, new V3(Math.sin(a) * s, rand(-0.5, 1), Math.cos(a) * s), pick([0xff5a10, 0xffa020, 0xffe060]), rand(0.25, 0.45), 0.7, -1);
         }
         b.tick -= dt;
-        if (b.tick <= 0) { b.tick = 0.35; sfx('fire'); if (dist < 7.5 && bossFront(b, 0.5) && heightAbove() < 2.5) hurtPlayer(1, b.pos); }
-        if (b.mt > 1.6) { p.mouth.visible = false; bossSetMode(b, 'chase'); }
+        if (b.tick <= 0) {
+          b.tick = 0.35; sfx('fire');
+          // 1回の炎で与えるダメージは lizardFlameMaxHits 回まで（無敵中の判定は数えない）
+          if ((b.flameHits || 0) < C.lizardFlameMaxHits && P.invuln <= 0 && dist < C.lizardFlameRange && bossFront(b, 0.5) && heightAbove() < 2.5) {
+            b.flameHits = (b.flameHits || 0) + 1;
+            hurtPlayer(1, b.pos);
+          }
+        }
+        if (b.mt > 1.6) { p.mouth.visible = false; lizardTired(b); }
         break;
       }
       case 'tele_tail':
         b.yaw -= dt * 0.8; b.jitter = Math.sin(G.t * 60) * 0.08;
-        if (b.mt > 0.6) { b.startYaw = b.yaw; bossSetMode(b, 'tail'); }
+        showTailMark(b);
+        if (b.mt > C.lizardTailTele) { b.startYaw = b.yaw; bossSetMode(b, 'tail'); }
         break;
       case 'tail':
         b.yaw = b.startYaw + TAU * smooth(Math.min(1, b.mt / 0.7));
-        if (!b.once && b.mt > 0.3) { b.once = true; sfx('fan'); if (dist < 5.8 && heightAbove() < 0.7) hurtPlayer(1, b.pos); }
+        if (b.mt < 0.35) showTailMark(b);
+        if (!b.once && b.mt > 0.3) { b.once = true; sfx('fan'); if (dist < C.lizardTailRadius && heightAbove() < C.lizardTailJump) hurtPlayer(1, b.pos); }
         if (b.mt > 0.8) bossSetMode(b, 'chase');
         break;
       case 'tele_wave': p.body.rotation.x = lerp(p.body.rotation.x, -0.3, dt * 6); if (b.mt > 0.8) { b.shots = 0; bossSetMode(b, 'wave'); } break;
       case 'wave':
         p.body.rotation.x = lerp(p.body.rotation.x, 0, dt * 12);
-        if ((b.shots === 0 && b.mt >= 0) || (b.shots === 1 && b.mt >= 0.8)) { b.shots++; waveRing(b.pos); shake(0.3); sfx('press'); }
-        if (b.mt > 1.8) bossSetMode(b, 'chase');
+        // 2発目はHPが lizardWaveSecondHp 以下のときだけ
+        if ((b.shots === 0 && b.mt >= 0) || (b.shots === 1 && b.mt >= 0.8 && b.hp <= b.maxHp * C.lizardWaveSecondHp)) { b.shots++; waveRing(b.pos); shake(0.3); sfx('press'); }
+        if (b.mt > 1.8) lizardTired(b);
+        break;
+      case 'tired':
+        // スキ：体を少し下げて口を開け、息を切らす
+        b.stun = true;
+        p.body.position.y = lerp(p.body.position.y, -0.25 + Math.sin(G.t * 5) * 0.05, dt * 6);
+        p.body.rotation.x = lerp(p.body.rotation.x, 0.08, dt * 6);
+        p.mouth.visible = true; p.mouth.scale.setScalar(0.22 + Math.sin(G.t * 5) * 0.04);
+        if (b.mt > C.lizardTiredTime) { b.stun = false; p.mouth.visible = false; bossSetMode(b, 'chase'); }
         break;
     }
   },
@@ -3232,9 +3292,32 @@ for (let i = 0; i < 110; i++) {
   m.visible = false; pools.add(m);
   particles.push({ mesh: m, pos: new V3(), vel: new V3(), t: 0, life: 1, size: 0.1, grav: 0, active: false });
 }
+// 溶岩の波の輪：平らな帯のジオメトリを毎フレーム書き換え、帯の幅を判定幅（±lizardWaveTol）と一致させる
+const BAND_SEG = 64;
+function makeBandGeo() {
+  const g = new THREE.BufferGeometry();
+  const n = (BAND_SEG + 1) * 2;
+  const nor = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) nor[i * 3 + 1] = 1;
+  const idx = [];
+  for (let i = 0; i < BAND_SEG; i++) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+  g.setIndex(idx);
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  return g;
+}
+function setBand(g, r0, r1) {
+  const p = g.attributes.position.array;
+  for (let i = 0; i <= BAND_SEG; i++) {
+    const a = i / BAND_SEG * TAU, c = Math.cos(a), s = Math.sin(a), k = i * 6;
+    p[k] = c * r0; p[k + 1] = 0; p[k + 2] = s * r0;
+    p[k + 3] = c * r1; p[k + 4] = 0; p[k + 5] = s * r1;
+  }
+  g.attributes.position.needsUpdate = true;
+}
 for (let i = 0; i < 4; i++) {
-  const m = new THREE.Mesh(GEO.torus, mat(0xff6a1a, { emissive: 0xff4a00, emissiveIntensity: 1.2 }));
-  m.rotation.x = Math.PI / 2; m.visible = false; pools.add(m);
+  const m = new THREE.Mesh(makeBandGeo(), mat(0xff6a1a, { emissive: 0xff4a00, emissiveIntensity: 1.2, side: THREE.DoubleSide }));
+  m.frustumCulled = false; m.visible = false; pools.add(m);
   rings.push({ mesh: m, c: new V3(), r: 0, hit: false, active: false });
 }
 for (let i = 0; i < 4; i++) {
@@ -3252,6 +3335,13 @@ pools.add(landMark);
 const aimMark = new THREE.Mesh(GEO.ring, new THREE.MeshBasicMaterial({ color: 0xffd23a, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }));
 aimMark.rotation.x = -Math.PI / 2; aimMark.visible = false;
 pools.add(aimMark);
+// マグマオオトカゲの尻尾攻撃の範囲（予兆中にボスの足元へ出す。常設の1組を使い回す。半径1で作り lizardTailRadius 倍する）
+const tailMark = new THREE.Group();
+const tailFill = new THREE.Mesh(new THREE.CircleGeometry(1, 48), new THREE.MeshBasicMaterial({ color: 0xff3a2a, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide }));
+const tailEdge = new THREE.Mesh(new THREE.RingGeometry(0.94, 1, 48), new THREE.MeshBasicMaterial({ color: 0xff3a2a, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide }));
+tailFill.rotation.x = tailEdge.rotation.x = -Math.PI / 2;
+tailMark.add(tailFill, tailEdge); tailMark.visible = false;
+pools.add(tailMark);
 
 function spawnParticle(pos, vel, color, size, life, grav = 6) {
   const p = particles.find(x => !x.active);
@@ -3450,6 +3540,7 @@ function clearShots() {
   shots.forEach(s => { s.active = false; s.mesh.visible = false; });
   rings.forEach(r => { r.active = false; r.mesh.visible = false; });
   rocks.forEach(r => { r.active = false; r.rock.visible = r.shadow.visible = false; });
+  tailMark.visible = false;
 }
 /* 溶岩の波 */
 function waveRing(c) { const r = rings.find(x => !x.active); if (!r) return; r.active = true; r.c.copy(c); r.r = 1.5; r.hit = false; r.mesh.visible = true; }
@@ -3457,8 +3548,10 @@ function updateRings(dt) {
   for (const r of rings) {
     if (!r.active) continue;
     r.r += 7 * dt;
-    r.mesh.position.set(r.c.x, 0.15, r.c.z); r.mesh.scale.set(r.r, r.r, 2);
-    if (!r.hit && !P.dead && Math.abs(hdist(P.pos, r.c) - r.r) < 0.7 && heightAbove() < 0.5) { r.hit = true; hurtPlayer(1, r.c); }
+    const tol = CONFIG.lizardWaveTol;
+    setBand(r.mesh.geometry, Math.max(0, r.r - tol), r.r + tol);
+    r.mesh.position.set(r.c.x, 0.15, r.c.z);
+    if (!r.hit && !P.dead && Math.abs(hdist(P.pos, r.c) - r.r) < tol && heightAbove() < 0.5) { r.hit = true; hurtPlayer(1, r.c); }
     if (r.r > 22) { r.active = false; r.mesh.visible = false; }
   }
 }
