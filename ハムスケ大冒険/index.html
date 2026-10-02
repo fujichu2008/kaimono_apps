@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-【ハムスケ大冒険 v1.17】新BGMの読み込みの安定化（v1.16 ステージごとの地形と「はじめから」の確認／v1.15 セーブと記録・ヒント／v1.14 ボスへのクリティカルの調整／v1.13 新BGMとミュージックボックス／v1.12 大技のクリティカル／v1.11 エンディングの演出強化／v1.10 魔王ノクターン第2段階のスキ／v1.9 スマホ横画面への対応／v1.8 マグマオオトカゲの調整／v1.7 背後の敵の察知と振り向き／v1.6 戦闘負担と取得・判定の調整／v1.5 照準の改善／v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
+【ハムスケ大冒険 v1.18】PWAで音が鳴らない不具合の修正（v1.17 新BGMの読み込みの安定化／v1.16 ステージごとの地形と「はじめから」の確認／v1.15 セーブと記録・ヒント／v1.14 ボスへのクリティカルの調整／v1.13 新BGMとミュージックボックス／v1.12 大技のクリティカル／v1.11 エンディングの演出強化／v1.10 魔王ノクターン第2段階のスキ／v1.9 スマホ横画面への対応／v1.8 マグマオオトカゲの調整／v1.7 背後の敵の察知と振り向き／v1.6 戦闘負担と取得・判定の調整／v1.5 照準の改善／v1.4 難易度の再調整／v1.3 中盤以降の遊びやすさ／v1.2 飛行する敵とアイテム配置／v1.1 バランス調整／v1.0 新規作成）
 ■ 作成内容
  - 単一HTML／Three.js r128（CDN 1回読込）。外部画像・モデル・音声なし。効果音は Web Audio で合成
  - 添付モデル「かわいいハムスター」のコードを1か所にそのまま追加し、ModelRenderer.createCharacter(MODEL_DATA,{walkSpeed:3,runSpeed:6}) で生成（scale 8）
@@ -130,6 +130,9 @@
    ゲーム中にクラシックへ切り替えたときは、1回の起動につき1回だけトーストで知らせる
  - 起動時に加えて、最初の画面操作のときにもステージ1の曲の先読みを始める
  - 数値は CONFIG の bgmLoadTries・bgmRetryWait・bgmLoadTimeout・bgmFailRest・bgmMono で調整できる
+■ v1.18 PWAで音が鳴らない不具合の修正（実機での確認は未実施。以前の版の記載と異なる場合はこちらが最新）
+ - 起動時（画面に触れる前）に音声の準備をするのをやめた。音声は最初の画面操作のときに作り、ステージ1の曲の先読みもそのときに始める
+ - 画面に触れるたびに、音声が止まっていれば再開をかける（裏に回して戻ったあとに止まった場合も復帰する）
 ■ 改善提案
  - 敵の出現数・HPを CONFIG の難易度倍率で一括調整できるようにする
 -->
@@ -1493,7 +1496,7 @@ function tintMats(list, hex, amount) {
 const Sound = {
   ctx: null, master: null, noiseBuf: null, muted: false, bgmGain: null, bgmMuted: false,
   init() {
-    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    if (this.ctx) { this.wake(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     this.ctx = new AC();
@@ -1507,6 +1510,25 @@ const Sound = {
     this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.wake();
+  },
+  // 音声が止まっていれば再開をかける（画面操作の中で呼ぶ。止まった状態は suspended のほかにもあるので running 以外すべてを対象にする）
+  // 無音の短い音を1回鳴らして、端末側の音声の制限を解除する
+  unlocked: false,
+  wake() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (ctx.state !== 'running') {
+      try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (err) { /* 再開できない場合は次の操作で試す */ }
+    }
+    if (this.unlocked) return;
+    try {
+      const s = ctx.createBufferSource();
+      s.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+      s.connect(ctx.destination);
+      s.start(0);
+      if (ctx.state === 'running') this.unlocked = true;
+    } catch (err) { /* 鳴らせない場合は次の操作で試す */ }
   },
   tone(f0, f1, dur, type = 'sine', vol = 0.2, delay = 0) {
     if (!this.ctx) return;
@@ -6076,7 +6098,7 @@ document.addEventListener('visibilitychange', () => {
     if (!G.paused && (G.state === 'playing' || G.state === 'bossBattle' || G.state === 'stageIntro')) togglePause();
     else Music.pause();
   } else {
-    if (Sound.ctx && Sound.ctx.state === 'suspended') Sound.ctx.resume();
+    Sound.wake();
     last = performance.now();
     if (!G.paused) Music.resume();
   }
@@ -6087,17 +6109,20 @@ setState('title');
 // 最初のステージの新BGMを起動時に先読みしておく（スタート直後から新BGMで始められるようにする）
 // ここで失敗しても記録は残さず、スタート時にもう一度読み込みを試す
 try {
-  Sound.init();
-  if (Remix.ready()) Remix.load('living').catch(() => {});
+  // 音声の準備は画面に触れる前には行わない（PWAでは、操作の前に作った音声が止まったままになることがある）
   // 最初の画面操作のときに、まだ用意できておらず読み込み中でもなければ、もう一度先読みを始める
   const firstTouch = () => {
-    removeEventListener('pointerdown', firstTouch);
-    removeEventListener('keydown', firstTouch);
+    // 2回目以降の操作では、音声が止まっていれば再開をかけるだけ
+    if (firstTouch.done) { Sound.wake(); return; }
+    firstTouch.done = true;
     Sound.init();
     if (Remix.ready() && !Remix.cache.has('living') && !Remix.loading.has('living')) Remix.load('living').catch(() => {});
   };
-  addEventListener('pointerdown', firstTouch);
-  addEventListener('keydown', firstTouch);
+  // ボタン側で伝播を止めていても届くよう、取り込み段階（capture）で受ける
+  addEventListener('pointerdown', firstTouch, true);
+  addEventListener('keydown', firstTouch, true);
+  addEventListener('touchend', firstTouch, true);
+  addEventListener('click', firstTouch, true);
 } catch (err) { /* 用意できなければ、開始時に読み込む */ }
 requestAnimationFrame(loop);
 })();
