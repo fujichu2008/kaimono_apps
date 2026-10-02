@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-ハムスケ大冒険-1d959792896d3042e715";
+const CACHE_NAME = "appstudio-pwa-ハムスケ大冒険-f492f939fa2098c661ca";
 const CACHE_PREFIX = "appstudio-pwa-ハムスケ大冒険-";
 const PRECACHE_URLS = [
     "./",
