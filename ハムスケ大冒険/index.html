@@ -94,7 +94,7 @@
 ■ v1.13 新BGMとミュージックボックス（実機での確認は未実施）
  - BGMを abcjs（CDN 1回読込。楽器音は abcjs の既定の配布元から取得）で演奏する8パートの新9曲に置き換え
    （ステージ1〜3、各ボス、ラスボス、ラスボス最終決戦、エンディング）。ラスボスは足場が崩れる段階で最終決戦の曲に切り替える
- - 旧BGM（SONGS と再生の仕組み ClassicMusic）はそのまま残す。新BGMを読み込めないときだけ旧BGMを鳴らす（準備中は無音で待つ。最初のステージの曲は起動時に先読みする）
+ - 旧BGM（SONGS と再生の仕組み ClassicMusic）はそのまま残す。新BGMを読み込めないときと、読み込みが CONFIG.bgmLoadWait 秒（4秒）を超えたときのつなぎに旧BGMを鳴らす（最初のステージの曲は起動時に先読みする）
  - 新BGMは1曲を音声に変換して自前でループ再生する（保持は2曲まで）。ステージ曲の準備後にボス曲を先読みする
  - タイトルに「ミュージックボックス」を追加。9曲の新BGMと旧BGM（クラシック）を試聴できる
  - 新BGMの音量は CONFIG.bgmRemixVol で調整できる
@@ -1247,7 +1247,9 @@ const CONFIG = {
   // 新BGM（abcjs で変換した音声）の音量の倍率。BGM全体の音量（bgmGain）にさらに掛ける
   bgmRemixVol: 1.1,
   // 効果音全体の音量（BGMに埋もれるときは上げる）
-  sfxVol: 0.7
+  sfxVol: 0.7,
+  // 新BGMの読み込みがこの秒数を超えたら、つなぎに旧BGMを鳴らす（準備ができたら新BGMへ切り替える）
+  bgmLoadWait: 4
 };
 // 新規アクションを受け付けない動き（attack 中の連打による再始動・種の重複消費もこれで防ぐ）
 const LOCK_SET = new Set(['attack', 'Taneremda', 'oshitsubusu', 'hissatsu', 'emote', 'hurt', 'die']);
@@ -2352,7 +2354,7 @@ const Remix = {
 // opts.classic：旧BGMで鳴らす／opts.standin：false なら読み込み中に旧BGMを鳴らさない（ミュージックボックス用）
 // opts.restart：同じ曲でも鳴らし直す／opts.retry：前に失敗していても新BGMの読み込みをもう一度試す
 const Music = {
-  key: null, want: null, engine: null, token: 0, paused: false, onChange: null,
+  key: null, want: null, engine: null, token: 0, paused: false, onChange: null, waitTimer: 0,
   play(key, opts = {}) {
     const tr = TRACKS[key];
     if (!tr || !Sound.ctx) return;
@@ -2374,8 +2376,17 @@ const Music = {
       this.changed();
       return;
     }
-    // 準備ができるまでは無音で待つ（旧BGMは、読み込めなかったときだけ鳴らす）
+    // 準備ができるまでは無音で待つ。bgmLoadWait 秒たっても終わらなければ、つなぎに旧BGMを鳴らす
+    // （engine は 'standin'。準備ができたら新BGMへ切り替える。ミュージックボックスでは鳴らさずに待つ）
     this.engine = 'loading';
+    clearTimeout(this.waitTimer);
+    if (chain) this.waitTimer = setTimeout(() => {
+      if (this.token !== token || this.engine !== 'loading') return;
+      this.engine = 'standin';
+      ClassicMusic.play(tr.classic);
+      if (this.paused) ClassicMusic.pause();
+      this.changed();
+    }, CONFIG.bgmLoadWait * 1000);
     this.changed();
     Remix.load(key).then(buf => {
       if (this.token !== token) return;
@@ -2389,6 +2400,7 @@ const Music = {
     }, () => {
       if (this.token !== token) return;
       if (this.engine === 'loading') { this.engine = 'classic'; ClassicMusic.play(tr.classic); if (this.paused) ClassicMusic.pause(); }
+      else if (this.engine === 'standin') this.engine = 'classic';
       this.changed();
     });
   },
@@ -2400,6 +2412,7 @@ const Music = {
   resume() { this.paused = false; ClassicMusic.resume(); Remix.resume(); },
   stop(quiet) {
     this.token++;
+    clearTimeout(this.waitTimer);
     this.key = null; this.want = null; this.engine = null; this.paused = false;
     ClassicMusic.stop(); Remix.stop();
     if (!quiet) this.changed();
@@ -5816,7 +5829,7 @@ function hintOnce(id, touchText, pcText) {
 }
 // 新BGMの準備で無音になっている間だけ「よみこみ中」を出す
 function updateBgmLoad() {
-  $('bgmLoad').classList.toggle('hidden', Music.engine !== 'loading');
+  $('bgmLoad').classList.toggle('hidden', Music.engine !== 'loading' && Music.engine !== 'standin');
 }
 // 保存済みの設定を復元する（音声の準備より前に行うので、音量には Sound.init が反映する）
 {
