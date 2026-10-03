@@ -112,7 +112,17 @@ nav span{display:block;font-size:17px}
 #walkActs button{background:#175d75e6;min-width:92px}
 #recoverBar{position:fixed;left:50%;bottom:calc(150px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:15;display:flex;gap:6px;align-items:center;max-width:calc(100vw - 24px);padding:8px;background:#3a2e1c;border:1px solid #b98b52;border-radius:14px}
 #recoverBar button{white-space:nowrap}
+#repairBar{position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:14;max-height:36dvh;overflow:auto}
 button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+#zoomTools{position:absolute;right:10px;bottom:10px;z-index:4;display:flex;gap:5px;align-items:center}
+#zoomTools[hidden]{display:none}
+#zoomTools button{min-width:44px;min-height:44px;padding:7px;background:#18212ded}
+#zoomLabel{min-width:34px;text-align:center;font-size:13px;text-shadow:0 1px 2px #000}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+fieldset:disabled{opacity:.5}
+.thumbs{position:relative;display:flex;gap:6px;overflow-x:auto;padding:6px 0;-webkit-overflow-scrolling:touch}
+.thumbs button{flex:none;min-width:44px;min-height:44px;padding:3px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px}
+.thumbs canvas{display:block;image-rendering:pixelated;border-radius:4px}
 @media(min-width:950px){#panel{padding-left:max(24px,calc((100vw - 1000px)/2));padding-right:max(24px,calc((100vw - 1000px)/2))}}
 @media(max-width:500px){input,select,textarea{font-size:16px}}
 </style>
@@ -123,6 +133,11 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 <main class="workspace">
  <section id="viewport" aria-label="プレビュー">
   <canvas id="view"></canvas>
+  <div id="zoomTools" role="group" aria-label="プレビューの拡大">
+   <button data-action="zoomOut" aria-label="縮小">−</button>
+   <span id="zoomLabel">1×</span>
+   <button data-action="zoomIn" aria-label="拡大">＋</button>
+  </div>
   <div id="quickTools" role="group" aria-label="編集と保存">
    <button id="undoBtn" data-action="undo" aria-label="元に戻す">↶</button>
    <button id="redoBtn" data-action="redo" aria-label="やり直す">↷</button>
@@ -150,10 +165,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
    <label class="menu-check"><input type="checkbox" id="pinViewport">プレビューを上部に固定</label>
    <label class="menu-check"><input type="checkbox" id="gridToggle">方眼を表示</label>
    <label class="menu-color">背景色<input type="color" id="background" value="#202a36" aria-label="背景色"></label>
-   <p class="menu-heading">動作チェック</p>
-   <p><button data-action="selfTest" class="menu-wide">動作チェック</button></p>
    <p class="menu-heading">ヘルプ</p>
    <button data-action="guide" class="menu-wide">? 使い方</button>
+   <p class="menu-heading">開発者向け</p>
+   <p><button data-action="selfTest" class="menu-wide">動作チェック</button></p>
   </div>
  </details>
 </div>
@@ -164,8 +179,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
  <button data-tab="motion"><span aria-hidden="true">▶</span>③ 動かす</button>
  <button data-tab="export"><span aria-hidden="true">↗</span>④ ゲームへ</button>
 </nav>
-<input type="file" id="fileInput" accept=".json,application/json" hidden>
+<input type="file" id="fileInput" accept=".json,.txt,application/json,text/plain" hidden>
 <input type="file" id="libraryFile" accept=".json,application/json" hidden>
+<input type="file" id="answerFile" accept=".json,.txt,application/json,text/plain" hidden>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="modal" class="modal" hidden>
  <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
@@ -639,7 +655,11 @@ const state = {
  bg: '#202a36',
  sel: {part:null,variant:'base',color:null,tool:'pen'},
  motion: {view:null,playing:null,speed:1,edit:null,trying:false,walk:false,x:0,y:0,dir:'down',facing:'right',trySpeed:0,review:null},
- ai: {idea:'',request:'',lastPrompt:'',recovery:null,queue:[],qi:0,queueFor:null,batchNote:'',dot:32,view:'side'},
+ ai: {idea:'',request:'',lastPrompt:'',recovery:null,queue:[],qi:0,queueFor:null,batchNote:'',dot:32,view:'side',skip:{}},
+ vw: {zoom:1,px:0,py:0,onion:false,ptrs:{},pan:null,drag:null,fine:false,pinch:null,aim:null},
+ welcome: true,
+ sheetClip: null,
+ evAt: {},
  rt: {sprite:null,animator:null,controller:null,layout:null},
  stroke: null,
  stick: {x:0,id:null},
@@ -710,32 +730,392 @@ function parseJSON(text,max=LIMIT.bytes) {
  try {
   v = JSON.parse(text);
  } catch (e) {
-  throw Error('データの書き方に誤りがあります（JSON構文エラー）: '+e.message);
+  throw Error('データの書き方に誤りがあります（JSON構文エラー）: '+e.message+syntaxHint(text));
  }
  guardTree(v);
  return v;
 }
 
-function cleanPastedJSON(text) {
- return String(text ?? '')
-  .replace(/^\uFEFF/,'')
-  .replace(/[\u201C\u201D\u201E\u201F\u2033\uFF02]/g,'"')
-  .replace(/\u00A0/g,' ')
-  .trim()
-  .replace(/^`{3}[A-Za-z]*\s*\n?/,'')
-  .replace(/\n?`{3}\s*$/,'')
-  .trim();
+// ---- 貼り付けの補正（スマホの自動変換・AIの書き方の癖をアプリ側で吸収する） ----
+let repairNotes = null;
+
+const FIX_CONFUSABLE = {
+ '\u043A':'k','\u0430':'a','\u043E':'o','\u0441':'c','\u0435':'e','\u0440':'p','\u0445':'x','\u0443':'y','\u0456':'i',
+ '\u0410':'A','\u0412':'B','\u0415':'E','\u041A':'K','\u041C':'M','\u041D':'H','\u041E':'O','\u0420':'P','\u0421':'C','\u0422':'T','\u0425':'X',
+ '\u03B1':'a','\u03BF':'o','\u03BD':'v','\u0391':'A','\u0392':'B','\u0395':'E','\u0396':'Z','\u0397':'H','\u0399':'I','\u039A':'K','\u039C':'M','\u039D':'N','\u039F':'O','\u03A1':'P','\u03A4':'T','\u03A5':'Y','\u03A7':'X'
+};
+
+function cpOf(ch) {
+ return 'U+'+ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0');
 }
 
-function parseAIJSON(text) {
- const t = cleanPastedJSON(text);
+// JSONの文字列の外側にある全角記号・全角スペースだけを半角に戻す（名前や説明文の日本語は変えない）
+function fixOutsideStrings(t) {
+ let out = '';
+ let inStr = false;
+ let esc1 = false;
+ for (const ch of t) {
+  if (inStr) {
+   out += ch;
+   if (esc1) esc1 = false;
+   else if (ch === '\\') esc1 = true;
+   else if (ch === '"') inStr = false;
+  } else if (ch === '"') {
+   inStr = true;
+   out += ch;
+  } else if (ch >= '\uFF01' && ch <= '\uFF5E') {
+   out += String.fromCharCode(ch.charCodeAt(0)-0xFEE0);
+  } else if (ch === '\u3000') {
+   out += ' ';
+  } else {
+   out += ch;
+  }
+ }
+ return out;
+}
+
+function normalizePastedText(text,fixQuotes) {
+ let t = String(text ?? '').replace(/[\u200B-\u200D\uFEFF]/g,'');
+ // 全角・曲線の引用符は、読み直すとき（fixQuotes）だけ半角に直す（説明文の中の引用符を壊さないため）
+ if (fixQuotes) {
+  t = t.replace(/[\u201C\u201D\u201E\u201F\u2033\uFF02]/g,'"').replace(/[\u2018\u2019]/g,"'");
+ }
+ t = t.replace(/\u00A0/g,' ').trim();
+ t = t.replace(/^`{3}[A-Za-z]*\s*\n?/,'').replace(/\n?`{3}\s*$/,'').trim();
+ const a = t.indexOf('{');
+ if (a > 0) t = t.slice(a);
+ return fixOutsideStrings(t);
+}
+
+// 構文エラーの修復: 文字列の後ろの式・末尾のカンマ・JSONの後ろの余分な文章を取り除く
+function repairJSONSyntax(t) {
+ const notes = [];
+ let s = t;
+ const calls = /("(?:[^"\\\n]|\\.)*")\s*\.\s*[A-Za-z_$][\w$]*\s*\((?:[^()]|\([^()]*\))*\)/g;
+ const s1 = s.replace(calls,'$1');
+ if (s1 !== s) {
+  s = s1;
+  notes.push('文字列の後ろに付いた式（.replace(…) など）を取り除きました');
+ }
+ const s2 = s.replace(/,(\s*[}\]])/g,'$1');
+ if (s2 !== s) {
+  s = s2;
+  notes.push('末尾の余分なカンマを取り除きました');
+ }
+ const end = s.lastIndexOf('}');
+ if (end >= 0 && end < s.length-1) {
+  s = s.slice(0,end+1);
+  notes.push('JSONの後ろの余分な文章を取り除きました');
+ }
+ return {text:s,notes};
+}
+
+// 構文エラーの位置（0始まり）を返す。エラーが無ければ -1
+function jsonErrorPos(t) {
+ let i = 0;
+ const fail = () => {
+  throw i;
+ };
+ const ws = () => {
+  while (i < t.length && ' \t\n\r'.includes(t[i])) i++;
+ };
+ const str = () => {
+  i++;
+  while (i < t.length) {
+   const c = t[i];
+   if (c === '\\') {
+    i += 2;
+   } else if (c === '"') {
+    i++;
+    return;
+   } else if (c === '\n') {
+    fail();
+   } else {
+    i++;
+   }
+  }
+  fail();
+ };
+ const val = () => {
+  ws();
+  const c = t[i];
+  if (c === '"') return str();
+  if (c === '{') {
+   i++;
+   ws();
+   if (t[i] === '}') {
+    i++;
+    return;
+   }
+   for (;;) {
+    ws();
+    if (t[i] !== '"') fail();
+    str();
+    ws();
+    if (t[i] !== ':') fail();
+    i++;
+    val();
+    ws();
+    if (t[i] === ',') {
+     i++;
+     continue;
+    }
+    if (t[i] === '}') {
+     i++;
+     return;
+    }
+    fail();
+   }
+  }
+  if (c === '[') {
+   i++;
+   ws();
+   if (t[i] === ']') {
+    i++;
+    return;
+   }
+   for (;;) {
+    val();
+    ws();
+    if (t[i] === ',') {
+     i++;
+     continue;
+    }
+    if (t[i] === ']') {
+     i++;
+     return;
+    }
+    fail();
+   }
+  }
+  const m = /^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(t.slice(i,i+40));
+  if (!m) fail();
+  i += m[0].length;
+ };
+ try {
+  val();
+  ws();
+  if (i < t.length) fail();
+  return -1;
+ } catch (e) {
+  return typeof e === 'number' ? e : -1;
+ }
+}
+
+function syntaxHint(text) {
+ const pos = jsonErrorPos(String(text));
+ if (pos < 0) return '';
+ const ch = text[pos];
+ const code = ch ? ch.charCodeAt(0) : 0;
+ const what = !ch ? '（データの終わり）' : '（この文字: '+(code > 126 || code < 32 ? cpOf(ch) : ch)+'）';
+ return '\n位置: '+(pos+1)+'文字目'+what
+  + '\n抜粋: '+text.slice(Math.max(0,pos-30),pos).replace(/\s+/g,' ')+'【ここ】'+text.slice(pos,pos+30).replace(/\s+/g,' ');
+}
+
+function parseJSONWithRepair(t) {
  try {
   return parseJSON(t);
  } catch (e) {
-  if (/構文エラー/.test(e.message) && t.startsWith('{') && !t.endsWith('}')) {
-   throw Error('AIの回答が途中で切れている可能性があります。頼む動きの数を減らすか、AIに続きを出すよう頼んでください');
+  const r = repairJSONSyntax(t);
+  if (r.text !== t) {
+   try {
+    const v = parseJSON(r.text);
+    if (repairNotes) repairNotes.push(...r.notes);
+    return v;
+   } catch (_) {}
   }
   throw e;
+ }
+}
+
+// 絵の1文字を直す。直せないときは元の文字を返す（検証でエラーになる）
+function fixRowChar(ch,pal) {
+ if (ch === '.' || own(pal,ch)) return ch;
+ if (ch === '_') return '.';
+ if (ch === '\u3000' || ch === '\u00A0') return '.';
+ const code = ch.charCodeAt(0);
+ let c = ch;
+ if (code >= 0xFF01 && code <= 0xFF5E) c = String.fromCharCode(code-0xFEE0);
+ else if (own(FIX_CONFUSABLE,ch)) c = FIX_CONFUSABLE[ch];
+ if (c === '_') return '.';
+ if (c === '.' || own(pal,c)) return c;
+ return ch;
+}
+
+// 絵の行の自動修復: 透明は「_」も「.」も可。「…」・全角・見た目の同じ別文字を戻し、行の長さをそろえる
+function repairSpecSymbols(s) {
+ const pal = s.palette;
+ let moved = null;
+ if (own(pal,'_')) {
+  moved = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('').find(c => !own(pal,c)) || null;
+  if (moved) {
+   pal[moved] = pal['_'];
+   delete pal['_'];
+   if (repairNotes) repairNotes.push('色の記号「_」は透明に使うため、「'+moved+'」に付け替えました');
+  }
+ }
+
+ const st = {ell:0,sym:0,pad:0,cut:0,ex:[]};
+
+ for (const p of Object.values(s.parts)) {
+  if (!obj(p) || !obj(p.variants)) continue;
+  for (const vid of Object.keys(p.variants)) {
+   const src = p.variants[vid];
+   if (!Array.isArray(src) || !src.length || !src.every(r => typeof r === 'string')) continue;
+
+   let rows = src.map(r => {
+    let t = r;
+    for (const [mark,dots] of [['\u2026','...'],['\u2025','..']]) {
+     if (!own(pal,mark) && t.includes(mark)) {
+      st.ell += t.split(mark).length-1;
+      t = t.split(mark).join(dots);
+     }
+    }
+    let out = '';
+    for (const ch of t) {
+     const f = ch === '_' && moved ? moved : fixRowChar(ch,pal);
+     if (f !== ch && ch !== '_') {
+      st.sym++;
+      const tag = cpOf(ch)+'→'+f;
+      if (st.ex.length < 4 && !st.ex.includes(tag)) st.ex.push(tag);
+     }
+     out += f;
+    }
+    return out;
+   });
+
+   const counts = {};
+   rows.forEach(r => {
+    counts[r.length] = (counts[r.length] || 0)+1;
+   });
+   let mode = 0;
+   let best = 0;
+   for (const k of Object.keys(counts)) {
+    if (counts[k] > best || (counts[k] === best && Number(k) > mode)) {
+     best = counts[k];
+     mode = Number(k);
+    }
+   }
+   rows = rows.map(r => {
+    if (r.length > mode && /^\.*$/.test(r.slice(mode))) {
+     st.cut++;
+     return r.slice(0,mode);
+    }
+    return r;
+   });
+   const w = Math.max(...rows.map(r => r.length));
+   rows = rows.map(r => {
+    if (r.length < w) {
+     st.pad++;
+     return r.padEnd(w,'.');
+    }
+    return r;
+   });
+   p.variants[vid] = rows;
+  }
+ }
+
+ if (repairNotes) {
+  if (st.ell) repairNotes.push('絵の行の「…」（U+2026など）'+st.ell+'か所を、元の「.」に戻しました');
+  if (st.sym) repairNotes.push('palette にない記号 '+st.sym+'か所を、見た目の同じ記号などに置き換えました（'+st.ex.join('、')+'）');
+  if (st.cut) repairNotes.push('長すぎる行 '+st.cut+'行の、右端の透明部分を切りました');
+  if (st.pad) repairNotes.push('長さの足りない行 '+st.pad+'行を、右側を透明で埋めてそろえました');
+ }
+}
+
+// AIに渡す絵は、透明を「_」で書く（化けやすい「.」の連続を避けるため）
+function toAIRows(spec) {
+ const c = clone(spec);
+ for (const p of Object.values(c.parts || {})) {
+  for (const k of Object.keys(p.variants || {})) {
+   p.variants[k] = p.variants[k].map(r => r.replace(/\./g,'_'));
+  }
+ }
+ return c;
+}
+
+function showRepairNotes(notes) {
+ if (!notes || !notes.length) return;
+ const uniq = [...new Set(notes)];
+ const bar = document.createElement('div');
+ bar.id = 'repairBar';
+ bar.className = 'warnbox';
+ bar.setAttribute('role','status');
+ bar.innerHTML = '<b>読み込み時に自動で直した内容</b><ul style="margin:6px 0 8px;padding-left:20px">'
+  + uniq.map(n => '<li>'+esc(n)+'</li>').join('')
+  + '</ul><button data-action="repairClose">閉じる</button>';
+ document.body.appendChild(bar);
+ layoutBars();
+}
+
+// 通知バーの位置: 下部のナビの上に、自動修復の一覧 → リカバリーの案内の順に積む
+function layoutBars() {
+ const nav = document.querySelector('nav');
+ const base = (nav ? nav.getBoundingClientRect().height : 64)+12;
+ const rep = $('repairBar');
+ const rec = $('recoverBar');
+ if (rep) rep.style.bottom = base+'px';
+ if (rec) rec.style.bottom = (base+(rep ? rep.getBoundingClientRect().height+8 : 0))+'px';
+}
+
+// ファイルから読み込む（貼り付けと同じ補正を通す）
+function loadAnswerFile(file) {
+ return file.text().then(text => {
+  try {
+   clearError();
+   const message = applyAIText(text);
+   if (!$('modal').hidden && $('importText')) closeDialog();
+   toast(message,3200);
+  } catch (e) {
+   const box = $('dialogError');
+   if (box && !$('modal').hidden && $('importText')) {
+    box.hidden = false;
+    box.textContent = e.message;
+    if (state.ai.recovery) box.insertAdjacentHTML('beforeend','<br>'+recoveryButton());
+   } else {
+    showError(e);
+   }
+  }
+ }).catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）かテキストファイル（.txt）を選んでください')));
+}
+
+function cleanPastedJSON(text,fixQuotes) {
+ return normalizePastedText(String(text ?? ''),fixQuotes);
+}
+
+function tryParseAI(text,fixQuotes) {
+ const t = cleanPastedJSON(text,fixQuotes);
+ try {
+  return {ok:true,value:parseJSONWithRepair(t),text:t};
+ } catch (e) {
+  return {ok:false,error:e,text:t};
+ }
+}
+
+function parseAIJSON(text) {
+ // 全角引用符は、まず変えずに読み、失敗したときだけ半角に直して読み直す
+ const first = tryParseAI(text,false);
+ if (first.ok) return first.value;
+ const second = tryParseAI(text,true);
+ if (second.ok) {
+  if (repairNotes) repairNotes.push('全角・曲線の引用符を、半角の引用符に直しました');
+  return second.value;
+ }
+ const e = second.error;
+ const t = second.text;
+ if (/構文エラー/.test(e.message) && t.startsWith('{') && !t.endsWith('}')) {
+  throw Error('AIの回答が途中で切れている可能性があります。頼む動きの数を減らすか、AIに続きを出すよう頼んでください');
+ }
+ throw e;
+}
+
+// 読み込む内容が修正データ（SPRITE_PATCH_V1 または operations を持つ）か
+function looksLikePatch(text) {
+ try {
+  const d = parseAIJSON(text);
+  return obj(d) && (d.format === 'SPRITE_PATCH_V1' || Array.isArray(d.operations));
+ } catch (_) {
+  return false;
  }
 }
 
@@ -763,6 +1143,7 @@ function normalizeSpec(source) {
  const s = clone(source);
  guardTree(s);
  assert(obj(s),'データはObjectです');
+ if (obj(s.palette) && obj(s.parts)) repairSpecSymbols(s);
  s.anchors ??= {};
  s.animations ??= {};
  if (obj(s.meta)) s.meta.version ??= 1;
@@ -806,7 +1187,7 @@ function validateSpec(s) {
  const colors = Object.keys(s.palette);
  assert(colors.length >= 1 && colors.length <= LIMIT.colors,'色は1〜'+LIMIT.colors+'色です');
  for (const k of colors) {
-  assert(k.length === 1 && k !== '.' && !/\s/.test(k),'色の記号「'+k+'」は使えません。"." と空白以外の1文字にしてください');
+  assert(k.length === 1 && k !== '.' && k !== '_' && !/\s/.test(k),'色の記号「'+k+'」は使えません。"." "_" と空白以外の1文字にしてください');
   assert(typeof s.palette[k] === 'string' && /^#[0-9a-f]{6}$/i.test(s.palette[k]),'色「'+k+'」は #rrggbb の形で書いてください');
  }
 
@@ -834,7 +1215,7 @@ function validateSpec(s) {
    rows.forEach((row,y) => {
     assert(typeof row === 'string' && row.length <= 64,V+'の'+(y+1)+'行目: 64文字までの文字列で書いてください');
     for (let x=0;x<row.length;x++) {
-     assert(row[x] === '.' || own(s.palette,row[x]),V+'の'+(y+1)+'行目: 記号「'+row[x]+'」が palette にありません');
+     assert(row[x] === '.' || own(s.palette,row[x]),V+'の'+(y+1)+'行目: 記号「'+row[x]+'」（'+cpOf(row[x])+'）が palette にありません');
     }
    });
   }
@@ -946,11 +1327,237 @@ function emptySpec() {
  };
 }
 
-// 32×32 の戦士（頭・胴・腕2本・脚2本・剣）と5つの動き
+// 64×64 のドラクエ風の戦士（角かぶと・よろい・マント・剣）と5つの動き
+// 絵はここで組み立てる: 部位の形を置き、輪郭（k）を自動で付ける
 function warriorSpec() {
- const arm = ['kkk','kbk','kbk','kbk','kbk','ksk','ksk','kkk'];
- const leg = ['kppk.','kppk.','kppk.','kppk.','kppk.','kppkk','kpppk','kkkkk'];
- const legUp = ['kppk.','kppk.','kppk.','kppk.','kppkk','kpppk','kkkkk'];
+ const filled = (rows,x,y) => y >= 0 && y < rows.length && x >= 0 && x < rows[y].length && rows[y][x] !== '.';
+ const recolor = (rows,map) => rows.map(r => r.split('').map(c => map[c] || c).join(''));
+ // 輪郭を付ける。occ があれば、ほかの部位と重なる所には輪郭を描かない（つなぎ目を隠す）
+ const edge = (rows,pos,occ) => {
+  const w = Math.max(...rows.map(r => r.length));
+  const out = [];
+  for (let y=-1;y<=rows.length;y++) {
+   let line = '';
+   for (let x=-1;x<=w;x++) {
+    if (filled(rows,x,y)) line += rows[y][x];
+    else if ((filled(rows,x+1,y) || filled(rows,x-1,y) || filled(rows,x,y+1) || filled(rows,x,y-1))
+     && !(occ && occ(pos[0]+x,pos[1]+y))) line += 'k';
+    else line += '.';
+   }
+   out.push(line);
+  }
+  return out;
+ };
+
+ // ---- 部位の絵（輪郭なし。右向き・光は左上から） ----
+ const HEAD = [
+  '.yy..............Y..',
+  '.yyy.....HHHH...YY..',
+  '..yyy..HHHHhhhh.YY..',
+  '..yyYYHHHhhhhhhhY...',
+  '...yYHHhhhhhhhhhhj..',
+  '....HHhhhhhhhhhhhj..',
+  '...HHhhhhhhhhhhhhhj.',
+  '...Hhhhhhhhhhhhhhhj.',
+  '...yyyyyyyyyyyyyyyY.',
+  '...hhhhjssssssssssS.',
+  '...hhhhjsssssswesss.',
+  '...hhhhjsssssswessss',
+  '...hhhhjSsssssssssS.',
+  '...jhhhjSssssssmmS..',
+  '....jhhjSSsssssSS...',
+  '.....jjj.SSssSSS....',
+  '..........SSSS......'
+ ];
+ const BODY = [
+  '.....AAaaaaaaa....',
+  '...AAAAaaaaaaaad..',
+  '..AAAaaaaaaaaaaad.',
+  '.AAAaaaaaaayaaaadd',
+  '.AAaaaaaaayyyaaadd',
+  '.AAaaaaaaaayaaaadd',
+  '.AAaaaaaaaaaaaaadd',
+  '.AAaaaaaaaaaaaaadd',
+  '.AAaaaaaaaaaaaaadd',
+  '..AaaaaaaaaaaaaddD',
+  '..Aaaaaaaaaaaaadd.',
+  '..AaaaaaaaaaaaddD.',
+  '..YyyyyyywwyyyyY..',
+  '..YyyyyyywwyyyyY..',
+  '..AaadAaadAaadAad.',
+  '.AaaadAaadAaadAadd',
+  '.AaaadAaadAaadAadd',
+  '.AaadDAadDAadDAadD'
+ ];
+ const LEG = [
+  'Bbbbbbq...',
+  'Bbbbbbq...',
+  'Bbbbbbq...',
+  'Bbbbbbq...',
+  'Bbbbbbq...',
+  'Bbbbbbq...',
+  '.Bbbbbq...',
+  '.Bbbbbq...',
+  '.Aaaaad...',
+  '.AAaaad...',
+  '.yyyyyY...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.ppppppp..',
+  '.pppppppp.',
+  '.ppppppppP',
+  '.PPPPPPPPP'
+ ];
+ const LEG_UP = [
+  '.Bbbbbbq..',
+  '.Bbbbbbq..',
+  '..Bbbbbbq.',
+  '..Bbbbbbq.',
+  '...Bbbbbq.',
+  '...Aaaaad.',
+  '...AAaaad.',
+  '...yyyyyY.',
+  '..pppppP..',
+  '..pppppP..',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.pppppP...',
+  '.ppppppp..',
+  '.pppppppp.',
+  '.ppppppppP',
+  '.PPPPPPPPP'
+ ];
+ const ARM = [
+  '..AAAA......',
+  '.AAAaaa.....',
+  'AAaaaaad....',
+  'Aaaaaaad....',
+  'Aaaaaadd....',
+  '.yyyyyY.....',
+  '.Bbbbbq.....',
+  '.Bbbbbbq....',
+  '..Bbbbbpppp.',
+  '..bbbbppppss',
+  '...bbqpppPss',
+  '.....qPPPSS.'
+ ];
+ const ARM_RAISE = [
+  '...sss...',
+  '...sssS..',
+  '..ppppP..',
+  '..ppppP..',
+  '..ppppP..',
+  '..pppppP.',
+  '..Bbbbbq.',
+  '..Bbbbbq.',
+  '.Bbbbbbq.',
+  '.Bbbbbq..',
+  '.yyyyyY..',
+  'Aaaaaadd.',
+  'Aaaaaaad.',
+  'AAaaaaad.',
+  '.AAAaaa..'
+ ];
+ const ARM_SWING = [
+  '..AAAA.............',
+  '.AAAaaayBbbbbpppp..',
+  'AAaaaaayBbbbbppppss',
+  'AaaaaaayBbbbqppppss',
+  'AaaaaadYbbbqqPPPPSS',
+  '.aaadd.............'
+ ];
+ const ARM_BACK = [
+  '.aaaa.',
+  'aaaaad',
+  'aaaadd',
+  '.YYYY.',
+  '.bbbq.',
+  '.bbbq.',
+  '.bbbq.',
+  '.bbbq.',
+  '.PPPP.',
+  '.PPPP.',
+  '.PPPP.',
+  '.PPPP.',
+  '.SSSS.',
+  '.SSS..'
+ ];
+ const CAPE = [
+  '....rrrrr',
+  '...rrrrrr',
+  '..rrrrrrr',
+  '..rrrrrrr',
+  '.rrrrrrrr',
+  '.rrrrrrRr',
+  '.rrrrrRRr',
+  '.rrrrrRRr',
+  'rrrrrrRRr',
+  'rrrrrRRRr',
+  'rrrrrRRRr',
+  'rrrrrRRRr',
+  'rrrrrRRR.',
+  'rrrrRRRR.',
+  'rrrrRRRR.',
+  'rrrrRRRR.',
+  'rrrRrRRR.',
+  'rrrRrRRR.',
+  'rrRRrRR..',
+  'rRR.rRR..',
+  'R...RR...'
+ ];
+ // 剣（立てた構え）: 握りから右上へ伸びる刃。2行で1ピクセルずつ右へ寄る
+ const SWORD = (() => {
+  const rows = [];
+  for (let i=22;i>=0;i--) {
+   const x = Math.floor(i/2);
+   rows.push('.'.repeat(x+2)+(i === 22 ? '.w.' : 'gwG')+'.'.repeat(13-x));
+  }
+  return rows.concat([
+   'YyyyyyY...........',
+   '..PpP.............',
+   '..PpP.............',
+   '..PpP.............',
+   '..yYy.............'
+  ]);
+ })();
+ // 剣（振り下ろした形）: 握りから右へまっすぐ伸びる刃
+ const BLADE = 14;
+ const SWORD_DOWN = [
+  '....y'+'.'.repeat(BLADE+2),
+  '....y'+'g'.repeat(BLADE)+'..',
+  'yPPPy'+'w'.repeat(BLADE+2),
+  '....y'+'G'.repeat(BLADE)+'..',
+  '....y'+'.'.repeat(BLADE+2)
+ ];
+
+ // ---- 置く位置（左上）。足元は y=62、左右の中央は x=32 ----
+ const at = {cape:[15,24],arm_back:[35,26],leg_back:[23,41],leg_front:[29,41],body:[21,23],head:[20,7],sword:[33,10],arm_front:[23,24]};
+ const dark = {B:'b',b:'q',A:'a',a:'d',y:'Y',p:'P'};
+ // 首のつなぎ目（頭と胴が接する所）だけは輪郭を描かない
+ const joint = {body:BODY,head:HEAD};
+ const occ = (x,y) => Object.keys(joint).some(id => filled(joint[id],x-at[id][0],y-at[id][1]));
+ const pos = id => [at[id][0]-1,at[id][1]-1];
+ const sil = id => edge(joint[id],at[id],occ);
+
+ // 手の位置と握りの位置から、コマのずれ（offset）を求める
+ const HAND = {base:[10,9],raise:[4,0],swing:[17,2]};
+ // back は、down を左右反転（flipX）したときの握りの位置
+ const GRIP = {base:[3,25],down:[2,2],back:[SWORD_DOWN[0].length-3,2]};
+ const hold = (armV,armOff,swordV) => [
+  at.arm_front[0]+armOff[0]+HAND[armV][0]-at.sword[0]-GRIP[swordV][0],
+  at.arm_front[1]+armOff[1]+HAND[armV][1]-at.sword[1]-GRIP[swordV][1]
+ ];
+ const UP = [0,-10];
+ const bob = (dy,extra) => Object.assign({
+  head:{offset:[0,dy]},body:{offset:[0,dy]},cape:{offset:[0,dy]},
+  arm_front:{offset:[0,dy]},arm_back:{offset:[0,dy]},sword:{offset:[0,dy]}
+ },extra || {});
 
  const s = {
   format: 'SPRITE_SPEC_V1',
@@ -958,94 +1565,64 @@ function warriorSpec() {
    name: '戦士',
    id: 'warrior_'+Date.now().toString(36),
    version: 1,
-   description: '32×32の戦士。頭・胴・腕2本・脚2本・剣。右向き。'
+   description: '64×64のドラクエ風の戦士。約3.5頭身、右向き。角かぶと・よろい・マント・剣。マント→奥の腕→奥の脚→手前の脚→胴→頭→剣→手前の腕の順に重ねる。'
   },
-  settings: {size:[32,32],origin:'center-bottom',facing:'right'},
+  settings: {size:[64,64],origin:'center-bottom',facing:'right'},
   palette: {
-   k:'#1b1f2a',s:'#f2c49b',h:'#7a4a2a',b:'#3a7bd5',d:'#27508f',
-   p:'#5b4636',g:'#c9d3dc',w:'#ffffff',y:'#e8b84a'
+   k:'#1a1423',s:'#f6c79e',S:'#d9946e',e:'#1d2440',m:'#b8564f',w:'#ffffff',
+   h:'#8fa3c4',H:'#c5d3ea',j:'#5b6d92',y:'#f5cf4e',Y:'#b98628',
+   a:'#5a4fcf',A:'#8a82f0',d:'#3a3190',D:'#28226a',
+   b:'#55648f',B:'#7887b3',q:'#39456b',p:'#7a4a2b',P:'#4a2c19',
+   r:'#cf3f3a',R:'#8c2531',g:'#dfe7ef',G:'#8e9bab'
   },
   parts: {
-   arm_back: {name:'奥の腕',z:1,position:[10,16],variants:{base:arm.slice()}},
-   leg_back: {name:'奥の脚',z:2,position:[11,24],variants:{base:leg.slice(),up:legUp.slice()}},
-   leg_front: {name:'手前の脚',z:3,position:[15,24],variants:{base:leg.slice(),up:legUp.slice()}},
-   body: {
-    name:'胴',z:4,position:[12,15],
-    variants:{base:['kkkkkkkk','kbbbbbbk','kbbbbbbk','kbbbbddk','kbbbbddk','kyyyyyyk','kbbbbddk','kbbbbddk','kkkkkkkk']}
-   },
-   head: {
-    name:'頭',z:5,position:[11,6],
-    variants:{base:[
-     '..kkkkkk..','.khhhhhhk.','khhhhhhhhk','khhssssssk','khsssskssk',
-     'khssssssk.','.kssssssk.','..kssssk..','...kkkk...'
-    ]}
-   },
-   sword: {
-    name:'剣',z:6,position:[17,12],
-    variants:{
-     base:['.k.','kgk','kwk','kgk','kgk','kgk','kgk','kgk','yyy','.p.','.p.','.k.'],
-     down:['...y.kkkkkk.','kppygggggwgk','...y.kkkkkk.']
-    }
-   },
-   arm_front: {
-    name:'手前の腕',z:7,position:[16,16],
-    variants:{
-     base:arm.slice(),
-     raise:['kkk','ksk','ksk','kbk','kbk','kbk','kbk','kkk'],
-     swing:['kkkkkkkk','kbbbbssk','kkkkkkkk']
-    }
-   }
+   cape: {name:'マント',z:0,position:pos('cape'),variants:{base:edge(CAPE)}},
+   arm_back: {name:'奥の腕',z:1,position:pos('arm_back'),variants:{base:edge(ARM_BACK)}},
+   leg_back: {name:'奥の脚',z:2,position:pos('leg_back'),variants:{base:edge(recolor(LEG,dark)),up:edge(recolor(LEG_UP,dark))}},
+   leg_front: {name:'手前の脚',z:3,position:pos('leg_front'),variants:{base:edge(LEG),up:edge(LEG_UP)}},
+   body: {name:'胴',z:4,position:pos('body'),variants:{base:sil('body')}},
+   head: {name:'頭',z:5,position:pos('head'),variants:{base:sil('head')}},
+   sword: {name:'剣',z:6,position:pos('sword'),variants:{base:edge(SWORD),down:edge(SWORD_DOWN)}},
+   arm_front: {name:'手前の腕',z:7,position:pos('arm_front'),variants:{base:edge(ARM),raise:edge(ARM_RAISE),swing:edge(ARM_SWING)}}
   },
   anchors: {
-   weaponTip: {name:'剣先',parent:'sword',position:[1,0]},
-   headTop: {name:'頭の上',parent:'head',position:[5,0]}
+   weaponTip: {name:'剣先',parent:'sword',position:[15,1]},
+   headTop: {name:'頭の上',parent:'head',position:[11,1]}
   },
   animations: {
    idle: {
     name:'待機',fps:4,loop:true,
-    frames:[
-     {hold:2},
-     {hold:2,parts:{
-      head:{offset:[0,1]},body:{offset:[0,1]},arm_front:{offset:[0,1]},
-      arm_back:{offset:[0,1]},sword:{offset:[0,1]}
-     }}
-    ]
+    frames:[{hold:2},{hold:2,parts:bob(1)}]
    },
    walk: {
     name:'歩く',fps:8,loop:true,
     frames:[
      {parts:{
-      leg_front:{offset:[2,0]},leg_back:{offset:[-2,0]},
-      arm_back:{offset:[1,0]},arm_front:{offset:[-1,0]},sword:{offset:[-1,0]}
+      leg_front:{offset:[4,0]},leg_back:{offset:[-4,0]},
+      arm_back:{offset:[-2,0]},arm_front:{offset:[1,0]},sword:{offset:[1,0]},cape:{offset:[-1,0]}
      }},
+     {parts:bob(-1,{leg_back:{variant:'up'}})},
      {parts:{
-      head:{offset:[0,-1]},body:{offset:[0,-1]},arm_front:{offset:[0,-1]},
-      arm_back:{offset:[0,-1]},sword:{offset:[0,-1]},leg_back:{variant:'up'}
+      leg_front:{offset:[-4,0]},leg_back:{offset:[4,0]},
+      arm_back:{offset:[2,0]},arm_front:{offset:[-1,0]},sword:{offset:[-1,0]},cape:{offset:[-1,0]}
      }},
-     {parts:{
-      leg_front:{offset:[-2,0]},leg_back:{offset:[2,0]},
-      arm_back:{offset:[-1,0]},arm_front:{offset:[1,0]},sword:{offset:[1,0]}
-     }},
-     {parts:{
-      head:{offset:[0,-1]},body:{offset:[0,-1]},arm_front:{offset:[0,-1]},
-      arm_back:{offset:[0,-1]},sword:{offset:[0,-1]},leg_front:{variant:'up'}
-     }}
+     {parts:bob(-1,{leg_front:{variant:'up'}})}
     ]
    },
    attack: {
     name:'攻撃',fps:10,loop:false,
     frames:[
      {hold:2,parts:{
-      arm_front:{variant:'raise',offset:[0,-6]},sword:{offset:[0,-10]},
-      body:{offset:[-1,0]},head:{offset:[-1,0]}
+      arm_front:{variant:'raise',offset:UP},sword:{variant:'down',flipX:true,offset:hold('raise',UP,'back')},
+      body:{offset:[-1,0]},head:{offset:[-1,0]},cape:{offset:[-1,0]}
      }},
      {hold:2,parts:{
-      arm_front:{variant:'swing',offset:[1,1]},sword:{variant:'down',offset:[3,5]},
-      body:{offset:[1,0]},head:{offset:[1,0]},leg_front:{offset:[1,0]}
+      arm_front:{variant:'swing',offset:[2,1]},sword:{variant:'down',offset:hold('swing',[2,1],'down')},
+      body:{offset:[2,0]},head:{offset:[2,1]},leg_front:{offset:[3,0]},cape:{offset:[1,0]}
      }},
      {parts:{
-      arm_front:{variant:'swing',offset:[1,2]},sword:{variant:'down',offset:[3,6]},
-      body:{offset:[1,0]},head:{offset:[1,1]},leg_front:{offset:[1,0]}
+      arm_front:{variant:'swing',offset:[2,3]},sword:{variant:'down',offset:hold('swing',[2,3],'down')},
+      body:{offset:[2,0]},head:{offset:[2,2]},leg_front:{offset:[3,0]},cape:{offset:[1,0]}
      }},
      {}
     ],
@@ -1055,34 +1632,51 @@ function warriorSpec() {
     name:'やられ',fps:8,loop:false,
     frames:[
      {hold:2,parts:{
-      head:{offset:[-2,0]},body:{offset:[-1,0]},arm_front:{offset:[-2,-1]},
-      arm_back:{offset:[-2,-1]},sword:{offset:[-2,-1]}
+      head:{offset:[-4,0]},body:{offset:[-2,0]},cape:{offset:[-3,0]},arm_front:{offset:[-4,-2]},
+      arm_back:{offset:[-3,-2]},sword:{offset:[-4,-2]},leg_front:{offset:[-1,0]}
      }},
-     {parts:{head:{offset:[-1,0]},body:{offset:[-1,0]},arm_front:{offset:[-1,0]},sword:{offset:[-1,0]}}},
+     {parts:{
+      head:{offset:[-2,0]},body:{offset:[-1,0]},cape:{offset:[-1,0]},arm_front:{offset:[-2,0]},
+      arm_back:{offset:[-1,0]},sword:{offset:[-2,0]}
+     }},
      {}
     ]
    },
    die: {
     name:'倒れる',fps:6,loop:false,
     frames:[
-     {parts:{head:{offset:[-1,1]},body:{offset:[-1,0]}}},
+     {parts:{head:{offset:[-2,0]},body:{offset:[-1,0]},cape:{offset:[-1,0]},arm_front:{offset:[-2,0]},sword:{offset:[-2,0]}}},
      {parts:{
-      head:{offset:[-2,4]},body:{offset:[-1,3]},arm_front:{offset:[-1,3]},
-      arm_back:{offset:[-1,3]},sword:{offset:[1,4]},
-      leg_front:{variant:'up',offset:[0,1]},leg_back:{variant:'up',offset:[0,1]}
+      head:{offset:[-3,2]},body:{offset:[-2,1]},cape:{offset:[-2,1]},arm_front:{offset:[-3,1]},
+      arm_back:{offset:[-2,1]},sword:{offset:[-3,1]},leg_front:{offset:[-1,0]}
      }},
      {parts:{
-      head:{offset:[-4,10]},body:{offset:[-1,6]},arm_front:{variant:'swing',offset:[1,9]},
-      arm_back:{visible:false},sword:{variant:'down',offset:[3,13]}
+      head:{offset:[-4,6]},body:{offset:[-2,6]},cape:{offset:[-2,6]},arm_front:{offset:[-2,6]},
+      arm_back:{offset:[-2,6]},sword:{offset:[-2,6]},
+      leg_front:{variant:'up',offset:[1,4]},leg_back:{variant:'up',offset:[-1,4]}
      }},
-     {hold:3,parts:{
-      head:{offset:[-6,16]},body:{offset:[0,7]},arm_front:{variant:'swing',offset:[2,12]},
-      arm_back:{visible:false},sword:{variant:'down',offset:[3,17]}
-     }}
-    ]
+     {hold:4,parts:{}}
+    ],
+    events:[[3,'land']]
    }
   }
  };
+
+ // 倒れた姿勢: 立ち姿を足元の位置を軸に90°回転（頭が左・足が右の仰向け）した絵を、部品ごとに作る
+ const rotCCW = rows => {
+  const w = rows[0].length;
+  return Array.from({length:w},(_,i) => rows.map(r => r[w-1-i]).join(''));
+ };
+ const lieParts = {};
+ for (const id of ['cape','arm_back','leg_back','leg_front','body','head','arm_front']) {
+  const p = s.parts[id];
+  const rows = p.variants.base;
+  const w = rows[0].length;
+  p.variants.lie = rotCCW(rows);
+  lieParts[id] = {variant:'lie',offset:[60+p.position[1]-62-p.position[0],77-p.position[0]-w-p.position[1]]};
+ }
+ lieParts.sword = {variant:'down',offset:[8,47]};
+ s.animations.die.frames[3].parts = lieParts;
 
  return normalizeSpec(s);
 }
@@ -1106,58 +1700,302 @@ function dirBaseParts() {
  return e && e.parts || {};
 }
 
-// 16×16・4方向の勇者（一枚絵方式）
+// 32×32・4方向の勇者（ドラクエ風のデモ用ひな形・一枚絵方式）
+// 絵はここで組み立てる: 形を重ねてから、シルエットの外周に輪郭（k）を自動で付ける
 function hero4Spec() {
- const frontTop = [
-  '.....kkkkkk.....',
-  '....khhhhhhk....',
-  '...khhhhhhhhk...',
-  '...khhssssshk...',
-  '...kskssssksk...',
-  '...kssssssssk...',
-  '....kssssssk....',
-  '...kkbbbbbbkk...',
-  '..kbbbbbbbbbbk..',
-  '.ksbbbbyybbbbsk.',
-  '..kbbbbyybbbbk..',
-  '..kddddddddddk..'
- ];
- const backTop = [
-  '.....kkkkkk.....',
-  '....khhhhhhk....',
-  '...khhhhhhhhk...',
-  '...khhhhhhhhk...',
-  '...khhhhhhhhk...',
-  '...khhhhhhhhk...',
-  '....kshhhhsk....',
-  '...kkbbbbbbkk...',
-  '..krrrrrrrrrrk..',
-  '.ksrrrrrrrrrrsk.',
-  '..krrrrrrrrrrk..',
-  '..kddddddddddk..'
- ];
- const sideTop = [
-  '.....kkkkkk.....',
-  '....khhhhhhk....',
-  '...khhhhhhhhk...',
-  '...khhhhsssk....',
-  '...khhhsskssk...',
-  '...khhhssssssk..',
-  '....khhsssssk...',
-  '....kkbbbbbk....',
-  '...kbbbbbbbbk...',
-  '...kbbbyybbbsk..',
-  '...kbbbyybbbk...',
-  '...kdddddddk....'
- ];
- const legsA = ['...kppkkkkppk...','...kppk..kppk...','...kppk..kppk...','..kkppk..kppkk..'];
- const legsB = ['...kppkkkkppk...','...kkkk..kppk...','.........kppk...','........kkppkk..'];
- const sideLegsA = ['....kppppk......','....kppppk......','....kppppk......','...kkppppkk.....'];
- const sideLegsB = ['....kppppk......','...kpp.kppk.....','..kpp...kppk....','..kkpk..kkpkk...'];
- const walk = (name,a,b) => ({
-  name,fps:4,loop:true,
-  frames:[{parts:{body:{variant:a}}},{parts:{body:{variant:b}}}]
+ const N = 32;
+ const blank = () => Array.from({length:N},() => Array(N).fill('.'));
+ const rowsOf = g => g.map(r => r.join(''));
+ const put = (g,x,y,c) => {
+  if (x >= 0 && y >= 0 && x < N && y < N) g[y][x] = c;
+ };
+ const rect = (g,x,y,w,h,c) => {
+  for (let j=0;j<h;j++) for (let i=0;i<w;i++) put(g,x+i,y+j,c);
+ };
+ const stamp = (g,x,y,rows,map) => rows.forEach((r,j) => {
+  for (let i=0;i<r.length;i++) {
+   if (r[i] !== '.') put(g,x+i,y+j,map && map[r[i]] || r[i]);
+  }
  });
+ const line = (g,x0,y0,x1,y1,c) => {
+  const dx = Math.abs(x1-x0);
+  const dy = -Math.abs(y1-y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx+dy;
+  for (let n=0;n<200;n++) {
+   put(g,x0,y0,c);
+   if (x0 === x1 && y0 === y1) break;
+   const e2 = 2*err;
+   if (e2 >= dy) {
+    err += dy;
+    x0 += sx;
+   }
+   if (e2 <= dx) {
+    err += dx;
+    y0 += sy;
+   }
+  }
+ };
+ // 腕: 肩から手まで2ピクセル幅（左側を明るく）、先に2×2の手
+ const arm = (g,sx,sy,hx,hy) => {
+  line(g,sx,sy,hx,hy,'B');
+  line(g,sx+1,sy,hx+1,hy,'b');
+  rect(g,hx,hy,2,2,'s');
+  put(g,hx+1,hy+1,'S');
+ };
+ // 剣: (hx,hy) が握り。向き (dx,dy) に、つば・刃・切っ先の順に描く
+ const sword = (g,hx,hy,dx,dy,len) => {
+  const px = -dy;
+  const py = dx;
+  put(g,hx+dx,hy+dy,'Y');
+  put(g,hx+dx+px,hy+dy+py,'y');
+  put(g,hx+dx-px,hy+dy-py,'y');
+  for (let i=2;i<=len+1;i++) put(g,hx+dx*i,hy+dy*i,i === 2 ? 'w' : i === len+1 ? 'G' : 'g');
+ };
+ const outline = g => {
+  const out = g.map(r => r.slice());
+  for (let y=0;y<N;y++) {
+   for (let x=0;x<N;x++) {
+    if (g[y][x] !== '.') continue;
+    const near = [[1,0],[-1,0],[0,1],[0,-1]].some(([dx,dy]) => {
+     const X = x+dx;
+     const Y = y+dy;
+     return X >= 0 && Y >= 0 && X < N && Y < N && g[Y][X] !== '.';
+    });
+    if (near) out[y][x] = 'k';
+   }
+  }
+  return rowsOf(out);
+ };
+
+ // ---- 部位の絵（輪郭なし。輪郭は最後に自動で付ける） ----
+ const F_HEAD = [
+  '....hhhhhh....',
+  '..hhHHHHHHhh..',
+  '.hhHHHHHHHHhh.',
+  '.hhhhHHHHhhhh.',
+  'hhhhhhhhhhhhhh',
+  'hhhshhhhhhshhh',
+  'hhsssshhsssshh',
+  'hssssssssssssh',
+  'hsssessssesssh',
+  'hsssessssesssh',
+  'hSssssssssssSh',
+  '.hSsssmmsssSh.',
+  '..SSssssssSS..'
+ ];
+ const B_HEAD = [
+  '....hhhhhh....',
+  '..hhHHHHHHhh..',
+  '.hhHHHHHHHHhh.',
+  '.hhhHHhhHHhhh.',
+  'hhhhhhhhhhhhhh',
+  'hhHhhhhhhhhHhh',
+  'hhHhhhhhhhhHhh',
+  'hhhHhhhhhhHhhh',
+  'hhhhhhhhhhhhhh',
+  'hhhhhhhhhhhhhh',
+  'ShhhhhhhhhhhhS',
+  '.ShhhhhhhhhhS.',
+  '..SShhhhhhSS..'
+ ];
+ const S_HEAD = [
+  '...hhhhhh....',
+  '.hhHHHHHHhh..',
+  'hhHHHHHHHHhh.',
+  'hhhhHHHHhhhh.',
+  'hhhhhhhhhhhhh',
+  'hhhhhhhhhshh.',
+  'hhhhhhhsssss.',
+  'hhhhhhssssss.',
+  'hhhhhsssesss.',
+  'hhhhSsssessss',
+  'hhhSsssssssS.',
+  '.hhhSssssmS..',
+  '..hhSSssSS...'
+ ];
+ const F_TORSO = [
+  '....SssS....',
+  '.bBBBwwBBBb.',
+  'bBBBBBBBBBBd',
+  'bBBBBbbbbbbd',
+  'dllllyylllld',
+  'bBBBbbbbbbbd',
+  'bBBbbbbbbbbd',
+  '.bbbbddbbbb.'
+ ];
+ const S_TORSO = [
+  '....SsS...',
+  '..bBBBBb..',
+  '.bBBBBBBd.',
+  '.bBBBBBbd.',
+  '.dlllllyd.',
+  '.bBBbbbbd.',
+  '.bBbbbbbd.',
+  '..bbbbbd..'
+ ];
+ const F_CAPE = ['..rrrrrrrrrrrr..','.rrrrrrrrrrrrrr.'].concat(Array(9).fill('RrrrrrrrrrrrrrrR'),['RrrRrrRrrRrrRrrR']);
+ const B_CAPE = ['..rrrrrrrr..','.rrrrrrrrrr.','rrrrrrrrrrrr'].concat(Array(9).fill('rrRrrrrrrRrr'),['RrRRrrrrRRrR']);
+ const S_CAPE = ['..rrr','.rrrr','.rrrr','rrrrr','rrrrR','rrrRR','rrrRR','rrrRR','rrRRR','rrRRR','rRrRR','R.R.R'];
+ const LEG = ['dddd','dddd','dddd','pppp','pppp','pppp','pppp','PPPP'];
+ const S_LEG = ['dddd.','dddd.','dddd.','pppp.','pppp.','pppp.','ppppp','PPPPP'];
+ const SHIELD = ['.yyyy.','yBBbby','yByybY','yByybY','yBBbbY','.yBbY.','..YY..'];
+ const B_SHIELD = ['.YYYY.','YppppY','YpPPpY','YpPPpY','YppppY','.YppY.','..YY..'];
+
+ // 正面（下向き）。pose: 'raise'（剣を掲げる）・'strike'（両手で振り下ろす）
+ const front = (o={}) => {
+  const g = blank();
+  const b = o.b || 0;
+  stamp(g,8,16+b,F_CAPE);
+  stamp(g,o.lx || 11,23+(o.l || 0),LEG);
+  stamp(g,o.rx || 17,23+(o.r || 0),LEG);
+  stamp(g,10,15+b,F_TORSO);
+  if (o.pose === 'strike') {
+   arm(g,8,17,13,21);
+   arm(g,22,17,16,21);
+   rect(g,15,21,1,2,'p');
+   sword(g,15,22,0,1,7);
+  } else {
+   if (o.pose === 'raise') {
+    arm(g,8,17+b,7,10+b);
+    sword(g,7,10+b,0,-1,6);
+   } else {
+    const al = o.al || 0;
+    arm(g,8,17+b,8,21+b+al);
+    sword(g,8,22+b+al,0,1,5);
+   }
+   const ar = o.ar || 0;
+   arm(g,22,17+b,22,21+b+ar);
+   stamp(g,21,18+b+ar,SHIELD);
+  }
+  stamp(g,9,2+b,F_HEAD);
+  return outline(g);
+ };
+
+ // 背面（上向き）。剣は画面の右手、盾は左手
+ const back = (o={}) => {
+  const g = blank();
+  const b = o.b || 0;
+  stamp(g,o.lx || 11,23+(o.l || 0),LEG);
+  stamp(g,o.rx || 17,23+(o.r || 0),LEG);
+  stamp(g,10,15+b,F_TORSO,{w:'B',y:'l'});
+  stamp(g,10,15+b,B_CAPE);
+  const al = o.al || 0;
+  arm(g,8,17+b,8,21+b+al);
+  stamp(g,5,18+b+al,B_SHIELD);
+  if (o.pose === 'raise') {
+   arm(g,22,17+b,23,10+b);
+   sword(g,23,10+b,0,-1,6);
+  } else if (o.pose !== 'strike') {
+   const ar = o.ar || 0;
+   arm(g,22,17+b,22,21+b+ar);
+   sword(g,23,22+b+ar,0,1,5);
+  }
+  stamp(g,9,2+b,B_HEAD);
+  if (o.pose === 'strike') {
+   arm(g,22,17,20,9);
+   sword(g,20,9,-1,-1,7);
+  }
+  return outline(g);
+ };
+
+ // 横（右向き）。手前の腕で剣を前に構える
+ const side = (o={}) => {
+  const g = blank();
+  const b = o.b || 0;
+  stamp(g,o.cx || 8,16+b,S_CAPE);
+  stamp(g,o.bx || 13,23+(o.bl || 0),S_LEG,{p:'P'});
+  stamp(g,o.fx || 16,23+(o.fl || 0),S_LEG);
+  stamp(g,11,15+b,S_TORSO);
+  if (o.pose === 'raise') {
+   arm(g,14,17+b,12,10+b);
+   sword(g,12,10+b,-1,-1,6);
+   stamp(g,9,2+b,S_HEAD);
+  } else {
+   stamp(g,9,2+b,S_HEAD);
+   if (o.pose === 'strike') {
+    arm(g,14,17,19,18);
+    sword(g,20,19,1,0,9);
+   } else {
+    const ax = o.ax || 0;
+    arm(g,14,17+b,15+ax,21+b);
+    sword(g,16+ax,22+b,1,0,6);
+   }
+  }
+  return outline(g);
+ };
+
+ const body = {
+  base: front(),
+  front_a: front({l:-1,al:1,ar:-1}),
+  front_b: front({r:-1,al:-1,ar:1}),
+  back: back(),
+  back_a: back({l:-1,al:-1,ar:1}),
+  back_b: back({r:-1,al:1,ar:-1}),
+  side: side(),
+  side_a: side({fx:18,bx:11,bl:-1,ax:-1,cx:7}),
+  side_b: side({fx:12,fl:-1,bx:17,ax:1,cx:7}),
+  atk_down1: front({pose:'raise',b:1,ar:-1}),
+  atk_down2: front({pose:'strike',lx:10,rx:18}),
+  atk_up1: back({pose:'raise',b:1}),
+  atk_up2: back({pose:'strike',lx:10,rx:18}),
+  atk_side1: side({pose:'raise',b:1,fx:15,bx:12}),
+  atk_side2: side({pose:'strike',fx:19,bx:11,cx:6}),
+  victory: front({pose:'raise',lx:10,rx:18})
+ };
+
+ // ---- 演出部品（輪郭なし） ----
+ const SLASH = (() => {
+  const g = Array.from({length:8},() => Array(24).fill('.'));
+  for (let x=0;x<24;x++) {
+   const t = (x-11.5)/11.5;
+   const y = Math.round(7*(1-t*t));
+   g[y][x] = 'w';
+   if (y > 0) g[y-1][x] = 'c';
+  }
+  return g.map(r => r.join(''));
+ })();
+ const transpose = rows => Array.from({length:rows[0].length},(_,i) => rows.map(r => r[i] || '.').join(''));
+ const fxAt = (rows,x,y) => {
+  const g = blank();
+  stamp(g,x,y,rows);
+  return rowsOf(g);
+ };
+ const star = (g,x,y) => {
+  put(g,x,y,'w');
+  put(g,x-1,y,'c');
+  put(g,x+1,y,'c');
+  put(g,x,y-1,'c');
+  put(g,x,y+1,'c');
+ };
+ const sparkA = blank();
+ star(sparkA,3,2);
+ star(sparkA,26,7);
+ put(sparkA,12,1,'y');
+ put(sparkA,21,3,'y');
+ const sparkB = blank();
+ star(sparkB,11,1);
+ star(sparkB,28,13);
+ put(sparkB,3,6,'y');
+ put(sparkB,24,2,'y');
+
+ // ---- 動き ----
+ const v = id => ({parts:{body:{variant:id}}});
+ const step = (name,a,b,fps) => ({name,fps,loop:true,frames:[v(a),{},v(b),{}]});
+ const attack = (name,v1,v2,sv,so) => ({
+  name,fps:12,loop:false,
+  frames:[
+   {hold:3,parts:{body:{variant:v1}}},
+   {parts:{body:{variant:v2},slash:{variant:sv,visible:true}}},
+   {hold:2,parts:{body:{variant:v2},slash:{variant:sv,visible:true,offset:so}}},
+   {hold:2,parts:{body:{variant:v2}}},
+   {hold:2}
+  ],
+  events:[[1,'hit']]
+ });
+ const vic = (extra) => ({parts:Object.assign({body:{variant:'victory'}},extra || {})});
+ const hide = {blink:{visible:false},slash:{visible:false},spark:{visible:false}};
 
  return normalizeSpec({
   format: 'SPRITE_SPEC_V1',
@@ -1165,37 +2003,82 @@ function hero4Spec() {
    name: '勇者（4方向）',
    id: 'hero4_'+Date.now().toString(36),
    version: 1,
-   description: '16×16の勇者。全方位マップ用の4方向キャラ。一枚絵方式。'
+   description: '32×32の勇者。ドラクエ風の全方位マップ用4方向キャラ（一枚絵方式）。足踏み・歩き・向き別の攻撃・ジャンプ・やられ・喜ぶ入り。'
   },
-  settings: {size:[16,16],origin:'center-bottom',facing:'right',view:'topdown'},
+  settings: {size:[32,32],origin:'center-bottom',facing:'right',view:'topdown'},
   palette: {
-   k:'#1b1f2a',s:'#f2c49b',h:'#7a4a2a',b:'#3a7bd5',d:'#27508f',
-   p:'#5b4636',y:'#e8b84a',r:'#c0392b'
+   k:'#1a1423',s:'#f6c79e',S:'#d9946e',h:'#5a3418',H:'#8a552a',e:'#1d2440',m:'#b8564f',
+   b:'#2c5fc4',B:'#4f8cf0',d:'#1d3a80',l:'#6b4423',y:'#f5cf4e',Y:'#b98628',
+   p:'#7a4a2b',P:'#4a2c19',r:'#cf3f3a',R:'#8c2531',g:'#dfe7ef',G:'#8e9bab',
+   w:'#ffffff',c:'#9fe8ff'
   },
   parts: {
-   body: {
-    name:'体',z:1,position:[0,0],
+   body: {name:'体',z:1,position:[0,0],variants:body},
+   blink: {name:'まばたき',z:2,position:[12,10],variants:{base:['.s....s.','ee....ee']}},
+   slash: {
+    name:'斬撃',z:3,position:[0,0],
     variants:{
-     base:frontTop.concat(legsA),
-     front2:frontTop.concat(legsB),
-     back1:backTop.concat(legsA),
-     back2:backTop.concat(legsB),
-     side1:sideTop.concat(sideLegsA),
-     side2:sideTop.concat(sideLegsB)
+     base:fxAt(SLASH,4,22),
+     up:fxAt(SLASH.slice().reverse(),4,0),
+     side:fxAt(transpose(SLASH),24,5)
     }
-   }
+   },
+   spark: {name:'きらめき',z:4,position:[0,0],variants:{base:rowsOf(sparkA),b:rowsOf(sparkB)}}
   },
-  anchors: {},
+  anchors: {
+   headTop: {name:'頭の上',parent:'body',position:[16,1]}
+  },
   directions: {
-   down: {},
-   up: {parts:{body:{variant:'back1'}}},
-   side: {parts:{body:{variant:'side1'}}}
+   down: {parts:Object.assign({},hide)},
+   up: {parts:Object.assign({body:{variant:'back'}},hide)},
+   side: {parts:Object.assign({body:{variant:'side'}},hide)}
   },
   animations: {
-   idle: {name:'待機',fps:2,loop:true,frames:[{},{parts:{body:{offset:[0,-1]}}}]},
-   walk_down: walk('歩く（下）','base','front2'),
-   walk_up: walk('歩く（上）','back1','back2'),
-   walk_side: walk('歩く（横）','side1','side2')
+   idle_down: {
+    name:'待機（下）',fps:3,loop:true,
+    frames:[{},v('front_a'),{},v('front_b'),{parts:{blink:{visible:true}}},v('front_a'),{},v('front_b')]
+   },
+   idle_up: step('待機（上）','back_a','back_b',3),
+   idle_side: step('待機（横）','side_a','side_b',3),
+   walk_down: step('歩く（下）','front_a','front_b',8),
+   walk_up: step('歩く（上）','back_a','back_b',8),
+   walk_side: step('歩く（横）','side_a','side_b',8),
+   attack_down: attack('攻撃（下）','atk_down1','atk_down2','base',[0,1]),
+   attack_up: attack('攻撃（上）','atk_up1','atk_up2','up',[0,-1]),
+   attack_side: attack('攻撃（横）','atk_side1','atk_side2','side',[1,0]),
+   jump: {
+    name:'ジャンプ',fps:12,loop:false,
+    frames:[
+     {},
+     {parts:{body:{offset:[0,-3]}}},
+     {parts:{body:{offset:[0,-5]}}},
+     {hold:2,parts:{body:{offset:[0,-6]}}},
+     {parts:{body:{offset:[0,-5]}}},
+     {parts:{body:{offset:[0,-3]}}},
+     {hold:2}
+    ],
+    events:[[6,'land']]
+   },
+   hurt: {
+    name:'やられ',fps:12,loop:false,
+    frames:[
+     {parts:{body:{visible:false}}},{},
+     {parts:{body:{visible:false}}},{},
+     {parts:{body:{visible:false}}},{hold:2}
+    ]
+   },
+   emote: {
+    name:'喜ぶ',fps:8,loop:false,
+    frames:[
+     Object.assign({hold:2},vic()),
+     {parts:{body:{variant:'victory',offset:[0,-2]},spark:{visible:true}}},
+     {parts:{body:{variant:'victory',offset:[0,-3]},spark:{variant:'b',visible:true}}},
+     {parts:{body:{variant:'victory',offset:[0,-2]},spark:{visible:true}}},
+     Object.assign({hold:4},vic({spark:{variant:'b',visible:true}})),
+     Object.assign({hold:2},vic({spark:{visible:true}})),
+     {}
+    ]
+   }
   }
  });
 }
@@ -1245,7 +2128,13 @@ function rebuild() {
  fixSelection();
  rt.sprite = R.buildSprite(state.spec);
  rt.animator = R.createAnimator(rt.sprite,state.spec,{showEffects:true});
- rt.animator.on('*',e => toast('合図「'+e.event+'」',900));
+ rt.animator.on('*',e => {
+  if (!(m.review || m.edit)) return;
+  const now = Date.now();
+  if (now-(state.evAt[e.event] || 0) < 2000) return;
+  state.evAt[e.event] = now;
+  toast('合図「'+e.event+'」',900);
+ });
  rt.controller = R.createController(rt.animator,state.spec);
  rt.animator.setDirection(viewKey());
 
@@ -1306,6 +2195,14 @@ function replaceProject(spec,id=null,dirty=true) {
  state.redo = [];
  state.motion.review = null;
  state.motion.view = null;
+ state.vw.zoom = 1;
+ state.vw.px = 0;
+ state.vw.py = 0;
+ state.vw.onion = false;
+ state.vw.pinch = null;
+ state.vw.pan = null;
+ state.vw.drag = null;
+ state.vw.aim = null;
  state.restoredTitle = '';
  state.ai.queueFor = null;
  rebuild();
@@ -1360,16 +2257,35 @@ function drawPreview() {
  if (!cw || !ch) return;
 
  const m = state.motion;
- const s = Math.max(1,Math.floor(Math.min(cw/(W+6),ch/(H+8))));
+ const vw = state.vw;
+ const z = m.trying ? 1 : vw.zoom;
+ const zt = $('zoomTools');
+ if (zt && zt.hidden !== !!m.trying) zt.hidden = !!m.trying;
+ const zl = $('zoomLabel');
+ const zText = (Math.round(vw.zoom*10)/10)+'×';
+ if (zl && zl.textContent !== zText) zl.textContent = zText;
+ // 上の保存ボタン列と、下の拡大ボタンにキャラが重ならないよう、その分を除いた範囲で大きさと位置を決める
+ const rc = c.getBoundingClientRect();
+ const kx = rc.width ? cw/rc.width : 1;
+ const qt = $('quickTools');
+ const topPad = qt ? Math.max(0,Math.round((qt.getBoundingClientRect().bottom-rc.top+6)*kx)) : 0;
+ const botPad = zt && !zt.hidden ? Math.max(0,Math.round((rc.bottom-zt.getBoundingClientRect().top+6)*kx)) : 0;
+ const availH = Math.min(ch,Math.max(H+2,ch-topPad-botPad));
+ const offY = Math.max(0,Math.min(topPad,ch-availH));
+ const s = Math.max(1,Math.floor(Math.min(cw/(W+6),availH/(H+2))))*z;
+ const lx = z > 1 ? Math.max(0,(W*s-cw)/2+s*3) : 0;
+ const ly = z > 1 ? Math.max(0,(H*s-availH)/2+s*3) : 0;
+ if (!m.trying) vw.px = Math.max(-lx,Math.min(lx,vw.px));
+ if (!m.trying) vw.py = Math.max(-ly,Math.min(ly,vw.py));
  const limit = Math.max(0,(cw/s-W)/2);
  if (m.trying) m.x = Math.max(-limit,Math.min(limit,m.x));
  if (m.trying) {
-  const limitY = Math.max(0,(ch/s-H)/2);
+  const limitY = Math.max(0,(availH/s-H)/2);
   m.y = Math.max(-limitY,Math.min(limitY,m.y));
  }
 
- const ox = Math.floor((cw-W*s)/2)+Math.round((m.trying ? m.x : 0)*s);
- const oy = Math.floor((ch-H*s)/2)+Math.round((m.trying && isTopdown() ? m.y : 0)*s);
+ const ox = Math.floor((cw-W*s)/2)+Math.round((m.trying ? m.x : 0)*s)+Math.round(m.trying ? 0 : vw.px);
+ const oy = offY+Math.floor((availH-H*s)/2)+Math.round((m.trying && isTopdown() ? m.y : 0)*s)+Math.round(m.trying ? 0 : vw.py);
  state.rt.layout = {s,ox,oy,limit};
 
  g.imageSmoothingEnabled = false;
@@ -1401,7 +2317,27 @@ function drawPreview() {
   g.strokeRect(ox+.5,oy+.5,W*s,H*s);
  }
 
+ if (m.edit && vw.onion && m.edit.frame > 0 && !m.trying && !m.edit.play) {
+  const rt = state.rt;
+  const ed = m.edit;
+  rt.animator.seek(ed.clip,ed.frame-1,true);
+  const prevPose = rt.sprite.pose;
+  rt.animator.seek(ed.clip,ed.frame,true);
+  const curPose = rt.sprite.pose;
+  rt.sprite.pose = prevPose;
+  g.globalAlpha = .35;
+  R.drawSprite(g,rt.sprite,ox,oy,{scale:s,flipX:previewFlip()});
+  g.globalAlpha = 1;
+  rt.sprite.pose = curPose;
+ }
  R.drawSprite(g,state.rt.sprite,ox,oy,{scale:s,flipX:previewFlip()});
+
+ // 精密モード: 狙っているマスの枠（描く座標と同じ pointerPixel の値）
+ if (vw.fine && vw.aim && state.stroke && state.stroke.fine && !m.trying) {
+  g.lineWidth = Math.max(2,Math.floor(s/5));
+  g.strokeStyle = '#ffd24a';
+  g.strokeRect(ox+vw.aim[0]*s,oy+vw.aim[1]*s,s,s);
+ }
 
  // 手でなおす: 選んだ部品の絵の範囲
  if (state.tab === 'parts' && state.sel.part && !m.trying && !m.playing && !m.edit) {
@@ -1436,7 +2372,11 @@ function frameLoop(now) {
   if (m.walk) updateWalk(dt);
   rt.controller.update(dt);
  } else if (m.edit) {
-  // コマの編集中は seek した姿勢のまま
+  // コマの編集中は seek した姿勢のまま（再生ボタンを押したときだけ進める）
+  if (m.edit.play) {
+   rt.animator.update(dt,{speed:1});
+   if (rt.animator.done) rt.animator.seek(m.edit.clip,0,true);
+  }
  } else if (m.playing) {
   rt.animator.update(dt,{speed:m.speed});
  } else {
@@ -1451,6 +2391,7 @@ function resizeView() {
  const dpr = Math.min(window.devicePixelRatio || 1,3);
  c.width = Math.max(1,Math.round(c.clientWidth*dpr));
  c.height = Math.max(1,Math.round(c.clientHeight*dpr));
+ layoutBars();
 }
 
 function canPaint() {
@@ -1464,7 +2405,8 @@ function pointerPixel(e) {
  const L = state.rt.layout;
  if (!L) return null;
  const x = (e.clientX-rect.left)*(c.width/rect.width);
- const y = (e.clientY-rect.top)*(c.height/rect.height);
+ const lift = state.vw.fine && canPaint() && state.sel.tool !== 'pick' ? 48 : 0;
+ const y = (e.clientY-lift-rect.top)*(c.height/rect.height);
  return [Math.floor((x-L.ox)/L.s),Math.floor((y-L.oy)/L.s)];
 }
 
@@ -1494,14 +2436,21 @@ function paintAt(px,py,start) {
  const p = state.spec.parts[state.sel.part];
  if (!p || px < 0 || py < 0 || px >= W || py >= H) return false;
 
- const rows = p.variants[state.sel.variant];
- const x = px-p.position[0];
- const y = py-p.position[1];
  const tool = state.sel.tool;
+ let x = px-p.position[0];
+ let y = py-p.position[1];
+ if ((x < 0 || y < 0) && tool !== 'erase' && tool !== 'fill') {
+  if (expandPartLeftTop(p,Math.max(0,-x),Math.max(0,-y))) {
+   if (state.stroke) state.stroke.wide = true;
+   x = px-p.position[0];
+   y = py-p.position[1];
+  }
+ }
+ const rows = p.variants[state.sel.variant];
  const ch = tool === 'erase' ? '.' : state.sel.color;
 
  if (x < 0 || y < 0) {
-  if (start) toast('絵の左か上の外側です。「絵を広げる」で広げてから塗ってください');
+  if (start && tool !== 'erase' && tool !== 'fill') toast('これ以上広げられません（64×64が上限です）');
   return false;
  }
  if (x >= 64 || y >= 64) return false;
@@ -1524,14 +2473,20 @@ function paintAt(px,py,start) {
 function strokePaint(e,start) {
  const st = state.stroke;
  const pos = pointerPixel(e);
- if (!st || !pos) return;
+ if (!st || !pos || multiTouch()) return;
+ if (st.fine && !st.armed) {
+  state.vw.aim = pos;
+  return;
+ }
  if (pos[0] === st.lastX && pos[1] === st.lastY && !start) return;
  st.lastX = pos[0];
  st.lastY = pos[1];
 
  if (paintAt(pos[0],pos[1],start)) {
   st.changed = true;
-  state.rt.sprite = R.buildSprite(state.spec);
+  const wide = st.wide;
+  st.wide = false;
+  if (!refreshPartSprite(state.sel.part,wide ? null : state.sel.variant)) state.rt.sprite = R.buildSprite(state.spec);
  }
 }
 
@@ -1539,10 +2494,10 @@ function bindCanvas() {
  const c = $('view');
 
  c.addEventListener('pointerdown',e => {
-  if (!canPaint()) return;
+  if (!canPaint() || state.sel.tool === 'pick' || multiTouch()) return;
   e.preventDefault();
   c.setPointerCapture(e.pointerId);
-  state.stroke = {id:e.pointerId,before:snapshot(),changed:false,lastX:null,lastY:null};
+  state.stroke = {id:e.pointerId,before:snapshot(),changed:false,lastX:null,lastY:null,fine:state.vw.fine && state.sel.tool !== 'pick',armed:false,dead:false};
   strokePaint(e,true);
  });
 
@@ -1553,6 +2508,11 @@ function bindCanvas() {
  const end = e => {
   const st = state.stroke;
   if (!st || st.id !== e.pointerId) return;
+  if (st.fine && !st.dead && e.type === 'pointerup') {
+   st.armed = true;
+   strokePaint(e,true);
+  }
+  state.vw.aim = null;
   state.stroke = null;
   if (st.changed) {
    remember(st.before);
@@ -2119,10 +3079,15 @@ function opId(op) {
 // ============================================================
 function applyAIText(text) {
  try {
+  repairNotes = [];
+  $('repairBar')?.remove();
   const message = applyAITextCore(text);
+  showRepairNotes(repairNotes);
+  repairNotes = null;
   clearRecovery();
   return message;
  } catch (e) {
+  repairNotes = null;
   offerRecovery(text,e);
   throw e;
  }
@@ -2241,6 +3206,8 @@ function offerRecovery(text,e) {
   bar.setAttribute('role','alert');
   bar.innerHTML = recoveryButton()+'<button data-action="recoverClose" aria-label="リカバリーの案内を閉じる">✕</button>';
   document.body.appendChild(bar);
+  layoutBars();
+  layoutBars();
  } catch (_) {}
 }
 
@@ -2258,6 +3225,7 @@ function createRecoveryPrompt(raw,message) {
   + '- データが途中で切れている場合は、切れた部分を補って完結させる。\n'
   + '- 出力は元と同じ種類のデータ（'+(isPatch ? 'SPRITE_PATCH_V1 の修正データ' : '完全な SPRITE_SPEC_V1')+'）を、省略せず全体で出力する。\n'
   + '- 出力はJSONのみのプレーンテキスト。Markdown・コードフェンス・見出し・説明文は禁止。先頭文字は{、末尾文字は}。\n'
+  + '- 文字列はすべて完成形で書く。式・関数呼び出し・コメントは禁止。絵の記号は半角ASCIIのみ。\n'
   + '\n'+schemaGuide()+'\n'
   + (isPatch ? '\n'+patchGuide()+'\n\n修正データを適用する先の、現在のキャラ:\n'+partsSummary()+'\n' : '')
   + '\n読み込めなかったデータ'+(cut ? '（長いため先頭'+max+'文字まで）' : '')+':\n'
@@ -2411,9 +3379,9 @@ function schemaGuide() {
   'SpriteSpec契約: format="SPRITE_SPEC_V1"。ゲーム用の2Dドット絵キャラクターを「部品」と「コマ」で定義する。',
   'meta={name,id,version:1,description}。id は英字で始まる英数字・_・-（64文字以内）。',
   'settings={size:[幅,高さ],origin:"center-bottom",facing:"right"}。size は8〜64。キャラは右向きで描く。足元の中央が基準点。',
-  'palette={"1文字の記号":"#rrggbb"}。記号は "." と空白以外の1文字。最大32色。絵の中の "." は透明。',
+  'palette={"1文字の記号":"#rrggbb"}。記号は "." "_" と空白以外の1文字。最大32色。絵の中の "_" は透明（"." も可）。',
   'parts={"部品ID":{name,z,position:[x,y],variants:{"base":["行の文字列",...],"絵ID":[...]},effect,visible}}。',
-  '- 絵（variants）は「1文字=1ピクセル」の行の配列。各文字は palette の記号か "."。base は必須。1つの部品の絵は16個まで。絵ごとに大きさが違ってよい（1〜64行、1行は64文字まで）。同じ絵の中では、すべての行を同じ文字数にそろえる。',
+  '- 絵（variants）は「1文字=1ピクセル」の行の配列。各文字は palette の記号か "_"（透明。"." も可）。base は必須。1つの部品の絵は16個まで。絵ごとに大きさが違ってよい（1〜64行、1行は64文字まで）。同じ絵の中では、すべての行を同じ文字数にそろえる。',
   '- position は絵の左上の位置。キャラの左上が原点、右が+X、下が+Y の整数。z が大きい部品ほど手前に描く。',
   '- effect:true の部品（斬撃・炎・光など）は、その部品を使う動きの再生中だけ表示される。visible:false は常に隠す。どちらも省略できる。',
   'anchors={"取付点ID":{name,parent:部品IDかnull,position:[x,y]}}。parent があれば、その部品の絵の左上からの位置。',
@@ -2462,7 +3430,7 @@ function partsSummary() {
   + '既存の動きID: '+anims;
 }
 
-const OUTPUT_RULE = '出力はJSONのみのプレーンテキスト。Markdown・コードフェンス・見出し・説明文は禁止。先頭文字は{、末尾文字は}。';
+const OUTPUT_RULE = '出力はJSONのみのプレーンテキスト。Markdown・コードフェンス・見出し・説明文は禁止。先頭文字は{、末尾文字は}。文字列はすべて完成形で書く。式・関数呼び出し・コメントは禁止。絵の記号は半角ASCIIのみ。';
 
 // 全方位マップ（4方向）用の、新規作成の依頼文
 function topdownNewPrompt(head,request) {
@@ -2526,14 +3494,23 @@ function createAIPrompt(mode) {
   + '完全なデータではなく SPRITE_PATCH_V1 の修正データだけを出力してください。'+OUTPUT_RULE+'\n'
   + '絵を直すときは、{"op":"replace","path":"/parts/部品ID/variants/絵ID","value":[…]} で絵を丸ごと置き換える。その絵を使う動きのコマ（offset）がずれないよう、絵の大きさと position をできるだけ保つ。\n'
   + '\n変更要求:\n'+request
-  + '\n\n現在のデータ:\n'+pretty(state.spec);
+  + '\n\n現在のデータ:\n'+pretty(toAIRows(state.spec));
 }
 
 function motionPromptBase(tail) {
  const s = state.spec;
+ // 「絵を添える部品」でオフにした部品は、絵のデータを省く（部品の一覧は全部品のまま）
+ const skip = state.ai.skip || {};
+ const allParts = toAIRows(s).parts;
+ const parts = {};
+ const omitted = [];
+ for (const id of Object.keys(allParts)) {
+  if (skip[id]) omitted.push(id);
+  else parts[id] = allParts[id];
+ }
  const data = {
   palette: s.palette,
-  parts: s.parts
+  parts
  };
 
  return 'あなたはゲーム用2Dドット絵キャラクターのアニメーション設計者です。次のキャラに動き（animations）を追加してください。\n'
@@ -2544,7 +3521,7 @@ function motionPromptBase(tail) {
   + '- frames は1〜24コマ。コマの parts に書かない部品は基本の状態（offset [0,0]・variant "base"・表示）。\n'
   + '- offset は整数ピクセルのずれ（右が+X、下が+Y）。回転は使えない。キャラは右向き。\n'
   + '- 大きく形が変わる姿勢は、絵の差し替え（variant）で表す。必要な絵が上の一覧になければ、'
-  + '{"op":"add","path":"/parts/部品ID/variants/新しい絵ID","value":["行の文字列",...]} で先に追加してよい（1部品16個まで。記号は palette にあるものだけ）。\n'
+  + '{"op":"add","path":"/parts/部品ID/variants/新しい絵ID","value":["行の文字列",...]} で先に追加してよい（1部品16個まで。記号は palette にあるものと、透明の "_" だけ）。\n'
   + '- 斬撃・炎・光などの演出が必要なら、新しい部品を {"op":"add","path":"/parts/新しい部品ID","value":{"name":"…","z":数値,"position":[x,y],"variants":{"base":[…]},"effect":true}} で追加してよい。effect:true の部品は、それを使う動きの再生中だけ表示される。\n'
   + '- 部品ID・絵IDは、上の一覧に実在するものか、同じ回答で追加するものだけを使う。既存の部品・色・取付点は変更・削除しない。\n'
   + '- くり返す動き（loop:true）は、最後のコマから最初のコマへ自然につながるようにする。その場での動きにする（キャラ全体を前へ進めない）。\n'
@@ -2558,6 +3535,8 @@ function motionPromptBase(tail) {
   + '例: {"format":"SPRITE_PATCH_V1","plan":"0コマ 構え → 1コマ 腕を上げる → 2コマ 戻る","operations":[{"op":"add","path":"/animations/wave","value":{"name":"手を振る","fps":8,"loop":true,"frames":[{},{"parts":{"arm_front":{"offset":[0,-2]}}}]}}]}\n'
   + OUTPUT_RULE+'\n'
   + tail
+  + (omitted.length ? '\n\n絵を省いた部品: '+omitted.join('、')+'（位置と大きさは上の一覧を参照）' : '')
+  + (omitted.length ? '\n\n絵を省いた部品: '+omitted.join('、')+'（位置と大きさは上の一覧を参照）' : '')
   + '\n\n現在の色と部品の絵（参考。絵の形を見て、ずれや差し替えを決める）:\n'+pretty(data);
 }
 
@@ -2590,6 +3569,8 @@ function ensureQueue() {
  a.queue = [newQueueItem(first)];
  a.qi = 0;
  a.batchNote = '';
+ a.skip = {};
+ a.skip = {};
 }
 
 function markQueueLoaded(ids) {
@@ -2904,6 +3885,28 @@ function restore() {
    } catch (_) {}
   }
  }
+
+ // 旧サンプル（32×32の戦士）が未変更のまま開かれるときは、新しいサンプルに入れ替える（保存済みのキャラはライブラリに残る）
+ // サンプルの指紋（キャラIDを除いた内容）。手を加えていないサンプルかどうかの判定に使う
+ const sampleSig = spec => {
+  const c = clone(spec);
+  if (obj(c.meta)) delete c.meta.id;
+  const t = JSON.stringify(c);
+  let h = 5381;
+  for (let i=0;i<t.length;i++) h = ((h*33) ^ t.charCodeAt(i)) >>> 0;
+  return h.toString(36)+'_'+t.length;
+ };
+ const freshSig = sampleSig(warriorSpec());
+ if (chosen && /^warrior_/.test(chosen.spec.meta.id)) {
+  const sig = sampleSig(chosen.spec);
+  // 指紋が保存されていない旧版からの移行は、1回だけ入れ替える
+  const untouched = state.sampleSig ? sig === state.sampleSig : state.sampleVer !== 3;
+  if (untouched && sig !== freshSig) {
+   chosen = null;
+   state.swapped = true;
+  }
+ }
+ state.sampleSig = freshSig;
 
  state.restoredTitle = chosen ? chosen.spec.meta.name : '';
  if (!chosen) chosen = {spec:warriorSpec(),projectId:null,dirty:true};
@@ -3225,12 +4228,494 @@ function heading() {
  `;
 }
 
+// ---- 初回導線・次の工程 ----
+function introCard() {
+ if (!state.welcome) return '';
+ return `
+  <div class="card review">
+   <h3>はじめての方へ（3ステップ）</h3>
+   <div class="helpsteps">
+    <div>① つくる · キャラの説明をAIに頼むか、ひな形を選びます。</div>
+    <div>② なおす・動かす · 絵を整え、動きを付けて確かめます。</div>
+    <div>③ ゲームへ · データをコピーして、AIにゲームをつくってもらいます。</div>
+   </div>
+   <div class="row">
+    ${button('tryWarrior','戦士で試す','primary')}
+    ${button('introClose','閉じる')}
+   </div>
+  </div>
+ `;
+}
+
+function nextStepCard() {
+ const t = state.tab;
+ const next = t === 'repair' || t === 'parts'
+  ? ['motion','③ 動かす','絵が整ったら、動きを付けて確かめましょう。']
+  : t === 'motion'
+   ? ['export','④ ゲームへ','動きが決まったら、ゲームに持ち出します。']
+   : null;
+ if (!next) return '';
+ return `
+  <div class="card">
+   <p class="hint">${next[2]}</p>
+   <button data-tab="${next[0]}" class="primary">次は「${next[1]}」へ →</button>
+  </div>
+ `;
+}
+
+// ---- ズームとパン（表示だけ。データには影響しない） ----
+function zoomBar() {
+ const z = state.vw.zoom;
+ const zb = n => `<button data-action="zoom${n}" class="${z === n ? 'selected' : ''}" aria-pressed="${z === n}">${n}×</button>`;
+ return `
+  <div class="chips" role="group" aria-label="プレビューの拡大">
+   ${zb(1)}${zb(2)}${zb(4)}${zb(8)}
+   ${z > 1 ? button('panL','◀')+button('panU','▲')+button('panD','▼')+button('panR','▶')+button('panReset','中央') : ''}
+  </div>
+  ${z > 1 ? '<p class="hint">2本指でつまむと拡大縮小、なぞると表示位置の移動ができます（矢印ボタンでも動かせます）。表示だけで、データは変わりません。</p>' : ''}
+ `;
+}
+
+function setZoom(n) {
+ state.vw.zoom = n;
+ if (n === 1) {
+  state.vw.px = 0;
+  state.vw.py = 0;
+ }
+ renderPanel();
+}
+
+function panView(dx,dy,reset) {
+ const c = $('view');
+ if (reset) {
+  state.vw.px = 0;
+  state.vw.py = 0;
+ } else {
+  state.vw.px += dx*c.width*.25;
+  state.vw.py += dy*c.height*.25;
+ }
+}
+
+function stepZoom(dir) {
+ const steps = [1,2,4,8];
+ const z = state.vw.zoom;
+ if (dir > 0) return steps.find(n => n > z+.01) || 8;
+ return steps.slice().reverse().find(n => n < z-.01) || 1;
+}
+
+function snapZoom() {
+ const steps = [1,2,4,8];
+ const z = Math.max(1,state.vw.zoom);
+ let best = 1;
+ for (const n of steps) {
+  if (Math.abs(Math.log(n/z)) < Math.abs(Math.log(best/z))) best = n;
+ }
+ setZoom(best);
+}
+
+// ---- コマ編集の補助（一覧・移動・サムネイル） ----
+function gotoFrame(i) {
+ const {ed,a} = editInfo();
+ if (ed.play) return;
+ ed.frame = Math.max(0,Math.min(a.frames.length-1,i));
+ state.rt.animator.seek(ed.clip,ed.frame,true);
+ renderPanel();
+}
+
+function moveFrame(dir) {
+ const {ed} = editInfo();
+ const i = ed.frame;
+ const j = i+dir;
+ const next = snapshot();
+ const a = next.animations[ed.clip];
+ assert(j >= 0 && j < a.frames.length,dir < 0 ? '最初のコマです' : '最後のコマです');
+
+ const tmp = a.frames[i];
+ a.frames[i] = a.frames[j];
+ a.frames[j] = tmp;
+ if (a.events) {
+  a.events.forEach(ev => {
+   if (ev[0] === i) ev[0] = j;
+   else if (ev[0] === j) ev[0] = i;
+  });
+  a.events.sort((x,y) => x[0]-y[0]);
+ }
+
+ ed.frame = j;
+ try {
+  commit(next);
+ } catch (err) {
+  ed.frame = i;
+  throw err;
+ }
+}
+
+function frameThumbs() {
+ const ed = state.motion.edit;
+ const a = ed && state.spec.animations[ed.clip];
+ if (!a) return '';
+ const [W,H] = state.spec.settings.size;
+ const sc = Math.max(1,Math.floor(48/Math.max(W,H)));
+ return '<div class="thumbs" id="thumbRow" role="group" aria-label="コマの一覧">'
+  + a.frames.map((f,i) =>
+   '<button data-thumb="'+i+'" class="'+(i === ed.frame ? 'selected' : '')+'" aria-label="'+(i+1)+'コマ目" aria-pressed="'+(i === ed.frame)+'">'
+   + '<canvas data-tc="'+i+'" width="'+W*sc+'" height="'+H*sc+'"></canvas>'
+   + '<span>'+(i+1)+((a.events || []).some(ev => ev[0] === i) ? '⚑' : '')+'</span></button>'
+  ).join('')
+  + '</div>';
+}
+
+function drawFrameThumbs() {
+ const ed = state.motion.edit;
+ const list = document.querySelectorAll('canvas[data-tc]');
+ if (!ed || !list.length) return;
+ const spec = state.spec;
+ if (!own(spec.animations,ed.clip)) return;
+
+ const sprite = R.buildSprite(spec);
+ const anim = R.createAnimator(sprite,spec,{showEffects:false});
+ anim.setDirection(viewKey());
+ const [W,H] = spec.settings.size;
+ const sc = Math.max(1,Math.floor(48/Math.max(W,H)));
+
+ list.forEach(c => {
+  anim.seek(ed.clip,Number(c.dataset.tc),true);
+  const g = c.getContext('2d');
+  g.fillStyle = state.bg;
+  g.fillRect(0,0,c.width,c.height);
+  R.drawSprite(g,sprite,0,0,{scale:sc,flipX:previewFlip()});
+ });
+}
+
+function multiTouch() {
+ return Object.keys(state.vw.ptrs).length >= 2;
+}
+
+// ---- 塗りの補助 ----
+function rowsToCanvas(rows,palette) {
+ const h = Math.max(1,rows.length);
+ const w = Math.max(1,...rows.map(r => r.length));
+ const c = document.createElement('canvas');
+ c.width = w;
+ c.height = h;
+ const g = c.getContext('2d');
+ rows.forEach((row,y) => {
+  for (let x=0;x<row.length;x++) {
+   const col = palette[row[x]];
+   if (col) {
+    g.fillStyle = col;
+    g.fillRect(x,y,1,1);
+   }
+  }
+ });
+ return c;
+}
+
+// 変更した部品の絵だけを描き直す（onlyVariant が null のときは、その部品のすべての絵）
+function refreshPartSprite(id,onlyVariant) {
+ const sp = state.rt.sprite;
+ const spec = state.spec;
+ const part = sp && sp.parts[id];
+ const p = spec.parts[id];
+ if (!part || !p) return false;
+ part.position = p.position;
+ const vids = onlyVariant ? [onlyVariant] : Object.keys(p.variants);
+ for (const v of vids) {
+  if (!own(p.variants,v)) return false;
+  part.variants[v] = rowsToCanvas(p.variants[v],spec.palette);
+ }
+ return true;
+}
+
+// 左・上に広げる。部品のすべての絵をそろえて広げ、位置をずらす。上限を超えるときは false
+function expandPartLeftTop(p,needL,needT) {
+ const vs = Object.keys(p.variants);
+ for (const k of vs) {
+  const rows = p.variants[k];
+  const w = Math.max(1,...rows.map(r => r.length));
+  if (w+needL > 64 || rows.length+needT > 64) return false;
+ }
+ for (const k of vs) {
+  const rows = p.variants[k];
+  const w = Math.max(1,...rows.map(r => r.length));
+  const pad = '.'.repeat(needL);
+  const next = rows.map(r => pad+r);
+  for (let i=0;i<needT;i++) next.unshift('.'.repeat(w+needL));
+  p.variants[k] = next;
+ }
+ p.position[0] -= needL;
+ p.position[1] -= needT;
+ return true;
+}
+
+// スポイト: 選んだ部品を優先し、なければ手前の部品から色を拾う
+function pickColorAt(e) {
+ const pos = pointerPixel(e);
+ if (!pos) return;
+ const s = state.spec;
+ const sel = state.sel;
+ const key = id => id === sel.part ? 1 : 0;
+ const ids = Object.keys(s.parts).sort((a,b) => key(b)-key(a) || s.parts[b].z-s.parts[a].z);
+
+ for (const id of ids) {
+  const p = s.parts[id];
+  const b = dirBaseParts()[id] || {};
+  const own1 = id === sel.part;
+  const vid = own1 ? sel.variant : (b.variant && own(p.variants,b.variant) ? b.variant : 'base');
+  const rows = p.variants[vid] || p.variants.base;
+  const x = pos[0]-p.position[0]-(own1 || !b.offset ? 0 : b.offset[0]);
+  const y = pos[1]-p.position[1]-(own1 || !b.offset ? 0 : b.offset[1]);
+  const ch = x >= 0 && y >= 0 && rows[y] ? rows[y][x] : null;
+  if (ch && ch !== '.' && own(s.palette,ch)) {
+   sel.color = ch;
+   sel.tool = 'pen';
+   renderPanel();
+   toast('色「'+ch+'」を拾いました');
+   return;
+  }
+ }
+ toast('そこには色がありません');
+}
+
+// ---- コマ編集: プレビューのドラッグ ----
+function frameHit(px,py) {
+ const sp = state.rt.sprite;
+ const spec = state.spec;
+ if (!sp || !sp.pose) return null;
+ const W = spec.settings.size[0];
+ const x0 = previewFlip() ? W-1-px : px;
+ const list = sp.order
+  .map((part,i) => ({part,i,z:sp.pose[part.id] && typeof sp.pose[part.id].z === 'number' ? sp.pose[part.id].z : part.z}))
+  .sort((a,b) => a.z-b.z || a.i-b.i)
+  .reverse();
+
+ for (const {part} of list) {
+  const p = sp.pose[part.id];
+  if (!p || !p.visible) continue;
+  const img = part.variants[p.variant] || part.variants.base;
+  const lx = x0-(part.position[0]+p.dx);
+  const ly = py-(part.position[1]+p.dy);
+  if (lx < 0 || ly < 0 || lx >= img.width || ly >= img.height) continue;
+  const rows = spec.parts[part.id].variants[p.variant] || spec.parts[part.id].variants.base;
+  const fx = p.flipX ? img.width-1-lx : lx;
+  const ch = rows[ly] && rows[ly][fx];
+  if (ch && ch !== '.') return part.id;
+ }
+ return null;
+}
+
+function writeFrameOffset(f,pid,ox,oy) {
+ if (ox === 0 && oy === 0) {
+  if (f.parts && f.parts[pid]) {
+   delete f.parts[pid].offset;
+   if (!Object.keys(f.parts[pid]).length) delete f.parts[pid];
+   if (!Object.keys(f.parts).length) delete f.parts;
+  }
+  return;
+ }
+ f.parts = f.parts || {};
+ const d = f.parts[pid] = f.parts[pid] || {};
+ d.offset = [ox,oy];
+}
+
+function startFrameDrag(e) {
+ if (state.motion.edit && state.motion.edit.play) return;
+ const pos = pointerPixel(e);
+ if (!pos) return;
+ const {ed,f} = editInfo();
+ const id = frameHit(pos[0],pos[1]);
+ if (!id) return;
+ e.preventDefault();
+ $('view').setPointerCapture(e.pointerId);
+ const cur = f.parts && f.parts[id] && f.parts[id].offset || [0,0];
+ state.vw.drag = {id:e.pointerId,part:id,sx:pos[0],sy:pos[1],base:cur.slice(),before:snapshot(),changed:false};
+ ed.part = id;
+}
+
+function moveFrameDrag(e) {
+ const d = state.vw.drag;
+ const pos = pointerPixel(e);
+ if (!d || !pos) return;
+ const {ed} = editInfo();
+ const k = previewFlip() ? -1 : 1;
+ const ox = Math.max(-64,Math.min(64,d.base[0]+(pos[0]-d.sx)*k));
+ const oy = Math.max(-64,Math.min(64,d.base[1]+pos[1]-d.sy));
+ const f = state.spec.animations[ed.clip].frames[ed.frame];
+ const cur = f.parts && f.parts[d.part] && f.parts[d.part].offset || [0,0];
+ if (cur[0] === ox && cur[1] === oy) return;
+ writeFrameOffset(f,d.part,ox,oy);
+ d.changed = true;
+ state.rt.animator.seek(ed.clip,ed.frame,true);
+}
+
+function endFrameDrag() {
+ const d = state.vw.drag;
+ if (!d) return;
+ state.vw.drag = null;
+ if (d.changed) {
+  try {
+   validateSpec(state.spec);
+   remember(d.before);
+   markChanged();
+  } catch (err) {
+   state.spec = d.before;
+   showError(err);
+  }
+  rebuild();
+ }
+ renderPanel();
+}
+
+// 2本指のパン、スポイト、コマのドラッグ（描く処理より先に登録する）
+function bindGestures() {
+ const c = $('view');
+ const vw = state.vw;
+ const spread = () => {
+  const ps = Object.values(vw.ptrs);
+  return ps.length < 2 ? 1 : Math.max(1,Math.hypot(ps[0].x-ps[1].x,ps[0].y-ps[1].y));
+ };
+ const centroid = () => {
+  const ps = Object.values(vw.ptrs);
+  return {x:ps.reduce((n,q) => n+q.x,0)/ps.length,y:ps.reduce((n,q) => n+q.y,0)/ps.length};
+ };
+
+ c.addEventListener('pointerdown',e => {
+  vw.ptrs[e.pointerId] = {x:e.clientX,y:e.clientY};
+  if (multiTouch()) {
+   e.preventDefault();
+   if (vw.drag) endFrameDrag();
+   if (state.stroke) state.stroke.dead = true;
+   if (state.motion.trying) return;
+   vw.pan = centroid();
+   vw.pinch = {d:spread(),z:vw.zoom};
+   return;
+  }
+  const m = state.motion;
+  if (m.trying || m.playing) return;
+  if (canPaint() && state.sel.tool === 'pick') {
+   e.preventDefault();
+   safe(() => pickColorAt(e));
+  } else if (m.edit) {
+   safe(() => startFrameDrag(e));
+  }
+ });
+
+ c.addEventListener('pointermove',e => {
+  if (!vw.ptrs[e.pointerId]) return;
+  vw.ptrs[e.pointerId] = {x:e.clientX,y:e.clientY};
+  if (multiTouch() && vw.pan) {
+   const now = centroid();
+   const rect = c.getBoundingClientRect();
+   const k = c.width/rect.width;
+   vw.px += (now.x-vw.pan.x)*k;
+   vw.py += (now.y-vw.pan.y)*k;
+   vw.pan = now;
+   if (vw.pinch) vw.zoom = Math.max(1,Math.min(8,vw.pinch.z*spread()/vw.pinch.d));
+   return;
+  }
+  if (vw.drag && vw.drag.id === e.pointerId) moveFrameDrag(e);
+ });
+
+ const up = e => {
+  delete vw.ptrs[e.pointerId];
+  if (!multiTouch()) {
+   vw.pan = null;
+   if (vw.pinch) {
+    vw.pinch = null;
+    snapZoom();
+   }
+  }
+  if (vw.drag && vw.drag.id === e.pointerId) endFrameDrag();
+ };
+ c.addEventListener('pointerup',up);
+ c.addEventListener('pointercancel',up);
+ window.addEventListener('blur',() => {
+  vw.ptrs = {};
+  if (vw.pinch) {
+   vw.pinch = null;
+   snapZoom();
+  }
+  vw.pan = null;
+ });
+}
+
+// ---- PNGの書き出し ----
+function canvasBlob(c) {
+ return new Promise((resolve,reject) => {
+  c.toBlob(b => b ? resolve(b) : reject(Error('画像を作れませんでした')),'image/png');
+ });
+}
+
+function downloadBlob(blob,name) {
+ const url = URL.createObjectURL(blob);
+ const a = document.createElement('a');
+ a.href = url;
+ a.download = name;
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+ setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+
+// いま表示している姿勢を、背景色つきで大きめに描いた画像
+function previewCanvas() {
+ const sp = state.rt.sprite;
+ const [W,H] = state.spec.settings.size;
+ const sc = Math.max(2,Math.floor(384/Math.max(W,H)));
+ const pad = sc*2;
+ const c = document.createElement('canvas');
+ c.width = W*sc+pad*2;
+ c.height = H*sc+pad*2;
+ const g = c.getContext('2d');
+ g.fillStyle = state.bg;
+ g.fillRect(0,0,c.width,c.height);
+ R.drawSprite(g,sp,pad,pad,{scale:sc,flipX:previewFlip()});
+ return c;
+}
+
+function savePreviewPng() {
+ return canvasBlob(previewCanvas()).then(b => {
+  downloadBlob(b,fileBase()+'_preview.png');
+  toast('プレビューをPNGで保存しました');
+ }).catch(showError);
+}
+
+function sheetClipId() {
+ const ids = Object.keys(state.spec.animations);
+ return own(state.spec.animations,state.sheetClip) ? state.sheetClip : (ids[0] || null);
+}
+
+// 選んだ動きの全コマを横に並べた透明PNG（倍率1・1コマ＝キャラの大きさ）
+function sheetCanvas(id) {
+ const spec = state.spec;
+ assert(own(spec.animations,id),'動きを選んでください');
+ const [W,H] = spec.settings.size;
+ const n = spec.animations[id].frames.length;
+ const sprite = R.buildSprite(spec);
+ const anim = R.createAnimator(sprite,spec);
+ const dm = /_(down|up|side)$/.exec(id);
+ if (isTopdown(spec) && dm) anim.setDirection(dm[1]);
+
+ const c = document.createElement('canvas');
+ c.width = W*n;
+ c.height = H;
+ const g = c.getContext('2d');
+ for (let i=0;i<n;i++) {
+  anim.seek(id,i,true);
+  R.drawSprite(g,sprite,i*W,0,{scale:1});
+ }
+ return c;
+}
+
 function answerImportCard() {
  return `
   <div class="card">
    <h3>AIの回答を読み込む</h3>
    <p class="hint">AIの回答全体をコピーしてから押してください。新しいキャラか修正データかを自動で判別します。変更は↶で戻せます。</p>
-   ${button('import','コピーしたAIの回答を読み込む','primary')}
+   <div class="row">
+    ${button('import','コピーしたAIの回答を読み込む','primary')}
+    ${button('fileAnswer','ファイルから読み込む')}
+   </div>
   </div>
  `;
 }
@@ -3316,6 +4801,7 @@ function aiPanel() {
  if (creating && state.createMode === 'library') return libraryPanel();
 
  return `
+  ${creating ? introCard() : ''}
   ${creating && state.restoredTitle ? `
    <div class="card review">
     <h3>前回の続き: ${esc(state.restoredTitle)}</h3>
@@ -3336,11 +4822,12 @@ function aiPanel() {
      ? '全方位マップ（ドラクエやFFのような上から見た画面）用に、正面・背面・横の3方向の絵を作ります。絵の量が増えるので、16×16か24×24がおすすめです。'
      : '横スクロール用に、右向きの絵を作ります（左向きは自動で反転します）。'}</p>
     ${selectField('ドットの粗さ（キャラの大きさ）','data-dot="1"',DOTS.map(x => [String(x[0]),x[1]]),String(dotSize()))}
-    <p class="hint">${esc(DOTS.find(x => x[0] === dotSize())[2])}小さいほど粗く、AIも描きやすくなります。戦士のひな形は32×32です。</p>
+    <p class="hint">${esc(DOTS.find(x => x[0] === dotSize())[2])}小さいほど粗く、AIも描きやすくなります。戦士のひな形は64×64です。</p>
    ` : ''}
    ${creating ? '' : fixPresetChips()}
    <div class="row">
     ${button(creating ? 'promptNew' : 'promptEdit','AIへの依頼文をコピー','primary')}
+    ${creating ? '' : button('previewCopy','プレビューをコピー')+button('previewSave','プレビューをPNG保存')}
     ${promptShareButton()}
    </div>
    <p class="hint">コピーした依頼文をChatGPTなどに貼り付けて送信してください。回答が届いたら、下の欄で読み込みます。${creating ? '' : '画像を見られるAIなら、プレビューのスクリーンショットを一緒に送ると、どこが不自然かを見て直してくれます。'}</p>
@@ -3378,14 +4865,16 @@ function partsPanel() {
 
  if (!p) return list;
 
- const tools = [['pen','塗る'],['erase','消す'],['fill','塗りつぶし']];
+ const tools = [['pen','塗る'],['erase','消す'],['fill','塗りつぶし'],['pick','スポイト']];
  const nb = (dir,label) => `<button data-nudge="${dir}">${label}</button>`;
  const gb = (dir,label) => `<button data-grow="${dir}">${label}</button>`;
 
  return `
   <div class="card">
    <h3>「${esc(p.name)}」を塗る</h3>
-   <p class="hint">上のプレビューをタップ（なぞる）と、選んだ絵に色を塗れます。水色の枠が、いま選んでいる絵の範囲です。</p>
+   <p class="hint">上のプレビューをタップ（なぞる）と、選んだ絵に色を塗れます。水色の枠が、いま選んでいる絵の範囲です。「スポイト」でタップした場所の色を拾えます。</p>
+   <label class="menu-check"><input type="checkbox" data-fine="1" ${state.vw.fine ? 'checked' : ''}> 精密モード（指の約48px上に塗る。指を離した位置で確定）</label>
+   ${zoomBar()}
    ${selectField('絵（姿勢ごとの差し替え）','id="variantSel"',Object.keys(p.variants).map(v => [v,v === 'base' ? 'base（基本の絵）' : v]),sel.variant)}
    <div class="row">
     ${button('addVariant','複製して新しい絵')}
@@ -3409,7 +4898,7 @@ function partsPanel() {
    </div>
    <h3>絵を広げる</h3>
    <div class="nudgegrid">${gb('left','← 左')}${gb('up','↑ 上')}${gb('down','↓ 下')}${gb('right','右 →')}</div>
-   <p class="hint">右と下は、塗ると自動で広がります。左と上は、ここで広げてから塗ってください。</p>
+   <p class="hint">絵の外側（右・下・左・上）を塗ると、自動で広がります。ボタンでも広げられます。64×64が上限です。</p>
   </div>
 
   <div class="card">
@@ -3460,6 +4949,7 @@ function frameEditorCard() {
  return `
   <div class="card review">
    <h3>「${esc(a.name || ed.clip)}」のコマを直す</h3>
+   ${zoomBar()}
    <div class="grid2">
     ${field('表示名','data-cedit="name"',a.name || '')}
     ${field('速さ（fps）','data-cedit="fps" min="1" max="30" step="1"',a.fps,'number')}
@@ -3468,13 +4958,28 @@ function frameEditorCard() {
 
    <h3>コマ ${ed.frame+1} / ${a.frames.length}</h3>
    <div class="row">
+    ${button('editPlay',ed.play ? '■ 止める' : '▶ この動きを再生',ed.play ? 'primary' : '')}
+   </div>
+   ${ed.play ? '<p class="hint">再生中は編集できません。止めると、再生前のコマに戻ります。</p>' : ''}
+   <fieldset ${ed.play ? 'disabled' : ''}>
+   ${frameThumbs()}
+   <p class="hint">プレビューの部品をドラッグすると、このコマでの位置を動かせます。</p>
+   <div class="row">
+    ${button('onionToggle',state.vw.onion ? '前のコマを重ねる: ON' : '前のコマを重ねる: OFF',state.vw.onion ? 'primary' : '')}
+   </div>
+   <div class="row">
     <button data-fstep="-1">◀ 前のコマ</button>
     <button data-fstep="1">次のコマ ▶</button>
+   </div>
+   <div class="row">
+    <button data-action="frameMoveBack" ${ed.frame === 0 ? 'disabled' : ''}>⇦ このコマを前へ移動</button>
+    <button data-action="frameMoveFwd" ${ed.frame >= a.frames.length-1 ? 'disabled' : ''}>後ろへ移動 ⇨</button>
    </div>
    <div class="row">
     ${button('frameAdd','＋ 空のコマ')}
     ${button('frameDup','このコマを複製')}
     ${button('frameDel','このコマを削除','danger')}
+    ${button('frameCopyPrev','前のコマの姿勢をコピー')}
    </div>
    <div class="grid2">
     ${field('表示する長さ（コマ数）','data-fedit="hold" min="1" max="24" step="1"',f.hold || 1,'number')}
@@ -3493,6 +4998,7 @@ function frameEditorCard() {
     <p class="hint">● が付いた部品は、このコマで基本の状態から変えています。</p>
    ` : '<p class="hint">部品がありません。</p>'}
 
+   </fieldset>
    <div class="row">${button('editClose','閉じる')}</div>
    <p class="hint">変更は、それぞれ↶で1回ずつ取り消せます。</p>
   </div>
@@ -3556,6 +5062,14 @@ function queueCard() {
      <textarea data-q="script" placeholder="構える&#10;剣を頭の上に振り上げる&#10;前へ振り下ろす（当たる瞬間）&#10;元に戻る">${esc(it.script)}</textarea>
     </label>
    ` : '<p class="hint">台本なし: 動きIDと「AIへの指示」から、AIが各コマの姿勢を考えます。</p>'}
+
+   <h3>絵を添える部品</h3>
+   <p class="hint">依頼文の末尾に付ける絵のデータを、オンの部品だけにします（依頼文が長いときに減らせます）。部品の一覧・位置・大きさは、オフでも依頼文に入ります。</p>
+   ${Object.entries(state.spec.parts).map(([id,p]) => `<label class="menu-check"><input type="checkbox" data-skippart="${esc(id)}" ${a.skip && a.skip[id] ? '' : 'checked'}> ${esc(p.name)} <small>${esc(id)}</small></label>`).join('')}
+
+   <h3>絵を添える部品</h3>
+   <p class="hint">依頼文の末尾に付ける絵のデータを、オンの部品だけにします（依頼文が長いときに減らせます）。部品の一覧・位置・大きさは、オフでも依頼文に入ります。</p>
+   ${Object.entries(state.spec.parts).map(([id,p]) => `<label class="menu-check"><input type="checkbox" data-skippart="${esc(id)}" ${a.skip && a.skip[id] ? '' : 'checked'}> ${esc(p.name)} <small>${esc(id)}</small></label>`).join('')}
 
    <h3>AIに頼む</h3>
    <label>全体への指示（すべての動きに共通・任意）
@@ -3642,6 +5156,14 @@ function exportPanel() {
    <h3>アプリの外で使う</h3>
    <p class="hint">確認用のHTMLは、ファイルを開くだけでキャラを歩かせられます。人に送って見てもらうのにも使えます。</p>
    ${button('demoHtml','確認用のHTMLを保存')}
+   <h3>PNGで書き出す</h3>
+   <p class="hint">スプライトシートは、選んだ動きの全コマ（1コマ＝キャラの大きさ、倍率1）を横に並べた透明PNGです。</p>
+   ${Object.keys(s.animations).length ? selectField('スプライトシートにする動き','data-sheet="1"',Object.entries(s.animations).map(([id,a]) => [id,(a.name || id)+'（'+id+'・'+a.frames.length+'コマ）']),sheetClipId()) : '<p class="hint">動きがありません。「動かす」で追加してください。</p>'}
+   <div class="row">
+    ${Object.keys(s.animations).length ? button('sheetSave','スプライトシートPNGを保存') : ''}
+    ${button('previewSave','プレビューをPNGで保存')}
+    ${button('previewCopy','プレビューをコピー')}
+   </div>
   </div>
  `;
 }
@@ -3673,9 +5195,20 @@ function renderPanel() {
  const views = {ai:aiPanel,repair:aiPanel,parts:partsPanel,motion:motionPanel,export:exportPanel,model:modelPanel};
  const panel = $('panel');
  const scroll = panel.scrollTop;
+ const thumbScroll = $('thumbRow') ? $('thumbRow').scrollLeft : 0;
 
- panel.innerHTML = heading()+(views[state.tab] || aiPanel)();
+ panel.innerHTML = heading()+(views[state.tab] || aiPanel)()+nextStepCard();
  panel.scrollTop = scroll;
+ const tr = $('thumbRow');
+ if (tr) {
+  tr.scrollLeft = thumbScroll;
+  const cur = tr.querySelector('.selected');
+  if (cur) {
+   if (cur.offsetLeft < tr.scrollLeft) tr.scrollLeft = cur.offsetLeft-4;
+   else if (cur.offsetLeft+cur.offsetWidth > tr.scrollLeft+tr.clientWidth) tr.scrollLeft = cur.offsetLeft+cur.offsetWidth-tr.clientWidth+4;
+  }
+ }
+ drawFrameThumbs();
 
  document.querySelectorAll('nav [data-tab]').forEach(b => {
   const active = b.dataset.tab === (GROUP[state.tab] || 'repair');
@@ -3736,7 +5269,7 @@ function showImport() {
   `<p class="hint">コピーした内容を自動で読み取れなかったため、ここに貼り付けてください。AIの回答（「{」で始まり「}」で終わる文章）をそのまま貼り付ければ、自動で判別します。</p>
    <textarea id="importText" aria-label="データ" placeholder="{ ... }"></textarea>
    <p id="dialogError" class="error" hidden></p>`,
-  button('close','キャンセル')+button('doImport','読み込む','primary')
+  button('close','キャンセル')+button('fileAnswer','ファイルから読み込む')+button('doImport','読み込む','primary')
  );
 }
 
@@ -3744,9 +5277,9 @@ function showNewDialog() {
  openDialog(
   '新しいキャラを作る',
   `<p class="hint">戦士のひな形は、部品が分かれていて5つの動きが入っているので、すぐに試せます。</p>
-   <button class="menu-wide" data-newkind="warrior"><b>戦士（32×32）</b><br><small>頭・胴・腕2本・脚2本・剣。待機・歩く・攻撃・やられ・倒れる</small></button>
+   <button class="menu-wide" data-newkind="warrior"><b>戦士（64×64・ドラクエ風）</b><br><small>角かぶと・よろい・マント・剣。待機・歩く・攻撃・やられ・倒れる</small></button>
    <p></p>
-   <button class="menu-wide" data-newkind="hero4"><b>勇者（16×16・4方向）</b><br><small>ドラクエやFFのような全方位マップ用。正面・背面・横の絵と、向き別の歩き</small></button>
+   <button class="menu-wide" data-newkind="hero4"><b>勇者（32×32・4方向・デモ）</b><br><small>ドラクエ風の全方位マップ用。足踏み・歩き・向き別の攻撃（斬撃エフェクト）・ジャンプ・喜ぶ入り</small></button>
    <p></p>
    <button class="menu-wide" data-newkind="empty"><b>空のキャラ</b><br><small>何もない状態から作る（AIで作るとき）</small></button>`,
   button('close','キャンセル')
@@ -3768,7 +5301,7 @@ function showGuide() {
    <p class="hint">「リカバリー依頼文をコピー」ボタンが出ます。コピーしてAIに送り、直った回答をもう一度読み込んでください。</p>
    <h3>データの考え方</h3>
    <p class="hint">キャラは「部品」（頭・腕・剣など）に分かれています。部品ごとに「絵」を複数持てます（腕を下げた絵・上げた絵など）。動きは「コマ」の並びで、コマごとに部品のずれと、どの絵を使うかを決めます。</p>`,
-  button('close','はじめる','primary')
+  button('guideIntro','はじめの案内をもう一度見る')+button('close','はじめる','primary')
  );
 }
 
@@ -3817,7 +5350,16 @@ function copyPrompt(text,message='依頼文をコピーしました。ChatGPTな
  document.querySelectorAll('[data-action="sharePrompt"]').forEach(b => {
   b.disabled = false;
  });
- return copyText(text,message);
+ const len = text.length;
+ const long = len > 20000;
+ const p = copyText(text,long ? null : message);
+ p.then(ok => {
+  if (!ok) return;
+  const n = len.toLocaleString();
+  if (long) toast('依頼文をコピーしました（'+n+'文字）。大きいキャラは長くなります。直したい部品だけを伝えると短くできます',6000);
+  else toast(message+'（'+n+'文字）',3600);
+ });
+ return p;
 }
 
 async function loadFromClipboard() {
@@ -3932,6 +5474,57 @@ function selfTest() {
   return '下・上・左で、向き別の歩きに切り替わりました';
  });
 
+ const roundTrip = (label,make) => run(label,() => {
+  const back = normalizeSpec(parseAIJSON(make(JSON.stringify(spec))));
+  validateSpec(back);
+  assert(JSON.stringify(back) === JSON.stringify(spec),'補正後に内容が変わりました');
+  return '貼り付けの崩れを補正して、元と同じ内容で読み込めました';
+ });
+
+ roundTrip('⑧ 「…」と全角引用符の補正',t => t.replace(/\.\.\./g,'\u2026').replace(/"/g,'\u201C'));
+ roundTrip('⑨ 絵の行に付いた .replace(…) の自動修復',t => {
+  const row = JSON.stringify(spec.parts.arm_back.variants.base[1]);
+  return t.replace(row,row+'.replace("b","b")');
+ });
+
+ run('⑩ 透明を「_」で書いたデータ',() => {
+  const back = normalizeSpec(parseAIJSON(JSON.stringify(toAIRows(spec))));
+  validateSpec(back);
+  assert(JSON.stringify(back) === JSON.stringify(spec),'内容が変わりました');
+  return '「_」で書いたデータが、元と同じ内容で読み込めました';
+ });
+
+ run('⑪ 修正データの絵（「…」と「_」）',() => {
+  const patch = parseAIJSON(JSON.stringify({
+   format:'SPRITE_PATCH_V1',
+   operations:[{op:'replace',path:'/parts/arm_back/variants/base',value:['\u2026kk','__kkk','kk\u2026']}]
+  }));
+  const next = applyPatch(spec,patch);
+  assert(
+   JSON.stringify(next.parts.arm_back.variants.base) === JSON.stringify(['...kk','..kkk','kk...']),
+   '絵の行が補正されませんでした'
+  );
+  return '修正データの絵も補正されました';
+ });
+
+ run('⑫ 説明文の中の全角引用符',() => {
+  const sample = clone(spec);
+  sample.meta.description = '\u201C引用\u201D を含む説明';
+  const back = normalizeSpec(parseAIJSON(JSON.stringify(sample)));
+  validateSpec(back);
+  assert(back.meta.description === sample.meta.description,'説明文が変わりました');
+  return '説明文の中の全角引用符を、そのまま読み込めました';
+ });
+
+ run('⑫ 説明文の中の全角引用符',() => {
+  const sample = clone(spec);
+  sample.meta.description = '\u201C引用\u201D を含む説明';
+  const back = normalizeSpec(parseAIJSON(JSON.stringify(sample)));
+  validateSpec(back);
+  assert(back.meta.description === sample.meta.description,'説明文が変わりました');
+  return '説明文の中の全角引用符を、そのまま読み込めました';
+ });
+
  const ng = rows.filter(r => r[1] === 'ng').length;
 
  openDialog(
@@ -3950,7 +5543,7 @@ function selfTest() {
 // ============================================================
 function savePrefs() {
  try {
-  localStorage.setItem(PREFS,JSON.stringify({pin:state.pin,grid:state.grid,bg:state.bg}));
+  localStorage.setItem(PREFS,JSON.stringify({pin:state.pin,grid:state.grid,bg:state.bg,intro:!state.welcome,fine:state.vw.fine,sample:3,sampleSig:state.sampleSig}));
  } catch (_) {}
 }
 
@@ -3967,6 +5560,92 @@ const actions = {
  saveAs: () => saveProject(true),
  guide: showGuide,
  new: showNewDialog,
+ tryWarrior: () => replaceGuard(() => {
+  replaceProject(warriorSpec());
+  state.welcome = false;
+  savePrefs();
+  state.tab = 'motion';
+  state.motion.view = 'view';
+  state.createMode = 'new';
+  playMotion('walk');
+  scrollPanelTop();
+  toast('戦士で試しています。名前をタップすると動きを再生・停止できます',3200);
+ }),
+ introClose: () => {
+  state.welcome = false;
+  savePrefs();
+  renderPanel();
+ },
+ zoom1: () => setZoom(1),
+ zoom2: () => setZoom(2),
+ zoom4: () => setZoom(4),
+ zoom8: () => setZoom(8),
+ zoomIn: () => setZoom(stepZoom(1)),
+ zoomOut: () => setZoom(stepZoom(-1)),
+ editPlay: () => {
+  const {ed} = editInfo();
+  ed.play = !ed.play;
+  state.rt.animator.seek(ed.clip,ed.frame,true);
+  renderPanel();
+ },
+ frameMoveBack: () => moveFrame(-1),
+ frameMoveFwd: () => moveFrame(1),
+ guideIntro: () => {
+  closeDialog();
+  if (state.motion.trying) stopMotion();
+  state.welcome = true;
+  savePrefs();
+  state.tab = 'ai';
+  state.createMode = 'new';
+  renderPanel();
+  scrollPanelTop();
+ },
+ panL: () => panView(1,0),
+ panR: () => panView(-1,0),
+ panU: () => panView(0,1),
+ panD: () => panView(0,-1),
+ panReset: () => panView(0,0,true),
+ onionToggle: () => {
+  state.vw.onion = !state.vw.onion;
+  renderPanel();
+ },
+ frameCopyPrev: () => {
+  const {ed} = editInfo();
+  assert(ed.frame > 0,'最初のコマには、前のコマがありません');
+  mutate(s => {
+   const fs = s.animations[ed.clip].frames;
+   const prev = fs[ed.frame-1];
+   const cur = fs[ed.frame];
+   if (prev.parts) cur.parts = clone(prev.parts);
+   else delete cur.parts;
+  });
+  toast('前のコマの姿勢をコピーしました');
+ },
+ previewSave: () => savePreviewPng(),
+ previewCopy: () => {
+  const ok = navigator.clipboard && navigator.clipboard.write && window.ClipboardItem && window.isSecureContext;
+  if (!ok) {
+   toast('この環境ではコピーできないため、PNGで保存します');
+   return savePreviewPng();
+  }
+  const blobPromise = canvasBlob(previewCanvas());
+  return navigator.clipboard.write([new ClipboardItem({'image/png':blobPromise})])
+   .then(() => toast('プレビュー画像をコピーしました。画像を読めるAIのチャットに貼り付けられます',3200))
+   .catch(() => {
+    toast('コピーできなかったため、PNGで保存します');
+    return savePreviewPng();
+   });
+ },
+ sheetSave: () => {
+  const id = sheetClipId();
+  assert(id,'動きがありません');
+  const c = sheetCanvas(id);
+  const n = state.spec.animations[id].frames.length;
+  return canvasBlob(c).then(b => {
+   downloadBlob(b,fileBase()+'_'+id+'_sheet.png');
+   toast('スプライトシートを保存しました（'+n+'コマ・1コマ '+state.spec.settings.size.join('×')+'）',3200);
+  }).catch(showError);
+ },
  selfTest,
 
  library: () => {
@@ -3979,6 +5658,11 @@ const actions = {
  libraryExport: exportLibrary,
  libraryImport: () => $('libraryFile').click(),
  fileOpen: () => $('fileInput').click(),
+ fileAnswer: () => $('answerFile').click(),
+ repairClose: () => {
+  $('repairBar')?.remove();
+  layoutBars();
+ },
  fileSave: () => {
   downloadText(pretty(state.spec),fileBase()+'.json','application/json');
   toast('「'+fileBase()+'.json」を保存しました（ダウンロード）');
@@ -4185,6 +5869,8 @@ function handleClick(e) {
    askConfirm('動き「'+(state.spec.animations[id]?.name || id)+'」を削除しますか？',() => mutate(s => {
     delete s.animations[id];
    }));
+  } else if (d.thumb !== undefined) {
+   gotoFrame(Number(d.thumb));
   } else if (d.fstep) {
    stepFrame(Number(d.fstep));
   } else if (d.foff) {
@@ -4227,7 +5913,7 @@ function handleClick(e) {
     state.createMode = 'new';
     renderPanel();
     toast(kind === 'empty' ? '空のキャラを作りました' : (kind === 'hero4'
-      ? '勇者のひな形を作りました。「動かす」で向きを切り替えて、4方向の歩きを確かめられます'
+      ? '勇者のひな形を作りました。「動かす」→「試す」で4方向に歩かせ、攻撃・ジャンプ・喜ぶを試せます'
       : '戦士のひな形を作りました。「動かす」で動きを確かめられます'),3200);
    });
   } else if (actions[d.action]) {
@@ -4268,7 +5954,30 @@ function handleChange(e) {
  const el = e.target;
  const d = el.dataset;
 
- if (d.dot) {
+ if (d.skippart) {
+  const sk = state.ai.skip = state.ai.skip || {};
+  if (el.checked) delete sk[d.skippart];
+  else sk[d.skippart] = true;
+  return;
+ }
+ if (d.skippart) {
+  const sk = state.ai.skip = state.ai.skip || {};
+  if (el.checked) delete sk[d.skippart];
+  else sk[d.skippart] = true;
+  return;
+ }
+ if (d.fine) {
+   state.vw.fine = el.checked;
+   state.vw.aim = null;
+   savePrefs();
+   renderPanel();
+   return;
+  }
+  if (d.sheet) {
+   state.sheetClip = el.value;
+   return;
+  }
+  if (d.dot) {
   state.ai.dot = Number(el.value) || 32;
   renderPanel();
   return;
@@ -4294,6 +6003,12 @@ function handleChange(e) {
   savePrefs();
   return;
  }
+ if (el.id === 'answerFile') {
+  const file = el.files && el.files[0];
+  el.value = '';
+  if (file) loadAnswerFile(file);
+  return;
+ }
  if (el.id === 'fileInput' || el.id === 'libraryFile') {
   const file = el.files && el.files[0];
   el.value = '';
@@ -4303,9 +6018,10 @@ function handleChange(e) {
   file.text()
    .then(text => {
     if (library) safe(() => importLibrary(text));
+    else if (looksLikePatch(text)) safe(() => toast(applyAIText(text),3200));
     else replaceGuard(() => safe(() => toast(applyAIText(text),3200)));
    })
-   .catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）を選んでください')));
+   .catch(() => showError(Error('ファイルを読み込めませんでした。JSONファイル（.json）かテキストファイル（.txt）を選んでください')));
   return;
  }
 
@@ -4438,6 +6154,10 @@ function init() {
    if (typeof p.pin === 'boolean') state.pin = p.pin;
    if (typeof p.grid === 'boolean') state.grid = p.grid;
    if (typeof p.bg === 'string' && /^#[0-9a-f]{6}$/i.test(p.bg)) state.bg = p.bg;
+   if (p.intro === true) state.welcome = false;
+   if (p.fine === true) state.vw.fine = true;
+   state.sampleVer = p.sample;
+   if (typeof p.sampleSig === 'string') state.sampleSig = p.sampleSig;
   }
  } catch (_) {}
 
@@ -4448,7 +6168,10 @@ function init() {
  restore();
  rebuild();
  renderPanel();
+ savePrefs();
+ if (state.swapped) toast('サンプルの戦士を最新版に入れ替えました。保存済みのキャラはライブラリに残っています',4200);
 
+ bindGestures();
  bindCanvas();
  new ResizeObserver(resizeView).observe($('viewport'));
  resizeView();
