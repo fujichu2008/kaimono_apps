@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-webapp-playground-ひらく-次の体験-cd98fe2be7785a035581";
+const CACHE_NAME = "appstudio-pwa-webapp-playground-ひらく-次の体験-b30bc5ce922af5ccd64d";
 const CACHE_PREFIX = "appstudio-pwa-webapp-playground-ひらく-次の体験-";
 const PRECACHE_URLS = [
     "./",
