@@ -200,7 +200,7 @@ fieldset:disabled{opacity:.5}
 const STORE = 'modelstudio2d.v1';
 const DRAFT = STORE+'.draft';
 const PREFS = STORE+'.prefs';
-const LIMIT = {sizeMin:8,sizeMax:64,colors:32,parts:40,variants:16,animations:50,frames:24,bytes:1000000,history:25};
+const LIMIT = {sizeMin:8,sizeMax:128,colors:32,parts:40,variants:16,animations:50,frames:24,bytes:1000000,history:25};
 // 標準の動き [ID, 表示名, くり返し, fps, コマ数の目安]
 const STANDARD = [
  ['idle','待機',true,4,4],['walk','歩く',true,8,4],['run','走る',true,12,4],['jump','ジャンプ',false,10,5],
@@ -623,7 +623,9 @@ const DOTS = [
  [24,'粗い（24×24）','細部は省き、目や武器などの特徴だけを残す。色は8〜10色。'],
  [32,'ふつう（32×32）','顔・服・持ち物の特徴が分かる程度に描く。色は8〜12色。'],
  [48,'細かい（48×48）','服のしわ・装飾・影を少し描き込める。色は10〜16色。行数が増えるので、各行の文字数を特に慎重にそろえる。'],
- [64,'とても細かい（64×64）','細部まで描き込める。色は12〜20色。出力が長くなり崩れやすいので、部品を分けて1つの絵を小さく保ち、各行の文字数を必ずそろえる。']
+ [64,'とても細かい（64×64）','細部まで描き込める。色は12〜20色。出力が長くなり崩れやすいので、部品を分けて1つの絵を小さく保ち、各行の文字数を必ずそろえる。'],
+ [96,'高精細（96×96）','ドットを意識させない、なめらかな絵にする。曲線や斜めの線の段差には中間色を1ピクセル置いてなじませ（アンチエイリアス）、明暗は4〜5段階のグラデーションで塗る。色は20〜32色。輪郭は真っ黒の太い線ではなく、隣の色より少し暗い色の細い線にする。出力がとても長くなるので、部品を細かく分けて1つの絵をおおむね48×48以内に保ち、透明な余白は絵に含めず position で位置を合わせる。各行の文字数を必ずそろえる。'],
+ [128,'超高精細（128×128）','ドットを意識させない、イラストのようになめらかな絵にする。曲線や斜めの線の段差には中間色を1〜2ピクセル置いてなじませ（アンチエイリアス）、明暗は5〜6段階のグラデーションで塗り、顔・髪・服の質感まで描き込む。色は24〜32色。輪郭は真っ黒の太い線ではなく、隣の色より少し暗い色の細い線にする。出力が非常に長くなるので、部品を細かく分けて1つの絵をおおむね64×64以内に保ち、透明な余白は絵に含めず position で位置を合わせる。各行の文字数を必ずそろえる。']
 ];
 
 function dotSize() {
@@ -782,7 +784,11 @@ function normalizePastedText(text,fixQuotes) {
  }
  t = t.replace(/\u00A0/g,' ').trim();
  t = t.replace(/^`{3}[A-Za-z]*\s*\n?/,'').replace(/\n?`{3}\s*$/,'').trim();
- const a = t.indexOf('{');
+ // 説明文の途中にコードフェンスがあるときは、その中身から読む
+ const fence = /`{3}[A-Za-z0-9_-]*[ \t]*\r?\n/.exec(t);
+ if (fence && /^\s*[{[]/.test(t.slice(fence.index+fence[0].length))) t = t.slice(fence.index+fence[0].length).trim();
+ // 操作の配列だけの回答（[{...}]）は、先頭の [ を残す
+ const a = /^\[\s*\{/.test(t) ? 0 : t.indexOf('{');
  if (a > 0) t = t.slice(a);
  return fixOutsideStrings(t);
 }
@@ -808,6 +814,172 @@ function repairJSONSyntax(t) {
   notes.push('JSONの後ろの余分な文章を取り除きました');
  }
  return {text:s,notes};
+}
+
+const CUT_NOTE = 'AIの回答が途中で切れていたため、最後まで書かれた項目までを読み込みました（末尾の内容が欠けている可能性があります）';
+
+// 構文エラーの修復（強め）: 文字列の内外を見分けながら読み、よくある崩れを直す
+// コメント・カンマ抜け・引用符のないキー・単一引用符・True/None・括弧の対応・途中で切れた回答
+function repairJSONStructure(t) {
+ const notes = new Set();
+ const lit = {true:'true',false:'false',null:'null',True:'true',False:'false',None:'null',TRUE:'true',FALSE:'false',NULL:'null',undefined:'null'};
+ const closer = ch => ch === '{' ? '}' : ']';
+ const n = t.length;
+ let out = '';
+ let stack = '';
+ let prev = '';
+ let safe = null;
+ let done = false;
+ let i = 0;
+ // 値の直後に、カンマなしで次の値が始まったら補う
+ const value = () => {
+  if (prev === 'v' && stack) {
+   out += ',';
+   notes.add('抜けていたカンマを補いました');
+  }
+ };
+
+ while (i < n && !done) {
+  const c = t[i];
+  if (c === ' ' || c === '\n' || c === '\r' || c === '\t') {
+   out += c;
+   i++;
+   continue;
+  }
+  if (c === '"' || c === "'") {
+   let j = i+1;
+   let body = '';
+   let closed = false;
+   while (j < n) {
+    const d = t[j];
+    if (d === '\\' && j+1 < n) {
+     body += t[j+1] === "'" ? "'" : d+t[j+1];
+     j += 2;
+     continue;
+    }
+    if (d === c) {
+     closed = true;
+     j++;
+     break;
+    }
+    if (d === '\n') {
+     body += '\\n';
+     notes.add('文字列の中の改行を直しました');
+    } else if (d === '\t') {
+     body += '\\t';
+    } else if (d === '"') {
+     body += '\\"';
+    } else if (d !== '\r') {
+     body += d;
+    }
+    j++;
+   }
+   if (!closed) break;
+   value();
+   if (c === "'") notes.add("引用符「'」で書かれた文字列を、半角の二重引用符に直しました");
+   out += '"'+body+'"';
+   i = j;
+   prev = 'v';
+   continue;
+  }
+  if (c === '/' && (t[i+1] === '/' || t[i+1] === '*')) {
+   const line = t[i+1] === '/';
+   const e = line ? t.indexOf('\n',i) : t.indexOf('*/',i+2);
+   i = e < 0 ? n : (line ? e : e+2);
+   notes.add('コメントを取り除きました');
+   continue;
+  }
+  if (c === '{' || c === '[') {
+   value();
+   stack += c;
+   out += c;
+   prev = c;
+   i++;
+   continue;
+  }
+  if (c === '}' || c === ']') {
+   i++;
+   if (!stack) continue;
+   if (closer(stack[stack.length-1]) !== c) {
+    if (stack.length > 1 && closer(stack[stack.length-2]) === c) {
+     out += closer(stack[stack.length-1]);
+     stack = stack.slice(0,-1);
+    }
+    notes.add('括弧の対応を直しました');
+   }
+   out += closer(stack[stack.length-1]);
+   stack = stack.slice(0,-1);
+   prev = 'v';
+   safe = {len:out.length,stack};
+   if (!stack) done = true;
+   continue;
+  }
+  if (c === ',') {
+   i++;
+   if (prev === ',' || prev === '{' || prev === '[') {
+    notes.add('余分なカンマを取り除きました');
+    continue;
+   }
+   safe = {len:out.length,stack};
+   out += c;
+   prev = ',';
+   continue;
+  }
+  if (c === ':') {
+   out += c;
+   prev = ':';
+   i++;
+   continue;
+  }
+  if (c === '+' && /[0-9]/.test(t[i+1] || '')) {
+   i++;
+   notes.add('数値の前の「+」を取り除きました');
+   continue;
+  }
+  const m = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(t.slice(i,i+40));
+  if (m) {
+   value();
+   out += m[0];
+   i += m[0].length;
+   prev = 'v';
+   continue;
+  }
+  const w = /^[A-Za-z_$][\w$]*/.exec(t.slice(i,i+80));
+  if (w) {
+   let k = i+w[0].length;
+   while (k < n && (t[k] === ' ' || t[k] === '\t')) k++;
+   if (t[k] === ':' && stack.endsWith('{') && (prev === '{' || prev === ',' || prev === 'v')) {
+    value();
+    out += '"'+w[0]+'"';
+    notes.add('引用符のないキーに引用符を補いました');
+    prev = 'v';
+   } else if (own(lit,w[0])) {
+    value();
+    out += lit[w[0]];
+    if (lit[w[0]] !== w[0]) notes.add('true・false・null の書き方を直しました');
+    prev = 'v';
+   } else {
+    out += w[0];
+    prev = '?';
+   }
+   i += w[0].length;
+   continue;
+  }
+  out += c;
+  prev = '?';
+  i++;
+ }
+
+ if (!done) {
+  // 途中で切れている: 最後まで書かれた項目まで戻り、閉じ括弧を補う
+  if (!stack || !safe) return {text:t,notes:[]};
+  out = out.slice(0,safe.len);
+  for (let k=safe.stack.length-1;k>=0;k--) out += closer(safe.stack[k]);
+  notes.add(CUT_NOTE);
+ } else if (t.slice(i).trim()) {
+  notes.add('JSONの後ろの余分な文章を取り除きました');
+ }
+ return {text:out,notes:[...notes]};
 }
 
 // 構文エラーの位置（0始まり）を返す。エラーが無ければ -1
@@ -916,11 +1088,17 @@ function parseJSONWithRepair(t) {
  try {
   return parseJSON(t);
  } catch (e) {
+  // まず軽い修復、だめなら構造を見ながらの強い修復を試す
   const r = repairJSONSyntax(t);
-  if (r.text !== t) {
+  const d = repairJSONStructure(t);
+  const r2 = d.text.trim().endsWith(']')
+   ? {text:d.text.replace(/,(\s*[}\]])/g,'$1'),notes:[]}
+   : repairJSONSyntax(d.text);
+  for (const c of [r,{text:r2.text,notes:[...d.notes,...r2.notes]}]) {
+   if (c.text === t) continue;
    try {
-    const v = parseJSON(r.text);
-    if (repairNotes) repairNotes.push(...r.notes);
+    const v = parseJSON(c.text);
+    if (repairNotes) repairNotes.push(...c.notes);
     return v;
    } catch (_) {}
   }
@@ -932,13 +1110,16 @@ function parseJSONWithRepair(t) {
 function fixRowChar(ch,pal) {
  if (ch === '.' || own(pal,ch)) return ch;
  if (ch === '_') return '.';
- if (ch === '\u3000' || ch === '\u00A0') return '.';
+ if (ch === '\u3000' || ch === '\u00A0' || ch === ' ' || ch === '\t') return '.';
  const code = ch.charCodeAt(0);
  let c = ch;
  if (code >= 0xFF01 && code <= 0xFF5E) c = String.fromCharCode(code-0xFEE0);
  else if (own(FIX_CONFUSABLE,ch)) c = FIX_CONFUSABLE[ch];
  if (c === '_') return '.';
  if (c === '.' || own(pal,c)) return c;
+ // 大文字と小文字の取り違え（palette に片方だけあるとき）
+ const alt = c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase();
+ if (alt !== c && alt.length === 1 && own(pal,alt)) return alt;
  return ch;
 }
 
@@ -955,7 +1136,7 @@ function repairSpecSymbols(s) {
   }
  }
 
- const st = {ell:0,sym:0,pad:0,cut:0,ex:[]};
+ const st = {ell:0,sym:0,pad:0,cut:0,ex:[],unk:0,unkEx:[]};
 
  for (const p of Object.values(s.parts)) {
   if (!obj(p) || !obj(p.variants)) continue;
@@ -973,8 +1154,13 @@ function repairSpecSymbols(s) {
     }
     let out = '';
     for (const ch of t) {
-     const f = ch === '_' && moved ? moved : fixRowChar(ch,pal);
-     if (f !== ch && ch !== '_') {
+     let f = ch === '_' && moved ? moved : fixRowChar(ch,pal);
+     if (f !== '.' && !own(pal,f)) {
+      // どうしても直せない記号は、透明にして読み込む（読み込みの失敗を避ける）
+      st.unk++;
+      if (st.unkEx.length < 6 && !st.unkEx.includes(ch)) st.unkEx.push(ch);
+      f = '.';
+     } else if (f !== ch && ch !== '_') {
       st.sym++;
       const tag = cpOf(ch)+'→'+f;
       if (st.ex.length < 4 && !st.ex.includes(tag)) st.ex.push(tag);
@@ -1016,6 +1202,7 @@ function repairSpecSymbols(s) {
  }
 
  if (repairNotes) {
+  if (st.unk) repairNotes.push('palette にない記号 '+st.unk+'か所（'+st.unkEx.join('、')+'）を透明にして読み込みました。絵が欠けて見える所は「なおす」で直してください');
   if (st.ell) repairNotes.push('絵の行の「…」（U+2026など）'+st.ell+'か所を、元の「.」に戻しました');
   if (st.sym) repairNotes.push('palette にない記号 '+st.sym+'か所を、見た目の同じ記号などに置き換えました（'+st.ex.join('、')+'）');
   if (st.cut) repairNotes.push('長すぎる行 '+st.cut+'行の、右端の透明部分を切りました');
@@ -1113,7 +1300,7 @@ function parseAIJSON(text) {
 function looksLikePatch(text) {
  try {
   const d = parseAIJSON(text);
-  return obj(d) && (d.format === 'SPRITE_PATCH_V1' || Array.isArray(d.operations));
+  return Array.isArray(d) || obj(d) && (d.format === 'SPRITE_PATCH_V1' || Array.isArray(d.operations));
  } catch (_) {
   return false;
  }
@@ -1139,11 +1326,375 @@ function newId(base,taken) {
 // ============================================================
 // 5. 検証
 // ============================================================
+// ---- 書き方の揺れの吸収（検証の前に、意味を変えずに直せるものを直す） ----
+function fixNote(m) {
+ if (repairNotes) repairNotes.push(m);
+}
+
+function looseNum(v) {
+ return typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : v;
+}
+
+// [x,y] の組を整数にそろえる。直す所が無ければ元の値をそのまま返す
+function loosePair(v,min,max) {
+ let a = v;
+ if (obj(a) && (own(a,'x') || own(a,'y'))) a = [a.x ?? 0,a.y ?? 0];
+ if (Array.isArray(a) && a.length > 2) a = a.slice(0,2);
+ if (!Array.isArray(a) || a.length !== 2) return v;
+ const out = a.map(n => {
+  const x = looseNum(n);
+  return typeof x === 'number' && Number.isFinite(x) ? Math.max(min,Math.min(max,Math.round(x))) : n;
+ });
+ return a === v && out[0] === v[0] && out[1] === v[1] ? v : out;
+}
+
+// 修正データの操作の書き方（op の別名・path の形）をそろえる
+function fixPatchOp(op) {
+ if (!obj(op)) return op;
+ const o = {...op};
+ const alias = {set:'replace',update:'replace',change:'replace',modify:'replace',put:'replace',delete:'remove',del:'remove',insert:'add',create:'add',append:'add'};
+ if (typeof o.op !== 'string') {
+  if (typeof o.type === 'string') o.op = o.type;
+  else if (typeof o.action === 'string') o.op = o.action;
+ }
+ if (typeof o.op === 'string') {
+  const k = o.op.trim().toLowerCase();
+  o.op = own(alias,k) ? alias[k] : k;
+ }
+ if (typeof o.path === 'string') {
+  let p = o.path.trim().replace(/^#/,'').replace(/\[(\d+)\]/g,'/$1');
+  if (p && !p.startsWith('/')) p = '/'+(p.includes('/') ? p : p.replace(/\./g,'/'));
+  if (p.length > 1) p = p.replace(/\/+$/,'');
+  o.path = p;
+ }
+ if (o.op !== op.op || o.path !== op.path) fixNote('修正データの操作の書き方（op・path）を直しました');
+ return o;
+}
+
+function relaxSpec(s) {
+ const marks = new Set();
+ const mark = m => marks.add(m);
+ const N_NUM = '数値や true/false の書き方（小数・文字列・範囲外など）を直しました';
+ const N_REF = '存在しない部品や絵を指していた指定を取り除きました';
+ const N_ADD = '不足していた項目（format・meta・size・fps・base など）を補いました';
+ const N_SHAPE = '絵・コマ・合図などの書き方を、標準の形に直しました';
+ const N_COLOR = '色の書き方を #rrggbb に直しました';
+ const N_CLEAR = '透明として定義された色を palette から外しました（絵の中では透明として扱います）';
+
+ const num = (o,k,min,max,round) => {
+  if (!own(o,k)) return;
+  let v = looseNum(o[k]);
+  if (typeof v !== 'number' || !Number.isFinite(v)) return;
+  if (round) v = Math.round(v);
+  v = Math.max(min,Math.min(max,v));
+  if (v !== o[k]) {
+   o[k] = v;
+   mark(N_NUM);
+  }
+ };
+ const bool = (o,k) => {
+  if (!own(o,k)) return;
+  const v = o[k];
+  if (v === null) {
+   delete o[k];
+   mark(N_NUM);
+  } else if (v === 'true' || v === 'false' || v === 1 || v === 0) {
+   o[k] = v === 'true' || v === 1;
+   mark(N_NUM);
+  }
+ };
+ const xy = (o,k,min,max) => {
+  if (!own(o,k)) return;
+  if (o[k] === null) {
+   delete o[k];
+   mark(N_NUM);
+   return;
+  }
+  const q = loosePair(o[k],min,max);
+  if (q !== o[k]) {
+   o[k] = q;
+   mark(N_NUM);
+  }
+ };
+ const text = (o,k) => {
+  if (!own(o,k)) return;
+  if (o[k] === null) {
+   delete o[k];
+  } else if (typeof o[k] !== 'string') {
+   o[k] = ['number','boolean'].includes(typeof o[k]) ? String(o[k]) : '';
+   mark(N_SHAPE);
+  }
+ };
+ const partHas = pid => typeof pid === 'string' && own(s.parts,pid) && obj(s.parts[pid]);
+ const varHas = (pid,v) => typeof v === 'string' && obj(s.parts[pid].variants) && own(s.parts[pid].variants,v);
+
+ // コマ・向きの「部品ごとの指定」を整える
+ const poseParts = (holder,withZ) => {
+  if (!obj(holder.parts)) {
+   if (holder.parts === null || Array.isArray(holder.parts) && !holder.parts.length) {
+    delete holder.parts;
+    mark(N_SHAPE);
+   }
+   return;
+  }
+  let removed = false;
+  for (const [pid,d] of Object.entries(holder.parts)) {
+   if (!partHas(pid)) {
+    delete holder.parts[pid];
+    removed = true;
+    mark(N_REF);
+    continue;
+   }
+   if (!obj(d)) continue;
+   xy(d,'offset',-LIMIT.sizeMax,LIMIT.sizeMax);
+   bool(d,'flipX');
+   bool(d,'visible');
+   if (withZ) num(d,'z',-9999,9999,false);
+   if (d.variant !== undefined && !varHas(pid,d.variant)) {
+    delete d.variant;
+    mark(N_REF);
+   }
+  }
+  if (removed && !Object.keys(holder.parts).length) delete holder.parts;
+ };
+
+ if (s.format !== 'SPRITE_SPEC_V1') {
+  s.format = 'SPRITE_SPEC_V1';
+  mark(N_ADD);
+ }
+
+ // meta
+ if (!obj(s.meta)) {
+  s.meta = {};
+  mark(N_ADD);
+ }
+ const meta = s.meta;
+ if (!validId(meta.id)) {
+  const id = String(meta.id ?? meta.name ?? '').replace(/[^A-Za-z0-9_-]/g,'_').replace(/^[^A-Za-z]+/,'').slice(0,64);
+  meta.id = validId(id) ? id : 'sprite_'+Date.now().toString(36);
+  mark(N_ADD);
+ }
+ if (typeof meta.name !== 'string' || !meta.name.trim()) {
+  meta.name = meta.id;
+  mark(N_ADD);
+ }
+ text(meta,'description');
+
+ // palette: 透明の定義を外し、色の書き方をそろえる
+ for (const k of Object.keys(s.palette)) {
+  const v = s.palette[k];
+  if (k === '.' || typeof v !== 'string' || /^(transparent|none|clear|)$/i.test(v.trim()) || /^#([0-9a-f]{3}0|[0-9a-f]{6}00)$/i.test(v.trim())) {
+   delete s.palette[k];
+   mark(N_CLEAR);
+   continue;
+  }
+  let c = v.trim();
+  if (/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(c)) c = '#'+c;
+  if (/^#[0-9a-f]{3,4}$/i.test(c)) c = '#'+c.slice(1,4).split('').map(x => x+x).join('');
+  else if (/^#[0-9a-f]{8}$/i.test(c)) c = c.slice(0,7);
+  if (c !== v && /^#[0-9a-f]{6}$/i.test(c)) {
+   s.palette[k] = c;
+   mark(N_COLOR);
+  }
+ }
+
+ // parts
+ for (const p of Object.values(s.parts)) {
+  if (!obj(p)) continue;
+  if (!obj(p.variants)) {
+   const rows = Array.isArray(p.variants) || typeof p.variants === 'string' ? p.variants : (p.rows ?? p.pixels ?? p.data);
+   if (Array.isArray(rows) || typeof rows === 'string') {
+    p.variants = {base:rows};
+    mark(N_SHAPE);
+   }
+  }
+  if (obj(p.variants)) {
+   for (const vid of Object.keys(p.variants)) {
+    let rows = p.variants[vid];
+    if (obj(rows) && (Array.isArray(rows.rows) || typeof rows.rows === 'string')) rows = rows.rows;
+    if (typeof rows === 'string') rows = rows.split(/\r?\n/);
+    if (Array.isArray(rows)) {
+     if (rows.some(Array.isArray)) rows = rows.map(r => Array.isArray(r) ? r.join('') : r);
+     if (!rows.length) rows = ['.'];
+    }
+    if (rows !== p.variants[vid]) {
+     p.variants[vid] = rows;
+     mark(N_SHAPE);
+    }
+   }
+   if (!own(p.variants,'base')) {
+    const first = Object.keys(p.variants).find(k => Array.isArray(p.variants[k]));
+    if (first) {
+     p.variants.base = p.variants[first].slice();
+     mark(N_ADD);
+    }
+   }
+  }
+  text(p,'name');
+  if (p.z === null) delete p.z;
+  num(p,'z',-9999,9999,false);
+  xy(p,'position',-LIMIT.sizeMax,LIMIT.sizeMax*2);
+  bool(p,'effect');
+  bool(p,'visible');
+ }
+
+ // settings
+ if (!obj(s.settings)) {
+  s.settings = {};
+  mark(N_ADD);
+ }
+ const se = s.settings;
+ let size = se.size;
+ if (obj(size)) size = [size.width ?? size.w ?? size.x,size.height ?? size.h ?? size.y];
+ size = looseNum(size);
+ if (typeof size === 'number') size = [size,size];
+ if (Array.isArray(size) && size.length === 2) size = size.map(v => looseNum(v));
+ if (!Array.isArray(size) || size.length !== 2 || !size.every(v => typeof v === 'number' && Number.isFinite(v))) {
+  // size が無いときは、部品の基本の絵が収まる大きさにする
+  let w = 0;
+  let h = 0;
+  for (const p of Object.values(s.parts)) {
+   if (!obj(p) || !obj(p.variants) || !Array.isArray(p.variants.base)) continue;
+   const pos = Array.isArray(p.position) ? p.position : [0,0];
+   w = Math.max(w,(Number(pos[0]) || 0)+Math.max(0,...p.variants.base.map(r => String(r).length)));
+   h = Math.max(h,(Number(pos[1]) || 0)+p.variants.base.length);
+  }
+  size = [w || 32,h || 32];
+ }
+ const fixed = size.map(v => Math.max(LIMIT.sizeMin,Math.min(LIMIT.sizeMax,Math.round(v))));
+ if (!Array.isArray(se.size) || se.size.length !== 2 || se.size[0] !== fixed[0] || se.size[1] !== fixed[1]) {
+  se.size = fixed;
+  mark(N_NUM);
+ }
+ if (se.view !== undefined && se.view !== 'side' && se.view !== 'topdown') {
+  if (/top|4|four/i.test(String(se.view))) se.view = 'topdown';
+  else delete se.view;
+  mark(N_SHAPE);
+ }
+
+ // anchors
+ if (Array.isArray(s.anchors) && !s.anchors.length) s.anchors = {};
+ if (obj(s.anchors)) {
+  for (const a of Object.values(s.anchors)) {
+   if (!obj(a)) continue;
+   text(a,'name');
+   xy(a,'position',-LIMIT.sizeMax,LIMIT.sizeMax*2);
+   if (a.position === undefined) {
+    a.position = [0,0];
+    mark(N_ADD);
+   }
+   if (a.parent != null && !partHas(a.parent)) {
+    a.parent = null;
+    mark(N_REF);
+   }
+  }
+ }
+
+ // animations
+ if (Array.isArray(s.animations) && !s.animations.length) s.animations = {};
+ if (obj(s.animations)) {
+  for (const id of Object.keys(s.animations)) {
+   if (Array.isArray(s.animations[id])) {
+    s.animations[id] = {fps:8,loop:true,frames:s.animations[id]};
+    mark(N_SHAPE);
+   }
+   const a = s.animations[id];
+   if (!obj(a)) continue;
+   text(a,'name');
+   if (a.fps == null) {
+    a.fps = 8;
+    mark(N_ADD);
+   }
+   num(a,'fps',1,30,false);
+   bool(a,'loop');
+   if (!Array.isArray(a.frames)) continue;
+   if (!a.frames.length) {
+    a.frames = [{}];
+    mark(N_ADD);
+   }
+   if (a.frames.length > LIMIT.frames) {
+    a.frames = a.frames.slice(0,LIMIT.frames);
+    mark('コマが'+LIMIT.frames+'個を超えていた動きは、'+LIMIT.frames+'個までに切りました');
+   }
+   a.frames.forEach((f,i) => {
+    if (f == null) {
+     a.frames[i] = {};
+     mark(N_SHAPE);
+     return;
+    }
+    if (!obj(f)) return;
+    if (f.hold === null) delete f.hold;
+    num(f,'hold',1,24,true);
+    poseParts(f,false);
+   });
+
+   if (a.events === null) delete a.events;
+   if (Array.isArray(a.events)) {
+    const last = a.frames.length-1;
+    const next = [];
+    for (const raw of a.events) {
+     const ev = obj(raw) ? [raw.frame ?? raw.index ?? raw.at,raw.name ?? raw.event ?? raw.id] : raw;
+     if (!Array.isArray(ev) || ev.length !== 2) continue;
+     let at = ev[0];
+     let name = ev[1];
+     if (typeof at === 'string' && typeof name === 'number') {
+      const tmp = at;
+      at = name;
+      name = tmp;
+     }
+     at = looseNum(at);
+     if (typeof at !== 'number' || !Number.isFinite(at) || !validId(name)) continue;
+     next.push([Math.max(0,Math.min(last,Math.round(at))),name]);
+    }
+    if (JSON.stringify(next) !== JSON.stringify(a.events)) {
+     if (next.length) a.events = next;
+     else delete a.events;
+     mark(N_SHAPE);
+    }
+   }
+
+   if (a.show === null) delete a.show;
+   if (typeof a.show === 'string') {
+    a.show = [a.show];
+    mark(N_SHAPE);
+   }
+   if (Array.isArray(a.show) && !a.show.every(pid => partHas(pid))) {
+    a.show = a.show.filter(pid => partHas(pid));
+    mark(N_REF);
+   }
+  }
+ }
+
+ // directions
+ if (s.directions === null || Array.isArray(s.directions)) {
+  delete s.directions;
+  mark(N_SHAPE);
+ }
+ if (obj(s.directions)) {
+  const map = {right:'side',front:'down',back:'up'};
+  for (const k of Object.keys(s.directions)) {
+   if (['down','up','side'].includes(k)) continue;
+   const to = own(map,k) ? map[k] : null;
+   if (to && !own(s.directions,to)) s.directions[to] = s.directions[k];
+   delete s.directions[k];
+   mark(N_SHAPE);
+  }
+  for (const dv of Object.values(s.directions)) {
+   if (obj(dv)) poseParts(dv,true);
+  }
+ }
+
+ for (const m of marks) fixNote(m);
+}
+
 function normalizeSpec(source) {
  const s = clone(source);
  guardTree(s);
  assert(obj(s),'データはObjectです');
- if (obj(s.palette) && obj(s.parts)) repairSpecSymbols(s);
+ if (obj(s.palette) && obj(s.parts)) {
+  relaxSpec(s);
+  repairSpecSymbols(s);
+ }
  s.anchors ??= {};
  s.animations ??= {};
  if (obj(s.meta)) s.meta.version ??= 1;
@@ -1200,7 +1751,7 @@ function validateSpec(s) {
   assert(typeof p.name === 'string',L+': name（名前）が必要です');
   assert(typeof p.z === 'number' && Number.isFinite(p.z),L+': z（描画順）は数値です');
   assert(Array.isArray(p.position) && p.position.length === 2,L+': position は [x,y] で書いてください');
-  p.position.forEach(v => int(v,L+'の位置',-64,128));
+  p.position.forEach(v => int(v,L+'の位置',-LIMIT.sizeMax,LIMIT.sizeMax*2));
   assert(p.effect === undefined || typeof p.effect === 'boolean',L+': effect は true/false です');
   assert(p.visible === undefined || typeof p.visible === 'boolean',L+': visible は true/false です');
   assert(obj(p.variants) && own(p.variants,'base'),L+': variants.base（基本の絵）が必要です');
@@ -1211,9 +1762,9 @@ function validateSpec(s) {
    const rows = p.variants[vid];
    const V = L+'の絵「'+vid+'」';
    assert(validId(vid),V+': 絵のIDは英字で始まる英数字にしてください');
-   assert(Array.isArray(rows) && rows.length >= 1 && rows.length <= 64,V+': 行は1〜64行です');
+   assert(Array.isArray(rows) && rows.length >= 1 && rows.length <= LIMIT.sizeMax,V+': 行は1〜'+LIMIT.sizeMax+'行です');
    rows.forEach((row,y) => {
-    assert(typeof row === 'string' && row.length <= 64,V+'の'+(y+1)+'行目: 64文字までの文字列で書いてください');
+    assert(typeof row === 'string' && row.length <= LIMIT.sizeMax,V+'の'+(y+1)+'行目: '+LIMIT.sizeMax+'文字までの文字列で書いてください');
     for (let x=0;x<row.length;x++) {
      assert(row[x] === '.' || own(s.palette,row[x]),V+'の'+(y+1)+'行目: 記号「'+row[x]+'」（'+cpOf(row[x])+'）が palette にありません');
     }
@@ -1227,7 +1778,7 @@ function validateSpec(s) {
   assert(validId(id) && obj(a) && typeof a.name === 'string',L+': IDと name を確認してください');
   assert(a.parent === null || typeof a.parent === 'string' && own(s.parts,a.parent),L+': 付ける部品（parent）が見つかりません');
   assert(Array.isArray(a.position) && a.position.length === 2,L+': position は [x,y] で書いてください');
-  a.position.forEach(v => int(v,L+'の位置',-64,128));
+  a.position.forEach(v => int(v,L+'の位置',-LIMIT.sizeMax,LIMIT.sizeMax*2));
  }
 
  const anims = Object.entries(s.animations);
@@ -1255,7 +1806,7 @@ function validateSpec(s) {
     assert(obj(d),F+': 部品「'+pid+'」の指定はObjectで書いてください');
     if (d.offset !== undefined) {
      assert(Array.isArray(d.offset) && d.offset.length === 2,F+': 部品「'+pid+'」の offset は [dx,dy] です');
-     d.offset.forEach(v => int(v,F+'の「'+pid+'」のずれ',-64,64));
+     d.offset.forEach(v => int(v,F+'の「'+pid+'」のずれ',-LIMIT.sizeMax,LIMIT.sizeMax));
     }
     if (d.variant !== undefined) {
      assert(
@@ -1295,7 +1846,7 @@ function validateSpec(s) {
     assert(obj(d),D+': 部品「'+pid+'」の指定はObjectで書いてください');
     if (d.offset !== undefined) {
      assert(Array.isArray(d.offset) && d.offset.length === 2,D+': 部品「'+pid+'」の offset は [dx,dy] です');
-     d.offset.forEach(v => int(v,D+'の「'+pid+'」のずれ',-64,64));
+     d.offset.forEach(v => int(v,D+'の「'+pid+'」のずれ',-LIMIT.sizeMax,LIMIT.sizeMax));
     }
     if (d.variant !== undefined) {
      assert(typeof d.variant === 'string' && own(s.parts[pid].variants,d.variant),D+': 部品「'+pid+'」に絵「'+d.variant+'」がありません');
@@ -2450,10 +3001,10 @@ function paintAt(px,py,start) {
  const ch = tool === 'erase' ? '.' : state.sel.color;
 
  if (x < 0 || y < 0) {
-  if (start && tool !== 'erase' && tool !== 'fill') toast('これ以上広げられません（64×64が上限です）');
+  if (start && tool !== 'erase' && tool !== 'fill') toast('これ以上広げられません（'+LIMIT.sizeMax+'×'+LIMIT.sizeMax+'が上限です）');
   return false;
  }
- if (x >= 64 || y >= 64) return false;
+ if (x >= LIMIT.sizeMax || y >= LIMIT.sizeMax) return false;
 
  if (tool === 'fill') return start ? floodFill(rows,x,y,ch) : false;
 
@@ -3008,7 +3559,7 @@ function applyPatch(source,patch) {
  // directions が無いデータにも /directions/向き を追加できるようにする（空のままなら最後に外す）
  if (!own(next,'directions')) next.directions = {};
 
- patch.operations.forEach((op,i) => {
+ patch.operations.map(fixPatchOp).forEach((op,i) => {
   assert(
    obj(op) && ['add','replace','remove'].includes(op.op),
    '修正データの'+(i+1)+'番目の操作の種類（op）が正しくありません。add・replace・remove のどれかにするよう、AIに頼み直してください'
@@ -3037,6 +3588,17 @@ function applyPatch(source,patch) {
   assert(parent && typeof parent === 'object','変更する場所の親がObjectでも配列でもありません（'+op.path+'）');
 
   const key = keys[keys.length-1];
+  // add と replace の取り違えは読み替える。すでに無い項目の remove は飛ばす
+  if (!Array.isArray(parent)) {
+   if (op.op === 'remove' && !own(parent,key)) {
+    fixNote('すでに無い項目の削除（remove）は飛ばしました');
+    return;
+   }
+   if (op.op !== 'remove' && (op.op === 'add') === own(parent,key)) {
+    op = {...op,op:own(parent,key) ? 'replace' : 'add'};
+    fixNote('修正データの add と replace の取り違えを読み替えました');
+   }
+  }
   if (op.op !== 'remove') assert(own(op,'value'),'修正データに value がありません（'+op.path+'）');
 
   if (Array.isArray(parent)) {
@@ -3087,14 +3649,38 @@ function applyAIText(text) {
   clearRecovery();
   return message;
  } catch (e) {
+  // 途中で切れた回答を補って読んだ結果のエラーは、切れていることを先に伝える
+  const cut = !!(repairNotes && repairNotes.includes(CUT_NOTE));
   repairNotes = null;
-  offerRecovery(text,e);
-  throw e;
+  const err = cut
+   ? Error('AIの回答が途中で切れている可能性があります。頼む動きの数を減らすか、AIに続きを出すよう頼んでください\n（切れた所までで読み込みを試しましたが、次のエラーになりました: '+(e && e.message ? e.message : e)+'）')
+   : e;
+  offerRecovery(text,err);
+  throw err;
  }
 }
 
 function applyAITextCore(text) {
- const data = parseAIJSON(text);
+ let data = parseAIJSON(text);
+ // 書き方の揺れを吸収する: 操作の配列だけ・外側の1段の包み・operations の別名・format の書き忘れ
+ if (Array.isArray(data) && data.length && data.every(x => obj(x) && typeof x.path === 'string')) {
+  data = {format:'SPRITE_PATCH_V1',operations:data};
+ }
+ if (obj(data) && !data.format && !Array.isArray(data.operations) && !obj(data.parts)) {
+  const inner = Object.values(data).filter(v => obj(v) && (
+   v.format === 'SPRITE_SPEC_V1' || v.format === 'SPRITE_PATCH_V1' || Array.isArray(v.operations) || obj(v.parts) && obj(v.palette)
+  ));
+  if (inner.length === 1) data = inner[0];
+ }
+ if (obj(data) && !Array.isArray(data.operations) && !obj(data.parts)) {
+  const alt = [data.ops,data.patch,data.patches,data.changes].find(Array.isArray);
+  if (alt) data = {...data,operations:alt};
+ }
+ if (obj(data) && data.format !== 'SPRITE_SPEC_V1' && data.format !== 'SPRITE_PATCH_V1'
+  && !Array.isArray(data.operations) && obj(data.parts) && obj(data.palette)) {
+  data = {...data,format:'SPRITE_SPEC_V1'};
+  if (repairNotes) repairNotes.push('format の書き忘れ・書き間違いを補いました');
+ }
  assert(obj(data),'AIの回答がデータの形になっていません');
 
  const base = {spec:snapshot(),projectId:state.projectId,dirty:state.dirty};
@@ -3378,10 +3964,10 @@ function schemaGuide() {
  return [
   'SpriteSpec契約: format="SPRITE_SPEC_V1"。ゲーム用の2Dドット絵キャラクターを「部品」と「コマ」で定義する。',
   'meta={name,id,version:1,description}。id は英字で始まる英数字・_・-（64文字以内）。',
-  'settings={size:[幅,高さ],origin:"center-bottom",facing:"right"}。size は8〜64。キャラは右向きで描く。足元の中央が基準点。',
+  'settings={size:[幅,高さ],origin:"center-bottom",facing:"right"}。size は8〜128。キャラは右向きで描く。足元の中央が基準点。',
   'palette={"1文字の記号":"#rrggbb"}。記号は "." "_" と空白以外の1文字。最大32色。絵の中の "_" は透明（"." も可）。',
   'parts={"部品ID":{name,z,position:[x,y],variants:{"base":["行の文字列",...],"絵ID":[...]},effect,visible}}。',
-  '- 絵（variants）は「1文字=1ピクセル」の行の配列。各文字は palette の記号か "_"（透明。"." も可）。base は必須。1つの部品の絵は16個まで。絵ごとに大きさが違ってよい（1〜64行、1行は64文字まで）。同じ絵の中では、すべての行を同じ文字数にそろえる。',
+  '- 絵（variants）は「1文字=1ピクセル」の行の配列。各文字は palette の記号か "_"（透明。"." も可）。base は必須。1つの部品の絵は16個まで。絵ごとに大きさが違ってよい（1〜128行、1行は128文字まで）。同じ絵の中では、すべての行を同じ文字数にそろえる。',
   '- position は絵の左上の位置。キャラの左上が原点、右が+X、下が+Y の整数。z が大きい部品ほど手前に描く。',
   '- effect:true の部品（斬撃・炎・光など）は、その部品を使う動きの再生中だけ表示される。visible:false は常に隠す。どちらも省略できる。',
   'anchors={"取付点ID":{name,parent:部品IDかnull,position:[x,y]}}。parent があれば、その部品の絵の左上からの位置。',
@@ -3475,10 +4061,12 @@ function createAIPrompt(mode) {
    + '- 向きをそろえる: すべての部品を同じ向き（右向きの、やや斜めから見た横向き）で描く。頭・胴・腰・脚・足先のすべてが右を向く。脚を正面向きに左右へ並べない。手前の脚と奥の脚は前後に2〜3ピクセルずらして重ね、奥の脚は手前の脚に一部隠れる。足先は右へ出す。\n'
    + '- 輪郭: 濃い色の輪郭は、全部品を重ねた全体のシルエットの外周だけに描く。部品どうしが接する辺（首の付け根・肩・腰・脚の付け根）には輪郭を描かず、部品を1〜2ピクセル重ねてつなぎ目を隠す。z（描画順）は、奥の腕 → 奥の脚 → 手前の脚 → 胴 → 頭 → 手前の腕 の順を基本にする。\n'
    + '- 奥の部品（奥の腕・奥の脚）は、手前より1段暗い色にして前後が分かるようにする。\n'
-   + '- 頭身の目安: 大きさが32以下なら2〜2.5頭身、48なら3頭身、64なら3.5〜4頭身。脚の長さは全身の35〜40%、胴は30%前後。肩幅は頭の幅と同じか少し広い程度。\n'
+   + '- 頭身の目安: 大きさが32以下なら2〜2.5頭身、48なら3頭身、64なら3.5〜4頭身、96以上なら4〜6頭身（要望に合わせる）。脚の長さは全身の35〜40%、胴は30%前後。肩幅は頭の幅と同じか少し広い程度。\n'
    + '- 腕と脚は長方形の棒にしない。肩から生やし、ひじ・ひざで少し曲げ、先を少し細くする。手は腰の高さあたり。\n'
    + '- 大きく形が変わる姿勢は、位置のずれではなく絵の差し替え（variants）で表す。攻撃で使う腕や武器には、振り上げた絵・振り下ろした絵を用意する。\n'
-   + '- 色数は少なく（8〜12色）。光は左上から当たっているように、明るい色・基本の色・影の色の3段階で塗る。\n'
+   + (dotSize() > 64
+    ? '- 光は左上から当たっているように塗る。色数と明暗の段階は、下の「ドットの粗さ」の指示に従う。\n'
+    : '- 色数は少なく（8〜12色）。光は左上から当たっているように、明るい色・基本の色・影の色の3段階で塗る。\n')
    + '- 足元がキャラの下端にそろい、左右の中央に立つように position を決める。基本の姿勢は、自然に立った軽い構えにする。\n'
    + '- meta.description に、頭身・向き・部品の重ね方を1〜2文で書く。\n'
    + '- 出力前の確認: 全部品を position に置いた全体像を1行ずつ思い浮かべ、頭・胴・脚が縦にずれていないか、部品の間に隙間や二重の輪郭がないか、向きが混ざっていないかを確かめる。\n'
@@ -3689,7 +4277,9 @@ function makeThumb(spec) {
   c.width = 96;
   c.height = 96;
   const g = c.getContext('2d');
-  const s = Math.max(1,Math.floor(96/Math.max(sprite.size[0],sprite.size[1])));
+  const big = Math.max(sprite.size[0],sprite.size[1]);
+  // 96を超える大きさのキャラは、全体が収まるように縮めて描く
+  const s = big > 96 ? 96/big : Math.max(1,Math.floor(96/big));
   g.fillStyle = '#1c2633';
   g.fillRect(0,0,96,96);
   R.drawSprite(g,sprite,Math.floor((96-sprite.size[0]*s)/2),Math.floor((96-sprite.size[1]*s)/2),{scale:s});
@@ -4433,7 +5023,7 @@ function expandPartLeftTop(p,needL,needT) {
  for (const k of vs) {
   const rows = p.variants[k];
   const w = Math.max(1,...rows.map(r => r.length));
-  if (w+needL > 64 || rows.length+needT > 64) return false;
+  if (w+needL > LIMIT.sizeMax || rows.length+needT > LIMIT.sizeMax) return false;
  }
  for (const k of vs) {
   const rows = p.variants[k];
@@ -4538,8 +5128,8 @@ function moveFrameDrag(e) {
  if (!d || !pos) return;
  const {ed} = editInfo();
  const k = previewFlip() ? -1 : 1;
- const ox = Math.max(-64,Math.min(64,d.base[0]+(pos[0]-d.sx)*k));
- const oy = Math.max(-64,Math.min(64,d.base[1]+pos[1]-d.sy));
+ const ox = Math.max(-LIMIT.sizeMax,Math.min(LIMIT.sizeMax,d.base[0]+(pos[0]-d.sx)*k));
+ const oy = Math.max(-LIMIT.sizeMax,Math.min(LIMIT.sizeMax,d.base[1]+pos[1]-d.sy));
  const f = state.spec.animations[ed.clip].frames[ed.frame];
  const cur = f.parts && f.parts[d.part] && f.parts[d.part].offset || [0,0];
  if (cur[0] === ox && cur[1] === oy) return;
@@ -4823,6 +5413,7 @@ function aiPanel() {
      : '横スクロール用に、右向きの絵を作ります（左向きは自動で反転します）。'}</p>
     ${selectField('ドットの粗さ（キャラの大きさ）','data-dot="1"',DOTS.map(x => [String(x[0]),x[1]]),String(dotSize()))}
     <p class="hint">${esc(DOTS.find(x => x[0] === dotSize())[2])}小さいほど粗く、AIも描きやすくなります。戦士のひな形は64×64です。</p>
+    ${dotSize() > 64 ? '<p class="warnbox">高精細は、AIの回答がとても長くなり、途中で切れたり行がずれたりしやすくなります。性能の高いAIを使い、うまくいかないときは96×96や64×64に下げてください。動きは「動かす」で、後から少しずつ追加するのがおすすめです。</p>' : ''}
    ` : ''}
    ${creating ? '' : fixPresetChips()}
    <div class="row">
@@ -4898,7 +5489,7 @@ function partsPanel() {
    </div>
    <h3>絵を広げる</h3>
    <div class="nudgegrid">${gb('left','← 左')}${gb('up','↑ 上')}${gb('down','↓ 下')}${gb('right','右 →')}</div>
-   <p class="hint">絵の外側（右・下・左・上）を塗ると、自動で広がります。ボタンでも広げられます。64×64が上限です。</p>
+   <p class="hint">絵の外側（右・下・左・上）を塗ると、自動で広がります。ボタンでも広げられます。128×128が上限です。</p>
   </div>
 
   <div class="card">
@@ -5177,8 +5768,8 @@ function modelPanel() {
    <label>説明<textarea data-meta="description">${esc(s.meta.description || '')}</textarea></label>
    ${field('キャラID（英数字の識別名）','data-meta="id"',s.meta.id)}
    <div class="grid2">
-    ${field('幅（8〜64）','data-size="0" min="8" max="64" step="1"',s.settings.size[0],'number')}
-    ${field('高さ（8〜64）','data-size="1" min="8" max="64" step="1"',s.settings.size[1],'number')}
+    ${field('幅（8〜128）','data-size="0" min="8" max="128" step="1"',s.settings.size[0],'number')}
+    ${field('高さ（8〜128）','data-size="1" min="8" max="128" step="1"',s.settings.size[1],'number')}
    </div>
    ${selectField('見え方（ゲームの種類）','data-view-edit="1"',[['side','横スクロール'],['topdown','全方位マップ（4方向）']],s.settings.view === 'topdown' ? 'topdown' : 'side')}
    <p class="hint">
@@ -5523,6 +6114,35 @@ function selfTest() {
   validateSpec(back);
   assert(back.meta.description === sample.meta.description,'説明文が変わりました');
   return '説明文の中の全角引用符を、そのまま読み込めました';
+ });
+
+ run('⑬ コメント・カンマ抜け・後ろの文章の自動修復',() => {
+  const broken = '説明です。\n'+JSON.stringify(spec)
+   .replace('{"format"','{ /* メモ */ "format"')
+   .replace('"SPRITE_SPEC_V1","meta"','"SPRITE_SPEC_V1" "meta"')+'\n以上です {参考}';
+  const back = normalizeSpec(parseAIJSON(broken));
+  validateSpec(back);
+  assert(JSON.stringify(back) === JSON.stringify(spec),'内容が変わりました');
+  return 'コメントとカンマ抜けを直し、元と同じ内容で読み込めました';
+ });
+
+ run('⑭ 途中で切れた回答の読み込み',() => {
+  const cutText = '{"format":"SPRITE_PATCH_V1","operations":[{"op":"replace","path":"/meta/description","value":"切れた回答"},{"op":"repl';
+  const next = applyPatch(spec,parseAIJSON(cutText));
+  assert(next.meta.description === '切れた回答','最後まで書かれた操作が反映されませんでした');
+  return '最後まで書かれた操作までを読み込めました';
+ });
+
+ run('⑮ 書き方の揺れの吸収（色・数値・存在しない部品）',() => {
+  const loose = clone(spec);
+  loose.palette.w = '#fff';
+  loose.parts.head.position = [String(spec.parts.head.position[0]),spec.parts.head.position[1]+.2];
+  loose.animations.idle.frames[0].parts = {nothing:{offset:[1,0]}};
+  loose.animations.idle.fps = String(spec.animations.idle.fps);
+  const back = normalizeSpec(loose);
+  validateSpec(back);
+  assert(JSON.stringify(back) === JSON.stringify(spec),'直した結果が元と一致しません');
+  return '色・数値・存在しない部品の指定を直して、元と同じ内容になりました';
  });
 
  const ng = rows.filter(r => r[1] === 'ng').length;
