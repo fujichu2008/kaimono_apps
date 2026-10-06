@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-デジタル買い物リスト-b4f9224af323394ac225";
+const CACHE_NAME = "appstudio-pwa-デジタル買い物リスト-35b4e96d7480316829ed";
 const CACHE_PREFIX = "appstudio-pwa-デジタル買い物リスト-";
 const PRECACHE_URLS = [
     "./",
