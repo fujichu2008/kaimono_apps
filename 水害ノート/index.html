@@ -1,0 +1,2916 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#007acc">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>水害ノート</title>
+<!--
+  水害ノート(関東・名古屋圏・大阪圏・福岡圏の川と雨を学び、雨の日を記録する・簡易モデル)
+  ------------------------------------------------------------
+  ■ これは簡易モデルによる試算です。公式ハザードマップではありません。
+    ・河道中心線、リスク地点の位置は概略座標
+    ・地盤高は実測の標高データではなく、河川からの距離にもとづく仮の地形
+    ・各地点のしきい値雨量はモデル上の仮定値
+  ■ 避難判断には、各自治体の洪水ハザードマップ/国交省「川の防災情報」を使うこと。
+  ■ 調整したい値は RIVERS(河川ごとの設定。座標・雨量しきい値は概略の仮定値) にまとめてある。
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{
+  --ink:#12262E;
+  --ink-soft:#4A616A;
+  --paper:#F5F8F8;
+  --line:#D3DEE0;
+  --river:#2F6F8F;
+  --river-deep:#1B4A63;
+  --low:#3E9B6E;
+  --watch:#D9A400;
+  --warn:#E8741E;
+  --danger:#D7263D;
+  --breach:#7A1FA2;
+  --d1:#F7F5A9; --d2:#FFD8C0; --d3:#FFB7B7; --d4:#FF9191; --d5:#F285C9;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  font-family:"Hiragino Sans","Yu Gothic UI","Noto Sans JP","Meiryo",sans-serif;
+  color:var(--ink);background:var(--paper);
+  font-size:14px;line-height:1.55;
+  -webkit-text-size-adjust:100%;
+}
+button{font:inherit;color:inherit}
+.app{
+  height:100vh;height:100dvh;
+  display:grid;
+  grid-template-columns:380px 1fr;
+  grid-template-rows:auto 1fr;
+  grid-template-areas:"head head" "panel map";
+}
+header{
+  grid-area:head;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:8px 14px;
+  background:var(--river-deep);color:#fff;
+}
+header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.02em}
+header .scope{font-size:12px;opacity:.85}
+.status{
+  margin-left:auto;
+  padding:3px 12px;border-radius:999px;
+  font-weight:700;font-size:13px;
+  background:var(--low);color:#fff;
+  transition:background .2s;
+}
+#map{grid-area:map;background:#E6ECEC;min-height:0}
+.panel{
+  grid-area:panel;
+  overflow-y:auto;
+  border-right:1px solid var(--line);
+  background:#fff;
+  padding:14px 14px 28px;
+  min-height:0;
+}
+.panel h2{font-size:13px;margin:18px 0 8px;font-weight:700;color:var(--ink-soft)}
+.panel h2:first-child{margin-top:0}
+
+/* 雨量:量水標(水位標)風のゲージ */
+.rain-read{display:flex;align-items:baseline;gap:6px}
+.rain-read output{font-size:34px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+.rain-read span{font-size:12px;color:var(--ink-soft)}
+.gauge{position:relative;margin-top:8px;padding-bottom:34px}
+.gauge input[type=range]{
+  -webkit-appearance:none;appearance:none;
+  width:100%;height:28px;margin:0;background:transparent;cursor:pointer;position:relative;z-index:2;
+}
+.gauge input[type=range]:focus-visible{outline:2px solid var(--river);outline-offset:2px}
+.gauge input[type=range]::-webkit-slider-runnable-track{height:10px;border-radius:2px;background:transparent}
+.gauge input[type=range]::-moz-range-track{height:10px;border-radius:2px;background:transparent}
+.gauge input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:18px;height:28px;margin-top:-9px;
+  background:var(--ink);border:2px solid #fff;border-radius:3px;box-shadow:0 1px 4px rgba(18,38,46,.45);
+}
+.gauge input[type=range]::-moz-range-thumb{
+  width:14px;height:24px;background:var(--ink);border:2px solid #fff;border-radius:3px;
+}
+.gauge .track{
+  position:absolute;left:9px;right:9px;top:9px;height:10px;border-radius:2px;
+  background:linear-gradient(90deg,#CFE3EA 0%,#CFE3EA 47%,var(--watch) 55%,var(--warn) 64%,var(--danger) 73.5%,var(--breach) 90%);
+}
+.gauge .ticks{position:absolute;left:9px;right:9px;top:22px;height:30px;pointer-events:none}
+.gauge .tick{position:absolute;top:0;width:1px;height:6px;background:var(--ink-soft)}
+.gauge .tick b{
+  position:absolute;top:7px;left:0;transform:translateX(-50%);
+  font-size:10px;font-weight:400;color:var(--ink-soft);font-variant-numeric:tabular-nums;
+}
+.gauge .mark{position:absolute;top:-13px;width:2px;height:19px;background:var(--ink)}
+.gauge .mark b{
+  position:absolute;top:21px;left:0;transform:translateX(-50%);white-space:nowrap;
+  font-size:10px;font-weight:700;color:var(--ink);
+}
+.gauge .mark.right b{transform:translateX(-12%)}
+.gauge .mark.left b{transform:translateX(-88%)}
+
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.presets button,.seg button,.pt-toggle,.pop-toggle{
+  border:1px solid var(--line);background:#fff;border-radius:6px;
+  padding:6px 10px;font-size:12px;cursor:pointer;min-height:34px;
+}
+.presets button:hover,.seg button:hover{border-color:var(--river)}
+.presets button:focus-visible,.seg button:focus-visible,.pt-toggle:focus-visible,.pt-main:focus-visible{
+  outline:2px solid var(--river);outline-offset:1px;
+}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.seg button[aria-pressed=true]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.hint{font-size:12px;color:var(--ink-soft);margin:6px 0 0}
+/* 表示する浸水の切替・内水の雨量欄 */
+.seg.seg3{grid-template-columns:1fr 1fr 1fr}
+.seg button:disabled{opacity:.45;cursor:not-allowed}
+#inBox h2{margin-top:18px}
+#inNote{margin-top:6px}
+/* 予報の取り込み */
+.fc{margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.fc-row{display:flex;gap:8px;align-items:center}
+#fcBtn{flex:none;border:1px solid var(--river-deep);background:var(--river-deep);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;min-height:34px}
+#fcBtn:disabled{opacity:.55;cursor:progress}
+#fcBtn:focus-visible{outline:2px solid var(--river);outline-offset:2px}
+.fc-state{font-size:11.5px;color:var(--ink-soft);line-height:1.4}
+#fcChart{display:block;width:100%;height:56px;margin-top:8px}
+#fcChart[hidden]{display:none}
+#fcHint{margin-top:2px;font-size:11px}
+.gauge .mark.fcm{background:var(--river);width:3px}
+.gauge .mark.fcm b{top:-13px;color:var(--river-deep)}
+#fcNote{margin-top:6px}
+/* 公式情報への導線・確認地点・行動の目安・オフライン帯 */
+.quick{margin-bottom:14px}
+.quick-links{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.quick-links a{display:flex;align-items:center;justify-content:center;min-height:34px;padding:4px 6px;border:1px solid var(--river-deep);border-radius:6px;background:#fff;color:var(--river-deep);font-size:12px;font-weight:700;text-decoration:none;text-align:center}
+.quick-links a:hover{background:var(--paper)}
+.quick-links a:focus-visible,.loc-row button:focus-visible{outline:2px solid var(--river);outline-offset:1px}
+.loc-row{display:flex;gap:6px;align-items:center;margin-top:8px}
+.loc-row button{flex:none;border:1px solid var(--line);background:#fff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;min-height:34px}
+#locDepth b{color:var(--ink)}
+.locpin{width:18px;height:18px;border-radius:50%;background:#1565C0;border:3px solid #fff;box-shadow:0 0 0 2px #1565C0,0 1px 5px rgba(18,38,46,.6)}
+.act{margin-top:8px;padding:8px 10px;border-left:4px solid var(--low);background:var(--paper);border-radius:0 6px 6px 0;font-size:12px}
+.act b{display:block;font-size:13px}
+.act small{display:block;color:var(--ink-soft);font-size:11px}
+.pt-pct small{display:block;font-size:10px;font-weight:400;line-height:1.1}
+#offBar{flex-basis:100%;margin:0 -14px -8px;padding:4px 14px;background:var(--danger);color:#fff;font-size:12px;font-weight:700}
+#offBar[hidden]{display:none}
+/* 平時/有事モードの切替 */
+.amode{display:flex;border:1px solid rgba(255,255,255,.5);border-radius:6px;overflow:hidden}
+.amode button{border:0;background:transparent;color:#fff;font-size:12px;padding:4px 8px;min-height:30px;cursor:pointer}
+.amode button[aria-pressed=true]{background:#fff;color:var(--river-deep);font-weight:700}
+.app.emg .amode button[aria-pressed=true]{background:var(--danger);color:#fff}
+.amode button:focus-visible{outline:2px solid #fff;outline-offset:-2px}
+.emg-note{display:none;margin:0 0 12px;padding:8px 10px;border-left:4px solid var(--danger);background:#FDECEE;border-radius:0 6px 6px 0;font-size:12px;font-weight:700}
+.app.emg .emg-note{display:block}
+/* 有事モードで隠すもの(シミュレーションの操作・数値・一覧・凡例) */
+.app.emg .sim>h2:not(#rainTtl),.app.emg .sim>.seg,.app.emg #demHint,.app.emg .sim>.rain-read,.app.emg .sim>.gauge,
+.app.emg #presets,.app.emg #presetNote,.app.emg #inBox,.app.emg #modeHint,.app.emg .stats,.app.emg #pts,
+.app.emg #fcBtn,.app.emg #fcHint,.app.emg #locStart,.app.emg .panel>h2,.app.emg .legend,.app.emg .legend-risk{display:none}
+#locStart b,#presetNote b{color:var(--ink)}
+/* 使い方・観察記録 */
+.app.emg .peace-only{display:none}
+.howto ol{margin:0 0 4px;padding-left:20px;font-size:12.5px}
+.rec{margin-top:18px;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.rec summary{font-size:13px;font-weight:700;color:var(--ink-soft);cursor:pointer}
+.rec-warn{font-weight:700;color:var(--danger)}
+.rec-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.rec-row button,.rec-re{border:1px solid var(--line);background:#fff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;min-height:34px}
+.rec-re{flex:none}
+#recAdd,#recSave{background:var(--river-deep);border-color:var(--river-deep);color:#fff;font-weight:700}
+.rec-form{margin-top:8px;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--paper)}
+.rec-form img{display:block;max-width:100%;max-height:180px;border-radius:4px;margin-bottom:6px}
+.rec-form label,.rec-tools label{display:block;font-size:12px;color:var(--ink-soft);margin-top:4px}
+.rec-form select,.rec-form input[type=text],.rec-tools select{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);max-width:100%}
+.rec-form input[type=text]{width:100%}
+.rec-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.rec-list{list-style:none;margin:8px 0 0;padding:0;border-top:1px solid var(--line)}
+.rec-list li{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line)}
+.rec-item{flex:1;display:flex;gap:8px;align-items:center;text-align:left;background:none;border:0;padding:6px 0;cursor:pointer;min-width:0}
+.rec-item img{width:56px;height:56px;object-fit:cover;border-radius:4px;flex:none;background:var(--line)}
+.rec-meta{display:flex;flex-direction:column;min-width:0;font-size:11.5px;color:var(--ink-soft)}
+.rec-meta b{font-size:12.5px;color:var(--ink)}
+.rec-list li.rec-empty{padding:8px 0;font-size:12px;color:var(--ink-soft)}
+#recNear{margin-top:8px;padding:6px 8px;border-left:4px solid var(--warn);background:#FFF6EC;border-radius:0 6px 6px 0;font-size:12px}
+#recNear .rec-list{margin-top:4px}
+.recpin{width:24px;height:24px;border-radius:50%;background:#fff;border:2px solid var(--river-deep);font-size:13px;line-height:20px;text-align:center;box-shadow:0 1px 4px rgba(18,38,46,.5)}
+.rec-view{position:fixed;inset:0;z-index:3000;background:rgba(18,38,46,.85);display:flex;align-items:center;justify-content:center;padding:12px}
+.rec-view[hidden]{display:none}
+.rec-view-in{background:#fff;border-radius:8px;padding:10px;max-width:640px;width:100%;max-height:100%;overflow:auto}
+.rec-view-in img{display:block;max-width:100%;max-height:60vh;margin:0 auto;border-radius:4px}
+.rec-view-in p{font-size:12.5px;margin:8px 0 0;white-space:pre-line}
+/* 雨の日・有事モードだけで表示するもの(撮影・入力・安全確認) */
+.app:not(.emg) .emg-only{display:none}
+.rec-form .rec-safe{font-weight:700;color:var(--ink);font-size:12.5px}
+#recSafeGo{background:var(--river-deep);border-color:var(--river-deep);color:#fff;font-weight:700}
+#recSafeGo:disabled{opacity:.45;cursor:not-allowed}
+.rec-jump{display:block;width:100%;margin:0 0 4px;border:1px solid var(--river-deep);background:#fff;color:var(--river-deep);border-radius:6px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;min-height:34px;text-align:left}
+.rec-jump[hidden]{display:none}
+/* 有事モード: 記録欄を公式情報リンクの直後に並べる(DOMの順序は変えず、表示順だけ入れ替える) */
+.app.emg .panel{display:flex;flex-direction:column}
+.app.emg .panel>*{flex:none}
+.app.emg .panel>.emg-note,.app.emg .panel>.quick{order:-2}
+.app.emg .panel>#recBox{order:-1;margin-top:0;margin-bottom:14px}
+#recBackup{font-weight:700;color:var(--warn)}
+/* 都市圏の出し分け・大雨の可能性の警告 */
+.pts li[hidden]{display:none}
+.app:not(.emg) .q-off{display:none}
+.warn-box{margin:0 0 12px;padding:10px 12px;border:2px solid var(--warn);border-radius:8px;background:#FFF6EC;font-size:12.5px}
+.warn-box.lv2{border-color:var(--danger);background:#FDECEE}
+.warn-box p,#warnViewIn p{margin:6px 0 0;white-space:normal}
+.warn-ttl{display:block;font-size:15px;color:var(--danger)}
+.warn-box .quick-links,#warnViewIn .quick-links{margin-top:8px}
+.warn-box .rec-row button,#warnViewIn .rec-row button{font-weight:700}
+#warnNa{margin:0 0 10px}
+/* 記録の位置: 仮ピン・件数バッジ・位置修正 */
+.recpin{position:relative}
+.recpin.edit{border-color:var(--danger);cursor:move}
+.recpin b{position:absolute;top:-7px;right:-9px;min-width:16px;height:16px;padding:0 3px;border-radius:8px;background:var(--river-deep);color:#fff;font-size:10px;line-height:16px;text-align:center}
+#recFixSave{background:var(--river-deep);border-color:var(--river-deep);color:#fff;font-weight:700}
+
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.stats div{padding:8px 10px;border-right:1px solid var(--line)}
+.stats div:last-child{border-right:0}
+.stats dt{font-size:11px;color:var(--ink-soft)}
+.stats dd{margin:0;font-size:19px;font-weight:800;font-variant-numeric:tabular-nums}
+.stats dd small{font-size:11px;font-weight:400;margin-left:2px}
+dl{margin:0}
+
+.legend{display:flex;border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+.legend span{flex:1;text-align:center;font-size:10.5px;padding:5px 2px;color:#3b2a2a;white-space:nowrap}
+.legend-risk{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--ink-soft)}
+.legend-risk i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+
+.pts{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.pts li{display:flex;align-items:stretch;border-bottom:1px solid var(--line)}
+.pt-main{
+  flex:1;text-align:left;background:none;border:0;cursor:pointer;
+  padding:9px 6px 9px 0;display:grid;grid-template-columns:12px 1fr auto;gap:2px 9px;align-items:center;
+}
+.pt-main:hover .pt-name{text-decoration:underline}
+.pt-dot{width:12px;height:12px;border-radius:50%;grid-row:1 / span 2}
+.pt-name{font-weight:700;font-size:13px}
+.pt-type{font-size:11.5px;color:var(--ink-soft);grid-column:2}
+.pt-pct{grid-row:1 / span 2;grid-column:3;font-weight:800;font-size:15px;font-variant-numeric:tabular-nums;min-width:44px;text-align:right}
+.pt-toggle{align-self:center;margin-left:6px;white-space:nowrap}
+.pt-toggle[aria-pressed=true],.pop-toggle[aria-pressed=true]{background:var(--breach);border-color:var(--breach);color:#fff}
+
+.check{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin-top:10px;cursor:pointer}
+.check input{margin-top:3px;width:16px;height:16px;accent-color:var(--river-deep)}
+
+.notice{
+  margin-top:18px;padding:10px 12px;border-left:4px solid var(--warn);
+  background:#FFF6EC;font-size:12px;border-radius:0 6px 6px 0;
+}
+.notice a{color:var(--river-deep);font-weight:700}
+
+/* 河川の切替 */
+header select{
+  font:inherit;font-size:13px;padding:4px 8px;min-height:30px;max-width:46vw;
+  border-radius:6px;border:1px solid rgba(255,255,255,.5);background:#fff;color:var(--ink);
+}
+header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
+.panel .sim~.sim h2:first-child{margin-top:18px}
+#ovBox .pt-main{grid-template-columns:12px 1fr}
+#approxNote{margin-top:6px;font-weight:700}
+
+/* 地図上のマーカー */
+.rp{width:22px;height:22px;border-radius:50%;border:3px solid #fff;box-shadow:0 1px 5px rgba(18,38,46,.55);position:relative}
+.rp.on::after{
+  content:"";position:absolute;inset:-9px;border-radius:50%;border:3px solid var(--breach);
+  animation:pulse 1.6s ease-out infinite;
+}
+@keyframes pulse{0%{transform:scale(.6);opacity:1}100%{transform:scale(1.5);opacity:0}}
+@media (prefers-reduced-motion:reduce){.rp.on::after{animation:none;opacity:.8}}
+.st-label{
+  background:rgba(255,255,255,.9);border:1px solid #9FB1B6;border-radius:3px;box-shadow:none;
+  padding:0 4px;font-size:11px;color:var(--ink);font-weight:700;
+}
+.st-label::before{display:none}
+.river-label{background:none;border:0;box-shadow:none;color:#fff;font-weight:800;font-size:13px;letter-spacing:.3em;text-shadow:0 0 3px var(--river-deep)}
+.river-label::before{display:none}
+.leaflet-popup-content{margin:12px 14px;font-size:13px;line-height:1.55;font-family:inherit}
+.pop h3{margin:0 0 2px;font-size:14px}
+.pop .t{font-size:11.5px;color:var(--ink-soft)}
+.pop .r{font-weight:800;font-size:15px;margin:6px 0 4px}
+.pop p{margin:0 0 8px;font-size:12px}
+.leaflet-container{font-family:inherit}
+
+@media (max-width:820px){
+  .app{
+    grid-template-columns:1fr;
+    grid-template-rows:auto 44dvh 1fr;
+    grid-template-areas:"head" "map" "panel";
+  }
+  .panel{border-right:0;border-top:1px solid var(--line)}
+  header h1{font-size:14px}
+  header .scope{display:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1 id="ttl">水害ノート</h1>
+    <select id="riverSel" aria-label="表示する河川"></select>
+    <div class="amode" id="amode" role="group" aria-label="表示モード">
+      <button type="button" data-am="peace" aria-pressed="true">平時: 学ぶ</button>
+      <button type="button" data-am="emg" aria-pressed="false">有事: 記録する</button>
+    </div>
+    <span class="scope" id="scope">川と雨を学び、雨の日を記録する(簡易モデル)</span>
+    <span class="status" id="status" role="status" aria-live="polite">試算上は低い</span>
+    <div id="offBar" role="status" hidden>オフラインです。地図・予報・公式情報は更新されません</div>
+  </header>
+
+  <div id="map" aria-label="氾濫リスク地図"></div>
+
+  <section class="panel">
+    <p class="emg-note">警報・避難情報の通知は、自治体や Yahoo!防災速報などの公式アプリで受け取ってください。この画面は通知しません。</p>
+    <p class="emg-note">外の様子を見に行かないでください。記録は屋内から。過去の記録と公式情報で確認を。</p>
+    <div class="warn-box" id="warnBox" role="alert" hidden></div>
+    <p class="hint" id="warnNa" hidden>予報を取得できないため、大雨の可能性を判定できません。</p>
+    <div class="rec-view" id="warnView" hidden><div class="rec-view-in" id="warnViewIn" role="alertdialog" aria-label="大雨の可能性のお知らせ"></div></div>
+    <div class="quick">
+      <h2 class="q-off">今の状況は公式情報で確認</h2>
+      <div class="quick-links q-off">
+        <a href="https://www.jma.go.jp/bosai/risk/" target="_blank" rel="noopener">キキクル</a>
+        <a href="https://www.river.go.jp/" target="_blank" rel="noopener">川の防災情報</a>
+        <a href="https://disaportal.gsi.go.jp/" target="_blank" rel="noopener">ハザードマップ</a>
+      </div>
+      <div class="loc-row">
+        <button id="locBtn" type="button">現在地を表示</button>
+        <button id="locClear" type="button" hidden>解除</button>
+        <span class="fc-state" id="locState" role="status" aria-live="polite">地図を長押しすると、確認したい地点を置けます。</span>
+      </div>
+      <p class="hint" id="locDepth" hidden></p>
+      <p class="hint" id="locStart" hidden></p>
+      <p class="hint" id="locSaved" hidden>確認地点はこの端末に保存されます(「解除」で消えます)。</p>
+    </div>
+    <div id="ovBox" hidden>
+      <div class="howto peace-only">
+        <h2>使い方</h2>
+        <ol>
+          <li>川を選んで雨量を動かす</li>
+          <li>地図を長押しして、わが家の浸水開始雨量を見る</li>
+          <li>雨の日・有事モードで屋内から記録し、平時に見返して試算と比べる</li>
+        </ol>
+        <button type="button" id="recJump" class="rec-jump" hidden></button>
+      </div>
+      <h2 id="ovTtl">関東全体</h2>
+      <p class="hint" style="margin:0 0 8px">地図か下の一覧から川を選ぶと、その川の簡易シミュレーションを表示します。全体の表示では、国の公式浸水想定を重ねています。</p>
+      <p class="hint" style="margin:0 0 8px">色は予報雨量と計画規模の比による目安です。低くても安全を意味しません。</p>
+      <ul class="pts" id="ovList"></ul>
+    </div>
+    <div class="sim">
+    <h2>表示する浸水</h2>
+    <div class="seg seg3" id="kindSeg">
+      <button data-kind="river" aria-pressed="true">河川氾濫</button>
+      <button data-kind="inland" aria-pressed="false">内水氾濫</button>
+      <button data-kind="both" aria-pressed="false">両方</button>
+    </div>
+    <p class="hint" id="demHint"></p>
+
+    <h2 id="rainTtl">雨量</h2>
+    <div class="fc">
+      <div class="fc-row">
+        <button id="fcBtn" type="button">予報を反映</button>
+        <span class="fc-state" id="fcState" role="status" aria-live="polite">予報は未取得です。</span>
+      </div>
+      <canvas id="fcChart" hidden aria-label="今後の流域平均雨量(予報)の棒グラフ"></canvas>
+      <p class="hint" id="fcHint"></p>
+    </div>
+    <div class="rain-read"><output id="rainOut" for="rain">300</output><span id="rainUnit">mm</span></div>
+    <div class="gauge">
+      <div class="track"></div>
+      <input type="range" id="rain" min="0" max="800" step="5" value="300" aria-label="雨量(mm)">
+      <div class="ticks" id="ticks"></div>
+    </div>
+    <div class="presets" id="presets">
+      
+      
+      
+      
+      
+    </div>
+
+    <p class="hint" id="presetNote" hidden></p>
+
+    <div id="inBox" hidden>
+      <h2>1時間雨量(内水氾濫)</h2>
+      <div class="rain-read"><output id="rain1Out" for="rain1">30</output><span>mm / 1時間</span></div>
+      <div class="gauge">
+        <div class="track" id="track1"></div>
+        <input type="range" id="rain1" min="0" max="150" step="1" value="30" aria-label="1時間雨量(mm)">
+        <div class="ticks" id="ticks1"></div>
+      </div>
+      <div class="presets" id="presets1">
+        <button data-v="30">激しい雨 30</button>
+        <button data-v="50">非常に激しい雨 50</button>
+        <button data-v="80">猛烈な雨 80</button>
+        <button data-v="100">記録的 100</button>
+      </div>
+    </div>
+
+    <h2>氾濫する地点の決め方</h2>
+    <div class="seg">
+      <button id="modeAuto" aria-pressed="true">雨量から自動判定</button>
+      <button id="modeManual" aria-pressed="false">地点を自分で選ぶ</button>
+    </div>
+    <p class="hint" id="modeHint"></p>
+
+    <h2>想定される浸水</h2>
+    <dl class="stats">
+      <div><dt>浸水面積</dt><dd id="sArea">0<small>km²</small></dd></div>
+      <div><dt>最大浸水深</dt><dd id="sDepth">0<small>m</small></dd></div>
+      <div><dt>氾濫地点</dt><dd id="sCount">0<small>か所</small></dd></div>
+    </dl>
+    <div class="act" id="actBox" role="status">
+      <b id="actMsg"></b>
+      <span>避難の判断は自治体の避難情報(警戒レベル)に従ってください。</span>
+      <small id="actSrc"></small>
+    </div>
+
+    </div>
+
+    <h2>凡例</h2>
+    <div class="legend" aria-label="浸水深の色分け">
+      <span style="background:var(--d1)">〜0.5m</span>
+      <span style="background:var(--d2)">0.5〜1m</span>
+      <span style="background:var(--d3)">1〜3m</span>
+      <span style="background:var(--d4)">3〜5m</span>
+      <span style="background:var(--d5)">5m〜</span>
+    </div>
+    <div class="legend-risk">
+      <span><i style="background:var(--low)"></i>低い</span>
+      <span><i style="background:var(--watch)"></i>注意</span>
+      <span><i style="background:var(--warn)"></i>警戒</span>
+      <span><i style="background:var(--danger)"></i>危険</span>
+      <span><i style="background:var(--breach)"></i>氾濫を想定</span>
+    </div>
+    <label class="check">
+      <input type="checkbox" id="official">
+      <span>国の公式浸水想定(想定最大規模)を重ねて比べる<br><small style="color:var(--ink-soft)">ハザードマップポータルのタイルを表示します(要ネット接続)</small></span>
+    </label>
+
+    <div class="sim"><h2>リスク地点(上流 → 下流)</h2>
+    <ul class="pts" id="pts"></ul></div>
+
+    <details class="rec" id="recBox">
+      <summary id="recTtl">観察記録を見返す</summary>
+      <p class="hint rec-warn emg-only">撮影は必ず安全な屋内から。外や川、冠水した道路には近づかないでください。</p>
+      <p class="hint emg-only">大雨でなくても、雨の日の記録が比較の基準になります。</p>
+      <p class="hint peace-only">記録は雨の日・有事モードで、安全な屋内から撮影します。</p>
+      <p class="hint" id="recStore" hidden></p>
+      <div class="rec-row emg-only">
+        <button type="button" id="recAdd">写真を記録</button>
+        <input type="file" id="recFile" accept="image/*" capture="environment" hidden>
+      </div>
+      <div class="rec-form emg-only" id="recSafe" hidden>
+        <label class="rec-safe"><input type="checkbox" id="recSafeChk"> 必ず安全な屋内から撮影します。外や川、冠水した道路には近づきません。</label>
+        <div class="rec-row">
+          <button type="button" id="recSafeGo" disabled>カメラを開く</button>
+          <button type="button" id="recSafeNo">やめる</button>
+        </div>
+      </div>
+      <div class="rec-form emg-only" id="recForm" hidden>
+        <img id="recPrev" alt="記録する写真">
+        <label>冠水の程度
+          <select id="recLevel">
+            <option>なし</option><option>水たまり</option><option>くるぶし</option><option>ひざ</option><option>それ以上</option>
+          </select>
+        </label>
+        <label>撮影場所(任意・例: 2階の窓)<input type="text" id="recPlace" maxlength="20" list="recPlaces"></label>
+        <datalist id="recPlaces"></datalist>
+        <label>メモ(任意)<input type="text" id="recMemo" maxlength="120"></label>
+        <div class="rec-row">
+          <button type="button" id="recSave">保存</button>
+          <button type="button" id="recCancel">取消</button>
+        </div>
+        <p class="hint" id="recFormState"></p>
+      </div>
+      <p class="hint" id="recMsg" role="status" aria-live="polite"></p>
+      <div class="rec-form" id="recFixBox" hidden>
+        <p class="hint" style="margin:0">ピンを動かして「この位置で保存」を押してください(地図のタップでも動かせます)。</p>
+        <div class="rec-row">
+          <button type="button" id="recFixSave">この位置で保存</button>
+          <button type="button" id="recFixNo">やめる</button>
+        </div>
+      </div>
+      <p class="hint" id="recCount"></p>
+      <p class="hint" id="recBackup" hidden></p>
+      <div class="rec-tools">
+        <label>並べ替え
+          <select id="recSort"><option value="new">新しい順</option><option value="rain">雨量の多い順</option></select>
+        </label>
+        <label>場所
+          <select id="recPlaceF"><option value="">すべて</option></select>
+        </label>
+        <label><input type="checkbox" id="recOnMap"> 地図に表示</label>
+      </div>
+      <div id="recNear" hidden></div>
+      <ul class="rec-list" id="recList"></ul>
+      <p class="hint">雨量は Open-Meteo(気象庁モデル)のモデル値です(観測値ではありません)。写真と記録はこの端末内にだけ保存します。雨量の取得時のみ、およその位置(約1km単位)を Open-Meteo に送ります。</p>
+      <p class="hint">写真の位置はこの端末内にだけ保存します。屋内ではずれることがあるので、地図のピンで直せます。</p>
+      <div class="rec-row">
+        <button type="button" id="recExport">書き出し</button>
+        <button type="button" id="recImportBtn" class="peace-only">読み込み</button>
+        <input type="file" id="recImport" accept="application/json,.json" hidden>
+      </div>
+    </details>
+    <div class="rec-view" id="recView" hidden>
+      <div class="rec-view-in">
+        <img id="recViewImg" alt="観察記録の写真">
+        <p id="recViewInfo"></p>
+        <div class="rec-row">
+          <button type="button" id="recViewMap" hidden>地図で見る</button>
+          <button type="button" id="recViewFix">位置を直す</button>
+          <button type="button" id="recViewDel">削除</button>
+          <button type="button" id="recViewClose">閉じる</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="notice">
+      このアプリは平時に浸水の仕組みとわが家のシナリオを学ぶためのものです。
+      この画面は簡易モデルによる試算で、地盤高や地点ごとのしきい値は仮定値です。実際の避難判断には
+      <a href="https://disaportal.gsi.go.jp/" target="_blank" rel="noopener">ハザードマップポータルサイト</a>、
+      <a href="https://www.river.go.jp/" target="_blank" rel="noopener">川の防災情報</a>、
+      <span id="offNote">お住まいの自治体の洪水ハザードマップ</span>を使ってください。
+      <div id="fcNote">予報雨量は <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>(気象庁モデル)による流域代表点の平均で、実際の流域平均雨量とは異なります。</div>
+    </div>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   設定値(ここを調整すればモデルの挙動を変えられる)
+   ============================================================ */
+let CONFIG=null;            // 選択中の河川の設定(buildGeo が組み立てる)
+const AUTO_THRESHOLD=0.6;   // 自動判定で「氾濫」とみなすリスク値
+const MAX_CELLS=300000;     // 計算メッシュの上限セル数(超える場合は自動で粗くする)
+/* 多摩川の設定値(RIVERS の多摩川から参照) */
+const TAMA_CONFIG = {
+  bounds:{S:35.553,N:35.632,W:139.552,E:139.692}, // 計算範囲
+  cell:45,            // 計算メッシュ(m)
+  halfWidth:190,      // 河道中心から堤防までの距離(m・概略)
+  maxLateral:3600,    // 堤防から何mまで計算するか
+  
+  riskWidth:38,       // リスク曲線の立ち上がり幅(mm)
+  rainPlan:457,       // 計画規模(mm/2日)
+  rainMax:588         // 想定最大規模(mm/48h)
+};
+
+/* 多摩川の河道中心線(上流→下流・概略座標) */
+const TAMA_CENTERLINE = [
+  [35.6268,139.5690],[35.6250,139.5745],[35.6225,139.5810],[35.6200,139.5875],
+  [35.6175,139.5960],[35.6150,139.6050],[35.6120,139.6140],[35.6098,139.6215],
+  [35.6090,139.6250],[35.6060,139.6330],[35.6025,139.6400],[35.5975,139.6460],
+  [35.5930,139.6515],[35.5900,139.6575],[35.5870,139.6635],[35.5845,139.6680],
+  [35.5800,139.6725],[35.5755,139.6765]
+];
+
+/* 多摩川のリスク地点(他の川は RIVERS 内に直接記述)
+   ref   : 河道上のおおよその位置(右岸堤防上に自動で寄せる)
+   T     : リスク50%となる48時間雨量(mm)…モデル上の仮定値
+   scale : 氾濫規模の係数(堤防決壊=1.0、樋管逆流などは小さめ) */
+const TAMA_RISK_POINTS = [
+  {id:'noborito', name:'登戸・多摩水道橋下流', type:'越水・堤防侵食', ref:[35.6240,139.5775], T:560, scale:1.0,
+   note:'橋梁付近で流れが絞られ、水位が上がりやすい区間と仮定。'},
+  {id:'shukugawara', name:'宿河原堰の上流', type:'堰上げによる越水', ref:[35.6203,139.5868], T:540, scale:1.0,
+   note:'堰で水位がせき上がる区間。1974年には対岸の狛江市側で堤防が決壊した。'},
+  {id:'unane', name:'宇奈根排水樋管付近', type:'樋管からの逆流', ref:[35.6155,139.6035], T:450, scale:0.55,
+   note:'2019年台風19号で逆流による浸水が起きた樋管の一つ。'},
+  {id:'hirase', name:'平瀬川合流部', type:'支川への背水', ref:[35.6100,139.6208], T:430, scale:0.7,
+   note:'本川の水位が上がると支川の水が流れ込めず、あふれやすい。2019年に浸水被害。'},
+  {id:'futako', name:'二子排水樋管付近', type:'樋管からの逆流', ref:[35.6082,139.6272], T:455, scale:0.5,
+   note:'2019年台風19号で逆流による浸水が起きた樋管の一つ。'},
+  {id:'suwa', name:'諏訪排水樋管付近', type:'樋管からの逆流', ref:[35.6045,139.6362], T:445, scale:0.6,
+   note:'2019年台風19号で逆流による浸水が起きた樋管の一つ。'},
+  {id:'miyauchi', name:'宮内排水樋管付近', type:'樋管からの逆流', ref:[35.5960,139.6478], T:450, scale:0.6,
+   note:'2019年台風19号で逆流による浸水が起きた樋管の一つ。'},
+  {id:'todoroki', name:'等々力緑地の北側', type:'越水・堤防侵食', ref:[35.5915,139.6545], T:575, scale:1.0,
+   note:'河道が曲がる区間で、流れが堤防に当たりやすいと仮定。'},
+  {id:'sanno', name:'山王排水樋管付近', type:'樋管からの逆流', ref:[35.5858,139.6658], T:440, scale:0.7,
+   note:'2019年台風19号で武蔵小杉駅周辺の浸水につながった樋管。'},
+  {id:'maruko', name:'丸子橋下流〜JR橋梁', type:'越水', ref:[35.5790,139.6735], T:590, scale:1.0,
+   note:'橋梁が連続する区間。背後に低地が広がるため、氾濫時の影響範囲が大きい。'}
+];
+
+/* 多摩川沿いの駅 */
+const TAMA_STATIONS = [
+  ['登戸',35.6207,139.5700],['向ヶ丘遊園',35.6176,139.5647],['宿河原',35.6153,139.5797],
+  ['久地',35.6078,139.5936],['武蔵溝ノ口',35.5992,139.6108],['高津',35.6035,139.6170],
+  ['二子新地',35.6072,139.6222],['武蔵新城',35.5874,139.6298],['武蔵中原',35.5808,139.6412],
+  ['武蔵小杉',35.5757,139.6596],['新丸子',35.5806,139.6620]
+];
+
+/* ============================================================
+   河川データ(RIVERS)
+   ============================================================ */
+/* ============================================================
+   各項目の意味
+   centerline : 河道中心線(上流→下流)
+   banks      : 計算する岸。'R'=右岸 / 'L'=左岸(下流を向いて右・左)
+   rain       : 雨量指標。plan=計画規模、maxScale=想定最大規模、riskWidth=リスク曲線の立ち上がり幅
+                floodStart/floodFull を省略すると plan×0.66 / maxScale×1.19 を使う
+   flood      : 氾濫水位(h0,h1)と広がり(l0,l1)の係数。省略時は標準値(h0:1.0, h1:4.2, l0:500, l1:2400)
+   origin / bounds / view : 省略時は中心線から自動算出
+   inland     : 内水氾濫の設定(任意)。capacity=排水能力(mm/時、既定50)、gain=たまりやすさの係数(既定1)
+   ※ approx:true の川は、座標・雨量しきい値とも概略の仮定値
+   ============================================================ */
+const RIVERS = [
+  {id:'tama', name:'多摩川', area:'登戸〜武蔵小杉・神奈川側',
+   centerline:TAMA_CENTERLINE, riskPoints:TAMA_RISK_POINTS, stations:TAMA_STATIONS,
+   halfWidth:TAMA_CONFIG.halfWidth, maxLateral:TAMA_CONFIG.maxLateral, cell:TAMA_CONFIG.cell,
+   banks:['R'], origin:[35.60,139.62], bounds:TAMA_CONFIG.bounds,
+   view:[[35.570,139.565],[35.628,139.682]],
+   rain:{label:'流域平均雨量(48時間)', span:'48時間', unit:'mm', max:800, step:5, tick:100, initial:300,
+         plan:TAMA_CONFIG.rainPlan, maxScale:TAMA_CONFIG.rainMax, riskWidth:TAMA_CONFIG.riskWidth,
+         floodStart:300, floodFull:700, grad:[376,440,512,588,720],
+         presets:[[200,'大雨 200'],[457,'計画規模 457'],[490,'2019年台風19号級(目安)'],[588,'想定最大 588'],[700,'超過 700']]},
+   officialNote:'川崎市の洪水ハザードマップ'},
+
+  {id:'tsurumi', name:'鶴見川', area:'綱島〜鶴見・横浜市/川崎市', approx:true,
+   centerline:[
+     [35.5290,139.6170],[35.5325,139.6250],[35.5340,139.6340],[35.5350,139.6440],
+     [35.5355,139.6540],[35.5350,139.6640],[35.5310,139.6720],[35.5260,139.6780],
+     [35.5190,139.6800],[35.5120,139.6800],[35.5050,139.6820],[35.4980,139.6850],[35.4910,139.6880]],
+   halfWidth:70, maxLateral:2500, cell:40, banks:['L','R'],
+   rain:{label:'流域平均雨量(48時間)', span:'48時間', unit:'mm', max:1000, step:5, tick:100, initial:300,
+         plan:405, maxScale:792, riskWidth:45,
+         presets:[[300,'大雨 300'],[405,'計画規模 405'],[600,'超過 600'],[792,'想定最大 792'],[900,'超過 900']]},
+   flood:{h0:0.9,h1:3.6,l0:400,l1:1800},
+   riskPoints:[
+     {id:'tsunashima', name:'綱島・大綱橋付近', type:'越水', bank:'L', ref:[35.5340,139.6340], T:640, scale:1.0,
+      note:'市街地が川沿いの低地に広がる区間と仮定。'},
+     {id:'taru', name:'樽町付近', type:'内水・越水', bank:'R', ref:[35.5350,139.6480], T:600, scale:0.7,
+      note:'本川の水位が高いと排水しにくくなる低地と仮定。'},
+     {id:'yagami', name:'矢上川合流部', type:'支川への背水', bank:'L', ref:[35.5352,139.6630], T:560, scale:0.7,
+      note:'本川の水位が上がると支川があふれやすい合流部と仮定。'},
+     {id:'sueyoshi', name:'末吉橋付近', type:'越水', bank:'L', ref:[35.5270,139.6770], T:660, scale:1.0,
+      note:'川崎市幸区側の低地に広がりやすいと仮定。'},
+     {id:'komaoka', name:'駒岡・上末吉付近', type:'越水', bank:'R', ref:[35.5200,139.6800], T:650, scale:0.9,
+      note:'河道が南へ向きを変える区間と仮定。'},
+     {id:'tsurumi_st', name:'鶴見川橋〜潮見橋', type:'越水・高潮の影響', bank:'R', ref:[35.5060,139.6815], T:700, scale:1.0,
+      note:'河口に近く、潮位の影響も受ける区間と仮定。'}],
+   stations:[['綱島',35.5370,139.6345],['大倉山',35.5222,139.6297],['鶴見',35.5083,139.6762],
+             ['尻手',35.5311,139.6844],['矢向',35.5389,139.6808]],
+   officialNote:'横浜市・川崎市の洪水ハザードマップ'},
+
+  {id:'zenpukuji', name:'善福寺川', area:'善福寺池〜神田川合流・杉並区', approx:true,
+   centerline:[
+     [35.7165,139.5935],[35.7130,139.5980],[35.7090,139.6020],[35.7000,139.6120],
+     [35.6990,139.6200],[35.6920,139.6270],[35.6840,139.6370],[35.6840,139.6450],
+     [35.6870,139.6520],[35.6900,139.6570],[35.6910,139.6630],[35.6900,139.6680]],
+   halfWidth:8, maxLateral:400, cell:10, banks:['L','R'],
+   rain:{label:'1時間雨量', span:'1時間', unit:'mm', max:200, step:1, tick:25, initial:40,
+         plan:75, planLabel:'整備目標', maxScale:153, riskWidth:8,
+         presets:[[50,'現況対応の目安 50'],[75,'整備目標 75'],[100,'時間100mm'],[112,'2005年9月豪雨級(目安)'],[153,'想定最大 153']]},
+   flood:{h0:0.5,h1:1.8,l0:90,l1:260},
+   riskPoints:[
+     {id:'nishiogi', name:'西荻北・上流部', type:'溢水', bank:'R', ref:[35.7110,139.6000], T:85, scale:0.8,
+      note:'川幅が狭い上流部。短時間の強い雨で水位が急に上がると仮定。'},
+     {id:'ogikubo', name:'荻窪・環八付近', type:'溢水', bank:'L', ref:[35.7000,139.6130], T:80, scale:0.9,
+      note:'2005年9月の集中豪雨では流域の広い範囲で浸水被害が出た。'},
+     {id:'narita', name:'成田西・和田堀公園上流', type:'溢水', bank:'R', ref:[35.6900,139.6290], T:72, scale:1.0,
+      note:'蛇行が続く区間。調節池による軽減は考慮していない。'},
+     {id:'seibi', name:'済美・堀ノ内付近', type:'溢水', bank:'L', ref:[35.6875,139.6530], T:76, scale:0.9,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'wada', name:'和田・神田川合流部', type:'合流部の背水', bank:'R', ref:[35.6905,139.6660], T:78, scale:0.8,
+      note:'神田川の水位が高いと流れ込みにくくなる合流部と仮定。'}],
+   stations:[['西荻窪',35.7038,139.5995],['荻窪',35.7046,139.6200],['南阿佐ケ谷',35.6997,139.6360],
+             ['新高円寺',35.6979,139.6480],['浜田山',35.6815,139.6275],['方南町',35.6835,139.6567],
+             ['中野富士見町',35.6905,139.6668]],
+   officialNote:'杉並区の洪水ハザードマップ(東京都の浸水予想区域図)'},
+
+  {id:'arakawa', name:'荒川', area:'岩淵水門〜河口・東京都(下流)', approx:true,
+   centerline:[
+     [35.7870,139.7350],[35.7790,139.7480],[35.7735,139.7585],[35.7650,139.7700],
+     [35.7580,139.7880],[35.7565,139.8040],[35.7480,139.8150],[35.7400,139.8220],
+     [35.7310,139.8280],[35.7200,139.8380],[35.7090,139.8460],[35.6960,139.8500],
+     [35.6840,139.8545],[35.6700,139.8540],[35.6520,139.8510]],
+   halfWidth:260, maxLateral:5000, cell:60, banks:['L','R'],
+   rain:{label:'流域平均雨量(72時間)', span:'72時間', unit:'mm', max:900, step:5, tick:100, initial:300,
+         plan:516, maxScale:632, riskWidth:40,
+         presets:[[300,'大雨 300'],[516,'計画規模 516'],[632,'想定最大 632'],[750,'超過 750']]},
+   flood:{h0:1.0,h1:5.0,l0:800,l1:3600},
+   riskPoints:[
+     {id:'iwabuchi', name:'岩淵・赤羽付近', type:'越水', bank:'R', ref:[35.7850,139.7380], T:640, scale:1.0,
+      note:'隅田川との分派点に近い区間と仮定。'},
+     {id:'adachi', name:'西新井橋〜千住新橋(足立区側)', type:'越水', bank:'L', ref:[35.7575,139.7950], T:660, scale:1.0,
+      note:'背後に低地が広がる区間と仮定。'},
+     {id:'keisei', name:'京成本線橋梁付近', type:'越水(堤防が低い箇所)', bank:'R', ref:[35.7450,139.8180], T:600, scale:1.0,
+      note:'橋梁部の堤防が周囲より低いと指摘されてきた箇所。'},
+     {id:'yotsugi', name:'四つ木付近', type:'越水', bank:'L', ref:[35.7320,139.8275], T:650, scale:1.0,
+      note:'葛飾区側の低地に広がりやすいと仮定。'},
+     {id:'hirai', name:'平井・小松川付近', type:'越水', bank:'R', ref:[35.7080,139.8465], T:640, scale:1.0,
+      note:'海抜ゼロメートル地帯に面する区間。浸水が長引きやすい。'},
+     {id:'funabori', name:'船堀付近', type:'越水', bank:'L', ref:[35.6850,139.8540], T:660, scale:1.0,
+      note:'江戸川区側の低地に広がりやすいと仮定。'}],
+   stations:[['赤羽岩淵',35.7835,139.7222],['北千住',35.7497,139.8049],['小菅',35.7590,139.8128],
+             ['堀切菖蒲園',35.7477,139.8275],['四ツ木',35.7320,139.8347],['平井',35.7065,139.8423],
+             ['東大島',35.6900,139.8460],['船堀',35.6838,139.8642]],
+   officialNote:'北区・足立区・葛飾区・墨田区・江東区・江戸川区の洪水ハザードマップ'},
+
+  {id:'kinu', name:'鬼怒川', area:'常総市付近・茨城県', approx:true,
+   centerline:[
+     [36.1600,139.9500],[36.1450,139.9520],[36.1300,139.9560],[36.1150,139.9560],
+     [36.1000,139.9600],[36.0850,139.9640],[36.0700,139.9680],[36.0550,139.9740],
+     [36.0400,139.9800],[36.0250,139.9850],[36.0100,139.9880],[35.9950,139.9900]],
+   halfWidth:150, maxLateral:4500, cell:60, banks:['L','R'],
+   rain:{label:'流域平均雨量(72時間)', span:'72時間', unit:'mm', max:800, step:5, tick:100, initial:250,
+         plan:362, maxScale:669, riskWidth:40,
+         presets:[[250,'大雨 250'],[362,'計画規模 362'],[501,'2015年関東・東北豪雨級(目安)'],[669,'想定最大 669']]},
+   flood:{h0:1.0,h1:4.0,l0:700,l1:3200},
+   riskPoints:[
+     {id:'wakamiyado', name:'若宮戸付近', type:'溢水', bank:'L', ref:[36.1370,139.9540], T:470, scale:0.8,
+      note:'2015年9月の関東・東北豪雨で溢水が起きた区間。'},
+     {id:'ishige', name:'石下付近(西側)', type:'越水', bank:'R', ref:[36.1150,139.9560], T:560, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'misaka', name:'三坂町付近', type:'堤防決壊', bank:'L', ref:[36.0890,139.9630], T:490, scale:1.0,
+      note:'2015年9月の関東・東北豪雨で堤防が決壊し、常総市の広い範囲が浸水した。'},
+     {id:'mitsukaido', name:'水海道市街地付近', type:'支川・排水路の背水', bank:'L', ref:[36.0250,139.9850], T:540, scale:0.7,
+      note:'本川の水位が高いと市街地側の水が排水しにくくなると仮定。'},
+     {id:'toyooka', name:'豊岡町付近', type:'越水', bank:'R', ref:[36.0300,139.9830], T:580, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'}],
+   stations:[['石下',36.1135,139.9700],['南石下',36.0940,139.9730],['三妻',36.0660,139.9790],
+             ['中妻',36.0440,139.9850],['北水海道',36.0330,139.9900],['水海道',36.0215,139.9935]],
+   officialNote:'常総市の洪水ハザードマップ'},
+
+  {id:'ichinomiya', name:'一宮川', area:'茂原市付近・千葉県', approx:true,
+   centerline:[
+     [35.4150,140.2550],[35.4200,140.2680],[35.4260,140.2800],[35.4290,140.2900],
+     [35.4270,140.3010],[35.4220,140.3110],[35.4160,140.3220],[35.4090,140.3330],
+     [35.4020,140.3440],[35.3950,140.3560],[35.3900,140.3680],[35.3870,140.3800]],
+   halfWidth:30, maxLateral:1800, cell:30, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間)', span:'24時間', unit:'mm', max:700, step:5, tick:100, initial:150,
+         plan:250, planLabel:'計画規模(仮定)', maxScale:600, maxLabel:'想定最大(仮定)', riskWidth:30,
+         presets:[[150,'大雨 150'],[250,'計画規模(仮定) 250'],[390,'2023年9月大雨級(目安)'],[600,'想定最大(仮定) 600']]},
+   flood:{h0:0.6,h1:2.6,l0:300,l1:1300},
+   riskPoints:[
+     {id:'upper', name:'茂原市西部(上流側)', type:'溢水', bank:'R', ref:[35.4200,140.2680], T:300, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'city', name:'茂原市街地付近', type:'溢水', bank:'L', ref:[35.4290,140.2900], T:280, scale:1.0,
+      note:'2019年10月と2023年9月の大雨で、茂原市の市街地に浸水被害が出た。'},
+     {id:'aku', name:'支川合流部(市街地東)', type:'支川への背水', bank:'L', ref:[35.4270,140.3010], T:265, scale:0.7,
+      note:'本川の水位が上がると支川があふれやすい合流部と仮定。'},
+     {id:'yachiyo', name:'茂原駅南東の低地', type:'溢水', bank:'R', ref:[35.4220,140.3110], T:270, scale:0.9,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'lower', name:'一宮町・下流部', type:'越水', bank:'R', ref:[35.3950,140.3560], T:340, scale:0.9,
+      note:'河口に近い下流部の低地と仮定。'}],
+   stations:[['茂原',35.4287,140.3040],['八積',35.4040,140.3410],['上総一ノ宮',35.3728,140.3680]],
+   officialNote:'茂原市および長生郡各町村の洪水ハザードマップ'},
+
+  {id:'kashima', name:'鹿島川', area:'佐倉市・印旛沼流入部', approx:true,
+   centerline:[
+     [35.6700,140.2030],[35.6800,140.2050],[35.6900,140.2070],[35.7000,140.2090],
+     [35.7100,140.2110],[35.7180,140.2120],[35.7250,140.2100],[35.7320,140.2070],[35.7390,140.2040]],
+   halfWidth:25, maxLateral:1500, cell:25, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間)', span:'24時間', unit:'mm', max:700, step:5, tick:100, initial:120,
+         plan:200, planLabel:'計画規模(仮定)', maxScale:600, maxLabel:'想定最大(仮定)', riskWidth:28,
+         presets:[[120,'大雨 120'],[200,'計画規模(仮定) 200'],[250,'2019年10月大雨級(目安)'],[400,'超過 400'],[600,'想定最大(仮定) 600']]},
+   flood:{h0:0.6,h1:2.6,l0:300,l1:1200},
+   riskPoints:[
+     {id:'mawatashi', name:'馬渡付近(上流側)', type:'溢水', bank:'R', ref:[35.6800,140.2050], T:270, scale:0.8,
+      note:'川沿いの水田地帯に広がると仮定。'},
+     {id:'terasaki', name:'寺崎付近', type:'溢水', bank:'R', ref:[35.7000,140.2090], T:250, scale:0.9,
+      note:'2019年10月の大雨では、鹿島川・高崎川の流域で浸水被害が出た。'},
+     {id:'takasaki_j', name:'高崎川合流部', type:'合流部の背水', bank:'R', ref:[35.7180,140.2120], T:235, scale:1.0,
+      note:'高崎川が合流し、水位が上がりやすい区間と仮定。'},
+     {id:'kakurai', name:'角来・鹿島橋付近', type:'越水', bank:'L', ref:[35.7230,140.2105], T:255, scale:0.9,
+      note:'国道が川を渡る付近の低地と仮定。'},
+     {id:'mouth', name:'印旛沼流入部(飯野付近)', type:'沼の水位上昇による背水', bank:'L', ref:[35.7350,140.2060], T:245, scale:0.8,
+      note:'印旛沼の水位が高いと、川の水がはけにくくなると仮定。'}],
+   stations:[['佐倉',35.7095,140.2228],['京成佐倉',35.7230,140.2240],['京成臼井',35.7290,140.1870]],
+   officialNote:'佐倉市の洪水ハザードマップ'},
+
+  {id:'takasaki', name:'高崎川', area:'佐倉市・JR佐倉駅周辺', approx:true,
+   centerline:[
+     [35.7050,140.2650],[35.7070,140.2550],[35.7090,140.2450],[35.7110,140.2350],
+     [35.7125,140.2270],[35.7150,140.2200],[35.7180,140.2130]],
+   halfWidth:12, maxLateral:1000, cell:20, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間)', span:'24時間', unit:'mm', max:700, step:5, tick:100, initial:120,
+         plan:200, planLabel:'計画規模(仮定)', maxScale:600, maxLabel:'想定最大(仮定)', riskWidth:26,
+         presets:[[120,'大雨 120'],[200,'計画規模(仮定) 200'],[250,'2019年10月大雨級(目安)'],[400,'超過 400'],[600,'想定最大(仮定) 600']]},
+   flood:{h0:0.6,h1:2.2,l0:220,l1:800},
+   riskPoints:[
+     {id:'upper', name:'上流側(酒々井町境付近)', type:'溢水', bank:'L', ref:[35.7060,140.2600], T:260, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'omotecho', name:'表町・JR佐倉駅付近', type:'溢水', bank:'L', ref:[35.7120,140.2290], T:225, scale:1.0,
+      note:'2019年10月の大雨で高崎川があふれ、JR佐倉駅周辺が浸水した。'},
+     {id:'kaburagi', name:'鏑木町付近', type:'溢水', bank:'R', ref:[35.7140,140.2230], T:235, scale:0.9,
+      note:'市街地側の低地に広がると仮定。'},
+     {id:'join', name:'鹿島川合流部', type:'合流部の背水', bank:'L', ref:[35.7175,140.2140], T:230, scale:0.9,
+      note:'鹿島川の水位が高いと流れ込みにくくなる合流部と仮定。'}],
+   stations:[['佐倉',35.7095,140.2228],['京成佐倉',35.7230,140.2240]],
+   officialNote:'佐倉市の洪水ハザードマップ'},
+
+  /* 印旛沼は、沼を「幅の広い川」とみなして同じ簡易モデルに当てはめた近似 */
+  {id:'inba', name:'印旛沼', label:'西印旛沼', area:'西印旛沼周辺・佐倉市/印西市/八千代市', approx:true,
+   centerline:[
+     [35.7700,140.2150],[35.7600,140.2070],[35.7500,140.1980],[35.7440,140.1880],
+     [35.7420,140.1760],[35.7440,140.1640],[35.7460,140.1500]],
+   halfWidth:400, maxLateral:2500, cell:40, banks:['L','R'],
+   rain:{label:'流域平均雨量(48時間)', span:'48時間', unit:'mm', max:700, step:5, tick:100, initial:150,
+         plan:250, planLabel:'計画規模(仮定)', maxScale:600, maxLabel:'想定最大(仮定)', riskWidth:32,
+         presets:[[150,'大雨 150'],[250,'計画規模(仮定) 250'],[400,'超過 400'],[600,'想定最大(仮定) 600']]},
+   flood:{h0:0.5,h1:2.2,l0:500,l1:1800},
+   riskPoints:[
+     {id:'seto', name:'瀬戸・師戸付近(印西市側)', type:'沼の水位上昇による越水', bank:'R', ref:[35.7560,140.2030], T:320, scale:0.8,
+      note:'沼の北西岸の低地と仮定。'},
+     {id:'tsuchiuki', name:'土浮・飯野付近', type:'沼の水位上昇による越水', bank:'L', ref:[35.7500,140.1980], T:300, scale:0.9,
+      note:'沼沿いの干拓地・水田が広がる区間と仮定。沼を幅の広い川とみなした近似で計算している。'},
+     {id:'usui', name:'臼井田・舟戸付近', type:'沼の水位上昇・内水', bank:'L', ref:[35.7420,140.1800], T:290, scale:0.9,
+      note:'京成臼井駅の北側、沼に面した低地と仮定。'},
+     {id:'aso', name:'阿宗橋付近(八千代市側)', type:'放水路への流出部', bank:'R', ref:[35.7455,140.1530], T:310, scale:0.8,
+      note:'印旛放水路(新川)へ続く区間。沼の水位が高いと周辺が浸水しやすいと仮定。'}],
+   stations:[['京成佐倉',35.7230,140.2240],['京成臼井',35.7290,140.1870],['ユーカリが丘',35.7256,140.1533]],
+   officialNote:'佐倉市・印西市・八千代市の洪水ハザードマップ'}
+];
+
+/* ============================================================
+   座標変換と河道ジオメトリ
+   ============================================================ */
+let LAT0=35.70, LNG0=139.80; // 投影原点(初期値は関東中心。川を選ぶと buildGeo が上書きする)
+let KX=111320*Math.cos(LAT0*Math.PI/180), KY=110940;
+const toXY=(lat,lng)=>[(lng-LNG0)*KX,(lat-LAT0)*KY];
+const toLL=(x,y)=>[y/KY+LAT0,x/KX+LNG0];
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* 予報雨量の集計に使う流域代表点(上流域を含む。すべて概略の仮定値)
+   各河川の basin として RIVERS に付与する。未設定の川は centerline の始点・中点・終点で代用する */
+const BASINS={
+  tama:[[35.81,139.10],[35.79,139.26],[35.66,139.32],[35.70,139.41],[35.66,139.48],[35.62,139.57]],      // 奥多摩・青梅・八王子(浅川)・立川・府中・登戸
+  tsurumi:[[35.58,139.44],[35.55,139.52],[35.54,139.57],[35.51,139.62],[35.535,139.635],[35.51,139.68]], // 町田・青葉・都筑・新横浜・綱島・鶴見
+  zenpukuji:[[35.716,139.594],[35.700,139.615],[35.688,139.640],[35.690,139.665]],                       // 善福寺池〜神田川合流
+  arakawa:[[35.99,139.08],[36.11,139.19],[36.15,139.39],[35.86,139.32],[35.92,139.49],[35.79,139.73]],   // 秩父・寄居・熊谷・飯能(入間川)・川越・岩淵
+  kinu:[[36.88,139.50],[36.75,139.60],[36.82,139.72],[36.56,139.95],[36.40,139.98],[36.10,139.96]],      // 奥鬼怒・日光・鬼怒川温泉・宇都宮・真岡・常総
+  ichinomiya:[[35.43,140.23],[35.39,140.24],[35.43,140.29],[35.37,140.32],[35.38,140.36]],               // 長柄・長南・茂原・睦沢・一宮
+  kashima:[[35.53,140.27],[35.60,140.22],[35.67,140.20],[35.72,140.21]],                                 // 土気・千葉市若葉区・佐倉南部・佐倉
+  takasaki:[[35.67,140.32],[35.72,140.34],[35.72,140.27],[35.71,140.23]],                                // 八街・富里・酒々井・佐倉
+  inba:[[35.72,140.22],[35.67,140.32],[35.63,140.18],[35.74,140.08],[35.79,140.15],[35.78,140.28]]       // 佐倉・八街・千葉市北部・八千代・印西・成田西部
+};
+/* ============================================================
+   都市圏(REGIONS)と、関東以外の河川
+   ※ 以下の9河川は、河道・リスク地点・駅の座標、雨量の指標としきい値のすべてが概略の仮定値。
+     反映後は公式の浸水想定と重ねて、河道の位置を確認すること。
+   ============================================================ */
+const REGIONS=[{id:'kanto',name:'関東'},{id:'nagoya',name:'名古屋圏'},{id:'osaka',name:'大阪圏'},{id:'fukuoka',name:'福岡圏'}];
+/* 中小河川用の雨量設定(1時間雨量・仮定) */
+const rain1h=(plan,mx)=>({label:'1時間雨量(仮定)', span:'1時間', unit:'mm', max:200, step:1, tick:25, initial:40,
+  plan:plan, planLabel:'計画規模(仮定)', maxScale:mx, maxLabel:'想定最大(仮定)', riskWidth:8,
+  presets:[[40,'強い雨 40'],[plan,'計画規模(仮定) '+plan],[100,'時間100mm'],[mx,'想定最大(仮定) '+mx]]});
+RIVERS.push(
+  {id:'shonai', name:'庄内川', area:'名古屋市北区〜西区〜中川区付近', region:'nagoya', approx:true,
+   centerline:[
+     [35.2330,136.9900],[35.2280,136.9700],[35.2210,136.9500],[35.2150,136.9300],[35.2080,136.9100],[35.2000,136.8900],
+     [35.1900,136.8720],[35.1750,136.8580],[35.1580,136.8480],[35.1400,136.8420],[35.1200,136.8380],[35.1000,136.8350]],
+   halfWidth:120, maxLateral:4000, cell:50, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間・仮定)', span:'24時間', unit:'mm', max:800, step:5, tick:100, initial:150,
+         plan:300, planLabel:'計画規模(仮定)', maxScale:580, maxLabel:'想定最大(仮定)', riskWidth:35,
+         presets:[[150,'大雨 150'],[300,'計画規模(仮定) 300'],[450,'超過 450'],[580,'想定最大(仮定) 580']]},
+   flood:{h0:1.0,h1:4.0,l0:600,l1:2800},
+   riskPoints:[
+     {id:'ajima', name:'味鋺・洗堰付近', type:'越水・新川への分派', bank:'R', ref:[35.2180,136.9400], T:360, scale:0.8,
+      note:'洗堰から新川へ水が分かれる区間と仮定。位置は概略。'},
+     {id:'kita', name:'北区・庄内通付近', type:'越水', bank:'L', ref:[35.2050,136.9000], T:400, scale:1.0,
+      note:'名古屋市街地側の低地に広がると仮定。'},
+     {id:'biwajima', name:'枇杷島付近', type:'越水(橋梁が連続する区間)', bank:'L', ref:[35.1950,136.8800], T:380, scale:1.0,
+      note:'橋梁が連続し、水位が上がりやすい区間と仮定。2000年9月の東海豪雨では庄内川流域でも浸水被害が出た。'},
+     {id:'oharu', name:'大治町側(右岸)', type:'越水', bank:'R', ref:[35.1750,136.8580], T:410, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'nakamura', name:'中村区付近', type:'越水', bank:'L', ref:[35.1650,136.8520], T:410, scale:1.0,
+      note:'左岸側の市街地に広がると仮定。'},
+     {id:'nakagawa', name:'中川区・下流部', type:'越水', bank:'L', ref:[35.1300,136.8400], T:430, scale:0.9,
+      note:'河口に近い下流部の低地と仮定。'}],
+   stations:[['味鋺',35.2217,136.9336],['庄内通',35.2033,136.8900],['枇杷島',35.1986,136.8689]],
+   officialNote:'名古屋市・清須市・大治町などの洪水ハザードマップ'},
+
+  {id:'shinkawa', name:'新川', area:'清須市・名古屋市西区付近', region:'nagoya', approx:true,
+   centerline:[
+     [35.2240,136.9250],[35.2230,136.9050],[35.2180,136.8850],[35.2100,136.8680],[35.2000,136.8560],
+     [35.1850,136.8440],[35.1680,136.8350],[35.1500,136.8280],[35.1300,136.8230],[35.1100,136.8200]],
+   halfWidth:35, maxLateral:2000, cell:35, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間・仮定)', span:'24時間', unit:'mm', max:700, step:5, tick:100, initial:120,
+         plan:250, planLabel:'計画規模(仮定)', maxScale:550, maxLabel:'想定最大(仮定)', riskWidth:30,
+         presets:[[120,'大雨 120'],[250,'計画規模(仮定) 250'],[400,'超過 400'],[550,'想定最大(仮定) 550']]},
+   flood:{h0:0.7,h1:3.0,l0:400,l1:1600},
+   riskPoints:[
+     {id:'arai', name:'上流側(洗堰の下流)', type:'庄内川からの流入', bank:'R', ref:[35.2230,136.9050], T:300, scale:0.8,
+      note:'庄内川の水位が高いと洗堰から水が流れ込み、水位が上がりやすいと仮定。'},
+     {id:'nishibiwa', name:'西枇杷島付近', type:'堤防決壊', bank:'L', ref:[35.2050,136.8620], T:290, scale:1.0,
+      note:'2000年9月の東海豪雨で新川の堤防が決壊し、周辺が広く浸水した。地点の位置は概略。'},
+     {id:'kiyosu', name:'清須市側(右岸)', type:'越水', bank:'R', ref:[35.2000,136.8560], T:320, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'oharu2', name:'大治町・あま市付近', type:'越水', bank:'R', ref:[35.1680,136.8350], T:330, scale:0.9,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'lower', name:'下流部(名古屋市港区側)', type:'越水', bank:'L', ref:[35.1300,136.8230], T:340, scale:0.8,
+      note:'河口に近い下流部の低地と仮定。'}],
+   stations:[['枇杷島',35.1986,136.8689],['庄内通',35.2033,136.8900],['味鋺',35.2217,136.9336]],
+   officialNote:'清須市・名古屋市・大治町・あま市などの洪水ハザードマップ'},
+
+  {id:'tenpaku', name:'天白川', area:'名古屋市天白区〜南区付近', region:'nagoya', approx:true,
+   centerline:[
+     [35.1330,137.0050],[35.1250,136.9920],[35.1180,136.9800],[35.1100,136.9680],[35.1020,136.9560],
+     [35.0950,136.9440],[35.0880,136.9320],[35.0810,136.9200],[35.0760,136.9080]],
+   halfWidth:35, maxLateral:1800, cell:30, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間・仮定)', span:'24時間', unit:'mm', max:700, step:5, tick:100, initial:120,
+         plan:220, planLabel:'計画規模(仮定)', maxScale:500, maxLabel:'想定最大(仮定)', riskWidth:28,
+         presets:[[120,'大雨 120'],[220,'計画規模(仮定) 220'],[350,'超過 350'],[500,'想定最大(仮定) 500']]},
+   flood:{h0:0.6,h1:2.6,l0:300,l1:1300},
+   riskPoints:[
+     {id:'ueda', name:'天白区・植田付近', type:'溢水', bank:'R', ref:[35.1250,136.9920], T:290, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'nonami', name:'野並付近', type:'内水・溢水', bank:'R', ref:[35.1050,136.9600], T:260, scale:1.0,
+      note:'2000年9月の東海豪雨では、天白川流域で大きな浸水被害が出た。地点の位置は概略。'},
+     {id:'narumi', name:'緑区側(左岸)', type:'溢水', bank:'L', ref:[35.0950,136.9440], T:280, scale:0.9,
+      note:'左岸側の低地に広がると仮定。'},
+     {id:'minami', name:'南区・下流部', type:'越水', bank:'R', ref:[35.0850,136.9260], T:300, scale:0.9,
+      note:'河口に近い下流部の低地と仮定。'}],
+   stations:[['植田',35.1297,136.9839],['野並',35.1042,136.9553],['鳴海',35.0806,136.9500]],
+   officialNote:'名古屋市の洪水ハザードマップ'},
+
+  {id:'yodo', name:'淀川', area:'枚方〜大阪市内(下流部)', region:'osaka', approx:true,
+   centerline:[
+     [34.8250,135.6500],[34.8050,135.6300],[34.7850,135.6100],[34.7650,135.5900],[34.7480,135.5650],[34.7350,135.5400],
+     [34.7250,135.5150],[34.7150,135.4900],[34.7050,135.4650],[34.6950,135.4400],[34.6850,135.4200]],
+   halfWidth:300, maxLateral:5000, cell:60, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間・仮定)', span:'24時間', unit:'mm', max:600, step:5, tick:100, initial:120,
+         plan:260, planLabel:'計画規模(仮定)', maxScale:360, maxLabel:'想定最大(仮定)', riskWidth:30,
+         presets:[[120,'大雨 120'],[260,'計画規模(仮定) 260'],[360,'想定最大(仮定) 360'],[450,'超過 450']]},
+   flood:{h0:1.0,h1:5.0,l0:800,l1:3600},
+   riskPoints:[
+     {id:'hirakata', name:'枚方付近', type:'越水', bank:'L', ref:[34.8150,135.6400], T:350, scale:1.0,
+      note:'左岸側の市街地に広がると仮定。'},
+     {id:'takatsuki', name:'高槻・摂津側(右岸)', type:'越水', bank:'R', ref:[34.7850,135.6100], T:360, scale:1.0,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'moriguchi', name:'寝屋川市・守口付近', type:'越水', bank:'L', ref:[34.7480,135.5650], T:350, scale:1.0,
+      note:'背後に低平地が広がるため、氾濫時の影響範囲が大きいと仮定。'},
+     {id:'kema', name:'毛馬・淀川大堰付近', type:'越水', bank:'L', ref:[34.7250,135.5150], T:370, scale:1.0,
+      note:'大川(旧淀川)への分派点に近い区間と仮定。'},
+     {id:'juso', name:'十三・西中島付近(右岸)', type:'越水', bank:'R', ref:[34.7150,135.4900], T:370, scale:1.0,
+      note:'右岸側の市街地に広がると仮定。'},
+     {id:'hanshin', name:'阪神なんば線橋梁付近', type:'越水(堤防が低い箇所)', bank:'L', ref:[34.6950,135.4450], T:330, scale:1.0,
+      note:'橋梁部の堤防が周囲より低いと指摘されてきた箇所。位置は概略。'}],
+   stations:[['枚方市',34.8164,135.6490],['守口市',34.7361,135.5640],['十三',34.7203,135.4825]],
+   officialNote:'大阪市・守口市・寝屋川市・枚方市・高槻市・摂津市などの洪水ハザードマップ'},
+
+  {id:'yamato', name:'大和川', area:'柏原〜堺・大阪市境(下流部)', region:'osaka', approx:true,
+   centerline:[
+     [34.5760,135.6350],[34.5800,135.6150],[34.5860,135.5950],[34.5920,135.5750],[34.5940,135.5550],[34.5910,135.5350],
+     [34.5880,135.5150],[34.5880,135.4950],[34.5950,135.4750],[34.6020,135.4550],[34.6060,135.4380]],
+   halfWidth:130, maxLateral:4000, cell:50, banks:['L','R'],
+   rain:{label:'流域平均雨量(24時間・仮定)', span:'24時間', unit:'mm', max:600, step:5, tick:100, initial:100,
+         plan:200, planLabel:'計画規模(仮定)', maxScale:320, maxLabel:'想定最大(仮定)', riskWidth:28,
+         presets:[[100,'大雨 100'],[200,'計画規模(仮定) 200'],[320,'想定最大(仮定) 320'],[420,'超過 420']]},
+   flood:{h0:0.9,h1:4.0,l0:600,l1:2800},
+   riskPoints:[
+     {id:'kashiwara', name:'柏原・石川合流部', type:'合流部の背水', bank:'L', ref:[34.5790,135.6200], T:270, scale:0.8,
+      note:'石川が合流し、水位が上がりやすい区間と仮定。'},
+     {id:'yao', name:'八尾・藤井寺付近(右岸)', type:'越水', bank:'R', ref:[34.5860,135.5950], T:290, scale:1.0,
+      note:'右岸側は大阪平野の低地に向かって土地が低くなると仮定。'},
+     {id:'matsubara', name:'松原・天美付近(左岸)', type:'越水', bank:'L', ref:[34.5930,135.5650], T:300, scale:0.9,
+      note:'左岸側の低地に広がると仮定。'},
+     {id:'yata', name:'東住吉・矢田付近(右岸)', type:'越水', bank:'R', ref:[34.5925,135.5450], T:280, scale:1.0,
+      note:'大阪市側の市街地に広がると仮定。'},
+     {id:'asaka', name:'堺・浅香付近(左岸)', type:'越水', bank:'L', ref:[34.5880,135.5050], T:300, scale:0.9,
+      note:'左岸側の低地に広がると仮定。'},
+     {id:'suminoe', name:'住之江・河口付近(右岸)', type:'越水・高潮の影響', bank:'R', ref:[34.6020,135.4550], T:310, scale:0.9,
+      note:'河口に近く、潮位の影響も受ける区間と仮定。'}],
+   stations:[['柏原',34.5822,135.6258],['杉本町',34.5933,135.5069],['浅香',34.5847,135.5064]],
+   officialNote:'大阪市・堺市・松原市・八尾市・柏原市などの洪水ハザードマップ'},
+
+  {id:'neya', name:'寝屋川', area:'寝屋川市・大東市・東大阪市・大阪市東部', region:'osaka', approx:true,
+   centerline:[
+     [34.7650,135.6280],[34.7500,135.6260],[34.7350,135.6250],[34.7200,135.6230],[34.7080,135.6200],[34.7040,135.6050],
+     [34.7010,135.5880],[34.6990,135.5700],[34.6975,135.5530],[34.6960,135.5370],[34.6945,135.5240]],
+   halfWidth:15, maxLateral:1200, cell:20, banks:['L','R'],
+   rain:rain1h(60,140),
+   flood:{h0:0.5,h1:1.8,l0:300,l1:900},
+   riskPoints:[
+     {id:'neyagawa', name:'寝屋川市付近(上流側)', type:'溢水', bank:'R', ref:[34.7500,135.6260], T:80, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'daito', name:'大東市・住道付近', type:'内水・合流部の背水', bank:'L', ref:[34.7080,135.6200], T:68, scale:1.0,
+      note:'寝屋川流域は低平地で、雨水が川へ自然に流れ込みにくく内水氾濫が起きやすい。1972年7月の大雨では大東市などで浸水被害が出た。'},
+     {id:'tokuan', name:'東大阪市北部・徳庵付近', type:'内水・溢水', bank:'L', ref:[34.7010,135.5880], T:72, scale:0.9,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'tsurumi', name:'大阪市鶴見区側(右岸)', type:'内水・溢水', bank:'R', ref:[34.6990,135.5700], T:74, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'kyobashi', name:'城東区・京橋付近', type:'合流部の背水', bank:'R', ref:[34.6960,135.5370], T:78, scale:0.8,
+      note:'下流の川の水位が高いと流れ込みにくくなる区間と仮定。'}],
+   stations:[['寝屋川市',34.7631,135.6278],['住道',34.7067,135.6219],['京橋',34.6967,135.5342]],
+   officialNote:'寝屋川市・大東市・東大阪市・大阪市などの洪水・内水ハザードマップ'},
+
+  {id:'mikasa', name:'御笠川', area:'大野城市〜博多駅東側〜博多湾', region:'fukuoka', approx:true,
+   centerline:[
+     [33.5300,130.4850],[33.5420,130.4760],[33.5540,130.4660],[33.5660,130.4560],[33.5760,130.4460],
+     [33.5850,130.4360],[33.5930,130.4270],[33.6010,130.4180],[33.6080,130.4100]],
+   halfWidth:20, maxLateral:1500, cell:25, banks:['L','R'],
+   rain:rain1h(65,150),
+   flood:{h0:0.6,h1:2.2,l0:300,l1:1000},
+   riskPoints:[
+     {id:'onojo', name:'大野城市・上流側', type:'溢水', bank:'L', ref:[33.5420,130.4760], T:85, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'itazuke', name:'板付付近(右岸)', type:'溢水', bank:'R', ref:[33.5660,130.4560], T:80, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'sanno', name:'山王・比恵付近', type:'溢水', bank:'L', ref:[33.5800,130.4410], T:74, scale:1.0,
+      note:'博多駅の南東側の低地と仮定。'},
+     {id:'hakata', name:'博多駅東付近', type:'溢水', bank:'L', ref:[33.5890,130.4310], T:72, scale:1.0,
+      note:'1999年6月と2003年7月の大雨で御笠川があふれ、博多駅周辺が浸水した。地点の位置は概略。'},
+     {id:'higashihie', name:'東比恵側(右岸)', type:'溢水', bank:'R', ref:[33.5890,130.4310], T:78, scale:0.9,
+      note:'右岸側の低地に広がると仮定。'},
+     {id:'mouth', name:'千代・河口付近', type:'越水・高潮の影響', bank:'R', ref:[33.6010,130.4180], T:88, scale:0.8,
+      note:'河口に近く、潮位の影響も受ける区間と仮定。'}],
+   stations:[['博多',33.5897,130.4207],['竹下',33.5672,130.4344],['南福岡',33.5461,130.4583]],
+   officialNote:'福岡市・大野城市の洪水ハザードマップ'},
+
+  {id:'naka', name:'那珂川', area:'福岡市南区〜中洲', region:'fukuoka', approx:true,
+   centerline:[
+     [33.5300,130.4250],[33.5400,130.4230],[33.5500,130.4200],[33.5600,130.4170],[33.5700,130.4140],
+     [33.5790,130.4110],[33.5870,130.4080],[33.5940,130.4050],[33.6000,130.4010]],
+   halfWidth:25, maxLateral:1500, cell:25, banks:['L','R'],
+   rain:rain1h(65,150),
+   flood:{h0:0.6,h1:2.2,l0:300,l1:1000},
+   riskPoints:[
+     {id:'ijiri', name:'南区・上流側', type:'溢水', bank:'R', ref:[33.5400,130.4230], T:86, scale:0.8,
+      note:'上流側の川沿い低地と仮定。'},
+     {id:'ohashi', name:'大橋付近', type:'溢水', bank:'R', ref:[33.5600,130.4170], T:80, scale:0.9,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'kiyokawa', name:'清川・渡辺通側(左岸)', type:'溢水', bank:'L', ref:[33.5790,130.4110], T:78, scale:0.9,
+      note:'左岸側の市街地に広がると仮定。'},
+     {id:'sumiyoshi', name:'春吉・住吉付近(右岸)', type:'溢水', bank:'R', ref:[33.5870,130.4080], T:76, scale:1.0,
+      note:'右岸側の市街地に広がると仮定。'},
+     {id:'nakasu', name:'中洲付近', type:'越水・高潮の影響', bank:'L', ref:[33.5940,130.4050], T:82, scale:0.9,
+      note:'河口に近く、潮位の影響も受ける区間と仮定。'}],
+   stations:[['天神',33.5914,130.3990],['中洲川端',33.5950,130.4063],['大橋',33.5589,130.4269]],
+   officialNote:'福岡市の洪水ハザードマップ'},
+
+  {id:'hii', name:'樋井川', area:'福岡市城南区〜中央区', region:'fukuoka', approx:true,
+   centerline:[
+     [33.5400,130.3800],[33.5480,130.3780],[33.5560,130.3770],[33.5640,130.3760],
+     [33.5720,130.3740],[33.5800,130.3710],[33.5870,130.3680],[33.5940,130.3650]],
+   halfWidth:12, maxLateral:1000, cell:20, banks:['L','R'],
+   rain:rain1h(60,150),
+   flood:{h0:0.5,h1:1.8,l0:220,l1:700},
+   riskPoints:[
+     {id:'nagao', name:'城南区・上流側', type:'溢水', bank:'R', ref:[33.5480,130.3780], T:82, scale:0.8,
+      note:'川幅が狭い上流部。短時間の強い雨で水位が急に上がると仮定。'},
+     {id:'tashima', name:'田島・友泉付近', type:'溢水', bank:'L', ref:[33.5640,130.3760], T:70, scale:1.0,
+      note:'2009年7月の大雨で、樋井川の流域に浸水被害が出た。地点の位置は概略。'},
+     {id:'befu', name:'別府・鳥飼付近', type:'溢水', bank:'R', ref:[33.5720,130.3740], T:72, scale:1.0,
+      note:'川沿いの低い土地に水が集まりやすいと仮定。'},
+     {id:'kusagae', name:'草ヶ江・今川付近', type:'溢水', bank:'R', ref:[33.5870,130.3680], T:76, scale:0.9,
+      note:'下流側の市街地に広がると仮定。'}],
+   stations:[['別府',33.5731,130.3719],['西新',33.5836,130.3597],['唐人町',33.5889,130.3731]],
+   officialNote:'福岡市の洪水ハザードマップ'}
+);
+RIVERS.forEach(r=>{ if(!r.region) r.region='kanto'; }); // 既存の川は関東
+/* 追加河川の流域代表点(概略の仮定値) */
+Object.assign(BASINS,{
+  shonai:[[35.42,137.25],[35.36,137.13],[35.33,137.02],[35.25,136.97],[35.20,136.89]],            // 恵那方面・土岐・多治見・春日井・名古屋北部
+  shinkawa:[[35.29,136.92],[35.26,136.88],[35.22,136.90],[35.20,136.86]],                         // 小牧・北名古屋・味鋺・清須
+  tenpaku:[[35.16,137.08],[35.13,137.01],[35.11,136.97],[35.09,136.94]],                          // 日進・天白・野並・南区
+  yodo:[[35.25,136.10],[35.00,135.90],[34.77,136.13],[34.75,135.85],[35.01,135.58],[34.95,135.72],[34.82,135.65]], // 琵琶湖東・琵琶湖南・伊賀(木津川)・木津川下流・亀岡(桂川)・京都・枚方
+  yamato:[[34.68,135.82],[34.60,135.70],[34.51,135.79],[34.52,135.85],[34.45,135.57],[34.58,135.63]], // 奈良・王寺・橿原・桜井・河内長野(石川)・柏原
+  neya:[[34.77,135.63],[34.74,135.64],[34.71,135.62],[34.70,135.57]],                             // 寝屋川・四條畷・大東・鶴見
+  mikasa:[[33.51,130.52],[33.53,130.48],[33.56,130.46],[33.59,130.43]],                           // 太宰府・大野城・板付・博多
+  naka:[[33.45,130.42],[33.50,130.42],[33.54,130.42],[33.58,130.41]],                             // 那珂川上流・那珂川市・南区・中央区
+  hii:[[33.53,130.38],[33.55,130.38],[33.57,130.37],[33.59,130.37]]                               // 油山のふもと・城南区・別府・今川
+});
+const regionName=()=>{ const g=REGIONS.find(x=>x.id===REGION); return g?g.name:''; };
+RIVERS.forEach(r=>{ if(!r.basin&&BASINS[r.id]) r.basin=BASINS[r.id]; });
+
+let SEGS=[]; let STOT=0;
+function buildSegs(line){
+  SEGS=[]; STOT=0;
+  const p=line.map(c=>toXY(c[0],c[1]));
+  for(let i=0;i<p.length-1;i++){
+    const ax=p[i][0],ay=p[i][1],bx=p[i+1][0],by=p[i+1][1];
+    const len=Math.hypot(bx-ax,by-ay);
+    SEGS.push({ax,ay,len,tx:(bx-ax)/len,ty:(by-ay)/len,s0:STOT});
+    STOT+=len;
+  }
+}
+
+/* 点を河道中心線に投影:s=上流端からの距離, d=中心線からの距離, side<0 が右岸 */
+function project(x,y){
+  let bd=Infinity,res=null;
+  const last=SEGS.length-1;
+  for(let i=0;i<=last;i++){
+    const g=SEGS[i];
+    const t=((x-g.ax)*g.tx+(y-g.ay)*g.ty)/g.len;
+    const tc=clamp(t,0,1);
+    const px=g.ax+g.tx*g.len*tc, py=g.ay+g.ty*g.len*tc;
+    const d=Math.hypot(x-px,y-py);
+    if(d<bd){
+      bd=d;
+      res={s:g.s0+tc*g.len,d:d,side:g.tx*(y-g.ay)-g.ty*(x-g.ax),
+           out:(i===0&&t<0)||(i===last&&t>1)};
+    }
+  }
+  return res;
+}
+/* 距離sの位置から右岸方向へoff(m)ずらした点 */
+function pointAt(s,off){
+  s=clamp(s,0,STOT-0.01);
+  let g=SEGS[0];
+  for(const q of SEGS){ if(s>=q.s0) g=q; }
+  const u=s-g.s0;
+  return [g.ax+g.tx*u+g.ty*off, g.ay+g.ty*u-g.tx*off];
+}
+
+/* 仮の地形:堤防沿いの微高地 → 後背低地 → 丘陵。実測標高ではない */
+function ground(s,lat,x,y){
+  const hill=1300+(s/STOT)*2900; // 上流ほど丘陵が川に近い
+  let g=0.7*Math.exp(-lat/260)+0.00025*lat+Math.max(0,lat-hill)*0.018;
+  g+=0.28*Math.sin(x/310+1.3)*Math.cos(y/270)+0.18*Math.sin((x+y)/140);
+  return g;
+}
+
+/* ============================================================
+   計算メッシュの前計算
+   ============================================================ */
+let B=null, W_M=0, H_M=0, COLS=1, ROWS=1, NCELL=1, CELL_AREA=0;
+let mask=null, cs=null, cl=null, cg=null;   // mask: 0=対象外 / 1=右岸 / 2=左岸
+let pts=[];
+let chn=null;   // 河道内のセル(1)。内水氾濫の計算対象から外す
+const GEO_CACHE={};   // 河川ごとの計算結果(一度選んだ川は再計算しない)
+
+/* 選ばれた川の投影原点・河道・計算範囲・メッシュ・リスク地点を生成する */
+function buildGeo(rv){
+  const line=rv.centerline;
+  if(rv.origin){ LAT0=rv.origin[0]; LNG0=rv.origin[1]; }
+  else{
+    let a=0,b=0; line.forEach(c=>{a+=c[0];b+=c[1];});
+    LAT0=a/line.length; LNG0=b/line.length;
+  }
+  KX=111320*Math.cos(LAT0*Math.PI/180); KY=110940;
+  buildSegs(line);
+  if(rv.bounds) B=rv.bounds;
+  else{
+    const pad=rv.halfWidth+rv.maxLateral+rv.cell*2;
+    let S=90,N=-90,W=180,E=-180;
+    line.forEach(c=>{S=Math.min(S,c[0]);N=Math.max(N,c[0]);W=Math.min(W,c[1]);E=Math.max(E,c[1]);});
+    B={S:S-pad/KY,N:N+pad/KY,W:W-pad/KX,E:E+pad/KX};
+  }
+W_M=(B.E-B.W)*KX; H_M=(B.N-B.S)*KY;
+  let cell=rv.cell;
+  if((W_M/cell)*(H_M/cell)>MAX_CELLS) cell=Math.sqrt(W_M*H_M/MAX_CELLS); // セル数が多すぎる場合は粗くする
+  CONFIG={bounds:B,cell:cell,halfWidth:rv.halfWidth,maxLateral:rv.maxLateral,
+          autoThreshold:AUTO_THRESHOLD,riskWidth:rv.rain.riskWidth,
+          rainPlan:rv.rain.plan,rainMax:rv.rain.maxScale};
+COLS=Math.round(W_M/CONFIG.cell); ROWS=Math.round(H_M/CONFIG.cell);
+NCELL=COLS*ROWS;
+CELL_AREA=(W_M/COLS)*(H_M/ROWS);
+mask=new Uint8Array(NCELL); cs=new Float32Array(NCELL); chn=new Uint8Array(NCELL);
+      cl=new Float32Array(NCELL), cg=new Float32Array(NCELL);
+(function(){
+  const dLat=(B.N-B.S)/ROWS, dLng=(B.E-B.W)/COLS;
+  for(let r=0;r<ROWS;r++){
+    const lat=B.N-(r+0.5)*dLat;
+    for(let c=0;c<COLS;c++){
+      const xy=toXY(lat,B.W+(c+0.5)*dLng);
+      const p=project(xy[0],xy[1]);
+      const i=r*COLS+c;
+      const lateral=p.d-CONFIG.halfWidth;
+      if(lateral<0&&!p.out) chn[i]=1; // 河道内
+      const right=p.side<0; // side<0 が右岸、それ以外は左岸
+      if(p.out||lateral<0||lateral>CONFIG.maxLateral||rv.banks.indexOf(right?'R':'L')<0) continue;
+      mask[i]=right?1:2; cs[i]=p.s; cl[i]=lateral; cg[i]=ground(p.s,lateral,xy[0],xy[1]);
+    }
+  }
+})();
+
+/* リスク地点を bank 側の堤防上に配置 */
+pts=rv.riskPoints.map(p=>{
+  const bank=p.bank||'R'; // bank 側の堤防上に置く
+  const xy=toXY(p.ref[0],p.ref[1]);
+  const s=project(xy[0],xy[1]).s;
+  const q=pointAt(s,(CONFIG.halfWidth+15)*(bank==='L'?-1:1));
+  return Object.assign({},p,{bank:bank,bm:bank==='L'?2:1,s:s,ll:toLL(q[0],q[1]),
+                             r:0,manual:false,active:false,marker:null});
+}).sort((a,b)=>a.s-b.s);
+
+  return {LAT0:LAT0,LNG0:LNG0,KX:KX,KY:KY,SEGS:SEGS,STOT:STOT,B:B,W_M:W_M,H_M:H_M,
+          COLS:COLS,ROWS:ROWS,NCELL:NCELL,CELL_AREA:CELL_AREA,
+          mask:mask,cs:cs,cl:cl,cg:cg,pts:pts,CONFIG:CONFIG,rainVal:rv.rain.initial,chn:chn,dem:null};
+}
+/* キャッシュ済みの計算結果を現在の川として読み込む */
+function useGeo(g){
+  LAT0=g.LAT0; LNG0=g.LNG0; KX=g.KX; KY=g.KY; SEGS=g.SEGS; STOT=g.STOT;
+  B=g.B; W_M=g.W_M; H_M=g.H_M; COLS=g.COLS; ROWS=g.ROWS; NCELL=g.NCELL; CELL_AREA=g.CELL_AREA;
+  mask=g.mask; cs=g.cs; cl=g.cl; cg=g.cg; pts=g.pts; CONFIG=g.CONFIG;
+}
+
+/* ============================================================
+   地図
+   ============================================================ */
+const map=L.map('map',{zoomControl:true,attributionControl:true,minZoom:8,maxZoom:17})
+  .fitBounds([[35.35,139.50],[36.20,140.40]]); // 初期表示は関東全体
+
+L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',{
+  maxZoom:18,
+  attribution:'<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>'
+}).addTo(map);
+
+/* 公式浸水想定を要求する範囲: 全河川の外接範囲(計算幅ぶん)に約0.05度の余白を足す。範囲外のタイルは要求しない */
+const OFF_BOUNDS=(function(){
+  let S=90,N=-90,W=180,E=-180;
+  RIVERS.forEach(r=>{
+    const m=r.halfWidth+r.maxLateral;
+    const dLat=m/110940+0.05, dLng=m/(111320*Math.cos(35.7*Math.PI/180))+0.05;
+    r.centerline.forEach(c=>{
+      S=Math.min(S,c[0]-dLat); N=Math.max(N,c[0]+dLat);
+      W=Math.min(W,c[1]-dLng); E=Math.max(E,c[1]+dLng);
+    });
+  });
+  return [[S,W],[N,E]];
+})();
+const officialLayer=L.tileLayer(
+  'https://disaportaldata.gsi.go.jp/raster/01_flood_l2_shinsuishin_data/{z}/{x}/{y}.png',
+  {maxNativeZoom:17,maxZoom:18,opacity:0.6,bounds:OFF_BOUNDS,
+   /* 浸水想定のない場所のタイルは存在せず、404になるのが正常。透明画像で置き換える */
+   errorTileUrl:'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+   attribution:'<a href="https://disaportal.gsi.go.jp/" target="_blank" rel="noopener">ハザードマップポータルサイト</a>'});
+
+/* 浸水域(キャンバスを画像として重ねる) */
+const cv=document.createElement('canvas'); cv.width=1; cv.height=1;
+const ctx=cv.getContext('2d');
+let img=ctx.createImageData(1,1);
+const floodLayer=L.imageOverlay(cv.toDataURL(),[[35,139],[36,140]],{opacity:0.8,interactive:false});
+const riverLayer=L.layerGroup().addTo(map);  // 河道・駅・リスク地点(川の切替時に丸ごと消す)
+const overviewLayer=L.layerGroup();          // 関東全体表示の河川マーカー
+
+/* 河道(タイルが読めない環境でも位置が分かるようベクターで描く) */
+function drawRiver(rv){
+  const right=[],left=[];
+  const stp=Math.max(20,Math.min(120,STOT/40));
+  for(let s=0;s<=STOT;s+=stp){
+    const a=pointAt(s,CONFIG.halfWidth), b=pointAt(s,-CONFIG.halfWidth);
+    right.push(toLL(a[0],a[1])); left.push(toLL(b[0],b[1]));
+  }
+  L.polygon(right.concat(left.slice().reverse()),
+    {color:'#1B4A63',weight:1,fillColor:'#2F6F8F',fillOpacity:0.55,interactive:false}).addTo(riverLayer);
+  if(rv.banks.indexOf('L')>=0) L.polyline(left,{color:'#12262E',weight:3,opacity:0.85,interactive:false}).addTo(riverLayer);
+  if(rv.banks.indexOf('R')>=0) L.polyline(right,{color:'#12262E',weight:3,opacity:0.85,interactive:false}).addTo(riverLayer); // 右岸の堤防
+  const mid=pointAt(STOT*0.47,0);
+  L.tooltip({permanent:true,direction:'center',className:'river-label',interactive:false})
+    .setLatLng(toLL(mid[0],mid[1])).setContent(rv.label||rv.name).addTo(riverLayer);
+
+  rv.stations.forEach(s=>{
+  L.circleMarker([s[1],s[2]],{radius:4,color:'#12262E',weight:2,fillColor:'#fff',fillOpacity:1,interactive:false})
+   .bindTooltip(s[0]+'駅',{permanent:true,direction:'bottom',offset:[0,3],className:'st-label'})
+   .addTo(riverLayer);
+  });
+}
+
+/* ============================================================
+   状態と描画
+   ============================================================ */
+const $=id=>document.getElementById(id);
+const slider=$('rain');
+const APP_NAME='水害ノート';      // アプリ名(document.title とヘッダーの組み立てに使う)
+let mode='auto';
+let APPMODE='peace';              // 表示モード: 'peace'=平時(学ぶ) / 'emg'=有事(公式情報の確認)。メモリ上のみ
+let REGION='kanto';               // 表示中の都市圏(REGIONS の id)
+let floodKind='river';            // 表示する浸水: 'river'=河川氾濫 / 'inland'=内水氾濫 / 'both'=両方
+let CUR=null;                     // 選択中の河川の計算結果(GEO_CACHE の要素)
+let RV=null;                      // 選択中の河川(null=関東全体)
+let DEP=null;                     // セルごとの試算浸水深(m)。drawFlood が書き出し、確認地点の表示に使う
+let offRiver=true, offOv=true;   // 公式浸水想定レイヤーのON/OFF(河川表示時/関東全体表示時)
+const bankTag=p=>RV&&RV.banks.length>1?'・'+(p.bank==='L'?'左岸':'右岸'):'';
+
+const LEVELS=[
+  {max:0.15,label:'低い',color:'#3E9B6E'},
+  {max:0.40,label:'注意',color:'#D9A400'},
+  {max:0.70,label:'警戒',color:'#E8741E'},
+  {max:1.01,label:'危険',color:'#D7263D'}
+];
+const levelOf=r=>LEVELS.find(l=>r<l.max);
+const BREACH='#7A1FA2';
+const DEPTH_COLORS=[[0.5,247,245,169],[1,255,216,192],[3,255,183,183],[5,255,145,145],[Infinity,242,133,201]];
+
+function popupHtml(p){
+  if(APPMODE==='emg'){ // 有事モードでは試算を出さず、地点の説明だけにする
+    return '<div class="pop"><h3>'+p.name+'</h3><div class="t">'+p.type+bankTag(p)+'</div><p>'+p.note+'</p></div>';
+  }
+  const lv=levelOf(p.r);
+  const btn=mode==='manual'
+    ? '<button class="pop-toggle" data-id="'+p.id+'" aria-pressed="'+p.manual+'">'+(p.manual?'氾濫の想定を解除':'ここで氾濫を想定')+'</button>'
+    : '';
+  return '<div class="pop"><h3>'+p.name+'</h3><div class="t">'+p.type+bankTag(p)+'</div>'+
+    '<div class="r" style="color:'+(p.active?BREACH:lv.color)+'">'+
+    (p.active?'氾濫を想定中':'試算: '+lv.label)+'(試算 '+Math.round(p.r*100)+'%)</div>'+
+    '<p class="t">仮定値による試算で、実際の危険度ではありません。</p>'+
+    '<p>'+p.note+'</p>'+
+    '<p class="t">試算50%の目安:'+RV.rain.span+' '+p.T+RV.rain.unit+'(仮定値)</p>'+btn+'</div>';
+}
+
+function addMarkers(){ pts.forEach(p=>{
+  p.marker=L.marker(p.ll,{keyboard:true,title:p.name}).addTo(riverLayer);
+  p.marker.bindPopup(()=>popupHtml(p),{maxWidth:260});
+}); }
+
+/* 丸いマーカーのアイコン(リスク地点・関東全体の河川マーカーで共通) */
+function rpIcon(color,on){
+  return L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],popupAnchor:[0,-10],
+    html:'<div class="rp'+(on?' on':'')+'" style="background:'+color+'"></div>'});
+}
+function setIcon(p){
+  const emg=APPMODE==='emg'; // 有事モードでは、隠れている雨量設定の試算を色に出さない
+  const c=emg?OV_BLUE:(p.active?BREACH:levelOf(p.r).color);
+  p.marker.setIcon(rpIcon(c,p.active&&!emg));
+  p.marker.setZIndexOffset(p.active?1000:Math.round(p.r*100));
+}
+
+function drawFlood(rain,active){
+  const d=img.data; d.fill(0);
+  if(!DEP||DEP.length!==NCELL) DEP=new Float32Array(NCELL); else DEP.fill(0); // 深さの書き出し先(計算式は変更なし)
+  const F=RV.fl; // 雨量→水位・広がりの換算基準(rain.plan / rain.maxScale から算出)
+  const k0=clamp(rain/F.start,0,1), k=clamp((rain-F.start)/(F.full-F.start),0,1);
+  const h=F.h0*k0+F.h1*k, L0=F.l0+F.l1*k;
+  const bs=active.map(p=>({s:p.s,bm:p.bm,H:h*p.scale,L:L0*(0.6+0.4*p.scale)}));
+  let cnt=0,maxD=0;
+  const IN=inlandParams();              // 内水の計算条件(内水を描かないときは null)
+  const useRiver=floodKind!=='inland';  // 内水のみの表示では河川氾濫を描かない
+  if(bs.length||IN){
+    for(let i=0;i<NCELL;i++){
+      if(!mask[i]&&!IN) continue;
+      let dep=0;
+      for(let j=0;useRiver&&j<bs.length;j++){
+        const b=bs[j];
+        if(b.bm!==mask[i]) continue;            // 氾濫は地点と同じ岸にだけ広げる
+        const ds=cs[i]-b.s;
+        const along=ds>=0?ds*0.55:-ds*1.7;      // 下流側へ広がりやすい
+        const e=Math.hypot(along,cl[i]*0.9);
+        const v=b.H*Math.exp(-e/b.L)-cg[i];
+        if(v>dep) dep=v;
+      }
+      if(IN&&!IN.chn[i]){
+        /* 内水: 周囲より低い土地ほど深くたまる(深さは maxLow で頭打ち) */
+        const lw=IN.low[i];
+        if(lw>IN.minLow){
+          const v=IN.maxLow*(1-Math.exp(-lw/IN.maxLow))*IN.fill;
+          if(v>dep) dep=v;               // 「両方」では深いほうを採用
+        }
+      }
+      if(dep>0.05){
+        cnt++; if(dep>maxD) maxD=dep; DEP[i]=dep;
+        let col=DEPTH_COLORS[0];
+        for(let n=0;n<DEPTH_COLORS.length;n++){ if(dep<DEPTH_COLORS[n][0]){col=DEPTH_COLORS[n];break;} }
+        const o=i*4; d[o]=col[1]; d[o+1]=col[2]; d[o+2]=col[3]; d[o+3]=215;
+      }
+    }
+  }
+  ctx.putImageData(img,0,0);
+  floodLayer.setUrl(cv.toDataURL());
+  return {area:cnt*CELL_AREA/1e6,maxD:maxD};
+}
+
+function renderList(){
+  $('pts').innerHTML=pts.map(p=>{
+    const lv=levelOf(p.r), c=p.active?BREACH:lv.color;
+    const toggle=mode==='manual'
+      ? '<button class="pt-toggle" data-toggle="'+p.id+'" aria-pressed="'+p.manual+'">'+(p.manual?'想定中':'氾濫を想定')+'</button>'
+      : '';
+    return '<li><button class="pt-main" data-focus="'+p.id+'">'+
+      '<span class="pt-dot" style="background:'+c+'"></span>'+
+      '<span class="pt-name">'+p.name+'</span>'+
+      '<span class="pt-pct" style="color:'+c+'"><small>試算</small>'+Math.round(p.r*100)+'%</span>'+
+      '<span class="pt-type">'+p.type+bankTag(p)+(p.active?'/氾濫を想定中':'/試算: '+lv.label)+'</span>'+
+      '</button>'+toggle+'</li>';
+  }).join('');
+}
+
+function update(){
+  if(!RV) return; // 関東全体表示では簡易シミュレーションを描かない
+  const rain=+slider.value;
+  $('rainOut').textContent=rain;
+  pts.forEach(p=>{
+    p.r=1/(1+Math.exp(-(rain-p.T)/CONFIG.riskWidth));
+    p.active=mode==='auto'?p.r>=CONFIG.autoThreshold:p.manual;
+  });
+  const active=pts.filter(p=>p.active);
+  const st=drawFlood(rain,active);
+  pts.forEach(p=>{
+    setIcon(p);
+    if(p.marker.isPopupOpen()) p.marker.setPopupContent(popupHtml(p));
+  });
+  renderList();
+
+  $('sArea').innerHTML=st.area.toFixed(1)+'<small>km²</small>';
+  $('sDepth').innerHTML=st.maxD.toFixed(1)+'<small>m</small>';
+  $('sCount').innerHTML=active.length+'<small>か所</small>';
+  refreshInlandUi();
+
+  renderAct();   // 行動の目安
+  renderLoc();   // 確認地点の試算浸水深
+  const status=$('status');
+  if(active.length){
+    status.textContent='試算: 氾濫を想定 '+active.length+'か所'; status.style.background=BREACH;
+  }else{
+    const lv=levelOf(Math.max.apply(null,pts.map(p=>p.r)));
+    status.textContent=lv.label==='低い'?'試算上は低い':'試算: '+lv.label; status.style.background=lv.color;
+  }
+  $('modeHint').textContent=mode==='auto'
+    ? 'リスクが'+Math.round(CONFIG.autoThreshold*100)+'%以上になった地点を、氾濫したものとして浸水域を描きます。'
+    : '一覧か地図上の地点を選ぶと、その地点が氾濫した場合の浸水域を描きます。広がりは雨量に応じて変わります。';
+  if(APPMODE==='emg'){ // 有事モードでは、隠れている雨量設定の試算を状態表示に出さない
+    status.textContent='有事: 屋内から記録'; status.style.background='#D7263D';
+  }
+}
+
+/* ============================================================
+   操作
+   ============================================================ */
+let raf=0;
+slider.addEventListener('input',()=>{
+  $('rainOut').textContent=slider.value;
+  clearPresetNote();
+  if(!raf) raf=requestAnimationFrame(()=>{raf=0;update();});
+});
+
+$('presets').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  slider.value=b.dataset.v; update();
+  showPresetNote(b.textContent);
+});
+
+function setMode(m){
+  mode=m;
+  $('modeAuto').setAttribute('aria-pressed',m==='auto');
+  $('modeManual').setAttribute('aria-pressed',m==='manual');
+  update();
+}
+$('modeAuto').addEventListener('click',()=>setMode('auto'));
+$('modeManual').addEventListener('click',()=>setMode('manual'));
+
+const byId=id=>pts.find(p=>p.id===id);
+$('pts').addEventListener('click',e=>{
+  const t=e.target.closest('[data-toggle]');
+  if(t){ const p=byId(t.dataset.toggle); if(!p) return; p.manual=!p.manual; update(); return; }
+  const f=e.target.closest('[data-focus]');
+  if(f){
+    const p=byId(f.dataset.focus);
+    if(!p) return;
+    map.setView(p.ll,Math.max(map.getZoom(),14),{animate:true});
+    p.marker.openPopup();
+  }
+});
+$('map').addEventListener('click',e=>{
+  const t=e.target.closest('.pop-toggle'); if(!t) return;
+  const p=byId(t.dataset.id); if(!p) return; p.manual=!p.manual; update();
+});
+
+$('official').addEventListener('change',e=>{
+  if(RV) offRiver=e.target.checked; else offOv=e.target.checked;
+  setOfficial(e.target.checked); // レイヤーの追加・削除は setOfficial に一本化
+});
+
+/* ゲージの目盛り・配色・プリセット(川ごとの雨量設定から生成) */
+function buildGauge(rn){
+  const pc=v=>v/rn.max*100;
+  let h='';
+  for(let v=0,n=0;v<=rn.max+1e-9;v+=rn.tick,n++){
+    h+='<span class="tick" style="left:'+pc(v)+'%">'+(n%2===0?'<b>'+v+'</b>':'')+'</span>';
+  }
+  h+='<span class="mark left" style="left:'+pc(rn.plan)+'%"><b>'+(rn.planLabel||'計画規模')+'</b></span>';
+  h+='<span class="mark right" style="left:'+pc(rn.maxScale)+'%"><b>'+(rn.maxLabel||'想定最大')+'</b></span>';
+  h+='<span class="mark fcm" id="fcMark" hidden><b>予報</b></span>'; // 予報最大値の位置(renderFc が動かす)
+  $('ticks').innerHTML=h;
+
+  /* ゲージの色分け */
+  const g=(rn.grad||[rn.plan*0.82,rn.plan*0.96,rn.plan*1.12,rn.maxScale,rn.maxScale*1.22])
+    .map(v=>Math.min(100,pc(v)));
+  document.querySelector('.gauge .track').style.background=
+    'linear-gradient(90deg,#CFE3EA 0%,#CFE3EA '+g[0]+'%,var(--watch) '+g[1]+'%,var(--warn) '+g[2]+
+    '%,var(--danger) '+g[3]+'%,var(--breach) '+g[4]+'%)';
+
+  $('presets').innerHTML=rn.presets.map(p=>'<button data-v="'+p[0]+'">'+p[1]+'</button>').join('');
+  $('rainTtl').textContent=rn.label;
+  $('rainUnit').textContent=rn.unit+' / '+rn.span;
+  slider.min=0; slider.max=rn.max; slider.step=rn.step;
+  slider.setAttribute('aria-label',rn.label+'('+rn.unit+')');
+}
+
+/* ============================================================
+   河川の切替
+   ============================================================ */
+/* 概略データの注意書き(注意欄の末尾に追加) */
+const approxNote=document.createElement('div');
+approxNote.id='approxNote';
+document.querySelector('.notice').appendChild(approxNote);
+
+/* ============================================================
+   内水氾濫(実標高を使う)
+   ============================================================ */
+/* 内水表示中だけ出す注意書き(注意欄の末尾に追加) */
+const inNote=document.createElement('div');
+inNote.id='inNote';
+document.querySelector('.notice').appendChild(inNote);
+
+/* 地理院の標高タイル1枚を読み、RGBA画素の配列を返す(失敗時は null) */
+function fetchDemTile(z,x,y){
+  return new Promise(res=>{
+    const im=new Image();
+    im.crossOrigin='anonymous';
+    im.onload=()=>{
+      try{
+        const c=document.createElement('canvas'); c.width=256; c.height=256;
+        const cx=c.getContext('2d',{willReadFrequently:true});
+        cx.drawImage(im,0,0);
+        res(cx.getImageData(0,0,256,256).data);
+      }catch(e){ res(null); }
+    };
+    im.onerror=()=>res(null);
+    im.src='https://cyberjapandata.gsi.go.jp/xyz/dem_png/'+z+'/'+x+'/'+y+'.png';
+  });
+}
+
+/* 周囲より低い度合い: 半径約300mの平均標高 − そのセルの標高(0未満は0) */
+function lowness(elev,g){
+  const C=g.COLS, R=g.ROWS, W1=C+1;
+  const rad=Math.max(1,Math.round(300/(g.W_M/C)));
+  const S=new Float64Array(W1*(R+1)), N=new Int32Array(W1*(R+1));
+  for(let r=0;r<R;r++){
+    for(let c=0;c<C;c++){
+      const v=elev[r*C+c], ok=v===v, a=(r+1)*W1+c+1;
+      S[a]=(ok?v:0)+S[a-W1]+S[a-1]-S[a-W1-1];
+      N[a]=(ok?1:0)+N[a-W1]+N[a-1]-N[a-W1-1];
+    }
+  }
+  const low=new Float32Array(C*R);
+  for(let r=0;r<R;r++){
+    const r0=Math.max(0,r-rad), r1=Math.min(R,r+rad+1);
+    for(let c=0;c<C;c++){
+      const v=elev[r*C+c];
+      if(v!==v) continue;                       // 標高データなし
+      const c0=Math.max(0,c-rad), c1=Math.min(C,c+rad+1);
+      const n=N[r1*W1+c1]-N[r0*W1+c1]-N[r1*W1+c0]+N[r0*W1+c0];
+      if(n<=0) continue;
+      const s=S[r1*W1+c1]-S[r0*W1+c1]-S[r1*W1+c0]+S[r0*W1+c0];
+      low[r*C+c]=Math.max(0,s/n-v);
+    }
+  }
+  return low;
+}
+
+/* 計算範囲の標高を非同期で読み込み、g.dem に保存する */
+function loadDem(g){
+  g.dem={state:'loading',msg:''};
+  const Bb=g.B;
+  const tx=(lng,z)=>(lng+180)/360*Math.pow(2,z);
+  const ty=(lat,z)=>{ const q=lat*Math.PI/180;
+    return (1-Math.log(Math.tan(q)+1/Math.cos(q))/Math.PI)/2*Math.pow(2,z); };
+  /* タイル数が60枚以下になる最も細かいズームを選ぶ(最大14) */
+  let z=14, x0=0, x1=0, y0=0, y1=0;
+  for(;z>=8;z--){
+    x0=Math.floor(tx(Bb.W,z)); x1=Math.floor(tx(Bb.E,z));
+    y0=Math.floor(ty(Bb.N,z)); y1=Math.floor(ty(Bb.S,z));
+    if((x1-x0+1)*(y1-y0+1)<=60) break;
+  }
+  if(z<8) z=8;
+  const tiles={}, jobs=[];
+  for(let x=x0;x<=x1;x++){
+    for(let y=y0;y<=y1;y++){
+      jobs.push(fetchDemTile(z,x,y).then(d=>{ tiles[x+'_'+y]=d; }));
+    }
+  }
+  Promise.all(jobs).then(()=>{
+    const elev=new Float32Array(g.NCELL);
+    const dLat=(Bb.N-Bb.S)/g.ROWS, dLng=(Bb.E-Bb.W)/g.COLS;
+    let ok=0;
+    for(let r=0;r<g.ROWS;r++){
+      const py=ty(Bb.N-(r+0.5)*dLat,z)*256, tyi=Math.floor(py/256), pyi=Math.floor(py)-tyi*256;
+      for(let c=0;c<g.COLS;c++){
+        const px=tx(Bb.W+(c+0.5)*dLng,z)*256, txi=Math.floor(px/256), pxi=Math.floor(px)-txi*256;
+        const t=tiles[txi+'_'+tyi];
+        let h=NaN;
+        if(t){
+          /* 地理院標高タイルの換算: x=R*65536+G*256+B、x=2^23 は無効値、x>2^23 は負の標高、分解能0.01m */
+          const o=(pyi*256+pxi)*4, v=t[o]*65536+t[o+1]*256+t[o+2];
+          if(t[o+3]!==0&&v!==8388608) h=(v<8388608?v:v-16777216)*0.01;
+        }
+        elev[r*g.COLS+c]=h;
+        if(h===h) ok++;
+      }
+    }
+    if(ok<g.NCELL*0.05) throw new Error('標高タイルを読み取れませんでした');
+    g.dem={state:'ok',msg:'',elev:elev,low:lowness(elev,g)};
+  }).catch(e=>{
+    g.dem={state:'fail',msg:(e&&e.message)||'標高の読み込みに失敗しました'};
+  }).then(()=>{
+    if(CUR!==g) return;                         // 読み込み中に別の川へ切り替えた場合は何もしない
+    if(g.dem.state==='fail'&&floodKind!=='river') floodKind='river';
+    update();
+  });
+}
+
+/* 排水能力(mm/時)。川のリスクが高いほど最大50%まで下げる */
+function inlandCap(){
+  const cap0=(RV&&RV.inland&&RV.inland.capacity)||50;
+  let mr=0; pts.forEach(p=>{ if(p.r>mr) mr=p.r; });
+  return {cap0:cap0, cap:cap0*(1-0.5*mr)};
+}
+
+/* 内水の計算条件。内水を描かない場合(河川氾濫のみ・標高なし・雨量が排水能力以下)は null */
+function inlandParams(){
+  if(floodKind==='river'||!RV||!CUR||!CUR.dem||CUR.dem.state!=='ok') return null;
+  const ex=(+$('rain1').value)-inlandCap().cap;
+  if(ex<=0) return null;
+  const gain=(RV.inland&&RV.inland.gain)||1;
+  return {low:CUR.dem.low, chn:CUR.chn, fill:Math.min(1,gain*ex/80), minLow:0.15, maxLow:1.2};
+}
+
+/* 切替ボタン・1時間雨量欄・説明文を現在の状態に合わせる */
+function refreshInlandUi(){
+  const d=CUR&&CUR.dem, fail=!!(d&&d.state==='fail'), inl=floodKind!=='river';
+  document.querySelectorAll('#kindSeg button').forEach(b=>{
+    b.setAttribute('aria-pressed',b.dataset.kind===floodKind);
+    b.disabled=fail&&b.dataset.kind!=='river';
+  });
+  $('inBox').hidden=!inl;
+  $('rain1Out').textContent=$('rain1').value;
+
+  const ic=inlandCap();
+  let t='';
+  if(fail) t='この川では内水氾濫を表示できません('+d.msg+')。河川氾濫は従来どおり表示します。';
+  else if(inl&&(!d||d.state==='loading')) t='標高を読み込み中です。読み込みが終わると内水の浸水域を表示します。';
+  else if(inl) t='排水能力の目安は時間'+Math.round(ic.cap)+'mm'+
+    (ic.cap<ic.cap0-0.5?'(川の水位上昇で低下。通常は'+ic.cap0+'mm)':'')+
+    '。これを超えた雨が、周囲より低い土地にたまると仮定します。';
+  $('demHint').textContent=t;
+  inNote.textContent=inl
+    ? '内水氾濫の表示は、水がたまりやすい場所の目安です。下水道や排水ポンプの能力は反映していません。' : '';
+
+  if(inl){
+    /* 1時間雨量ゲージの目盛りと配色(排水能力を基準にする) */
+    const pc=v=>Math.max(0,Math.min(100,v/150*100));
+    let h='';
+    for(let v=0,n=0;v<=150;v+=25,n++){
+      h+='<span class="tick" style="left:'+pc(v)+'%">'+(n%2===0?'<b>'+v+'</b>':'')+'</span>';
+    }
+    h+='<span class="mark left" style="left:'+pc(ic.cap0)+'%"><b>排水能力</b></span>';
+    $('ticks1').innerHTML=h;
+    $('track1').style.background=
+      'linear-gradient(90deg,#CFE3EA 0%,#CFE3EA '+pc(ic.cap0-8)+'%,var(--watch) '+pc(ic.cap0)+
+      '%,var(--warn) '+pc(ic.cap0+20)+'%,var(--danger) '+pc(ic.cap0+45)+'%,var(--breach) '+pc(ic.cap0+80)+'%)';
+  }
+}
+
+function setKind(k){
+  if(k!=='river'&&CUR&&CUR.dem&&CUR.dem.state==='fail') k='river'; // 標高がない川では内水を選べない
+  floodKind=k;
+  update();
+}
+$('kindSeg').addEventListener('click',e=>{
+  const b=e.target.closest('[data-kind]');
+  if(b&&!b.disabled) setKind(b.dataset.kind);
+});
+let raf1=0;
+$('rain1').addEventListener('input',()=>{
+  $('rain1Out').textContent=$('rain1').value;
+  if(!raf1) raf1=requestAnimationFrame(()=>{raf1=0;update();});
+});
+$('presets1').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  $('rain1').value=b.dataset.v; update();
+});
+
+/* ============================================================
+   天気予報の雨量(Open-Meteo の気象庁モデル)
+   ============================================================ */
+const FC_URL='https://api.open-meteo.com/v1/jma';
+const FC_TTL=30*60*1000;      // 取得結果を使い回す時間(30分・メモリ上のみ)
+const FC_DAYS=[11,7];         // 予報日数。長いほうから試し、400エラーなら短くする
+const FC_CACHE={};            // 河川ごとの予報 {state:'loading'|'ok'|'fail', t, msg, data, promise}
+const OV_MARKERS={};          // 関東全体表示のマーカー(河川id→marker)
+const OV_BLUE='#2F6F8F';
+
+const fcSpanHours=rv=>parseInt(rv.rain.span,10)||24;
+const fcNum=v=>v<10?v.toFixed(1):String(Math.round(v));
+function fcTime(sec){
+  const d=new Date((sec+9*3600)*1000); // 日本時間で表示
+  return (d.getUTCMonth()+1)+'/'+d.getUTCDate()+' '+d.getUTCHours()+'時';
+}
+function fcClock(ms){
+  const d=new Date(ms+9*3600000);
+  return d.getUTCHours()+':'+('0'+d.getUTCMinutes()).slice(-2);
+}
+function fcErr(e){
+  if(e&&e.name==='AbortError') return '応答がありません(タイムアウト)';
+  if(e&&e.name==='TypeError') return '通信できません。接続を確認してください';
+  return (e&&e.message)||'不明なエラー';
+}
+/* 流域代表点と、内水用の河道中点 */
+function fcPoints(rv){
+  const ln=rv.centerline, mid=ln[Math.floor(ln.length/2)];
+  const bs=(rv.basin&&rv.basin.length)?rv.basin:[ln[0],mid,ln[ln.length-1]];
+  return {basin:bs,mid:mid};
+}
+
+/* 代表点の平均→時間幅の移動合計→「現在以降に終わる窓」の最大値とピーク時刻 */
+function fcSummarize(rv,list,nb){
+  const first=list[0]&&list[0].hourly;
+  if(!first||!first.time||!first.time.length) throw new Error('予報データが空でした');
+  const times=first.time.map(t=>typeof t==='number'?t:Date.parse(t+':00+09:00')/1000);
+  const N=times.length, avg=new Array(N);
+  let last=-1;
+  for(let i=0;i<N;i++){
+    let s=0,c=0;
+    for(let k=0;k<nb&&k<list.length;k++){
+      const h=list[k]&&list[k].hourly, v=(h&&h.precipitation)?h.precipitation[i]:null;
+      if(typeof v==='number'&&v===v){ s+=v; c++; }
+    }
+    avg[i]=c?s/c:0;
+    if(c) last=i;
+  }
+  if(last<0) throw new Error('予報データが空でした');
+  const now=Date.now()/1000, n=fcSpanHours(rv);
+  let i0=-1;
+  for(let i=0;i<=last;i++){ if(times[i]>=now){ i0=i; break; } }
+  if(i0<0) throw new Error('今後の予報がありませんでした');
+  let run=0, max=-1, peak=i0;
+  for(let i=0;i<=last;i++){
+    run+=avg[i]; if(i>=n) run-=avg[i-n];   // 過去の雨も窓に含める
+    if(i>=i0&&run>max){ max=run; peak=i; }
+  }
+  /* 内水用: 河道中点の今後の最大1時間雨量 */
+  const mh=list[Math.min(nb,list.length-1)].hourly;
+  let max1=0;
+  if(mh&&mh.precipitation){
+    for(let i=i0;i<=last;i++){
+      const v=mh.precipitation[i];
+      if(typeof v==='number'&&v>max1) max1=v;
+    }
+  }
+  return {times:times,avg:avg,i0:i0,last:last,n:n,max:Math.max(0,max),peak:peak,peakT:times[peak],max1:max1};
+}
+
+/* 複数地点を1リクエストにまとめて取得する */
+function fcFetch(rv,di){
+  const P=fcPoints(rv), all=P.basin.concat([P.mid]);
+  const url=FC_URL+'?latitude='+all.map(p=>p[0].toFixed(4)).join(',')+
+    '&longitude='+all.map(p=>p[1].toFixed(4)).join(',')+
+    '&hourly=precipitation&timezone=Asia%2FTokyo&timeformat=unixtime&past_days=3&forecast_days='+FC_DAYS[di];
+  const ac=(typeof AbortController==='function')?new AbortController():null;
+  const tm=setTimeout(()=>{ if(ac) ac.abort(); },15000);
+  return fetch(url,ac?{signal:ac.signal}:undefined).then(res=>{
+    clearTimeout(tm);
+    if(res.status===400&&di<FC_DAYS.length-1) return fcFetch(rv,di+1);
+    if(!res.ok) throw new Error('予報サーバーの応答エラー('+res.status+')');
+    return res.json().then(j=>fcSummarize(rv,Array.isArray(j)?j:[j],P.basin.length));
+  },e=>{ clearTimeout(tm); throw e; });
+}
+
+/* 河川の予報を取得する(30分以内の結果は使い回す)。常にキャッシュ要素で resolve する */
+function loadForecast(rv){
+  let c=FC_CACHE[rv.id];
+  if(c&&c.state==='loading') return c.promise;
+  if(c&&c.state==='ok'&&Date.now()-c.t<FC_TTL) return Promise.resolve(c);
+  c=FC_CACHE[rv.id]={state:'loading',t:Date.now(),msg:'',data:null,promise:null};
+  c.promise=Promise.resolve().then(()=>fcFetch(rv,0)).then(
+    d=>{ c.state='ok'; c.t=Date.now(); c.data=d; },
+    e=>{ c.state='fail'; c.msg=fcErr(e); }
+  ).then(()=>c);
+  return c.promise;
+}
+
+/* 今後の流域平均雨量(時間雨量)の棒グラフ。予報最大となる時間帯を橙色で強調する */
+function drawFcChart(d){
+  const el=$('fcChart'), dpr=window.devicePixelRatio||1;
+  const w=el.clientWidth||320, h=56;
+  el.width=Math.round(w*dpr); el.height=Math.round(h*dpr);
+  const g=el.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+  const n=d.last-d.i0+1, bw=w/n, base=h-13;
+  let top=5;
+  for(let i=d.i0;i<=d.last;i++){ if(d.avg[i]>top) top=d.avg[i]; }
+  g.font='10px sans-serif'; g.textAlign='left';
+  for(let i=d.i0;i<=d.last;i++){
+    const x=(i-d.i0)*bw, jst=new Date((d.times[i]+9*3600)*1000);
+    if(jst.getUTCHours()===0){ // 日付の区切り
+      g.fillStyle='#D3DEE0'; g.fillRect(x,0,1,base);
+      g.fillStyle='#4A616A';
+      if(x<w-24) g.fillText((jst.getUTCMonth()+1)+'/'+jst.getUTCDate(),x+2,h-2);
+    }
+    const bh=d.avg[i]/top*(base-2);
+    if(bh>0){
+      g.fillStyle=(i>d.peak-d.n&&i<=d.peak)?'#E8741E':'#2F6F8F';
+      g.fillRect(x,base-bh,Math.max(1,bw-0.5),bh);
+    }
+  }
+  g.fillStyle='#D3DEE0'; g.fillRect(0,base,w,1);
+  g.fillStyle='#4A616A'; g.textAlign='right';
+  g.fillText('目盛上端 '+fcNum(top)+'mm/時',w-2,10);
+  g.textAlign='left';
+}
+
+/* 河川表示時の予報欄(状態・ゲージの予報マーク・棒グラフ)を現在の状態に合わせる */
+function renderFc(){
+  if(!RV) return;
+  const c=FC_CACHE[RV.id], rn=RV.rain, d=(c&&c.state==='ok')?c.data:null;
+  const st=$('fcState'), mk=$('fcMark'), ch=$('fcChart');
+  $('fcBtn').disabled=!!(c&&c.state==='loading');
+  if(!c) st.textContent='予報は未取得です。';
+  else if(c.state==='loading') st.textContent='予報を取得中…';
+  else if(c.state==='fail') st.textContent='予報を取得できませんでした('+c.msg+')。手動の操作はそのまま使えます。';
+  else st.textContent='予報最大 '+fcNum(d.max)+rn.unit+'/'+rn.span+'('+fcTime(d.peakT)+'まで)・1時間最大 '+
+    fcNum(d.max1)+'mm・'+fcAge(c.t);
+  if(mk){
+    mk.hidden=!d;
+    if(d) mk.style.left=clamp(d.max/rn.max*100,0,100)+'%';
+  }
+  ch.hidden=!d;
+  $('fcHint').textContent=d
+    ? '棒は今後の流域平均の時間雨量(予報)。橙色は合計が最大となる'+rn.span+'です。ボタンを押すと雨量に反映します。' : '';
+  if(d) drawFcChart(d);
+  renderAct();   // 予報の到着・更新を行動の目安にも反映
+  renderStart(); // 浸水開始雨量の欄に予報との比を併記(再計算はしない)
+  renderRecNear(); // 有事モードの「今回の予報に近い記録」を更新
+  renderWarn();    // 大雨の可能性の判定を更新
+}
+
+/* 「予報を反映」: 押したときだけスライダーを書き換える */
+$('fcBtn').addEventListener('click',()=>{
+  const rv=RV; if(!rv) return;
+  const p=loadForecast(rv);
+  renderFc();
+  p.then(c=>{
+    if(RV!==rv) return;                 // 取得中に別の川へ切り替えた場合は何もしない
+    renderFc();
+    if(c.state!=='ok') return;
+    const rn=rv.rain;
+    slider.value=clamp(Math.round(c.data.max/rn.step)*rn.step,0,rn.max);
+    $('rain1').value=clamp(Math.round(c.data.max1),0,150);
+    clearPresetNote();
+    update();
+  });
+});
+window.addEventListener('resize',renderFc);
+
+/* 関東全体: 予報最大値÷計画規模で色分けする */
+function fcLevel(ratio){
+  return ratio<0.5?LEVELS[0]:ratio<0.8?LEVELS[1]:ratio<1?LEVELS[2]:LEVELS[3];
+}
+function renderOverviewFc(){
+  renderWarn(); // 大雨の可能性の判定を更新
+  RIVERS.forEach(r=>{
+    const c=FC_CACHE[r.id], d=(c&&c.state==='ok')?c.data:null;
+    const ratio=d?d.max/r.rain.plan:0, lv=d?fcLevel(ratio):null, col=lv?lv.color:OV_BLUE;
+    const row=document.querySelector('#ovList [data-river="'+r.id+'"]');
+    if(row){
+      row.parentNode.hidden=r.region!==REGION; // 一覧は表示中の圏の川だけ
+      row.querySelector('.pt-dot').style.background=col;
+      row.querySelector('.pt-type').innerHTML=r.area+(r.approx?'/概略データ':'')+
+        (d ? '<br><b style="color:'+col+'">'+lv.label+'</b> 予報最大 '+fcNum(d.max)+r.rain.unit+'/'+r.rain.span+
+             '(計画規模比 '+Math.round(ratio*100)+'%)'
+           : (c&&c.state==='loading'?'<br>予報を取得中…':''));
+    }
+    const m=OV_MARKERS[r.id];
+    if(m&&overviewLayer.hasLayer(m)){
+      m.setIcon(rpIcon(col,false));
+    }
+  });
+}
+/* 全河川の予報を順番に取得する(失敗した川は青表示のまま) */
+let ovBusy=false;
+let ovAgain=false; // 取得中に圏や川が切り替わったら、終了後にもう一度取得する
+function ovDone(){
+  ovBusy=false;
+  if(ovAgain){ ovAgain=false; loadAllForecasts(); }
+}
+function loadAllForecasts(){
+  if(ovBusy){ ovAgain=true; return; }
+  ovBusy=true;
+  RIVERS.filter(r=>r.region===REGION).reduce((p,r)=>p.then(()=>{
+    const q=loadForecast(r);
+    if(!RV) renderOverviewFc();
+    return q;
+  }).then(()=>{ if(!RV) renderOverviewFc(); else renderWarn(); }),Promise.resolve())
+    .then(ovDone,ovDone);
+}
+
+/* ============================================================
+   確認地点(現在地/長押しのピン)・行動の目安・鮮度と通信状態
+   ============================================================ */
+/* 予報の鮮度: 30分以上前なら経過時間を明示する */
+function fcAge(t){
+  const m=Math.floor((Date.now()-t)/60000);
+  return m>=30 ? m+'分前の予報(ボタンを押すか川を選び直すと再取得)' : fcClock(t)+'取得';
+}
+setInterval(()=>{ if(RV) renderFc(); else renderWarn(); },60000); // 表示だけ1分ごとに更新(再取得はしない)
+
+/* 確認地点: 現在地と長押しのピンを同じものとして扱い、後から指定したほうを採用(メモリ上のみ) */
+const LOC_HELP='地図を長押しすると、確認したい地点を置けます。';
+let LOC=null;         // {ll:[lat,lng], kind:'gps'|'pin'}
+let locMarker=null;
+function setLoc(ll,kind){
+  LOC=ll?{ll:ll,kind:kind}:null;
+  if(locMarker){ map.removeLayer(locMarker); locMarker=null; }
+  if(LOC){
+    locMarker=L.marker(ll,{keyboard:false,interactive:false,zIndexOffset:2000,icon:L.divIcon({
+      className:'',iconSize:[18,18],iconAnchor:[9,9],html:'<div class="locpin"></div>'})}).addTo(map);
+  }
+  $('locClear').hidden=!LOC;
+  computeStart(); // 確認地点が変わったときだけ浸水開始雨量を再計算
+  if(LOC) cfgPut('loc',{ll:LOC.ll,kind:LOC.kind}); else cfgDel('loc'); // わが家をこの端末に保存
+  $('locSaved').hidden=!LOC||recMem;
+  renderLoc();
+}
+/* 緯度経度 → 現在の川の計算セル番号(計算範囲の外、川が未選択のときは -1) */
+function locCell(ll){
+  if(!B||!ll) return -1;
+  const lat=ll[0], lng=ll[1];
+  if(lat<=B.S||lat>=B.N||lng<=B.W||lng>=B.E) return -1;
+  const r=Math.min(ROWS-1,Math.floor((B.N-lat)/(B.N-B.S)*ROWS));
+  const c=Math.min(COLS-1,Math.floor((lng-B.W)/(B.E-B.W)*COLS));
+  return r*COLS+c;
+}
+/* 確認地点の試算浸水深(drawFlood が書き出した DEP を参照) */
+function renderLoc(){
+  const el=$('locDepth');
+  el.hidden=!LOC;
+  if(!LOC){ $('locState').textContent=LOC_HELP; return; }
+  $('locState').textContent=(LOC.kind==='gps'?'現在地':'長押しで置いた地点')+'を確認地点にしています。';
+  let t;
+  if(APPMODE==='emg') t='地図に重ねた公式の浸水想定で、この地点の色を確認してください。';
+  else if(!RV||!CUR||!DEP||DEP.length!==NCELL) t='川を選ぶと、確認地点の試算浸水深を表示します。';
+  else{
+    const i=locCell(LOC.ll);
+    if(i<0) t='確認地点はこの川の計算範囲外です。';
+    else{
+      const dep=DEP[i];
+      if(dep>=0.05) t='確認地点の試算浸水深 '+dep.toFixed(1)+'m';
+      else if(!mask[i]&&floodKind==='river') t='確認地点は計算範囲外です(河道内、または計算対象外の岸・距離)。';
+      else t='この条件の試算では浸水なし(安全を意味しません)';
+    }
+  }
+  el.innerHTML='<b>'+t+'</b><br>公式の浸水想定を必ず確認してください。';
+}
+$('locBtn').addEventListener('click',()=>{
+  const st=$('locState');
+  if(!navigator.geolocation){ st.textContent='この端末では現在地を取得できません。'; return; }
+  st.textContent='現在地を取得中…';
+  try{
+    navigator.geolocation.getCurrentPosition(p=>{
+      const ll=[p.coords.latitude,p.coords.longitude];
+      setLoc(ll,'gps');
+      map.setView(ll,Math.max(map.getZoom(),13),{animate:true});
+    },e=>{
+      renderLoc();
+      st.textContent='現在地を取得できませんでした('+
+        (e&&e.code===1?'位置情報の利用が許可されていません':e&&e.code===3?'時間切れ':'位置を特定できません')+')。';
+    },{enableHighAccuracy:false,timeout:10000,maximumAge:60000});
+  }catch(err){
+    st.textContent='現在地を取得できませんでした。';
+  }
+});
+$('locClear').addEventListener('click',()=>setLoc(null));
+map.on('contextmenu',e=>setLoc([e.latlng.lat,e.latlng.lng],'pin')); // 長押し(PCは右クリック)
+
+/* 行動の目安: 予報(取得済みなら計画規模比)と現在の試算から3段階で示す */
+function renderAct(){
+  if(!RV) return;
+  const c=FC_CACHE[RV.id], d=(c&&c.state==='ok')?c.data:null;
+  const ratio=d?d.max/RV.rain.plan:0;
+  let mr=0, na=0;
+  pts.forEach(p=>{ if(p.r>mr) mr=p.r; if(p.active) na++; });
+  if(APPMODE==='emg'){ mr=0; na=0; } // 有事モードでは隠れている雨量設定の試算を使わず、予報のみで判定
+  let lv=0;
+  if(ratio>=0.5||mr>=0.40) lv=1;   // 試算で「警戒」以上
+  if(ratio>=1||na>0) lv=2;
+  $('actMsg').textContent=[
+    '平時の備え: ハザードマップと避難先を確認',
+    '早めの準備: 避難先・経路・持ち出し品を確認し、気象情報に注意',
+    '自治体の避難情報とキキクルを今すぐ確認'][lv];
+  $('actBox').style.borderLeftColor=[LEVELS[0].color,LEVELS[2].color,LEVELS[3].color][lv];
+  $('actSrc').textContent=d
+    ? '予報(計画規模比 '+Math.round(ratio*100)+'%)と、現在の雨量設定での試算から判定した目安です。'
+    : '予報が未取得のため、現在の雨量設定での試算のみで判定した目安です。';
+  if(APPMODE==='emg'){
+    if(!d) $('actMsg').textContent='予報が未取得です。公式情報で今の状況を確認';
+    $('actSrc').textContent=d
+      ? '予報雨量(計画規模比 '+Math.round(ratio*100)+'%)のみで判定した目安です。実況は公式情報で確認してください。'
+      : '予報を取得できていないため、目安を表示できません。';
+  }
+}
+
+/* 通信状態: オフライン時はヘッダー下端に帯を出す */
+function renderNet(){
+  $('offBar').hidden=navigator.onLine!==false;
+  setTimeout(()=>map.invalidateSize(),50);
+}
+window.addEventListener('online',renderNet);
+window.addEventListener('offline',renderNet);
+renderNet();
+
+function setOfficial(on){
+  if(APPMODE==='emg') on=true; // 有事モードでは公式浸水想定を常に表示(記憶しているON/OFFは変えない)
+  $('official').checked=on;
+  $('official').disabled=APPMODE==='emg';
+  if(on) officialLayer.addTo(map); else map.removeLayer(officialLayer);
+}
+
+/* ============================================================
+   平時/有事モード・わが家の浸水開始雨量・過去災害プリセットの解説
+   ============================================================ */
+/* モード切替: 表示の出し分けは .app の emg クラス(CSS)で行う */
+function applyMode(m){
+  APPMODE=m;
+  document.querySelector('.app').classList.toggle('emg',m==='emg');
+  document.querySelectorAll('#amode button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.am===m));
+  if(m==='emg'){
+    if(map.hasLayer(floodLayer)) map.removeLayer(floodLayer);       // 簡易モデルの浸水域は出さない
+  }else if(RV&&CUR&&!map.hasLayer(floodLayer)) floodLayer.addTo(map);
+  setOfficial(RV?offRiver:offOv);                                   // 平時に戻ると元のON/OFFへ復帰
+  if(RV){ update(); renderFc(); }
+  recApplyMode(); // 観察記録欄の出し分け(有事は屋内から記録、平時は見返す)
+  navCount++;     // 利用者が操作した印(起動時の川の自動復元を止める)
+  renderLoc();
+  renderStart();
+  setTimeout(()=>map.invalidateSize(),50);
+}
+$('amode').addEventListener('click',e=>{
+  const b=e.target.closest('[data-am]');
+  if(b&&b.dataset.am!==APPMODE) applyMode(b.dataset.am);
+});
+
+/* 1セル分の試算浸水深(河川氾濫のみ・自動判定相当)。drawFlood と同じ式を1セルだけ評価する */
+function cellDepthAuto(i,rain){
+  if(!mask[i]) return 0;
+  const F=RV.fl;
+  const k0=clamp(rain/F.start,0,1), k=clamp((rain-F.start)/(F.full-F.start),0,1);
+  const h=F.h0*k0+F.h1*k, L0=F.l0+F.l1*k;
+  let dep=0;
+  for(let j=0;j<pts.length;j++){
+    const p=pts[j];
+    const r=1/(1+Math.exp(-(rain-p.T)/CONFIG.riskWidth));
+    if(r<CONFIG.autoThreshold||p.bm!==mask[i]) continue;
+    const ds=cs[i]-p.s;
+    const along=ds>=0?ds*0.55:-ds*1.7;
+    const e=Math.hypot(along,cl[i]*0.9);
+    const v=h*p.scale*Math.exp(-e/(L0*(0.6+0.4*p.scale)))-cg[i];
+    if(v>dep) dep=v;
+  }
+  return dep;
+}
+
+/* 確認地点が浸水し始める最小雨量。川の切替時と確認地点の変更時だけ計算する */
+let START=null;   // {state:'out'|'never'|'ok', rain}
+function computeStart(){
+  START=null;
+  if(LOC&&RV&&CUR){
+    const i=locCell(LOC.ll);
+    if(i<0) START={state:'out'};
+    else{
+      if(!mask[i]) START={state:'out'};
+      else{
+        const rn=RV.rain;
+        START={state:'never'};
+        for(let n=0;n*rn.step<=rn.max+1e-9;n++){
+          const v=n*rn.step;
+          if(cellDepthAuto(i,v)>0.05){ START={state:'ok',rain:v}; break; }
+        }
+      }
+    }
+  }
+  renderStart();
+}
+function renderStart(){
+  const el=$('locStart');
+  if(!START||!RV){ el.hidden=true; return; }
+  el.hidden=false;
+  const rn=RV.rain;
+  let t;
+  if(START.state==='out') t='この地点は計算範囲外のため、浸水開始雨量は求められません。';
+  else if(START.state==='never') t='この川の試算では最大雨量('+rn.max+rn.unit+')でも浸水しません(安全を意味しません)。';
+  else{
+    t='この地点は'+rn.span+' '+START.rain+rn.unit+' 付近から浸水し始める試算です(計画規模の'+
+      Math.round(START.rain/rn.plan*100)+'%)。';
+    const c=FC_CACHE[RV.id];
+    if(c&&c.state==='ok'&&START.rain>0){
+      t+='予報最大 '+fcNum(c.data.max)+rn.unit+' はその'+Math.round(c.data.max/START.rain*100)+'%。';
+    }
+  }
+  el.innerHTML='<b>わが家の浸水開始雨量(試算)</b><br>'+t+'<br>河川氾濫のみの試算で、内水氾濫は対象外です。';
+}
+
+/* 過去災害プリセットの解説(各河川のリスク地点 note にある事実の範囲) */
+const PRESET_NOTES={
+  tama:'2019年台風19号: 排水樋管からの逆流や支川への背水で浸水被害が出ました。山王排水樋管は武蔵小杉駅周辺の浸水につながりました。',
+  zenpukuji:'2005年9月の集中豪雨: 流域の広い範囲で浸水被害が出ました。',
+  kinu:'2015年9月の関東・東北豪雨: 若宮戸付近で溢水が起き、三坂町付近で堤防が決壊して常総市の広い範囲が浸水しました。',
+  ichinomiya:'2023年9月の大雨: 茂原市の市街地に浸水被害が出ました(2019年10月の大雨でも被害)。',
+  kashima:'2019年10月の大雨: 鹿島川・高崎川の流域で浸水被害が出ました。',
+  takasaki:'2019年10月の大雨: 高崎川があふれ、JR佐倉駅周辺が浸水しました。'
+};
+function clearPresetNote(){
+  const el=$('presetNote');
+  el.hidden=true; el.textContent='';
+}
+function showPresetNote(label){
+  const txt=RV&&PRESET_NOTES[RV.id];
+  if(!txt||String(label).indexOf('級(目安)')<0){ clearPresetNote(); return; }
+  const el=$('presetNote');
+  el.innerHTML='<b>'+txt+'</b><br>雨量は目安で、浸水域は簡易モデルの試算です(当時の実際の浸水範囲ではありません)。';
+  el.hidden=false;
+}
+
+/* ============================================================
+   雨の日の観察記録(写真+雨量。端末内の IndexedDB に保存し、外部へは送らない)
+   ============================================================ */
+let RECS=[];                 // 記録の一覧 {id,t,ll,river,img,thumb,level,memo,rain}
+let recDb=null, recMem=false; // recMem=true: IndexedDB が使えずメモリ保存のみ
+let recPending=null;         // 入力中の記録
+let recViewId=null;          // 拡大表示中の記録id
+const recLayer=L.layerGroup(); // 地図上の記録マーカー(「地図に表示」がONのときだけ地図に載せる)
+const recEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const recMm=v=>typeof v==='number'?fcNum(v)+'mm':'—';
+function recDate(t){
+  const d=new Date(t+9*3600000); // 日本時間で表示
+  return d.getUTCFullYear()+'/'+(d.getUTCMonth()+1)+'/'+d.getUTCDate()+' '+
+    d.getUTCHours()+':'+('0'+d.getUTCMinutes()).slice(-2);
+}
+function recMsg(t){ $('recMsg').textContent=t||''; }
+
+/* --- 保存(IndexedDB。使えなければメモリのみ) --- */
+function recOpen(){
+  return new Promise(res=>{
+    try{
+      if(!window.indexedDB){ res(null); return; }
+      const rq=window.indexedDB.open('suigai-note',2); // v2: 設定用の settings ストアを追加
+      rq.onupgradeneeded=()=>{
+        const db=rq.result;
+        if(!db.objectStoreNames.contains('records')) db.createObjectStore('records',{keyPath:'id'});
+        if(!db.objectStoreNames.contains('settings')) db.createObjectStore('settings',{keyPath:'key'});
+      };
+      rq.onsuccess=()=>res(rq.result);
+      rq.onerror=()=>res(null);
+      rq.onblocked=()=>res(null);
+    }catch(e){ res(null); }
+  });
+}
+function recTx(txMode,fn){
+  return new Promise(res=>{
+    if(!recDb){ res(null); return; }
+    try{
+      const tx=recDb.transaction('records',txMode);
+      const rq=fn(tx.objectStore('records'));
+      tx.oncomplete=()=>res({result:rq?rq.result:null});
+      tx.onerror=()=>res(null);
+      tx.onabort=()=>res(null);
+    }catch(e){ res(null); }
+  });
+}
+function recPut(rec){
+  if(!recDb) return;
+  recTx('readwrite',st=>st.put(rec)).then(r=>{
+    if(!r) recMsg('端末への保存に失敗しました。書き出しで保存してください。');
+  });
+}
+function recDel(id){ if(recDb) recTx('readwrite',st=>st.delete(id)); }
+function recStoreNote(){
+  const el=$('recStore');
+  el.hidden=!recMem;
+  el.textContent=recMem?'この環境では記録は閉じると消えます。書き出しで保存してください。':'';
+}
+
+/* --- 写真の縮小(長辺1280px・JPEG 0.7。一覧用に160pxのサムネイルも作る) --- */
+function recScale(im,maxSide,q){
+  const k=Math.min(1,maxSide/Math.max(im.naturalWidth,im.naturalHeight));
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(im.naturalWidth*k));
+  c.height=Math.max(1,Math.round(im.naturalHeight*k));
+  c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg',q);
+}
+function recShrink(file){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(file), im=new Image();
+    im.onload=()=>{
+      try{
+        const out={img:recScale(im,1280,0.7),thumb:recScale(im,160,0.6)};
+        URL.revokeObjectURL(url); res(out);
+      }catch(e){ URL.revokeObjectURL(url); rej(e); }
+    };
+    im.onerror=()=>{ URL.revokeObjectURL(url); rej(new Error('画像を読み込めませんでした')); };
+    im.src=url;
+  });
+}
+
+/* --- 雨量(その地点。位置がなければ記録時に選んでいた川の中点) --- */
+function recRainPoint(rec){
+  if(rec.ll) return rec.ll;
+  const rv=RIVERS.find(r=>r.id===rec.river);
+  return rv?rv.centerline[Math.floor(rv.centerline.length/2)]:null;
+}
+function recFetchRain(rec){
+  const p=recRainPoint(rec);
+  if(!p) return Promise.resolve(null);
+  /* 位置は小数2桁(約1km単位)に丸めて送る */
+  const url=FC_URL+'?latitude='+p[0].toFixed(2)+'&longitude='+p[1].toFixed(2)+
+    '&hourly=precipitation&timezone=Asia%2FTokyo&timeformat=unixtime&past_days=3&forecast_days=1';
+  return fetch(url).then(r=>{
+    if(!r.ok) throw new Error('応答エラー');
+    return r.json();
+  }).then(j=>{
+    const h=(Array.isArray(j)?j[0]:j).hourly;
+    const T=h.time.map(t=>typeof t==='number'?t:Date.parse(t+':00+09:00')/1000), P=h.precipitation;
+    const t=rec.t/1000;
+    let e=-1;
+    for(let i=0;i<T.length;i++){ if(T[i]>=t){ e=i; break; } } // 撮影時刻を含む1時間
+    if(e<0) e=T.length-1;
+    const sum=n=>{
+      if(e-n+1<0) return null;                  // データの範囲が足りない
+      let s=0;
+      for(let i=e-n+1;i<=e;i++){ if(typeof P[i]==='number') s+=P[i]; }
+      return s;
+    };
+    return {h1:sum(1),h24:sum(24),h48:sum(48),h72:sum(72),src:rec.ll?'point':'river',at:Date.now()};
+  });
+}
+function recRefetch(id){
+  const r=RECS.find(x=>x.id===id); if(!r) return;
+  recMsg('雨量を取得中…');
+  recFetchRain(r).then(v=>{
+    if(!v){ recMsg('雨量を取得できませんでした。'); return; }
+    r.rain=v; recPut(r); recMsg(''); renderRecs();
+  },()=>recMsg('雨量を取得できませんでした。'));
+}
+
+/* --- 一覧・予報に近い記録・地図マーカー --- */
+function recItem(r,extra){
+  const canRe=!r.rain&&Date.now()-r.t<3*86400000&&!!recRainPoint(r);
+  return '<li><button type="button" class="rec-item" data-open="'+recEsc(r.id)+'">'+
+    '<img src="'+recEsc(r.thumb||r.img)+'" alt="">'+
+    '<span class="rec-meta"><b>'+recDate(r.t)+'・'+recEsc(r.level||'')+(r.place?'・'+recEsc(r.place):'')+'</b>'+
+    '<span>'+(r.rain?'24時間 '+recMm(r.rain.h24)+'・1時間 '+recMm(r.rain.h1)+'(モデル値)':'雨量なし')+
+    (extra?'・'+extra:'')+'</span>'+
+    (r.memo?'<span>'+recEsc(r.memo)+'</span>':'')+'</span></button>'+
+    (canRe?'<button type="button" class="rec-re" data-rain="'+recEsc(r.id)+'">雨量を再取得</button>':'')+'</li>';
+}
+function renderRecNear(){
+  const el=$('recNear');
+  const c=RV&&FC_CACHE[RV.id];
+  if(APPMODE!=='emg'||!RV||!c||c.state!=='ok'){ el.hidden=true; el.innerHTML=''; return; }
+  const n=fcSpanHours(RV), key=n<=1?'h1':n<=24?'h24':n<=48?'h48':'h72', fmax=c.data.max;
+  const near=RECS.filter(r=>{
+    const v=r.rain&&r.rain[key];
+    return typeof v==='number'&&v>0&&fmax>0&&v/fmax>=0.5&&v/fmax<=2;
+  }).sort((a,b)=>Math.abs(Math.log(a.rain[key]/fmax))-Math.abs(Math.log(b.rain[key]/fmax))).slice(0,3);
+  el.hidden=false;
+  el.innerHTML='<b>今回の予報に近い記録</b>(予報最大 '+fcNum(fmax)+RV.rain.unit+'/'+RV.rain.span+')'+
+    (near.length
+      ? '<ul class="rec-list">'+near.map(r=>recItem(r,RV.rain.span+' '+recMm(r.rain[key]))).join('')+'</ul>'+
+        '記録は地点の雨量、予報は流域平均のため、比較は目安です。'
+      : '<br>予報に近い雨量の記録はまだありません。');
+}
+function renderRecMarkers(){
+  recLayer.clearLayers();
+  if(!$('recOnMap').checked) return;
+  if(recMarkersGrouped()) return; // 同じ場所の記録は1つの印にまとめて描く(この下の旧処理は実行されない)
+  RECS.forEach(r=>{
+    if(!r.ll) return;
+    L.marker(r.ll,{keyboard:false,title:recDate(r.t),icon:L.divIcon({
+      className:'',iconSize:[24,24],iconAnchor:[12,12],html:'<div class="recpin">📷</div>'})})
+     .on('click',()=>recOpenView(r.id)).addTo(recLayer);
+  });
+}
+function renderRecs(){
+  const byRain=$('recSort').value==='rain';
+  const val=r=>(r.rain&&typeof r.rain.h24==='number')?r.rain.h24:-1;
+  recPlaceOptions(); // 撮影場所の候補と絞り込みの選択肢を更新
+  renderRecCount();  // 件数・容量の目安と書き出しの案内
+  renderRecJump();   // 平時の「見返す」ボタン
+  const pf=$('recPlaceF').value;
+  const list=RECS.filter(r=>!pf||(r.place||'')===pf).sort((a,b)=>byRain?(val(b)-val(a)||b.t-a.t):b.t-a.t);
+  $('recList').innerHTML=list.length?list.map(r=>recItem(r,'')).join('')
+    :'<li class="rec-empty">記録はまだありません。</li>';
+  renderRecMarkers();
+  renderRecNear();
+}
+
+/* --- 記録の追加(有事モードのみ。撮影前に屋内から撮ることを確認する) --- */
+function recFormState(){ $('recFormState').textContent=recPending?'位置: '+recPending.pos:''; }
+function recCloseForm(){
+  recPending=null;
+  $('recForm').hidden=true;
+  $('recPrev').removeAttribute('src');
+  if(!recFix) recPinClear(); // 入力欄を閉じたら仮ピンを消す(位置の修正中は残す)
+  recFormState();
+}
+let recLastPlace='';   // 直前に使った撮影場所(メモリ上のみ)
+/* 撮影場所の候補(datalist)と絞り込みの選択肢を、記録から作り直す */
+function recPlaceOptions(){
+  const seen={}, places=[];
+  RECS.forEach(r=>{ const p=r.place||''; if(p&&!seen[p]){ seen[p]=1; places.push(p); } });
+  const sel=$('recPlaceF'), cur=sel.value;
+  sel.innerHTML='<option value="">すべて</option>'+
+    places.map(p=>'<option value="'+recEsc(p)+'">'+recEsc(p)+'</option>').join('');
+  sel.value=seen[cur]?cur:'';
+  $('recPlaces').innerHTML=places.map(p=>'<option value="'+recEsc(p)+'"></option>').join('');
+}
+$('recPlaceF').addEventListener('change',renderRecs);
+/* 平時モードの「観察記録を見返す」ボタン(使い方の下) */
+function renderRecJump(){
+  const b=$('recJump');
+  let mx=-1;
+  RECS.forEach(r=>{ if(r.rain&&typeof r.rain.h24==='number'&&r.rain.h24>mx) mx=r.rain.h24; });
+  b.hidden=!RECS.length;
+  b.textContent='観察記録 '+RECS.length+'件'+(mx>=0?'(最多の24時間雨量 '+fcNum(mx)+'mm)':'')+'を見返す';
+}
+$('recJump').addEventListener('click',()=>{
+  const box=$('recBox');
+  box.open=true;
+  box.scrollIntoView({behavior:'smooth',block:'start'});
+});
+/* 「写真を記録」: カメラを開く前に、屋内から撮ることを毎回確認する */
+$('recAdd').addEventListener('click',()=>{
+  $('recSafeChk').checked=false;
+  $('recSafeGo').disabled=true;
+  recFixCancel(); // 写真の記録を始めたら、位置の修正は取り消す
+  $('recSafe').hidden=false;
+});
+$('recSafeChk').addEventListener('change',e=>{ $('recSafeGo').disabled=!e.target.checked; });
+$('recSafeNo').addEventListener('click',()=>{ $('recSafe').hidden=true; });
+$('recSafeGo').addEventListener('click',()=>{
+  if(!$('recSafeChk').checked) return;
+  $('recSafe').hidden=true;
+  $('recFile').click();
+});
+$('recFile').addEventListener('change',e=>{
+  const file=e.target.files&&e.target.files[0];
+  e.target.value='';
+  if(!file) return;
+  recMsg('写真を準備中…');
+  recShrink(file).then(o=>{
+    recMsg('');
+    const p=recPending={img:o.img,thumb:o.thumb,t:Date.now(),
+      ll:LOC?LOC.ll.slice():null,pos:LOC?'確認地点を使います':'現在地を取得中…'};
+    $('recPrev').src=o.img;
+    $('recLevel').value='なし';
+    $('recMemo').value='';
+    $('recPlace').value=recLastPlace;
+    recFixCancel();
+    recPinSet(p.ll,true); // 保存予定の位置に仮ピンを立てる(位置がまだなければ何もしない)
+    $('recForm').hidden=false;
+    recFormState();
+    if(!LOC){
+      const fail=()=>{ if(recPending===p){ p.pos='取得できません。地図をタップすると位置を指定できます(指定しなければ位置なしで保存)'; recFormState(); } };
+      if(!navigator.geolocation) fail();
+      else{
+        try{
+          navigator.geolocation.getCurrentPosition(g=>{
+            if(recPending!==p) return;
+            p.ll=[g.coords.latitude,g.coords.longitude]; p.pos='現在地を使います(ピンを動かして直せます)'; recFormState();
+            recPinSet(p.ll,true);
+          },fail,{enableHighAccuracy:false,timeout:8000,maximumAge:60000});
+        }catch(err){ fail(); }
+      }
+    }
+  }).catch(()=>recMsg('写真を読み込めませんでした。'));
+});
+$('recCancel').addEventListener('click',recCloseForm);
+$('recSave').addEventListener('click',()=>{
+  const p=recPending; if(!p) return;
+  const rec={id:'r'+p.t+'_'+Math.random().toString(36).slice(2,8),t:p.t,ll:p.ll,river:RV?RV.id:null,
+    img:p.img,thumb:p.thumb,level:$('recLevel').value,memo:$('recMemo').value.trim(),place:$('recPlace').value.trim().slice(0,20),rain:null};
+  recLastPlace=rec.place;
+  if(rec.ll&&!$('recOnMap').checked){ // 位置のある記録を保存したら、地図に表示をONにする
+    $('recOnMap').checked=true;
+    recLayer.addTo(map);
+  }
+  RECS.push(rec);
+  recPut(rec);
+  recCloseForm();
+  renderRecs();
+  if(!recRainPoint(rec)){ recMsg('保存しました(位置も川もないため、雨量は記録していません)。'); return; }
+  recMsg('保存しました。雨量を取得中…');
+  recFetchRain(rec).then(v=>{
+    if(RECS.indexOf(rec)<0) return;
+    if(!v){ recMsg('保存しました(雨量は取得できませんでした)。'); return; }
+    rec.rain=v; recPut(rec); recMsg('保存しました。'); renderRecs();
+  },()=>recMsg('保存しました(雨量は取得できませんでした。3日以内なら一覧から再取得できます)。'));
+});
+
+/* --- 拡大表示・削除 --- */
+function recOpenView(id){
+  const r=RECS.find(x=>x.id===id); if(!r) return;
+  recViewId=id;
+  $('recViewMap').hidden=!r.ll;
+  recArmDel(false);
+  $('recViewImg').src=r.img;
+  const rv=RIVERS.find(x=>x.id===r.river);
+  $('recViewInfo').textContent=recDate(r.t)+'・冠水の程度: '+(r.level||'—')+(r.place?'・撮影場所: '+r.place:'')+'\n'+
+    (r.rain?'雨量(モデル値・'+(r.rain.src==='river'?'川の中点':'記録地点付近')+'): 1時間 '+recMm(r.rain.h1)+
+      ' / 24時間 '+recMm(r.rain.h24)+' / 48時間 '+recMm(r.rain.h48)+' / 72時間 '+recMm(r.rain.h72):'雨量: 記録なし')+'\n'+
+    '位置: '+(r.ll?'あり':'なし')+(rv?'・'+rv.name:'')+(r.memo?'\nメモ: '+r.memo:'');
+  $('recViewInfo').textContent+='\n\n'+recCheck(r); // 答え合わせ(試算と実際の記録)
+  $('recView').hidden=false;
+}
+function recCloseView(){
+  recViewId=null;
+  $('recView').hidden=true;
+  $('recViewImg').removeAttribute('src');
+  recArmDel(false);
+}
+/* 削除の確認(画面内): 1回目で「本当に削除」に変わり、3秒たつか閉じると元に戻る */
+let recDelArmed=false, recDelTimer=0;
+function recArmDel(on){
+  clearTimeout(recDelTimer);
+  recDelArmed=!!on;
+  $('recViewDel').textContent=on?'本当に削除':'削除';
+  if(on) recDelTimer=setTimeout(()=>recArmDel(false),3000);
+}
+$('recViewClose').addEventListener('click',recCloseView);
+$('recView').addEventListener('click',e=>{ if(e.target===$('recView')) recCloseView(); });
+$('recViewDel').addEventListener('click',()=>{
+  const id=recViewId; if(!id) return;
+  if(!recDelArmed){ recArmDel(true); return; } // 1回目は確認表示に切り替えるだけ
+  recArmDel(false);
+  RECS=RECS.filter(r=>r.id!==id);
+  recDel(id);
+  recCloseView();
+  renderRecs();
+});
+$('recBox').addEventListener('click',e=>{
+  const re=e.target.closest('[data-rain]');
+  if(re){ recRefetch(re.dataset.rain); return; }
+  const op=e.target.closest('[data-open]');
+  if(op) recOpenView(op.dataset.open);
+});
+$('recSort').addEventListener('change',renderRecs);
+$('recOnMap').addEventListener('change',e=>{
+  if(e.target.checked) recLayer.addTo(map); else map.removeLayer(recLayer);
+  renderRecMarkers();
+});
+
+/* --- 記録の位置: 仮ピン(入力中)・まとめ表示・地図で見る・位置を直す --- */
+let recPin=null;   // ドラッグできる仮ピン(入力中、または位置の修正中だけ地図に出す)
+let recFix=null;   // 位置を修正中の記録id
+function recPinClear(){
+  if(recPin){ map.removeLayer(recPin); recPin=null; }
+}
+function recPinSet(ll,pan){
+  if(!ll){ recPinClear(); return; }
+  if(!recPin){
+    recPin=L.marker(ll,{draggable:true,keyboard:false,zIndexOffset:3000,icon:L.divIcon({
+      className:'',iconSize:[24,24],iconAnchor:[12,12],html:'<div class="recpin edit">📍</div>'})}).addTo(map);
+    recPin.on('dragend',()=>{ const q=recPin.getLatLng(); recPinMoved([q.lat,q.lng]); });
+  }else recPin.setLatLng(ll);
+  if(pan) map.setView(ll,Math.max(map.getZoom(),15),{animate:true});
+}
+/* ピンを動かしたとき: 入力中なら保存予定の位置を更新(修正中は保存時にピンの位置を読む) */
+function recPinMoved(ll){
+  if(!recPending) return;
+  recPending.ll=ll;
+  recPending.pos='地図で指定した位置を使います';
+  recFormState();
+}
+/* 入力中・修正中だけ、地図のタップでピンを置き直す(長押しの確認地点は従来どおり) */
+map.on('click',e=>{
+  if(!recPending&&!recFix) return;
+  const ll=[e.latlng.lat,e.latlng.lng];
+  recPinSet(ll,false);
+  recPinMoved(ll);
+});
+
+/* 記録マーカー: ほぼ同じ位置(小数4桁)の記録は1つにまとめ、件数を表示する */
+function recMarkersGrouped(){
+  const groups={};
+  RECS.forEach(r=>{
+    if(!r.ll) return;
+    const k=r.ll[0].toFixed(4)+','+r.ll[1].toFixed(4);
+    const g=groups[k]||(groups[k]={n:0,last:r});
+    g.n++;
+    if(r.t>g.last.t) g.last=r;
+  });
+  Object.keys(groups).forEach(k=>{
+    const g=groups[k];
+    L.marker(g.last.ll,{keyboard:false,title:recDate(g.last.t)+(g.n>1?'(ほか'+(g.n-1)+'件)':''),icon:L.divIcon({
+      className:'',iconSize:[24,24],iconAnchor:[12,12],
+      html:'<div class="recpin">📷'+(g.n>1?'<b>'+g.n+'</b>':'')+'</div>'})})
+     .on('click',()=>recOpenView(g.last.id)).addTo(recLayer);
+  });
+  return true;
+}
+
+/* 地図で見る */
+function recShowOnMap(ll){
+  if(!$('recOnMap').checked){ $('recOnMap').checked=true; recLayer.addTo(map); }
+  renderRecMarkers();
+  map.setView(ll,Math.max(map.getZoom(),15),{animate:true});
+}
+$('recViewMap').addEventListener('click',()=>{
+  const r=RECS.find(x=>x.id===recViewId);
+  if(!r||!r.ll) return;
+  recCloseView();
+  recShowOnMap(r.ll);
+});
+
+/* 位置を直す: ピンを動かして保存する(雨量は取り直さない) */
+function recFixCancel(){
+  if(!recFix) return;
+  recFix=null;
+  $('recFixBox').hidden=true;
+  if(!recPending) recPinClear();
+}
+$('recViewFix').addEventListener('click',()=>{
+  const r=RECS.find(x=>x.id===recViewId);
+  if(!r) return;
+  recCloseView();
+  recCloseForm();           // 入力中の写真があれば取り消す
+  $('recSafe').hidden=true;
+  recFix=r.id;
+  const c=map.getCenter();
+  recPinSet(r.ll?r.ll.slice():[c.lat,c.lng],true); // 位置なしの記録は地図の中心から
+  $('recBox').open=true;
+  $('recFixBox').hidden=false;
+  $('recFixBox').scrollIntoView({behavior:'smooth',block:'nearest'});
+});
+$('recFixNo').addEventListener('click',recFixCancel);
+$('recFixSave').addEventListener('click',()=>{
+  const r=RECS.find(x=>x.id===recFix);
+  if(r&&recPin){
+    const q=recPin.getLatLng();
+    r.ll=[q.lat,q.lng];
+    recPut(r);
+    if(!$('recOnMap').checked){ $('recOnMap').checked=true; recLayer.addTo(map); }
+    recMsg('位置を保存しました。');
+  }
+  recFixCancel();
+  renderRecs();
+});
+
+/* --- 書き出し・読み込み(JSON) --- */
+$('recExport').addEventListener('click',()=>{
+  if(!RECS.length){ recMsg('書き出す記録がありません。'); return; }
+  try{
+    const d=new Date(Date.now()+9*3600000);
+    const name='suigai-note-'+d.getUTCFullYear()+('0'+(d.getUTCMonth()+1)).slice(-2)+('0'+d.getUTCDate()).slice(-2)+'.json';
+    const blob=new Blob([JSON.stringify({app:'suigai-note',version:1,records:RECS})],{type:'application/json'});
+    const url=URL.createObjectURL(blob), a=document.createElement('a');
+    a.href=url; a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    CFG.exported=RECS.length; cfgPut('exported',RECS.length); renderRecCount();
+    recMsg(RECS.length+'件を書き出しました。');
+  }catch(e){ recMsg('書き出しに失敗しました。'); }
+});
+$('recImportBtn').addEventListener('click',()=>$('recImport').click());
+$('recImport').addEventListener('change',e=>{
+  const file=e.target.files&&e.target.files[0];
+  e.target.value='';
+  if(!file) return;
+  const fr=new FileReader();
+  fr.onerror=()=>recMsg('ファイルを読み込めませんでした。');
+  fr.onload=()=>{
+    try{
+      const j=JSON.parse(fr.result), arr=Array.isArray(j)?j:(j&&j.records);
+      if(!Array.isArray(arr)) throw new Error('形式が違います');
+      const ids={}; RECS.forEach(r=>{ ids[r.id]=1; });
+      let add=0, skip=0;
+      arr.forEach(x=>{
+        const okImg=s=>typeof s==='string'&&s.indexOf('data:image/')===0;
+        if(!x||typeof x.id!=='string'||typeof x.t!=='number'||!okImg(x.img)||ids[x.id]){ skip++; return; }
+        const ll=(Array.isArray(x.ll)&&x.ll.length===2&&typeof x.ll[0]==='number'&&typeof x.ll[1]==='number')?[x.ll[0],x.ll[1]]:null;
+        const rec={id:x.id,t:x.t,ll:ll,river:typeof x.river==='string'?x.river:null,img:x.img,
+          thumb:okImg(x.thumb)?x.thumb:x.img,level:typeof x.level==='string'?x.level:'',
+          memo:typeof x.memo==='string'?x.memo.slice(0,200):'', place:typeof x.place==='string'?x.place.slice(0,20):'',
+          rain:(x.rain&&typeof x.rain==='object')?{h1:x.rain.h1,h24:x.rain.h24,h48:x.rain.h48,h72:x.rain.h72,src:x.rain.src,at:x.rain.at}:null};
+        ids[rec.id]=1; RECS.push(rec); recPut(rec); add++;
+      });
+      recMsg(add+'件を読み込みました'+(skip?'(重複・不正な'+skip+'件はスキップ)':'')+'。');
+      renderRecs();
+    }catch(err){ recMsg('読み込めませんでした(形式が違います)。'); }
+  };
+  fr.readAsText(file);
+});
+
+/* --- モードによる出し分け(有事は屋内から記録、平時は見返す。表示の切替は CSS の emg-only / peace-only) --- */
+function recApplyMode(){
+  const emg=APPMODE==='emg';
+  $('recTtl').textContent=emg?'雨の日の記録(屋内から)':'観察記録を見返す';
+  recFixCancel(); // モードを切り替えたら、位置の修正は取り消す
+  recCloseForm();
+  $('recSafe').hidden=true;
+  renderWarn(); // モード切替時に警告欄を出し分け
+  $('recBox').open=emg; // 雨の日・有事は開く、平時は閉じた状態から
+  renderRecs();
+}
+
+/* --- 設定の保存(わが家=確認地点・前回の川・書き出し時の件数)。IndexedDB の settings ストアを使う --- */
+let CFG={};        // 読み込んだ設定 {loc, river, exported}
+let navCount=0;    // 川の表示・モード切替の回数(起動直後の1回を超えていれば利用者が操作済み)
+function cfgPut(key,val){
+  if(!recDb) return;
+  try{ recDb.transaction('settings','readwrite').objectStore('settings').put({key:key,val:val}); }catch(e){}
+}
+function cfgDel(key){
+  if(!recDb) return;
+  try{ recDb.transaction('settings','readwrite').objectStore('settings').delete(key); }catch(e){}
+}
+function cfgAll(){
+  return new Promise(res=>{
+    if(!recDb){ res({}); return; }
+    try{
+      const tx=recDb.transaction('settings','readonly'), rq=tx.objectStore('settings').getAll();
+      tx.oncomplete=()=>{ const o={}; (rq.result||[]).forEach(x=>{ if(x) o[x.key]=x.val; }); res(o); };
+      tx.onerror=()=>res({});
+      tx.onabort=()=>res({});
+    }catch(e){ res({}); }
+  });
+}
+/* 起動時の復元: 確認地点は未設定のときだけ、川は利用者がまだ操作していないときだけ */
+function cfgRestore(o){
+  CFG=o||{};
+  /* 保存済みの川がなく、保存済みの圏が今と違えば、その圏の全体表示にする(利用者が未操作のときだけ) */
+  const hasRiver=typeof CFG.river==='string'&&CFG.river&&RIVERS.some(r=>r.id===CFG.river);
+  if(navCount<=1&&!RV&&!hasRiver&&typeof CFG.region==='string'&&CFG.region!==REGION&&REGIONS.some(x=>x.id===CFG.region)){
+    showRiver('region:'+CFG.region);
+  }
+  const s=CFG.loc;
+  if(!LOC&&s&&Array.isArray(s.ll)&&s.ll.length===2&&typeof s.ll[0]==='number'&&typeof s.ll[1]==='number'){
+    setLoc([s.ll[0],s.ll[1]],s.kind==='gps'?'gps':'pin');
+  }
+  if(navCount<=1&&!RV&&typeof CFG.river==='string'&&CFG.river&&RIVERS.some(r=>r.id===CFG.river)){
+    showRiver(CFG.river);
+  }
+  renderRecCount();
+}
+
+/* 記録の件数・容量の目安と、書き出しの案内 */
+function renderRecCount(){
+  let len=0;
+  RECS.forEach(r=>{ len+=(r.img?r.img.length:0)+(r.thumb?r.thumb.length:0); });
+  $('recCount').textContent='記録 '+RECS.length+'件・約'+(len*0.75/1048576).toFixed(1)+'MB';
+  const done=typeof CFG.exported==='number', inc=RECS.length-(done?CFG.exported:0);
+  const el=$('recBackup');
+  el.hidden=inc<10;
+  el.textContent=inc<10?'':(done
+    ? '前回の書き出しから'+inc+'件増えています。書き出しで控えを残しましょう。'
+    : '記録が'+inc+'件あります。書き出しで控えを残しましょう。');
+}
+
+/* 答え合わせ: 記録の雨量での試算(河川氾濫のみ・自動判定相当)と、実際の記録を並べる */
+function recCheck(r){
+  const head='【答え合わせ】';
+  if(!r.ll) return head+'位置のない記録は答え合わせできません。';
+  if(!r.river) return head+'川を選ばずに記録したため、答え合わせできません。';
+  if(!RV||!CUR||r.river!==RV.id) return head+'答え合わせは、記録した川を表示しているときにできます。';
+  const i=locCell(r.ll);
+  if(i<0||!mask[i]) return head+'計算範囲外の地点です。';
+  const n=fcSpanHours(RV), key=n<=1?'h1':n<=24?'h24':n<=48?'h48':'h72';
+  const v=r.rain&&r.rain[key];
+  if(typeof v!=='number') return head+'この川の指標('+RV.rain.span+')の雨量が記録にないため、答え合わせできません。';
+  const dep=cellDepthAuto(i,v);
+  return head+'\n'+
+    'この雨量('+RV.rain.span+' '+fcNum(v)+'mm)での試算: '+(dep>0.05?'約'+dep.toFixed(1)+'m':'浸水なし')+'\n'+
+    '実際の記録: '+(r.level||'—')+'\n'+
+    '記録の雨量は地点のモデル値、試算は流域平均雨量を前提にした河川氾濫のみの簡易モデルです。内水による冠水は試算に含まれません。';
+}
+
+/* --- 起動時: 保存済みの記録を読み込む --- */
+recOpen().then(db=>{
+  recDb=db;
+  if(!db){ recMem=true; return null; }
+  return recTx('readonly',st=>st.getAll());
+}).then(r=>{
+  if(r&&Array.isArray(r.result)){
+    const ids={}; RECS.forEach(x=>{ ids[x.id]=1; });
+    r.result.forEach(x=>{ if(x&&!ids[x.id]) RECS.push(x); });
+  }
+  recStoreNote();
+  cfgAll().then(cfgRestore); // 設定(わが家・前回の川)を読み込んで復元
+  renderRecs();
+});
+
+/* ============================================================
+   都市圏ごとの公式タイル範囲・大雨の可能性の警告(平時モードのみ)
+   ============================================================ */
+let offRegion='';   // 公式浸水想定の要求範囲を合わせてある圏
+function regionBounds(rg){
+  let S=90,N=-90,W=180,E=-180;
+  RIVERS.forEach(r=>{
+    if(r.region!==rg) return;
+    const m=r.halfWidth+r.maxLateral;
+    const dLat=m/110940+0.05, dLng=m/(111320*Math.cos(35*Math.PI/180))+0.05;
+    r.centerline.forEach(c=>{
+      S=Math.min(S,c[0]-dLat); N=Math.max(N,c[0]+dLat);
+      W=Math.min(W,c[1]-dLng); E=Math.max(E,c[1]+dLng);
+    });
+  });
+  return L.latLngBounds([[S,W],[N,E]]);
+}
+
+/* 判定: 表示中の圏で予報を取得できた川について、計画規模比と1時間最大雨量を見る */
+function warnJudge(){
+  let ok=0, fail=0, other=0, best=null;
+  RIVERS.forEach(r=>{
+    if(r.region!==REGION) return;
+    const c=FC_CACHE[r.id];
+    if(!c||c.state==='loading'){ other++; return; }
+    if(c.state!=='ok'){ fail++; return; }
+    ok++;
+    const d=c.data, ratio=d.max/r.rain.plan;
+    const lv=(ratio>=0.8||d.max1>=80)?2:((ratio>=0.5||d.max1>=50)?1:0);
+    const score=Math.max(ratio/0.5,d.max1/50);
+    if(!best||lv>best.level||(lv===best.level&&score>best.score)){
+      best={level:lv,score:score,r:r,ratio:ratio,d:d,byRatio:ratio/0.5>=d.max1/50};
+    }
+  });
+  if(!ok) return {level:0,na:fail>0&&other===0,reason:''};
+  const b=best;
+  return {level:b.level,na:false,reason:b.byRatio
+    ? b.r.name+'の予報雨量が計画規模(仮定を含む)の'+Math.round(b.ratio*100)+'%です('+fcTime(b.d.peakT)+'ごろまで)。'
+    : b.r.name+'付近で1時間に'+fcNum(b.d.max1)+'mmの予報が出ています。'};
+}
+function warnHtml(w,modal){
+  return '<b class="warn-ttl">'+(w.level>=2?'大雨のおそれが高まっています':'大雨の可能性があります')+'</b>'+
+    '<p>'+w.reason+'</p>'+
+    '<p><b>今は学習用の画面ではなく、キキクル・川の防災情報・自治体や Yahoo!防災速報などの専門アプリで最新の情報を確認してください。</b></p>'+
+    '<div class="quick-links">'+
+    '<a href="https://www.jma.go.jp/bosai/risk/" target="_blank" rel="noopener">キキクル</a>'+
+    '<a href="https://www.river.go.jp/" target="_blank" rel="noopener">川の防災情報</a>'+
+    '<a href="https://disaportal.gsi.go.jp/" target="_blank" rel="noopener">ハザードマップ</a></div>'+
+    '<div class="rec-row"><button type="button" data-warn="emg">有事モードに切り替える</button>'+
+    (modal?'<button type="button" data-warn="ok">確認しました</button>':'')+'</div>'+
+    '<p class="hint">予報は外れることがあります。この表示が出ていなくても安全を意味しません。このアプリは通知をしません。</p>';
+}
+let warnSeen=0;     // 画面中央に表示済みの最大レベル(このセッション内)
+let warnKey='';     // 警告欄の内容が変わったときだけ書き換える
+function renderWarn(){
+  const box=$('warnBox'), na=$('warnNa');
+  if(APPMODE==='emg'){ // 有事モードは公式リンクを常時表示しているので、警告は出さない
+    box.hidden=true; na.hidden=true; $('warnView').hidden=true;
+    return;
+  }
+  const w=warnJudge();
+  na.hidden=!w.na;
+  if(w.level<1){ box.hidden=true; warnKey=''; return; }
+  const key=w.level+'|'+w.reason;
+  if(key!==warnKey){
+    warnKey=key;
+    box.className='warn-box'+(w.level>=2?' lv2':'');
+    box.innerHTML=warnHtml(w,false);
+  }
+  box.hidden=false;
+  if(w.level>warnSeen){ // 最初の1回と、レベルが上がったときだけ画面中央にも出す
+    warnSeen=w.level;
+    $('warnViewIn').innerHTML=warnHtml(w,true);
+    $('warnView').hidden=false;
+  }
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest('[data-warn]');
+  if(!b) return;
+  $('warnView').hidden=true;
+  if(b.dataset.warn==='emg'&&APPMODE!=='emg') applyMode('emg');
+});
+
+/* id の川を表示する。id が空なら表示中の圏の全体表示、'region:圏id' なら圏を切り替えて全体表示 */
+function showRiver(id){
+  if(typeof id==='string'&&id.indexOf('region:')===0){
+    const rg=id.slice(7);
+    if(REGIONS.some(x=>x.id===rg)) REGION=rg;
+    id='';
+  }
+  const rv=RIVERS.find(r=>r.id===id)||null;
+  if(rv) REGION=rv.region;
+  cfgPut('region',REGION); // 表示中の圏を保存(設定の読み込み前は保存されない)
+  if(offRegion!==REGION){ // 公式浸水想定の要求範囲を、表示中の圏に合わせる
+    offRegion=REGION;
+    officialLayer.options.bounds=regionBounds(REGION);
+    if(map.hasLayer(officialLayer)) officialLayer.redraw();
+  }
+  if(RV&&GEO_CACHE[RV.id]) GEO_CACHE[RV.id].rainVal=+slider.value; // 川ごとに雨量を覚えておく
+
+  /* 前の表示を確実に片付ける */
+  map.closePopup();
+  riverLayer.clearLayers();
+  overviewLayer.clearLayers();
+  if(map.hasLayer(overviewLayer)) map.removeLayer(overviewLayer);
+  if(map.hasLayer(floodLayer)) map.removeLayer(floodLayer);
+
+  RV=rv; CUR=null;
+  START=null; renderStart(); // 浸水開始雨量は川ごとに計算し直す
+  recFixCancel();            // 川を切り替えたら、記録の位置の修正は取り消す
+  clearPresetNote();
+  $('riverSel').value=rv?rv.id:'region:'+REGION;
+  document.querySelectorAll('.sim').forEach(e=>{e.hidden=!rv;});
+  $('ovBox').hidden=!!rv;
+  renderRecNear(); // 川が変わったら「今回の予報に近い記録」を作り直す
+  navCount++;
+  cfgPut('river',rv?rv.id:''); // 最後に表示した川を保存(設定の読み込み前は保存されない)
+
+  if(!rv){
+    /* 関東全体:川の位置マーカーと公式浸水想定だけを表示 */
+    let all=[];
+    RIVERS.forEach(r=>{
+      if(r.region!==REGION) return; // 全体表示は、表示中の圏の川だけ
+      all=all.concat(r.centerline);
+      const c=r.centerline[Math.floor(r.centerline.length/2)];
+      OV_MARKERS[r.id]=L.marker(c,{keyboard:true,title:r.name,icon:rpIcon(OV_BLUE,false)})
+       .bindTooltip(r.name,{permanent:true,direction:'right',offset:[12,0],className:'st-label'})
+       .on('click',()=>showRiver(r.id))
+       .addTo(overviewLayer);
+    });
+    overviewLayer.addTo(map);
+    renderOverviewFc();   // 取得済みの予報で色分け
+    loadAllForecasts();   // 未取得・期限切れの川を順次取得
+    document.title=APP_NAME;
+    $('ttl').textContent=APP_NAME;
+    $('scope').textContent='川と雨を学び、雨の日を記録する(簡易モデル)';
+    $('ovTtl').textContent=regionName()+'全体';
+    $('offNote').textContent='お住まいの自治体の洪水ハザードマップ';
+    approxNote.textContent='';
+    const st=$('status'); st.textContent=regionName()+'全体'; st.style.background='#2F6F8F';
+    setOfficial(offOv);
+    map.fitBounds(L.latLngBounds(all).pad(0.08));
+    return;
+  }
+
+  let g=GEO_CACHE[rv.id];
+  if(g) useGeo(g); else g=GEO_CACHE[rv.id]=buildGeo(rv);
+  CUR=g;
+  if(!g.dem||g.dem.state==='fail') loadDem(g); // 内水用の標高(非同期。失敗しても河川氾濫は動く)
+
+  const rn=rv.rain, f=rv.flood||{};
+  rv.fl={start:rn.floodStart||rn.plan*0.66, full:rn.floodFull||rn.maxScale*1.19,
+         h0:f.h0||1.0, h1:f.h1||4.2, l0:f.l0||500, l1:f.l1||2400};
+
+  cv.width=COLS;
+  cv.height=ROWS;
+  img=ctx.createImageData(COLS,ROWS);
+  floodLayer.setBounds([[B.S,B.W],[B.N,B.E]]);
+  if(APPMODE!=='emg') floodLayer.addTo(map); // 有事モードでは簡易モデルの浸水域を出さない
+  drawRiver(rv);
+  addMarkers();
+
+  document.title=APP_NAME+'|'+rv.name;
+  $('ttl').textContent=APP_NAME+'|'+rv.name;
+  $('scope').textContent=rv.area+'(簡易モデル)';
+  $('offNote').textContent=rv.officialNote;
+  approxNote.textContent=rv.approx
+    ? 'この川の河道・リスク地点・駅の位置と雨量のしきい値は、概略の仮定値です。' : '';
+
+  buildGauge(rn);
+  slider.value=g.rainVal;
+  loadForecast(rv).then(()=>{ if(RV===rv) renderFc(); }); // 予報は表示だけ更新(雨量は書き換えない)
+  renderFc();
+  setOfficial(offRiver);
+  computeStart(); // 川の切替時に、確認地点の浸水開始雨量を計算
+  loadAllForecasts(); // 圏内の他の川の予報も取得(大雨の可能性の判定用)
+  map.fitBounds(rv.view||L.latLngBounds(rv.centerline).pad(0.15));
+  update();
+}
+
+$('riverSel').innerHTML=REGIONS.map(g=>
+  '<optgroup label="'+g.name+'"><option value="region:'+g.id+'">'+g.name+'全体</option>'+
+  RIVERS.filter(r=>r.region===g.id).map(r=>'<option value="'+r.id+'">'+r.name+'('+r.area+')</option>').join('')+
+  '</optgroup>').join('')+
+  ''; // 川の選択肢は、上で圏ごとの optgroup として生成している
+$('riverSel').addEventListener('change',e=>showRiver(e.target.value));
+
+$('ovList').innerHTML=RIVERS.map(r=>
+  '<li><button class="pt-main" data-river="'+r.id+'">'+
+  '<span class="pt-dot" style="background:#2F6F8F"></span>'+
+  '<span class="pt-name">'+r.name+'</span>'+
+  '<span class="pt-type">'+r.area+(r.approx?'/概略データ':'')+'</span>'+
+  '</button></li>').join('');
+$('ovList').addEventListener('click',e=>{
+  const b=e.target.closest('[data-river]'); if(b) showRiver(b.dataset.river);
+});
+
+window.addEventListener('resize',()=>map.invalidateSize());
+showRiver(''); // 起動時は関東全体を表示
+setTimeout(()=>map.invalidateSize(),200);
+})();
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_START -->
+<script>
+window.addEventListener("load", function () {
+    if (location.protocol !== "file:" && location.protocol !== "about:" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(function (error) {
+            console.warn("Service Worker registration failed:", error);
+        });
+    }
+});
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_END -->
+</body>
+</html>
