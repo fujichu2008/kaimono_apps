@@ -1349,7 +1349,7 @@ function normalize(s){ if(!s) return ''; let t=s.normalize('NFKC');
 }
 function guessCategory(name){
   const n=normalize(name);
-  if(USER_DICT[n]) return USER_DICT[n]; // 最優先
+  if(CATEGORY_NAMES.includes(USER_DICT[n])) return USER_DICT[n]; // 最優先（有効な分類のときだけ）
   // 以降は照合用の形（括弧書き・末尾の数量を除去、かなはカタカナに統一）で判定する
   const m = matchKey(name);
   // 学習辞書の部分一致（2文字以上・最長を採用）
@@ -1490,7 +1490,53 @@ let items = loadJSON(LS_ITEMS, []);
 let supers = loadJSON(LS_SUPERS, []);
 const LS_HISTORY='shopping_history_v1';
 let buyHistory = loadJSON(LS_HISTORY, {});   // { 正規化した品名: { name, category, count, last } }
-if(!buyHistory || typeof buyHistory !== 'object' || Array.isArray(buyHistory)) buyHistory = {};
+// 保存データの構造検証（移行処理より前。分類名はここでは変更しない。起動時には保存しない）
+let loadDataDropped = false;   // 要素の除外・初期値への置き換えが起きたか（init で1回だけ通知）
+(function validateLoadedData(){
+  const plain = o => !!o && typeof o === 'object' && !Array.isArray(o);
+  const drop = () => { loadDataDropped = true; };
+
+  // 品目：name が空でない文字列のオブジェクトだけ残し、id・数量・真偽値を整える
+  if(!Array.isArray(items)){ drop(); items = []; }
+  const okItems = [];
+  items.forEach(x => {
+    if(!plain(x) || typeof x.name !== 'string' || !x.name.trim()){ drop(); return; }
+    if(typeof x.id !== 'string' || !x.id) x.id = newId();
+    x.qty = clampQty(x.qty);
+    x.checked = (x.checked === true);
+    x.skip = (x.skip === true);
+    okItems.push(x);
+  });
+  items = okItems;
+
+  // スーパー：id と name が文字列のオブジェクトだけ残す
+  if(!Array.isArray(supers)){ drop(); supers = []; }
+  const okSupers = [];
+  supers.forEach(s => {
+    if(!plain(s) || typeof s.id !== 'string' || !s.id || typeof s.name !== 'string'){ drop(); return; }
+    if(Array.isArray(s.shelfOrder)){
+      const so = s.shelfOrder.filter(c => typeof c === 'string');
+      if(so.length !== s.shelfOrder.length){ drop(); s.shelfOrder = so; }
+    }else{
+      if(s.shelfOrder != null) drop();
+      s.shelfOrder = [];
+    }
+    if(s.floorBreaks !== undefined && !plain(s.floorBreaks)){ drop(); delete s.floorBreaks; }
+    okSupers.push(s);
+  });
+  supers = okSupers;
+
+  // 学習辞書：値が文字列の項目だけ残す
+  if(!plain(USER_DICT)){ drop(); USER_DICT = {}; }
+  Object.keys(USER_DICT).forEach(k => { if(typeof USER_DICT[k] !== 'string'){ drop(); delete USER_DICT[k]; } });
+
+  // 購入履歴：name が空でない文字列のオブジェクトだけ残す
+  if(!plain(buyHistory)){ drop(); buyHistory = {}; }
+  Object.keys(buyHistory).forEach(k => {
+    const h = buyHistory[k];
+    if(!plain(h) || typeof h.name !== 'string' || !h.name){ drop(); delete buyHistory[k]; }
+  });
+})();
 
 // 移行：既に購入済みの品目は「集計済み」にする（履歴は増やさない。何度実行しても結果は同じ）
 (function migrateCounted(){
@@ -1516,7 +1562,9 @@ if(!buyHistory || typeof buyHistory !== 'object' || Array.isArray(buyHistory)) b
   // USER_DICT（学習辞書）の再分類
   for(const [k,v] of Object.entries(USER_DICT)){
     if(v === OLD){
-      USER_DICT[k] = guessCategory(k);
+      delete USER_DICT[k];                  // 旧学習結果を外してから、品名で再推定する
+      const g = guessCategory(k);
+      if(g !== 'その他') USER_DICT[k] = g;   // 「その他」は学習として残さない
       changed++;
     }
   }
@@ -1607,6 +1655,21 @@ function isProcessedMeatName(name){
   if(changedDict) saveUserDict();
   if(changedHistory) saveHistory();
   if(changedSupers) saveSupers();
+})();
+
+// 分類の検証（すべての移行処理の後）。有効な分類は変更しない。何度実行しても結果は同じ。起動時には保存しない
+(function validateCategories(){
+  const valid = c => CATEGORY_NAMES.includes(c);
+  // 学習辞書：無効な分類の項目は削除
+  Object.keys(USER_DICT).forEach(k => { if(!valid(USER_DICT[k])){ delete USER_DICT[k]; loadDataDropped = true; } });
+  // 品目・購入履歴：無効な分類は品名から再推定（除外ではないので通知しない）
+  items.forEach(it => { if(!valid(it.category)) it.category = guessCategory(it.name); });
+  Object.values(buyHistory).forEach(h => { if(!valid(h.category)) h.category = guessCategory(h.name); });
+  // 売場順：無効な分類と重複を取り除く
+  supers.forEach(s => {
+    const so = s.shelfOrder.filter((c, i) => valid(c) && s.shelfOrder.indexOf(c) === i);
+    if(so.length !== s.shelfOrder.length){ s.shelfOrder = so; loadDataDropped = true; }
+  });
 })();
 
 /* ========= 表示状態（選択スーパー・売場順ON/OFF）の保存 ========= */
@@ -1705,7 +1768,7 @@ function openDB(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAM
   r.onupgradeneeded=e=>{ const d=e.target.result; d.createObjectStore(DB_STORE,{keyPath:'id'}); };
   r.onsuccess=()=>{ db=r.result; res(); }; r.onerror=()=>rej(r.error);
 });}
-async function dbAdd(photo){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).add(photo);
+async function dbAdd(photo){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).add(photo); tx.onabort=()=>rej(tx.error||new Error('transaction aborted'));
   tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
 async function dbPut(photo){ await openDBIf(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).put(photo);
   tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
@@ -2087,7 +2150,6 @@ function renderList(){
   updateEmptyState(items.length === 0);   // 品目が1件でもあれば案内は出さない（全て購入済みで折りたたんだ場合も）
 }
 function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
-renderList();
 
 /* ========= カメラからアルバム追加 ========= */
 const hiddenPicker=document.createElement('input'); hiddenPicker.type='file'; hiddenPicker.accept='image/*'; hiddenPicker.capture='environment'; hiddenPicker.style.display='none'; document.body.appendChild(hiddenPicker);
@@ -2115,6 +2177,7 @@ function fillCapCategory(selectEl, selected){
 // 入力モーダルを開く
 function openCaptureModal(draft){
   currentCaptureDraft = draft; // { dataUrl, supermarketId, name?, category?, note? }
+  capCatTouched = false;       // 前回の撮影の手動変更を持ち越さない
   capPreview.hidden = true;
   capPreview.removeAttribute('src');
   if(typeof draft.dataUrl === 'string' && draft.dataUrl.trim()){
@@ -2149,17 +2212,26 @@ capName.addEventListener('input', () => {
 });
 btnCapCancel.onclick = () => closeCaptureModal();
 
+// 写真追加の保存中状態（重複保存と、保存中のキャンセルによる混線を防ぐ）
+let captureSaving = false;
+function setCaptureSaving(on){
+  captureSaving = !!on;
+  btnCapSave.disabled = captureSaving;
+  btnCapCancel.disabled = captureSaving;
+  btnCapSave.textContent = captureSaving ? '保存中…' : 'アルバムに保存';
+}
+
 // 保存 → IndexedDB
 btnCapSave.onclick = async () => {
-  if(!currentCaptureDraft) return;
+  if(!currentCaptureDraft || captureSaving) return;
   const name = capName.value.trim();
   if(!name){ alert('品名を入力してください'); return; }
   const category = capCategory.value || guessCategory(name);
   const note = capNote.value.trim();
 
   // 学習辞書に反映（次回以降の自動分類に活きる）
-  USER_DICT[normalize(name)] = category;
-  saveUserDict();
+  // 学習は、分類を手動で変えたときだけ（自動推定のままの分類と「その他」は学習しない）。書き込みは写真の保存成功後
+  const learnCat = (capCatTouched && category !== 'その他');
 
   const photo = {
     id: newId(),
@@ -2170,7 +2242,17 @@ btnCapSave.onclick = async () => {
     takenAt: Date.now(),
     note
   };
-  await dbAdd(photo);
+  setCaptureSaving(true);
+  let saved = false;
+  try{ await dbAdd(photo); saved = true; }
+  catch(err){ console.warn(err); }
+  setCaptureSaving(false);
+  if(!saved){
+    // 写真と入力内容は残す（そのまま「アルバムに保存」で再試行できる）
+    showToast('写真を保存できませんでした。端末の空き容量を確認して、もう一度お試しください');
+    return;
+  }
+  if(learnCat){ USER_DICT[normalize(name)] = category; saveUserDict(); }   // 保存できないときは既存の警告の帯で知らせる
   closeCaptureModal();
   showToast('アルバムに保存しました');
   renderAlbum();
@@ -2183,12 +2265,25 @@ function startCaptureForItem(item){
   captureContext={item, supermarketId: selSuper.value || ''};
   hiddenPicker.value=''; hiddenPicker.click();
 }
-hiddenPicker.onchange = async (e) => {
+hiddenPicker.onchange = (e) => {
+  const ctx = captureContext;   // 撮影開始時のコンテキストを確保し、共有の変数はすぐ空に戻す
+  captureContext = null;
+  return handleCapturePick(e, ctx);
+};
+// ここから下の captureContext は引数（この撮影だけのコンテキスト）を指す
+async function handleCapturePick(e, captureContext){
   const f = e.target.files[0];
   if (!f || !captureContext) return;
 
-  const img = await fileToImage(f);
-  const resized = await shrinkAndOrient(img, 1280);
+  let resized;
+  try{
+    const img = await fileToImage(f);
+    resized = await shrinkAndOrient(img, 1280);
+  }catch(err){
+    console.warn(err);
+    showToast('写真を読み込めませんでした。別の写真でもう一度お試しください');
+    return;
+  }
 
   // 📷ボタンからの「フリーモード」
   if (captureContext.mode === 'free') {
@@ -2214,14 +2309,21 @@ hiddenPicker.onchange = async (e) => {
       takenAt: Date.now(),
       note: ''
     };
-    await dbAdd(photo);
+    try{ await dbAdd(photo); }
+    catch(err){
+      console.warn(err);
+      // 保存できなかったときは、写真追加シートに同じ写真と品目の内容を入れて開き、再撮影なしで再試行できるようにする
+      openCaptureModal({ dataUrl: resized, supermarketId: photo.supermarketId, name: photo.name, category: photo.category, note: '' });
+      showToast('写真を保存できませんでした。「アルバムに保存」でもう一度お試しください');
+      return;
+    }
     renderAlbum();
     showToast('アルバムに保存しました');
     captureContext = null;
   }
 };
 
-function fileToImage(file){ return new Promise((res,rej)=>{ const url=URL.createObjectURL(file); const img=new Image(); img.onload=()=>{URL.revokeObjectURL(url); res(img)}; img.onerror=rej; img.src=url; });}
+function fileToImage(file){ return new Promise((res,rej)=>{ const url=URL.createObjectURL(file); const img=new Image(); img.onload=()=>{URL.revokeObjectURL(url); res(img)}; img.onerror=()=>{URL.revokeObjectURL(url); rej(new Error('image load failed'))}; img.src=url; });}
 async function shrinkAndOrient(img, maxSide){
   const r= Math.min(1, maxSide/Math.max(img.width,img.height));
   const w=Math.round(img.width*r), h=Math.round(img.height*r);
@@ -5418,6 +5520,11 @@ function init(){
   applyShopMode();
   syncWake();   // 起動時は通知しない（失敗しても何も表示しない）
   migrateAlbumCategory().then(renderAlbum, renderAlbum);
+  // 読み込み時に保存データの一部を除外した場合は、1回だけ知らせる
+  if(loadDataDropped){
+    loadDataDropped = false;
+    showToast('保存データの一部を読み込めなかったため、除外しました');
+  }
   // 初めて使うとき（品目・スーパー・購入履歴がすべて空）だけ、ヘルプを1回開く
   if(uiState.helpSeen !== true && !items.length && !supers.length && !Object.keys(buyHistory).length){
     uiState.helpSeen = true; saveUi();
