@@ -302,6 +302,16 @@ button.v3d-note.min{right:auto;max-width:calc(100% - 64px);min-height:36px;font-
 .help-nav button:disabled{opacity:.4;cursor:default}
 #helpNext{background:var(--river-deep);border-color:var(--river-deep);color:#fff;font-weight:700}
 #helpPage{flex:1;text-align:center;font-size:12px;color:var(--ink-soft)}
+/* モード切替のトースト */
+.mode-toast{position:fixed;left:50%;top:max(56px,calc(env(safe-area-inset-top) + 48px));transform:translate(-50%,-12px);z-index:3100;width:calc(100% - 24px);max-width:420px;display:flex;gap:10px;align-items:flex-start;padding:10px 14px 10px 12px;border-radius:10px;background:var(--river-deep);color:#fff;box-shadow:0 6px 20px rgba(18,38,46,.35);border-left:6px solid var(--river);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s}
+.mode-toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto;cursor:pointer}
+.mode-toast.emg{border-left-color:var(--danger)}
+.mode-toast svg{flex:none;width:34px;height:34px;margin-top:2px}
+.mode-toast b{display:block;font-size:14px;margin-bottom:2px}
+.mode-toast span{display:block;font-size:12.5px;line-height:1.5}
+.mode-toast .mt-d{fill:#BFDDEA}
+.mode-toast .mt-s{stroke:#BFDDEA;stroke-width:3;fill:none;stroke-linecap:round}
+@media (prefers-reduced-motion:reduce){.mode-toast{transition:none}}
 /* 初回のタイトル画面(全画面) */
 .title-view{position:fixed;inset:0;z-index:3200;display:flex;align-items:center;justify-content:center;overflow:auto;padding:max(20px,env(safe-area-inset-top)) 20px max(20px,env(safe-area-inset-bottom));background:linear-gradient(180deg,#1B4A63 0%,#2F6F8F 100%);color:#fff}
 .title-view[hidden]{display:none}
@@ -442,7 +452,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
     <select id="riverSel" aria-label="表示する河川"></select>
     <div class="amode" id="amode" role="group" aria-label="表示モード">
       <button type="button" data-am="emg" aria-pressed="true">有事: 記録する</button>
-      <button type="button" data-am="peace" aria-pressed="false">平時: 学ぶ</button>
+      <button type="button" data-am="peace" aria-pressed="false">平時: 確認</button>
     </div>
     <button type="button" id="helpBtn" class="help-btn" aria-label="使い方">?</button>
     <span class="scope" id="scope">川と雨を学び、雨の日を記録する(簡易モデル)</span>
@@ -723,6 +733,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
   </section>
 </div>
 
+<div class="mode-toast" id="modeToast" role="status" aria-live="polite"></div>
 <div class="title-view" id="titleView" aria-label="水害ノート">
   <div class="title-in">
     <svg viewBox="0 0 320 200" role="img" aria-label="雨の日に、家の窓から外を記録している様子">
@@ -2601,10 +2612,33 @@ document.addEventListener('keydown',e=>{
   else if(!$('warnView').hidden) $('warnView').hidden=true; // 「確認しました」と同じ
 });
 
+/* モード切替のトースト: 何を記録するか/何を確認するかを短く示す(約4秒で消える。タップでも閉じる) */
+const MODE_TOAST={
+  emg:{t:'有事モード: 記録する',
+       d:'雨の日に、安全な屋内から写真と雨量を残します。避難の判断は、自治体の避難情報と公式の防災情報で。',
+       svg:'<svg viewBox="0 0 34 34" aria-hidden="true"><path class="mt-d" d="M17 4 C22 12 25 16 25 21 A8 8 0 0 1 9 21 C9 16 12 12 17 4 Z"/></svg>'},
+  peace:{t:'平時モード: 確認する',
+       d:'晴れた日に、川と雨の関係や浸水の試算を確認します。試算は仮定で、避難判断には使えません。',
+       svg:'<svg viewBox="0 0 34 34" aria-hidden="true"><path class="mt-s" d="M3 12 Q9 6 15 12 T27 12"/><path class="mt-s" d="M3 20 Q9 14 15 20 T27 20"/><path class="mt-s" d="M3 28 Q9 22 15 28 T27 28"/></svg>'}
+};
+let toastTimer=0;
+function modeToast(m){
+  const el=$('modeToast'), c=MODE_TOAST[m];
+  if(!c) return;
+  el.className='mode-toast '+m;
+  el.innerHTML=c.svg+'<div><b>'+c.t+'</b><span>'+c.d+'</span></div>';
+  void el.offsetWidth; // 連続して切り替えても、表示の動きをやり直す
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>el.classList.remove('show'),4000);
+}
+$('modeToast').addEventListener('click',()=>{ clearTimeout(toastTimer); $('modeToast').classList.remove('show'); });
+
 /* モード切替: 表示の出し分けは .app の emg クラス(CSS)で行う */
 function applyMode(m){
   if(m!==APPMODE&&recEditGuard()) return; // 準備中・入力中・日時訂正中は切り替えない(確認画面も開かない)
   if(m==='peace'&&!peaceOk){ gateOpen(); return; } // 平時モードは、確認画面で「はい」を選んでから開く
+  const modeChanged=m!==APPMODE;
   APPMODE=m;
   v3dClose(); // モードを切り替えたら3D表示を閉じる(有事モードには出さない)
   document.querySelector('.app').classList.toggle('emg',m==='emg');
@@ -2620,6 +2654,7 @@ function applyMode(m){
   }
   recApplyMode(); // 観察記録欄の出し分け(有事は屋内から記録、平時は見返す)
   navCount++;     // 利用者が操作した印(起動時の川の自動復元を止める)
+  if(modeChanged) modeToast(m);
   renderLoc();
   setTimeout(()=>map.invalidateSize(),50);
 }
@@ -4461,7 +4496,7 @@ const HELP_PAGES=[
      '<rect class="hd" x="16" y="48" width="140" height="58" rx="29"/>'+
      '<text class="tw" x="86" y="82" text-anchor="middle">有事: 記録する</text>'+
      '<rect class="hwh hs2" x="164" y="48" width="140" height="58" rx="29"/>'+
-     '<text x="234" y="82" text-anchor="middle">平時: 学ぶ</text>'+
+     '<text x="234" y="82" text-anchor="middle">平時: 確認</text>'+
      '<path class="hs" d="M130 34 Q160 12 190 34"/><path class="hs" d="M182 24 L191 35 L178 37"/>'),
    body:'有事モードは、記録と公式情報の確認だけに絞った画面です。平時モードは、雨量を動かして浸水の試算を見る学習用の画面です。起動時は有事モードです。'},
   {t:'雨の日の記録',
@@ -4476,7 +4511,7 @@ const HELP_PAGES=[
      '<line class="hs" stroke-dasharray="5 5" x1="150" y1="74" x2="204" y2="68"/>'),
    body:'「写真を記録」から撮影します。撮った日時の雨量が自動で付きます。位置がずれたら、地図のピンを動かして直せます。',
    caution:'撮影は必ず安全な屋内から。外や川、冠水した道路には近づかないでください。'},
-  {t:'平時に学ぶ',
+  {t:'平時に確認',
    svg:helpSvg('川の断面と、雨量を動かすつまみ',
      '<g class="hrs"><line x1="60" y1="12" x2="54" y2="28"/><line x1="110" y1="16" x2="104" y2="32"/><line x1="160" y1="10" x2="154" y2="26"/>'+
      '<line x1="210" y1="16" x2="204" y2="32"/><line x1="260" y1="12" x2="254" y2="28"/></g>'+
