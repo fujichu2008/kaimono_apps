@@ -139,6 +139,10 @@ header .scope{font-size:12px;opacity:.85}
 #fcBtn{flex:none;border:1px solid var(--river-deep);background:var(--river-deep);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;min-height:34px}
 #fcBtn:disabled{opacity:.55;cursor:progress}
 #fcBtn:focus-visible{outline:2px solid var(--river);outline-offset:2px}
+.fc-refresh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+#fcRefresh{min-height:44px;padding:6px 12px;border:1px solid var(--river-deep);border-radius:6px;background:#fff;color:var(--river-deep);font:inherit;font-weight:700;cursor:pointer}
+#fcRefresh:disabled{opacity:.55;cursor:progress}
+#fcRefresh:focus-visible{outline:2px solid var(--river);outline-offset:2px}
 .fc-state{font-size:11.5px;color:var(--ink-soft);line-height:1.4}
 #fcChart{display:block;width:100%;height:56px;margin-top:8px}
 #fcChart[hidden]{display:none}
@@ -397,6 +401,10 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
       </div>
     </div>
     <div class="quick">
+      <div class="fc-refresh">
+        <button type="button" id="fcRefresh">予報を更新</button>
+        <span class="fc-state" id="fcRefreshState" role="status" aria-live="polite"></span>
+      </div>
       <h2 class="q-off">今の状況は公式情報で確認</h2>
       <div class="quick-links q-off">
         <a href="https://www.jma.go.jp/bosai/risk/" target="_blank" rel="noopener">キキクル</a>
@@ -424,7 +432,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
       </div>
       <h2 id="ovTtl">関東全体</h2>
       <p class="hint" style="margin:0 0 8px">地図か下の一覧から川を選ぶと、その川の簡易シミュレーションを表示します。全体の表示では、国の公式浸水想定を重ねています。</p>
-      <p class="hint peace-only" style="margin:0 0 8px">色は予報雨量と計画規模の比による目安です。低くても安全を意味しません。</p>
+      <p class="hint peace-only" style="margin:0 0 8px">予報は参考のモデル値です。一覧と地図の印の色では危険度を示しません。</p>
       <ul class="pts" id="ovList"></ul>
     </div>
     <div class="sim">
@@ -1547,7 +1555,7 @@ let floodKind='river';            // 表示する浸水: 'river'=河川氾濫 / 
 let CUR=null;                     // 選択中の河川の計算結果(GEO_CACHE の要素)
 let RV=null;                      // 選択中の河川(null=関東全体)
 let DEP=null;                     // セルごとの試算浸水深(m)。drawFlood が書き出し、確認地点の表示に使う
-let offRiver=true, offOv=true;   // 公式浸水想定レイヤーのON/OFF(河川表示時/関東全体表示時)
+let offRiver=false, offOv=true;  // 平時の公式重ね表示: 河川は初期OFF、全体は初期ON。有事は常時ON
 const bankTag=p=>RV&&RV.banks.length>1?'・'+(p.bank==='L'?'左岸':'右岸'):'';
 
 const LEVELS=[
@@ -1760,7 +1768,7 @@ function buildGauge(rn){
   $('presets').innerHTML=rn.presets.map(p=>'<button data-v="'+p[0]+'">'+p[1]+'</button>').join('');
   $('rainTtl').textContent=rn.label;
   $('rainUnit').textContent=rn.unit+' / '+rn.span;
-  slider.min=0; slider.max=rn.max; slider.step=rn.step;
+  slider.min=0; slider.max=rn.max; slider.step=1;
   slider.setAttribute('aria-label',rn.label+'('+rn.unit+')');
 }
 
@@ -1964,6 +1972,9 @@ const FC_URL='https://api.open-meteo.com/v1/jma';
 const FC_TTL=30*60*1000;      // 取得結果を使い回す時間(30分・メモリ上のみ)
 const FC_DAYS=[11,7];         // 予報日数。長いほうから試し、400エラーなら短くする
 const FC_CACHE={};            // 河川ごとの予報 {state:'loading'|'ok'|'fail', t, msg, data, promise}
+/* 成功済みで、取得から30分以内の予報だけを判定・記録比較に使う */
+const fcFresh=c=>!!(c&&c.state==='ok'&&Number.isFinite(c.t)&&Date.now()-c.t>=0&&Date.now()-c.t<=FC_TTL);
+const fcValid=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
 const OV_MARKERS={};          // 関東全体表示のマーカー(河川id→marker)
 const OV_BLUE='#2F6F8F';
 
@@ -1989,42 +2000,54 @@ function fcPoints(rv){
   return {basin:bs,mid:mid};
 }
 
-/* 代表点の平均→時間幅の移動合計→「現在以降に終わる窓」の最大値とピーク時刻 */
+/* 全代表点が有効な時間だけ平均し、連続した完全な窓だけを集計する */
 function fcSummarize(rv,list,nb){
   const first=list[0]&&list[0].hourly;
-  if(!first||!first.time||!first.time.length) throw new Error('予報データが空でした');
-  const times=first.time.map(t=>typeof t==='number'?t:Date.parse(t+':00+09:00')/1000);
-  const N=times.length, avg=new Array(N);
-  let last=-1;
-  for(let i=0;i<N;i++){
-    let s=0,c=0;
-    for(let k=0;k<nb&&k<list.length;k++){
-      const h=list[k]&&list[k].hourly, v=(h&&h.precipitation)?h.precipitation[i]:null;
-      if(typeof v==='number'&&v===v){ s+=v; c++; }
+  if(!first||!Array.isArray(first.time)||!first.time.length) throw new Error('予報データが空でした');
+  const asTime=t=>typeof t==='number'?t:(typeof t==='string'?Date.parse(t+':00+09:00')/1000:NaN);
+  const times=first.time.map(asTime), N=times.length;
+  const valid=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+  /* 長さや時刻列が一致しない地点は、全時間を欠損として扱う */
+  const aligned=list.map(p=>{
+    const h=p&&p.hourly;
+    return h&&Array.isArray(h.time)&&Array.isArray(h.precipitation)&&
+      h.time.length===N&&h.precipitation.length===N&&
+      h.time.every((t,i)=>Number.isFinite(times[i])&&asTime(t)===times[i])?h.precipitation:null;
+  });
+  const avg=times.map((t,i)=>{
+    if(!Number.isFinite(t)||nb<1) return null;
+    let s=0;
+    for(let k=0;k<nb;k++){
+      const p=aligned[k], v=p?p[i]:null;
+      if(!valid(v)) return null;
+      s+=v;
     }
-    avg[i]=c?s/c:0;
-    if(c) last=i;
-  }
-  if(last<0) throw new Error('予報データが空でした');
+    const v=s/nb;
+    return valid(v)?v:null;
+  });
   const now=Date.now()/1000, n=fcSpanHours(rv);
-  let i0=-1;
-  for(let i=0;i<=last;i++){ if(times[i]>=now){ i0=i; break; } }
-  if(i0<0) throw new Error('今後の予報がありませんでした');
-  let run=0, max=-1, peak=i0;
-  for(let i=0;i<=last;i++){
-    run+=avg[i]; if(i>=n) run-=avg[i-n];   // 過去の雨も窓に含める
-    if(i>=i0&&run>max){ max=run; peak=i; }
-  }
-  /* 内水用: 河道中点の今後の最大1時間雨量 */
-  const mh=list[Math.min(nb,list.length-1)].hourly;
-  let max1=0;
-  if(mh&&mh.precipitation){
-    for(let i=i0;i<=last;i++){
-      const v=mh.precipitation[i];
-      if(typeof v==='number'&&v>max1) max1=v;
+  const start=times.findIndex(t=>Number.isFinite(t)&&t>=now);
+  const i0=start<0?N:start, last=N-1;
+  let run=0, count=0, max=null, peak=null, max1=null;
+  for(let i=0;i<N;i++){
+    if(!valid(avg[i])){ run=0; count=0; continue; }
+    if(i>0&&times[i]-times[i-1]!==3600){ run=0; count=0; }
+    run+=avg[i]; count++;
+    if(count>n) run-=avg[i-n];
+    if(count>=n&&times[i]>=now&&valid(run)&&(max===null||run>max)){
+      max=run; peak=i;
     }
   }
-  return {times:times,avg:avg,i0:i0,last:last,n:n,max:Math.max(0,max),peak:peak,peakT:times[peak],max1:max1};
+  /* 河道中点は流域平均とは独立して集計する。他地点で代用しない */
+  const mid=aligned[nb];
+  if(mid){
+    for(let i=0;i<N;i++){
+      const v=mid[i];
+      if(times[i]>=now&&valid(v)&&(max1===null||v>max1)) max1=v;
+    }
+  }
+  return {times:times,avg:avg,i0:i0,last:last,n:n,max:max,peak:peak,
+    peakT:peak===null?null:times[peak],max1:max1};
 }
 
 /* 複数地点を1リクエストにまとめて取得する */
@@ -2043,11 +2066,11 @@ function fcFetch(rv,di){
   },e=>{ clearTimeout(tm); throw e; });
 }
 
-/* 河川の予報を取得する(30分以内の結果は使い回す)。常にキャッシュ要素で resolve する */
-function loadForecast(rv){
+/* force=true は鮮度に関係なく再取得する。取得中の同じ川への要求は共有する */
+function loadForecast(rv,force=false){
   let c=FC_CACHE[rv.id];
   if(c&&c.state==='loading') return c.promise;
-  if(c&&c.state==='ok'&&Date.now()-c.t<FC_TTL) return Promise.resolve(c);
+  if(!force&&fcFresh(c)) return Promise.resolve(c);
   c=FC_CACHE[rv.id]={state:'loading',t:Date.now(),msg:'',data:null,promise:null};
   c.promise=Promise.resolve().then(()=>fcFetch(rv,0)).then(
     d=>{ c.state='ok'; c.t=Date.now(); c.data=d; },
@@ -2056,6 +2079,41 @@ function loadForecast(rv){
   return c.promise;
 }
 
+/* 両モード共通の更新操作。学習用の雨量設定は変更しない */
+let fcRefreshBusy=false;
+function fcRefreshTargets(){
+  return RV?[RV]:RIVERS.filter(r=>r.region===REGION);
+}
+function renderFcRefresh(){
+  const loading=fcRefreshBusy||fcRefreshTargets().some(r=>{
+    const c=FC_CACHE[r.id];
+    return c&&c.state==='loading';
+  });
+  $('fcRefresh').disabled=loading;
+  $('fcRefresh').textContent=loading?'予報を取得中…':'予報を更新';
+}
+$('fcRefresh').addEventListener('click',()=>{
+  if(fcRefreshBusy||$('fcRefresh').disabled) return;
+  const targets=fcRefreshTargets();
+  fcRefreshBusy=true;
+  $('fcRefreshState').textContent='予報を更新中です。';
+  const jobs=targets.map(r=>loadForecast(r,true));
+  renderFcRefresh();
+  if(RV) renderFc(); else renderOverviewFc();
+  Promise.all(jobs).then(results=>{
+    const failed=results.filter(c=>c.state!=='ok').length;
+    $('fcRefreshState').textContent=failed
+      ? failed+'河川の予報を取得できませんでした。'
+      : '予報を更新しました。雨量設定は変更していません。';
+  }).catch(()=>{
+    $('fcRefreshState').textContent='予報を更新できませんでした。';
+  }).finally(()=>{
+    fcRefreshBusy=false;
+    if(RV) renderFc(); else renderOverviewFc();
+    renderFcRefresh();
+  });
+});
+
 /* 今後の流域平均雨量(時間雨量)の棒グラフ。予報最大となる時間帯を橙色で強調する */
 function drawFcChart(d){
   const el=$('fcChart'), dpr=window.devicePixelRatio||1;
@@ -2063,54 +2121,75 @@ function drawFcChart(d){
   el.width=Math.round(w*dpr); el.height=Math.round(h*dpr);
   const g=el.getContext('2d');
   g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
-  const n=d.last-d.i0+1, bw=w/n, base=h-13;
-  let top=5;
-  for(let i=d.i0;i<=d.last;i++){ if(d.avg[i]>top) top=d.avg[i]; }
   g.font='10px sans-serif'; g.textAlign='left';
+  const n=d.last-d.i0+1;
+  if(n<=0){
+    g.fillStyle='#4A616A'; g.fillText('今後の予報はデータ不足です',4,20);
+    return;
+  }
+  const bw=w/n, base=h-13;
+  let top=5, validCount=0;
   for(let i=d.i0;i<=d.last;i++){
+    if(fcValid(d.avg[i])){
+      validCount++;
+      if(d.avg[i]>top) top=d.avg[i];
+    }
+  }
+  for(let i=d.i0;i<=d.last;i++){
+    if(!Number.isFinite(d.times[i])) continue;
     const x=(i-d.i0)*bw, jst=new Date((d.times[i]+9*3600)*1000);
-    if(jst.getUTCHours()===0){ // 日付の区切り
+    if(jst.getUTCHours()===0){
       g.fillStyle='#D3DEE0'; g.fillRect(x,0,1,base);
       g.fillStyle='#4A616A';
       if(x<w-24) g.fillText((jst.getUTCMonth()+1)+'/'+jst.getUTCDate(),x+2,h-2);
     }
+    if(!fcValid(d.avg[i])) continue; // 欠損は棒を描かない
     const bh=d.avg[i]/top*(base-2);
     if(bh>0){
-      g.fillStyle=(i>d.peak-d.n&&i<=d.peak)?'#E8741E':'#2F6F8F';
+      g.fillStyle=(d.peak!==null&&i>d.peak-d.n&&i<=d.peak)?'#E8741E':'#2F6F8F';
       g.fillRect(x,base-bh,Math.max(1,bw-0.5),bh);
     }
   }
   g.fillStyle='#D3DEE0'; g.fillRect(0,base,w,1);
   g.fillStyle='#4A616A'; g.textAlign='right';
-  g.fillText('目盛上端 '+fcNum(top)+'mm/時',w-2,10);
+  g.fillText(validCount?'目盛上端 '+fcNum(top)+'mm/時':'今後の流域平均はデータ不足',w-2,10);
   g.textAlign='left';
 }
 
 /* 河川表示時の予報欄(状態・ゲージの予報マーク・棒グラフ)を現在の状態に合わせる */
 function renderFc(){
+  renderFcRefresh();
   if(!RV) return;
   const c=FC_CACHE[RV.id], rn=RV.rain, d=(c&&c.state==='ok')?c.data:null;
   const st=$('fcState'), mk=$('fcMark'), ch=$('fcChart');
+  const hasMax=!!d&&fcValid(d.max), hasMax1=!!d&&fcValid(d.max1);
   $('fcBtn').disabled=!!(c&&c.state==='loading');
   if(!c) st.textContent='予報は未取得です。';
   else if(c.state==='loading') st.textContent='予報を取得中…';
-  else if(c.state==='fail') st.textContent='予報を取得できませんでした('+c.msg+')。手動の操作はそのまま使えます。';
-  else if(APPMODE==='emg') st.textContent='参考予報(モデル値・'+RV.name+'の流域代表点の平均): 最大 '+
-    fcNum(d.max)+rn.unit+'/'+rn.span+'('+fcTime(d.peakT)+'まで)・'+fcStamp(c.t);
-  else st.textContent='予報最大 '+fcNum(d.max)+rn.unit+'/'+rn.span+'('+fcTime(d.peakT)+'まで)・1時間最大 '+
-    fcNum(d.max1)+'mm・'+fcAge(c.t);
+  else if(c.state==='fail') st.textContent='予報を取得できませんでした('+c.msg+')。';
+  else{
+    const total=hasMax
+      ? fcNum(d.max)+rn.unit+'/'+rn.span+
+        (Number.isFinite(d.peakT)?'('+fcTime(d.peakT)+'まで)':'')
+      : 'データ不足';
+    const hourly=hasMax1?fcNum(d.max1)+'mm':'データ不足';
+    st.textContent='参考予報(モデル値): '+RV.name+'の流域代表点平均・最大 '+total+
+      '・河道中点の1時間最大 '+hourly+'・'+fcStamp(c.t);
+  }
   if(mk){
-    mk.hidden=!d;
-    if(d) mk.style.left=clamp(d.max/rn.max*100,0,100)+'%';
+    mk.hidden=!hasMax;
+    if(hasMax) mk.style.left=clamp(d.max/rn.max*100,0,100)+'%';
   }
   ch.hidden=!d;
   $('fcHint').textContent=d
-    ? '棒は今後の流域平均の時間雨量(予報)。橙色は合計が最大となる'+rn.span+'です。ボタンを押すと雨量に反映します。' : '';
+    ? '棒は今後の流域代表点平均の時間雨量。欠損の時間は棒を描きません。'+
+      (hasMax?'橙色は合計が最大となる'+rn.span+'です。':'有効な連続期間がなく、合計はデータ不足です。')+
+      '「予報を反映」は有効な項目だけ雨量設定に反映します。'
+    : '';
   if(d) drawFcChart(d);
-  renderAct();   // 予報の到着・更新を行動の目安にも反映
-  
-  renderRecNear(); // 有事モードの「今回の予報に近い記録」を更新
-  renderWarn();    // 大雨の可能性の判定を更新
+  renderAct();
+  renderRecNear();
+  renderWarn();
 }
 
 /* 「予報を反映」: 押したときだけスライダーを書き換える */
@@ -2121,51 +2200,47 @@ $('fcBtn').addEventListener('click',()=>{
   p.then(c=>{
     if(RV!==rv) return;                 // 取得中に別の川へ切り替えた場合は何もしない
     renderFc();
-    if(c.state!=='ok') return;
+    if(!fcFresh(c)||APPMODE!=='peace') return;
     const rn=rv.rain;
-    slider.value=clamp(Math.round(c.data.max/rn.step)*rn.step,0,rn.max);
-    $('rain1').value=clamp(Math.round(c.data.max1),0,150);
-    clearPresetNote();
+    if(fcValid(c.data.max)){
+      slider.value=clamp(Math.round(c.data.max),0,rn.max);
+      clearPresetNote();
+    }
+    if(fcValid(c.data.max1)) $('rain1').value=clamp(Math.round(c.data.max1),0,150);
     update();
   });
 });
 window.addEventListener('resize',renderFc);
 
-/* 関東全体: 予報最大値÷計画規模で色分けする */
-function fcLevel(ratio){
-  return ratio<0.5?LEVELS[0]:ratio<0.8?LEVELS[1]:ratio<1?LEVELS[2]:LEVELS[3];
-}
 /* 予報の取得時刻の表示: FC_TTL(30分)を超えたら「古い予報」と明示する */
 function fcStamp(t){
   const age=Date.now()-t;
   return age>FC_TTL ? '古い予報('+Math.floor(age/60000)+'分前)' : fcClock(t)+'取得';
 }
-/* 有事モードの全体表示用: 危険度を付けず、参考予報の数値と状態だけを示す */
+/* 全体表示は両モードとも中立色。数値・欠損・取得時刻だけを示す */
 function fcRefHtml(r,c){
   if(!c) return '<br>予報は未取得';
   if(c.state==='loading') return '<br>取得中';
   if(c.state!=='ok') return '<br>予報を取得できません';
-  return '<br>参考予報(モデル値) 最大 '+fcNum(c.data.max)+r.rain.unit+'/'+r.rain.span+'・'+fcStamp(c.t);
+  const d=c.data;
+  const total=fcValid(d.max)?fcNum(d.max)+r.rain.unit+'/'+r.rain.span:'データ不足';
+  const hourly=fcValid(d.max1)?fcNum(d.max1)+'mm':'データ不足';
+  return '<br>参考予報(モデル値) 最大 '+total+
+    '・河道中点の1時間最大 '+hourly+'・'+fcStamp(c.t);
 }
 function renderOverviewFc(){
-  renderWarn(); // 大雨の可能性の判定を更新
+  renderFcRefresh();
+  renderWarn();
   RIVERS.forEach(r=>{
-    const c=FC_CACHE[r.id], d=(c&&c.state==='ok')?c.data:null;
-    const emg=APPMODE==='emg'; // 有事モードでは危険色・危険度の語・計画規模比を出さない
-    const ratio=d?d.max/r.rain.plan:0, lv=d?fcLevel(ratio):null, col=(lv&&!emg)?lv.color:OV_BLUE;
+    const c=FC_CACHE[r.id];
     const row=document.querySelector('#ovList [data-river="'+r.id+'"]');
     if(row){
-      row.parentNode.hidden=r.region!==REGION; // 一覧は表示中の圏の川だけ
-      row.querySelector('.pt-dot').style.background=col;
-      row.querySelector('.pt-type').innerHTML=r.area+(r.approx?'/概略データ':'')+(emg ? fcRefHtml(r,c) :
-        (d ? '<br><b style="color:'+col+'">'+lv.label+'</b> 予報最大 '+fcNum(d.max)+r.rain.unit+'/'+r.rain.span+
-             '(計画規模比 '+Math.round(ratio*100)+'%)'
-           : (c&&c.state==='loading'?'<br>予報を取得中…':'')));
+      row.parentNode.hidden=r.region!==REGION;
+      row.querySelector('.pt-dot').style.background=OV_BLUE;
+      row.querySelector('.pt-type').innerHTML=r.area+(r.approx?'/概略データ':'')+fcRefHtml(r,c);
     }
     const m=OV_MARKERS[r.id];
-    if(m&&overviewLayer.hasLayer(m)){
-      m.setIcon(rpIcon(col,false));
-    }
+    if(m&&overviewLayer.hasLayer(m)) m.setIcon(rpIcon(OV_BLUE,false));
   });
 }
 /* 全河川の予報を順番に取得する(失敗した川は青表示のまま) */
@@ -2265,30 +2340,17 @@ $('locBtn').addEventListener('click',()=>{
 $('locClear').addEventListener('click',()=>setLoc(null));
 map.on('contextmenu',e=>setLoc([e.latlng.lat,e.latlng.lng],'pin')); // 長押し(PCは右クリック)
 
-/* 行動の目安: 予報(取得済みなら計画規模比)と現在の試算から3段階で示す */
+/* 行動の案内は固定。学習条件や予報から現在の行動を判定しない */
 function renderAct(){
   if(!RV) return;
-  const c=FC_CACHE[RV.id], d=(c&&c.state==='ok')?c.data:null;
-  const ratio=d?d.max/RV.rain.plan:0;
-  let mr=0, na=0;
-  pts.forEach(p=>{ if(p.r>mr) mr=p.r; if(p.active) na++; });
-  if(APPMODE==='emg'){ // 有事モードでは予報や試算で変化させず、公式情報を確認する固定の案内にする
+  $('actBox').style.borderLeftColor=OV_BLUE;
+  if(APPMODE==='emg'){
     $('actMsg').textContent='自治体の避難情報とキキクルで今の状況を確認';
-    $('actBox').style.borderLeftColor=OV_BLUE;
     $('actSrc').textContent='この画面は危険度を判定しません。表示がなくても安全を意味しません。';
     return;
   }
-  let lv=0;
-  if(ratio>=0.5||mr>=0.40) lv=1;   // 試算で「警戒」以上
-  if(ratio>=1||na>0) lv=2;
-  $('actMsg').textContent=[
-    '平時の備え: ハザードマップと避難先を確認',
-    '早めの準備: 避難先・経路・持ち出し品を確認し、気象情報に注意',
-    '自治体の避難情報とキキクルを今すぐ確認'][lv];
-  $('actBox').style.borderLeftColor=[LEVELS[0].color,LEVELS[2].color,LEVELS[3].color][lv];
-  $('actSrc').textContent=d
-    ? '予報(計画規模比 '+Math.round(ratio*100)+'%)と、現在の雨量設定での試算から判定した目安です。'
-    : '予報が未取得のため、現在の雨量設定での試算のみで判定した目安です。';
+  $('actMsg').textContent='平時の備え: ハザードマップと避難先を確認';
+  $('actSrc').textContent='この欄は学習用の雨量設定では変わりません。今の状況は公式情報で確認してください。';
 }
 
 /* 通信状態: オフライン時はヘッダー下端に帯を出す */
@@ -2361,6 +2423,19 @@ document.addEventListener('keydown',e=>{
 
 /* モード切替: 表示の出し分けは .app の emg クラス(CSS)で行う */
 function applyMode(m){
+  if(m!==APPMODE&&(recPending||!$('recTimeBox').hidden)){
+    const message='記録の入力中です。保存するか取消してから切り替えてください';
+    recMsg(message);
+    if(!$('recTimeBox').hidden){
+      $('recTimeMsg').textContent=message;
+      $('recTimeBox').scrollIntoView({behavior:'smooth',block:'nearest'});
+    }else{
+      $('recBox').open=true;
+      $('recFormState').textContent=message+'。位置: '+recPending.pos;
+      $('recForm').scrollIntoView({behavior:'smooth',block:'nearest'});
+    }
+    return; // 確認画面を開く前に止め、入力内容を維持する
+  }
   if(m==='peace'&&!peaceOk){ gateOpen(); return; } // 平時モードは、確認画面で「はい」を選んでから開く
   APPMODE=m;
   v3dClose(); // モードを切り替えたら3D表示を閉じる(有事モードには出さない)
@@ -2676,7 +2751,9 @@ function recItem(r,extra){
 function renderRecNear(){
   const el=$('recNear');
   const c=RV&&FC_CACHE[RV.id];
-  if(APPMODE!=='emg'||!RV||!c||c.state!=='ok'){ el.hidden=true; el.innerHTML=''; return; }
+  if(APPMODE!=='emg'||!RV||!fcFresh(c)||!fcValid(c.data.max)){
+    el.hidden=true; el.innerHTML=''; return;
+  }
   const n=fcSpanHours(RV), key=n<=1?'h1':n<=24?'h24':n<=48?'h48':'h72', fmax=c.data.max;
   const near=RECS.filter(r=>{
     const v=recRainVal(r,key); // 有効な雨量だけ(条件変更前の参考値、日時が未確認・不明は除く)
@@ -3300,27 +3377,30 @@ function regionBounds(rg){
   return L.latLngBounds([[S,W],[N,E]]);
 }
 
-/* 判定: 表示中の圏で予報を取得できた川について、計画規模比と1時間最大雨量を見る */
+/* 判定: 新鮮な河道中点の1時間最大予報だけを使う。計画規模比や学習条件は使わない */
 function warnJudge(){
-  let ok=0, fail=0, other=0, best=null;
+  let fresh=0, best=null;
   RIVERS.forEach(r=>{
     if(r.region!==REGION) return;
     const c=FC_CACHE[r.id];
-    if(!c||c.state==='loading'){ other++; return; }
-    if(c.state!=='ok'){ fail++; return; }
-    ok++;
-    const d=c.data, ratio=d.max/r.rain.plan;
-    const lv=(ratio>=0.8||d.max1>=80)?2:((ratio>=0.5||d.max1>=50)?1:0);
-    const score=Math.max(ratio/0.5,d.max1/50);
-    if(!best||lv>best.level||(lv===best.level&&score>best.score)){
-      best={level:lv,score:score,r:r,ratio:ratio,d:d,byRatio:ratio/0.5>=d.max1/50};
-    }
+    if(!fcFresh(c)) return;
+    fresh++;
+    const value=c.data.max1;
+    if(!fcValid(value)) return;
+    if(!best||value>best.value) best={r:r,value:value};
   });
-  if(!ok) return {level:0,na:fail>0&&other===0,reason:''};
-  const b=best;
-  return {level:b.level,na:false,reason:b.byRatio
-    ? b.r.name+'の予報雨量が計画規模(仮定を含む)の'+Math.round(b.ratio*100)+'%です('+fcTime(b.d.peakT)+'ごろまで)。'
-    : b.r.name+'付近で1時間に'+fcNum(b.d.max1)+'mmの予報が出ています。'};
+  if(!fresh) return {
+    level:0,na:true,reason:'',
+    naText:'予報が古いか未取得のため、大雨の可能性を判定できません。予報を更新してください。'
+  };
+  if(!best) return {
+    level:0,na:true,reason:'',
+    naText:'1時間雨量の予報がデータ不足のため、大雨の可能性を判定できません。予報を更新してください。'
+  };
+  return {
+    level:best.value>=80?2:(best.value>=50?1:0),na:false,naText:'',
+    reason:best.r.name+'付近で1時間に'+fcNum(best.value)+'mmの予報が出ています。'
+  };
 }
 function warnHtml(w,modal){
   return '<b class="warn-ttl">'+(w.level>=2?'大雨のおそれが高まっています':'大雨の可能性があります')+'</b>'+
@@ -3337,23 +3417,28 @@ function warnHtml(w,modal){
 let warnSeen=0;     // 画面中央に表示済みの最大レベル(このセッション内)
 let warnKey='';     // 警告欄の内容が変わったときだけ書き換える
 function renderWarn(){
-  const box=$('warnBox'), na=$('warnNa');
-  if(APPMODE==='emg'){ // 有事モードは公式リンクを常時表示しているので、警告は出さない
-    box.hidden=true; na.hidden=true; $('warnView').hidden=true;
-    renderStatus(); // 有事モードでは、大雨の可能性をヘッダーの状態表示で知らせる
+  const box=$('warnBox'), na=$('warnNa'), w=warnJudge();
+  na.hidden=!w.na;
+  na.textContent=w.na?w.naText:'';
+  if(APPMODE==='emg'){ // 有事は中立の状態表示・公式案内を維持する
+    box.hidden=true; $('warnView').hidden=true; warnKey='';
+    renderStatus();
     return;
   }
-  const w=warnJudge();
-  na.hidden=!w.na;
-  if(w.level<1){ box.hidden=true; warnKey=''; return; }
+  if(w.level<1){
+    box.hidden=true; warnKey='';
+    $('warnView').hidden=true; // 欠損・期限切れになった警告を残さない
+    return;
+  }
   const key=w.level+'|'+w.reason;
   if(key!==warnKey){
     warnKey=key;
     box.className='warn-box'+(w.level>=2?' lv2':'');
     box.innerHTML=warnHtml(w,false);
+    if(!$('warnView').hidden) $('warnViewIn').innerHTML=warnHtml(w,true);
   }
   box.hidden=false;
-  if(w.level>warnSeen){ // 最初の1回と、レベルが上がったときだけ画面中央にも出す
+  if(w.level>warnSeen){
     warnSeen=w.level;
     $('warnViewIn').innerHTML=warnHtml(w,true);
     $('warnView').hidden=false;
@@ -3637,7 +3722,12 @@ function v3dStart(g){
     }else{
       p.x=e.clientX; p.y=e.clientY;
       const a=v.ptr[ids[0]], b=v.ptr[ids[1]], d=Math.hypot(a.x-b.x,a.y-b.y);
-      if(v.pinch>0&&d>0) v.dist=clamp(v.dist*v.pinch/d,v.R0*0.15,v.R0*3);
+      const mx=(a.x+b.x)/2, my=(a.y+b.y)/2; // 2本の指の中点
+      if(v.pinch>0&&d>0){
+        v.dist=clamp(v.dist*v.pinch/d,v.R0*0.15,v.R0*3);
+        v3dPan(mx-v.midX,my-v.midY); // 2本指のドラッグで前後左右に動かす
+      }
+      v.midX=mx; v.midY=my;
       v.pinch=d;
     }
     v3dDraw();
@@ -3972,6 +4062,19 @@ function v3dRefresh(){
     '地図: 地理院タイル。地図は地形に貼って表示しているため、細かい文字は読めません。';
   v3dNote();
   v3dDraw();
+}
+
+/* 視点の中心を、画面上の移動量(ピクセル)ぶん動かす。地形が指についてくる向きに動く */
+function v3dPan(dx,dy){
+  const v=V3;
+  if(!v||(!dx&&!dy)) return;
+  const g=v.g, hpx=Math.max(1,v.cvs.clientHeight);
+  const k=2*v.dist*Math.tan(20*Math.PI/180)/hpx;      // 画面1ピクセルあたりの距離(視野角40度)
+  const kz=k/Math.max(0.35,Math.sin(v.tilt));         // 奥行き方向は、見下ろす角度のぶん引き伸ばす
+  const ca=Math.cos(v.az), sa=Math.sin(v.az);
+  /* 画面の右方向は(ca,-sa)、奥方向は(-sa,-ca)。指を右へ動かすと中心は左へ、下へ動かすと中心は奥へ */
+  v.cx=clamp(v.cx-dx*k*ca-dy*kz*sa,-g.W_M*0.6,g.W_M*0.6);
+  v.cz=clamp(v.cz+dx*k*sa-dy*kz*ca,-g.H_M*0.6,g.H_M*0.6);
 }
 
 /* 描画は、操作や更新があったときだけ1回行う */
