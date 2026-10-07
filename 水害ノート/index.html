@@ -20,7 +20,7 @@
   ■ 避難判断には、各自治体の洪水ハザードマップ/国交省「川の防災情報」を使うこと。
   ■ 調整したい値は RIVERS(河川ごとの設定。座標・雨量しきい値は概略の仮定値) にまとめてある。
 -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" crossorigin="anonymous">
 <style>
 :root{
   --ink:#12262E;
@@ -133,6 +133,7 @@ header .scope{font-size:12px;opacity:.85}
 .seg button:disabled{opacity:.45;cursor:not-allowed}
 #inBox h2{margin-top:18px}
 #inNote{margin-top:6px}
+.app.emg #kindHint{display:none}
 /* 予報の取り込み */
 .fc{margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
 .fc-row{display:flex;gap:8px;align-items:center}
@@ -458,6 +459,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
       <button data-kind="inland" aria-pressed="false">内水氾濫</button>
       <button data-kind="both" aria-pressed="false">両方</button>
     </div>
+    <p class="hint" id="kindHint"></p>
     <p class="hint" id="demHint"></p>
 
     <h2 id="rainTtl">雨量</h2>
@@ -486,7 +488,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
     <p class="hint" id="presetNote" hidden></p>
 
     <div id="inBox" hidden>
-      <h2>1時間雨量(内水氾濫)</h2>
+      <h2>内水氾濫に使う雨量: 1時間雨量</h2>
       <div class="rain-read"><output id="rain1Out" for="rain1">30</output><span>mm / 1時間</span></div>
       <div class="gauge">
         <div class="track" id="track1"></div>
@@ -612,6 +614,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
       <ul class="rec-list" id="recList"></ul>
       <p class="hint">雨量は Open-Meteo(気象庁モデル)のモデル値です(観測値ではありません)。写真と記録はこの端末内にだけ保存します。雨量の取得時のみ、およその位置(約1km単位)を Open-Meteo に送ります。</p>
       <p class="hint">写真の位置はこの端末内にだけ保存します。屋内ではずれることがあるので、地図のピンで直せます。</p>
+      <p class="hint">書き出したファイルには、写真と位置が含まれます。共有する相手に注意してください。</p>
       <div class="rec-row">
         <button type="button" id="recExport">書き出し</button>
         <button type="button" id="recImportBtn" class="peace-only">読み込み</button>
@@ -652,7 +655,7 @@ header select:focus-visible{outline:2px solid #fff;outline-offset:1px}
   </section>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js" crossorigin="anonymous"></script>
 <script>
 (function(){
 'use strict';
@@ -1782,7 +1785,8 @@ function buildGauge(rn){
     '%,var(--danger) '+g[3]+'%,var(--breach) '+g[4]+'%)';
 
   $('presets').innerHTML=rn.presets.map(p=>'<button data-v="'+p[0]+'">'+p[1]+'</button>').join('');
-  $('rainTtl').textContent=rn.label;
+  rainLabel=rn.label;
+  rainTitle();
   $('rainUnit').textContent=rn.unit+' / '+rn.span;
   slider.min=0; slider.max=rn.max; slider.step=1;
   slider.setAttribute('aria-label',rn.label+'('+rn.unit+')');
@@ -1926,6 +1930,14 @@ function inlandDepth(IN,i){
   return lw>IN.minLow?inlandDepthOf(IN,lw):0;
 }
 
+/* 川の雨量の見出し: 平時モードでは用途を頭に付ける。有事モードでは雨量の名前だけ(予報の欄の見出しとして使うため) */
+let rainLabel='雨量';
+function rainTitle(){
+  $('rainTtl').textContent=APPMODE==='emg'
+    ? rainLabel
+    : (floodKind==='inland'?'川の雨量(排水のしにくさに影響): ':'河川氾濫に使う雨量: ')+rainLabel;
+}
+
 /* 切替ボタン・1時間雨量欄・説明文を現在の状態に合わせる */
 function refreshInlandUi(){
   const d=CUR&&CUR.dem, fail=!!(d&&d.state==='fail'), inl=floodKind!=='river';
@@ -1934,6 +1946,20 @@ function refreshInlandUi(){
     b.disabled=fail&&b.dataset.kind!=='river';
   });
   $('inBox').hidden=!inl;
+  /* 内水氾濫のときは1時間雨量の欄を川の雨量より上に、それ以外は選択肢の解説の次に置く(作り直さず位置だけ入れ替える) */
+  const inBoxEl=$('inBox'), ttlEl=$('rainTtl'), noteEl=$('presetNote');
+  if(floodKind==='inland'){
+    if(inBoxEl.nextElementSibling!==ttlEl) ttlEl.parentNode.insertBefore(inBoxEl,ttlEl);
+  }else if(noteEl.nextElementSibling!==inBoxEl){
+    noteEl.parentNode.insertBefore(inBoxEl,noteEl.nextSibling);
+  }
+  rainTitle();
+  /* 2つの雨量の関係の説明(期間は選んだ川に合わせる) */
+  const oneHour=!!RV&&RV.rain.span==='1時間';
+  $('kindHint').textContent=!RV?'':(oneHour
+    ? 'この川の河川氾濫は、短い時間の強い雨(1時間雨量)で起きやすくなります。'
+    : '河川氾濫は、流域に長い時間降った雨の合計(この川では'+RV.rain.span+')で起きやすくなります。')+
+    '内水氾濫は、短い時間の強い雨(1時間雨量)が排水能力を超えると起きます。';
   $('rain1Out').textContent=$('rain1').value;
 
   const ic=inlandCap();
@@ -2551,7 +2577,7 @@ let recDb=null, recMem=false; // recMem=true: IndexedDB が使えずメモリ保
 const recDbState=()=>recDb?'ok':(recMem?'mem':'init');
 let recReadyDone=null;
 const recReady=new Promise(res=>{ recReadyDone=res; }); // 初期化の完了(利用可能/メモリのみ)で解決する
-const recGen={};             // 記録idごとの更新世代(メモリ上のみ。保存データには含めない)
+const recGen=Object.create(null);             // 記録idごとの更新世代(メモリ上のみ。保存データには含めない)
 const recBump=id=>{ recGen[id]=(recGen[id]||0)+1; return recGen[id]; };
 let recBusy=false;           // 保存・削除・読み込みの実行中(重複操作を防ぐ)
 let recPending=null;         // 入力中の記録
@@ -2650,14 +2676,15 @@ function recRainVal(r,key){
 /* 記録の正規化(DBの読み込みとJSONの読み込みで共通)。不正なら null。不明な値を0にしない */
 function recNormalize(x){
   try{
-    const isImg=s=>typeof s==='string'&&s.indexOf('data:image/')===0;
+    /* 画像は JPEG・PNG・WebP のデータURLだけを受け付け、長さに上限を設ける */
+    const isImg=(s,max)=>typeof s==='string'&&s.length<=max&&/^data:image\/(jpeg|png|webp)[;,]/.test(s);
     const num=v=>typeof v==='number'&&isFinite(v);
-    if(!x||typeof x.id!=='string'||!x.id||!recTimeValid(x.t)||!isImg(x.img)) return null;
+    if(!x||typeof x.id!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(x.id)||!recTimeValid(x.t)||!isImg(x.img,3000000)) return null;
     const ll=(Array.isArray(x.ll)&&x.ll.length===2&&num(x.ll[0])&&num(x.ll[1])&&
       Math.abs(x.ll[0])<=90&&Math.abs(x.ll[1])<=180)?[x.ll[0],x.ll[1]]:null;
     const mm=v=>(num(v)&&v>=0)?v:null;
     const rec={id:x.id,t:x.t,ll:ll,river:typeof x.river==='string'?x.river:null,img:x.img,
-      thumb:isImg(x.thumb)?x.thumb:x.img,level:typeof x.level==='string'?x.level.slice(0,20):'',
+      thumb:isImg(x.thumb,200000)?x.thumb:x.img,level:typeof x.level==='string'?x.level.slice(0,20):'',
       memo:typeof x.memo==='string'?x.memo.slice(0,200):'',place:typeof x.place==='string'?x.place.slice(0,20):'',rain:null};
     if(x.rain&&typeof x.rain==='object'){
       rec.rain={h1:mm(x.rain.h1),h24:mm(x.rain.h24),h48:mm(x.rain.h48),h72:mm(x.rain.h72)};
@@ -3335,7 +3362,7 @@ $('recExport').addEventListener('click',()=>{
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),5000);
     CFG.exported=RECS.length; cfgPut('exported',RECS.length); renderRecCount();
-    recMsg(RECS.length+'件の書き出しを開始しました。ファイルが保存されたか確認してください');
+    recMsg(RECS.length+'件の書き出しを開始しました。ファイルが保存されたか確認してください。ファイルには写真と位置が含まれます');
   }catch(e){ recMsg('書き出しに失敗しました。'); }
 });
 $('recImportBtn').addEventListener('click',()=>$('recImport').click());
@@ -3343,13 +3370,15 @@ $('recImport').addEventListener('change',e=>{
   const file=e.target.files&&e.target.files[0];
   e.target.value='';
   if(!file) return;
+  if(file.size>100*1024*1024){ recMsg('ファイルが大きすぎます(100MBまで)。'); return; }
   const fr=new FileReader();
   fr.onerror=()=>recMsg('ファイルを読み込めませんでした。');
   fr.onload=()=>{
     try{
       const j=JSON.parse(fr.result), arr=Array.isArray(j)?j:(j&&j.records);
       if(!Array.isArray(arr)) throw new Error('形式が違います');
-      const ids={}; RECS.forEach(r=>{ ids[r.id]=1; });
+      if(arr.length>5000){ recMsg('記録の件数が多すぎます(5000件まで)。'); return; }
+      const ids=Object.create(null); RECS.forEach(r=>{ ids[r.id]=1; });
       let add=0, skip=0, ng=0;
       const todo=[]; // 検証を通った記録(保存できたものだけ一覧に追加する)
       arr.forEach(x=>{
@@ -3464,7 +3493,7 @@ recOpen().then(db=>{
   return recTx('readonly',st=>st.getAll());
 }).then(r=>{
   if(r&&Array.isArray(r.result)){
-    const ids={}; RECS.forEach(x=>{ ids[x.id]=1; });
+    const ids=Object.create(null); RECS.forEach(x=>{ ids[x.id]=1; });
     let bad=0;
     r.result.forEach(x=>{
       const n=recNormalize(x); // 不正な記録は一覧に入れない(DBからは削除しない)
@@ -3713,6 +3742,7 @@ function v3dLoadLib(){
   if(!v3dLib){
     v3dLib=new Promise((res,rej)=>{
       const s=document.createElement('script');
+      s.crossOrigin='anonymous';
       s.src=V3D_LIB;
       s.onload=()=>{ if(window.THREE) res(); else rej(new Error('THREE')); };
       s.onerror=()=>rej(new Error('load'));
@@ -4290,6 +4320,14 @@ $('ovList').addEventListener('click',e=>{
 });
 
 window.addEventListener('resize',()=>map.invalidateSize());
+/* 新しいタブで開くリンクには、開いた先へ参照元を渡さない指定を付ける。
+   画面上にあるリンクは起動時に、あとから作られるリンク(大雨のお知らせ・地図の出典)は押した時点で付ける */
+const relSafe=a=>{ a.rel='noopener noreferrer'; };
+document.querySelectorAll('a[target="_blank"]').forEach(relSafe);
+['click','auxclick'].forEach(n=>document.addEventListener(n,e=>{
+  const a=e.target&&e.target.closest?e.target.closest('a[target="_blank"]'):null;
+  if(a) relSafe(a);
+},true));
 showRiver(''); // 起動時は関東全体を表示
 setTimeout(()=>map.invalidateSize(),200);
 })();
