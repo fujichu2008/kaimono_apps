@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-水害ノート-67b8643230aeb4c742a1";
+const CACHE_NAME = "appstudio-pwa-水害ノート-26bc79305ee1f1a02d7e";
 const CACHE_PREFIX = "appstudio-pwa-水害ノート-";
 const PRECACHE_URLS = [
     "./",
