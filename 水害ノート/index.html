@@ -277,7 +277,7 @@ button.v3d-note.min{right:auto;max-width:calc(100% - 64px);min-height:36px;font-
 #recTimeSave{background:var(--river-deep);border-color:var(--river-deep);color:#fff;font-weight:700}
 #recTimeSave:disabled{opacity:.5;cursor:progress}
 /* 保存・削除の実行中は、該当のボタンを押せなくする */
-#recSave:disabled,#recFixSave:disabled,#recViewDel:disabled,#recImportBtn:disabled{opacity:.5;cursor:progress}
+#recSave:disabled,#recFixSave:disabled,#recViewDel:disabled,#recImportBtn:disabled,#recAdd:disabled,#recCancel:disabled,#recTimeNo:disabled{opacity:.5;cursor:progress}
 /* 地図左下: 表示中の重ね合わせの説明 */
 .layer-note{max-width:260px;padding:4px 8px;background:rgba(255,255,255,.92);border:1px solid #9FB1B6;border-radius:4px;font-size:11px;line-height:1.4;color:var(--ink)}
 .layer-note[hidden]{display:none}
@@ -2423,19 +2423,7 @@ document.addEventListener('keydown',e=>{
 
 /* モード切替: 表示の出し分けは .app の emg クラス(CSS)で行う */
 function applyMode(m){
-  if(m!==APPMODE&&(recPending||!$('recTimeBox').hidden)){
-    const message='記録の入力中です。保存するか取消してから切り替えてください';
-    recMsg(message);
-    if(!$('recTimeBox').hidden){
-      $('recTimeMsg').textContent=message;
-      $('recTimeBox').scrollIntoView({behavior:'smooth',block:'nearest'});
-    }else{
-      $('recBox').open=true;
-      $('recFormState').textContent=message+'。位置: '+recPending.pos;
-      $('recForm').scrollIntoView({behavior:'smooth',block:'nearest'});
-    }
-    return; // 確認画面を開く前に止め、入力内容を維持する
-  }
+  if(m!==APPMODE&&recEditGuard()) return; // 準備中・入力中・日時訂正中は切り替えない(確認画面も開かない)
   if(m==='peace'&&!peaceOk){ gateOpen(); return; } // 平時モードは、確認画面で「はい」を選んでから開く
   APPMODE=m;
   v3dClose(); // モードを切り替えたら3D表示を閉じる(有事モードには出さない)
@@ -2527,6 +2515,39 @@ function recDate(t){
     d.getUTCHours()+':'+('0'+d.getUTCMinutes()).slice(-2);
 }
 function recMsg(t){ $('recMsg').textContent=t||''; }
+
+/* 編集状態: 'prep'=写真の準備中 / 'form'=写真の入力中 / 'time'=保存済み記録の日時訂正中 / ''=なし */
+let recPrep=false, recPrepSeq=0; // 準備中かどうかと、準備の要求番号(古い結果を捨てるため)
+function recEditState(){
+  return recPrep?'prep':recPending?'form':!$('recTimeBox').hidden?'time':'';
+}
+const REC_EDIT_MSG='記録の入力中です。保存するか取消してから切り替えてください';
+/* 編集中なら別の操作を止めて案内し、true を返す。各ボタンはこれを呼ぶだけにする。
+   exceptTime=true のときは、日時訂正中を止めない(詳細を閉じる操作は、従来どおり訂正の取消として扱う) */
+function recEditGuard(exceptTime){
+  const s=recEditState();
+  if(!s||(s==='time'&&exceptTime)) return false;
+  const go=el=>el.scrollIntoView({behavior:'smooth',block:'nearest'});
+  if(s==='time'){
+    $('recTimeMsg').textContent=REC_EDIT_MSG;
+    go($('recTimeBox'));
+    return true;
+  }
+  if(!$('recView').hidden) recCloseView(); // 詳細表示の中から押された場合は、閉じて入力欄へ戻す
+  $('recBox').open=true;
+  recMsg(REC_EDIT_MSG);
+  if(s==='form'){
+    $('recFormState').textContent=REC_EDIT_MSG+'。位置: '+recPending.pos;
+    go($('recForm'));
+  }else go($('recMsg'));
+  return true;
+}
+/* 写真の準備中は「写真を記録」を無効にする(成功・失敗のどちらでも必ず戻す) */
+function recPrepSet(on){
+  recPrep=!!on;
+  $('recAdd').disabled=recPrep;
+  $('recAdd').textContent=recPrep?'写真を準備中…':'写真を記録';
+}
 
 /* --- 日時(日本時間)の入出力・由来の表示・雨量の有効性・記録の正規化 --- */
 const recP2=n=>('0'+n).slice(-2);
@@ -2640,7 +2661,7 @@ function recDel(id){
 /* 保存・削除・読み込みの実行中は、該当のボタンを無効にする */
 function recSetBusy(on){
   recBusy=!!on;
-  ['recSave','recFixSave','recViewDel','recImportBtn','recTimeSave'].forEach(id=>{ $(id).disabled=recBusy; });
+  ['recSave','recFixSave','recViewDel','recImportBtn','recTimeSave','recCancel','recTimeNo'].forEach(id=>{ $(id).disabled=recBusy; });
 }
 /* メモリ保持のみのとき、成功の文言の末尾に付ける注意 */
 const recMemTail=()=>recMem?'(一時保持中。閉じると消えます)':'';
@@ -2826,6 +2847,7 @@ $('recJump').addEventListener('click',()=>{
 });
 /* 「写真を記録」: カメラを開く前に、屋内から撮ることを毎回確認する */
 $('recAdd').addEventListener('click',()=>{
+  if(recEditGuard()) return; // 入力中の写真を、別の写真で置き換えない
   $('recSafeChk').checked=false;
   $('recSafeGo').disabled=true;
   $('recSafePick').disabled=true;
@@ -2845,16 +2867,24 @@ $('recFile').addEventListener('change',e=>{
   const file=e.target.files&&e.target.files[0];
   e.target.value='';
   if(!file) return;
+  if(recPrep||recPending) return; // 準備中・入力中は受け付けない
+  /* 開始条件を、写真を選んだ時点で固定する(縮小の完了時にグローバル変数から読み直さない) */
+  const lib=recFromLib, river0=RV?RV.id:null, loc0=LOC?LOC.ll.slice():null;
+  const seq=++recPrepSeq;
+  recPrepSet(true);
   recMsg('写真を準備中…');
   recShrink(file).then(o=>{
+    if(seq!==recPrepSeq) return; // 古い準備の結果は捨てる
+    recPrepSet(false);
+    if(recPending) return;       // 入力中の記録を上書きしない
     recMsg('');
-    const p=recPending={img:o.img,thumb:o.thumb,t:recPickTime(file),lib:recFromLib,
-      river:RV?RV.id:null,        // 入力開始時に表示していた川(途中で切り替えても差し替えない)
-      src:(LOC&&!recFromLib)?'loc':'none',       // 位置の由来: 'loc'=確認地点 / 'gps'=現在地 / 'map'=地図で指定 / 'none'=なし
+    const p=recPending={img:o.img,thumb:o.thumb,t:recPickTime(file,lib),lib:lib,
+      river:river0,        // 入力開始時に表示していた川(途中で切り替えても差し替えない)
+      src:(loc0&&!lib)?'loc':'none',       // 位置の由来: 'loc'=確認地点 / 'gps'=現在地 / 'map'=地図で指定 / 'none'=なし
       geo:0,                      // 現在地の要求番号(後から別の方法を選んだら、遅れて届いた結果を無視する)
-      ll:(LOC&&!recFromLib)?LOC.ll.slice():null,
-      pos:recFromLib?'未指定です。下のボタンか地図のタップで指定できます(指定しなければ位置なしで保存)'
-        :(LOC?'確認地点を使います':'現在地を取得中…')};
+      ll:(loc0&&!lib)?loc0:null,
+      pos:lib?'未指定です。下のボタンか地図のタップで指定できます(指定しなければ位置なしで保存)'
+        :(loc0?'確認地点を使います':'現在地を取得中…')};
     $('recPrev').src=o.img;
     $('recLevel').value=''; // 初期値は「未選択」(未操作を「なし」にしない)
     recTimeInit(p);
@@ -2864,14 +2894,18 @@ $('recFile').addEventListener('change',e=>{
     recPinSet(p.ll,true); // 保存予定の位置に仮ピンを立てる(位置がまだなければ何もしない)
     $('recForm').hidden=false;
     recFormState();
-    if(!p.lib&&!LOC) recUseGps(p); // カメラ撮影で確認地点がなければ現在地(カメラロールの写真には自動で位置を付けない)
-  }).catch(()=>recMsg('写真を読み込めませんでした。'));
+    if(!p.lib&&!loc0) recUseGps(p); // カメラ撮影で確認地点がなければ現在地(カメラロールの写真には自動で位置を付けない)
+  }).catch(()=>{
+    if(seq!==recPrepSeq) return;
+    recPrepSet(false); // 失敗しても準備中を解除し、すぐ選び直せるようにする
+    recMsg('写真を読み込めませんでした。');
+  });
 });
 /* カメラロールから選ぶ: 同じ入力欄の capture 指定を外して開く */
 let recFromLib=false;   // 直前の操作がカメラロールからの選択か
-function recPickTime(file){
+function recPickTime(file,lib){ // lib: 写真を選んだ時点で固定した「カメラロールからの選択か」
   /* 選んだ写真は、ファイルの日時を撮影日時として使う(5分以内なら今撮ったものとみなす) */
-  if(recFromLib&&file&&typeof file.lastModified==='number'){
+  if(lib&&file&&typeof file.lastModified==='number'){
     const lm=file.lastModified;
     if(lm>0&&lm<Date.now()-5*60000) return lm;
   }
@@ -3016,6 +3050,8 @@ function recTimeBoxClose(){
   $('recTimeMsg').textContent='';
 }
 $('recViewTime').addEventListener('click',()=>{
+  if(!$('recTimeBox').hidden) return; // 開いている間の押し直しでは、入力内容を初期化しない
+  if(recEditGuard()) return;          // 写真の準備中・入力中は、日時訂正を始めない
   const r=RECS.find(x=>x.id===recViewId); if(!r) return;
   const unk=recTimeUnknown(r);
   $('recTimeEdit').value=recToInput(r.t);
@@ -3166,10 +3202,11 @@ function recFixCancel(){
   if(!recPending) recPinClear();
 }
 $('recViewFix').addEventListener('click',()=>{
+  if(recEditGuard(true)) return; // 写真の準備中・入力中は、位置修正を始めない(日時訂正中は従来どおり取消して進む)
   const r=RECS.find(x=>x.id===recViewId);
   if(!r) return;
   recCloseView();
-  recCloseForm();           // 入力中の写真があれば取り消す
+  recCloseForm();           // 入力中はここに来ない(手前の recEditGuard で止める)。入力欄の表示を初期状態に戻すだけ
   $('recSafe').hidden=true;
   recFix=r.id;
   const c=map.getCenter();
