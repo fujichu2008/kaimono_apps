@@ -7221,6 +7221,73 @@ ${currentCode}
             };
         }
 
+        // AI反映結果を初心者向けの4種類の表示へ変換する。
+        // 適用処理や状態管理とは独立した表示専用の純粋関数。
+        function describeAiReflectResult(appliedCount, alreadyAppliedCount, failedCount) {
+            const applied = Math.max(0, Number(appliedCount) || 0);
+            const already = Math.max(0, Number(alreadyAppliedCount) || 0);
+            const failed = Math.max(0, Number(failedCount) || 0);
+
+            const counts = [];
+            if (applied > 0) counts.push(`${applied}件反映`);
+            if (already > 0) counts.push(`${already}件適用済み`);
+            if (failed > 0) counts.push(`${failed}件未適用`);
+
+            const detail = counts.join("・");
+
+            if (failed > 0 && applied > 0) {
+                return {
+                    type: "partial",
+                    title: "⚠️ 一部だけ修正できました",
+                    nextAction: "未適用分だけをAIに再依頼してください。",
+                    detail
+                };
+            }
+
+            if (failed > 0) {
+                return {
+                    type: "failed",
+                    title: "❌ 修正できませんでした",
+                    nextAction: "下のボタンからAIに修正を再依頼してください。現在のコードは変更されていません。",
+                    detail
+                };
+            }
+
+            if (applied > 0) {
+                return {
+                    type: "success",
+                    title: "✅ 修正できました",
+                    nextAction: "実行画面で動きを確認してください。起動チェックの結果も確認しましょう。",
+                    detail
+                };
+            }
+
+            if (already > 0) {
+                return {
+                    type: "already",
+                    title: "✅ すでに修正済みです",
+                    nextAction: "コードを変更する必要はありません。実行画面で動きを確認してください。",
+                    detail
+                };
+            }
+
+            return {
+                type: "none",
+                title: "反映対象がありません",
+                nextAction: "AIの回答内容を確認してください。",
+                detail
+            };
+        }
+
+        function formatAiReflectResultMessage(result, includeNextAction = true) {
+            const parts = [result.title];
+            if (result.detail) parts.push(result.detail);
+            if (includeNextAction && result.nextAction) {
+                parts.push(result.nextAction);
+            }
+            return parts.join("\n");
+        }
+
         function applyNormalizedPatches(fixes, options = {}) {
             const fromLongPress = options.fromLongPress === true;
             clearFixError();
@@ -7271,6 +7338,11 @@ ${currentCode}
                 }
 
                 const resultSummary = buildResultSummary();
+                const reflectResult = describeAiReflectResult(
+                    appliedFixes.length,
+                    alreadyAppliedFixes.length,
+                    failedFixes.length
+                );
 
                 // 適用済みは通常の成功・失敗へ混ぜず、独立したログ種別で記録する。
                 if (alreadyAppliedFixes.length > 0) {
@@ -7325,7 +7397,8 @@ ${currentCode}
                         firstAfter !== undefined ? String(firstAfter) : "";
 
                     displayFixError(
-                        `${resultSummary}。下のボタンで、未適用分だけをAIに出力し直させるプロンプトをコピーできます。`
+                        formatAiReflectResultMessage(reflectResult)
+                        + "\n\n下のボタンで未適用分だけをAIに再依頼できます。"
                     );
                     displayFixRecovery(
                         failedFixes,
@@ -7351,7 +7424,7 @@ ${currentCode}
                             failedCount: failedFixes.length
                         });
                     } else {
-                        showToast(resultSummary);
+                        showToast(reflectResult.title);
                     }
                     return false;
                 }
@@ -7362,12 +7435,8 @@ ${currentCode}
                 // snapshot・reflect_success・runtime verificationも発生させない。
                 if (appliedFixes.length === 0 && alreadyAppliedFixes.length > 0) {
                     closeModal('fix-modal');
-                    showToast(
-                        alreadyAppliedFixes.length === fixes.length
-                            ? `✓ ${alreadyAppliedFixes.length}件ともすでに反映済みです`
-                            : resultSummary
-                    );
                     switchTab('run');
+                    showToast(reflectResult.title);
                     return true;
                 }
 
@@ -7380,11 +7449,19 @@ ${currentCode}
                         totalCount: appliedFixes.length,
                         failedCount: 0
                     });
-                } else {
-                    showToast(resultSummary);
                 }
 
                 switchTab('run');
+
+                // 起動検証や変更箇所通知の既存表示を維持する。
+                // ここでは結果の見出しだけを短く通知し、
+                // 起動成功を保証する表現にはしない。
+                if (appliedFixes.length > 0) {
+                    showToast(reflectResult.title);
+                } else {
+                    showToast(formatAiReflectResultMessage(reflectResult));
+                }
+
                 return true;
             } catch (e) {
                 console.error(e);
