@@ -2267,7 +2267,7 @@
             position: fixed;
             left: 50%;
             bottom: calc(92px + env(safe-area-inset-bottom));
-            z-index: 200;
+            z-index: 600;
             width: min(calc(100% - 30px), 470px);
             padding: 12px 14px;
             transform: translate(-50%, 18px);
@@ -4278,45 +4278,10 @@
                     throw new Error("保存データのdecksが配列ではありません。");
                 }
 
-                // 途中まで正規化できても、全件成功するまでappDataへ反映しない。
-                const normalizedDecks = parsed.decks.map(deck => {
-                    if (
-                        !deck ||
-                        typeof deck !== "object" ||
-                        Array.isArray(deck)
-                    ) {
-                        throw new Error("デッキの構造が不正です。");
-                    }
-
-                    const cards = Array.isArray(deck.cards)
-                        ? deck.cards.map(card => {
-                            if (
-                                !card ||
-                                typeof card !== "object" ||
-                                Array.isArray(card)
-                            ) {
-                                throw new Error("カードの構造が不正です。");
-                            }
-
-                            return defaultCard(card);
-                        })
-                        : [];
-
-                    return {
-                        ...deck,
-                        cards,
-                        tts: normalizeDeckTts(deck.tts),
-                        aiSettings: normalizeDeckAiSettings(deck.aiSettings),
-                        studyDirection:
-                            normalizeStudyDirection(deck.studyDirection),
-                        favorite: deck.favorite === true,
-                        lastStudiedAt:
-                            typeof deck.lastStudiedAt === "string" &&
-                            !Number.isNaN(Date.parse(deck.lastStudiedAt))
-                                ? deck.lastStudiedAt
-                                : null
-                    };
-                });
+                // 全デッキと全カードの検証・正規化が成功するまで反映しない。
+                const normalizedDecks = validateAndNormalizeDecks(
+                    parsed.decks
+                );
 
                 appData = {
                     ...parsed,
@@ -4366,6 +4331,7 @@
         } catch (error) {
             console.error("Save Data Error:", error);
             setUnsavedWarning(true);
+            showToast("保存できませんでした。変更は未保存です。");
             return false;
         }
     }
@@ -8580,53 +8546,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         input.click();
     }
 
-    function validateAnyDeckBackup(raw) {
-        if (
-            !raw ||
-            typeof raw !== "object" ||
-            raw.format !== "ANYDECK_BACKUP_V1" ||
-            !raw.data ||
-            !Array.isArray(raw.data.decks)
-        ) {
-            throw new Error("AnyDeckのバックアップ形式ではありません。");
-        }
-
-        if (
-            !raw.activity ||
-            typeof raw.activity !== "object" ||
-            Array.isArray(raw.activity)
-        ) {
-            throw new Error("学習実績の形式が正しくありません。");
-        }
-
-        const activity = {};
-
-        Object.entries(raw.activity).forEach(([date, value]) => {
-            if (
-                !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-                !value ||
-                typeof value !== "object"
-            ) {
-                throw new Error("学習実績に不正な項目があります。");
-            }
-
-            const known = Number(value.known);
-            const unknown = Number(value.unknown);
-
-            if (
-                !Number.isSafeInteger(known) ||
-                !Number.isSafeInteger(unknown) ||
-                known < 0 ||
-                unknown < 0
-            ) {
-                throw new Error("学習実績の件数が不正です。");
-            }
-
-            activity[date] = { known, unknown };
-        });
-
+    // 通常読み込みとバックアップ復元で同じ必須項目を検証する。
+    // 不正なデッキやカードは補完・スキップせず、全件を不合格とする。
+    function validateAndNormalizeDecks(sourceDecks) {
         const deckIds = new Set();
-        const decks = raw.data.decks.map((deck, deckIndex) => {
+
+        return sourceDecks.map((deck, deckIndex) => {
             if (
                 !deck ||
                 typeof deck !== "object" ||
@@ -8715,6 +8640,54 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                         : null
             };
         });
+    }
+
+    function validateAnyDeckBackup(raw) {
+        if (
+            !raw ||
+            typeof raw !== "object" ||
+            raw.format !== "ANYDECK_BACKUP_V1" ||
+            !raw.data ||
+            !Array.isArray(raw.data.decks)
+        ) {
+            throw new Error("AnyDeckのバックアップ形式ではありません。");
+        }
+
+        if (
+            !raw.activity ||
+            typeof raw.activity !== "object" ||
+            Array.isArray(raw.activity)
+        ) {
+            throw new Error("学習実績の形式が正しくありません。");
+        }
+
+        const activity = {};
+
+        Object.entries(raw.activity).forEach(([date, value]) => {
+            if (
+                !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+                !value ||
+                typeof value !== "object"
+            ) {
+                throw new Error("学習実績に不正な項目があります。");
+            }
+
+            const known = Number(value.known);
+            const unknown = Number(value.unknown);
+
+            if (
+                !Number.isSafeInteger(known) ||
+                !Number.isSafeInteger(unknown) ||
+                known < 0 ||
+                unknown < 0
+            ) {
+                throw new Error("学習実績の件数が不正です。");
+            }
+
+            activity[date] = { known, unknown };
+        });
+
+        const decks = validateAndNormalizeDecks(raw.data.decks);
 
         const requestedActive =
             typeof raw.activeDeckId === "string"
@@ -9308,27 +9281,6 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         return normalizeStudyDirection(deck?.studyDirection);
     }
 
-    function changeStudyDirection(value) {
-        const deck = getActiveDeck();
-
-        if (!deck) {
-            syncStudyControls();
-            return;
-        }
-
-        deck.studyDirection = normalizeStudyDirection(value);
-        const saved = saveData();
-
-        resetCardInteraction();
-        resetStudyRound();
-
-        studyIndex = 0;
-        rebuildStudyQueue(true);
-        renderStudy();
-
-        return saved;
-    }
-
     // ===== 学習画面の音声設定 =====
     function updateStudyTtsControls() {
         const enabled =
@@ -9384,6 +9336,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         const directionChanged =
             nextDirection !== getDeckStudyDirection(deck);
 
+        // 音声と出題方向を先にメモリへ反映し、まとめて1回だけ保存する。
         deck.tts = normalizeDeckTts({
             enabled:
                 document.getElementById("study-tts-enabled").checked,
@@ -9393,7 +9346,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                 document.getElementById("study-tts-rate").value
         });
 
-        const ttsSaved = saveData();
+        deck.studyDirection = nextDirection;
+
+        const saved = saveData();
 
         // 「教材の詳細設定」側の音声項目にも同じ値を反映する。
         document.getElementById("creation-tts-enabled").checked =
@@ -9411,22 +9366,25 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         closeModal("study-tts-modal");
         stopCardSpeech();
 
-        let directionSaved = true;
-
         if (directionChanged) {
-            // 出題方向が変わった場合だけ、既存処理で周回をリセットする。
-            directionSaved = changeStudyDirection(nextDirection);
+            // 出題方向が変わった場合だけ、周回とカード操作状態をリセットする。
+            resetCardInteraction();
+            resetStudyRound();
+
+            studyIndex = 0;
+            rebuildStudyQueue(true);
+            renderStudy();
         } else if (
             !document
                 .getElementById("view-study")
                 .classList.contains("hidden")
         ) {
-            // 音声設定だけの変更では出題位置と周回集計を維持する。
+            // 音声設定だけの変更では出題位置・周回集計・取り消し情報を維持する。
             renderStudy();
         }
 
-        if (ttsSaved || directionSaved === true && directionChanged) {
-            // 方向変更時の再保存が成功すれば、音声設定も含めた最新状態が保存済み。
+        // 保存失敗時はメモリ上の変更を維持し、成功通知を表示しない。
+        if (saved) {
             showToast("学習設定を保存しました。");
         }
     }
