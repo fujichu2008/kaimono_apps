@@ -301,22 +301,65 @@
             min-height: 40px;
         }
 
-        /* 回答案内の重複を解消。下段の回答ボタンのみ残す。 */
+        /* 回答案内は下段の回答ボタンと重複するため非表示。 */
         #view-study .swipe-guide {
             display: none !important;
+            margin: 0 !important;
         }
 
-        /* 空いた縦方向のスペースを学習カードに割り当てる。 */
+        /* 画面の残り高さを基準に、カードの大きさを調整する。 */
         #view-study .study-area {
-            min-height: clamp(340px, 48dvh, 540px);
+            height: clamp(250px, calc(100dvh - 355px), 570px);
+            min-height: 0;
+            margin-bottom: 8px;
         }
 
-        #view-study .swipe-shell {
-            min-height: clamp(340px, 48dvh, 540px);
+        #view-study .swipe-shell,
+        #view-study .flip-card,
+        #view-study .flip-inner {
+            height: 100%;
+            min-height: 0;
         }
 
-        #view-study .flip-card {
-            min-height: clamp(340px, 48dvh, 540px);
+        /* カード内の長文は隠さず、必要に応じて縦スクロールする。 */
+        #view-study .card-face {
+            height: 100%;
+            min-height: 0;
+            overflow-x: hidden;
+            overflow-y: auto;
+            overscroll-behavior-y: contain;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        #view-study .card-details-content {
+            max-height: min(32dvh, 260px);
+            overflow-y: auto;
+        }
+
+        #view-study .answer-buttons {
+            margin-top: 6px;
+            margin-bottom: 6px;
+        }
+
+        /* 高さの低いスマホ・横向き画面への対応。 */
+        @media (max-height: 650px) {
+            #view-study .study-area {
+                height: clamp(210px, calc(100dvh - 295px), 420px);
+            }
+
+            #view-study .card-details-content {
+                max-height: 28dvh;
+            }
+        }
+
+        @media (orientation: landscape) and (max-height: 500px) {
+            #view-study .study-area {
+                height: clamp(180px, calc(100dvh - 230px), 320px);
+            }
+
+            #view-study .card-details-content {
+                max-height: 30dvh;
+            }
         }
 
         #view-study .gesture-hint {
@@ -5880,156 +5923,185 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
             throw new Error("取り込むテキストが空です。");
         }
 
-        // Prefer fenced content when the AI includes an introductory guide.
-        // Do not treat brackets in explanatory prose as JSON.
-        const fences = Array.from(
-            original.matchAll(/```(?:json|javascript|js)?[ \t]*\r?\n?([\s\S]*?)```/gi)
-        );
+        // 完全に正常なJSONは一切書き換えない。
+        try {
+            const direct = JSON.parse(original);
 
-        const candidates = [
-            ...fences.map(match => match[1].trim()),
-            original
-        ];
-
-        function extractJsonArray(text) {
-            const source = String(text || "").trim();
-            const starts = [];
-
-            for (let i = 0; i < source.length; i++) {
-                if (source[i] === "[") {
-                    starts.push(i);
-                }
+            if (Array.isArray(direct)) {
+                validateImportCardArray(direct);
+                return original;
             }
-
-            for (const start of starts) {
-                let depth = 0;
-                let quote = "";
-                let escaped = false;
-
-                for (let i = start; i < source.length; i++) {
-                    const char = source[i];
-
-                    if (quote) {
-                        if (escaped) {
-                            escaped = false;
-                            continue;
-                        }
-
-                        if (char === "\\") {
-                            escaped = true;
-                            continue;
-                        }
-
-                        if (
-                            char === quote ||
-                            (quote === "“" && char === "”") ||
-                            (quote === "”" && char === "“")
-                        ) {
-                            quote = "";
-                        }
-
-                        continue;
-                    }
-
-                    if (char === '"' || char === "“" || char === "”" || char === "＂") {
-                        quote = char;
-                        continue;
-                    }
-
-                    if (char === "[") {
-                        depth++;
-                    } else if (char === "]") {
-                        depth--;
-
-                        if (depth === 0) {
-                            const found = source.slice(start, i + 1);
-
-                            // An actual deck import contains an array of objects.
-                            // Avoid selecting unrelated arrays from introductory text.
-                            if (/^\[\s*(?:\{|])/.test(found)) {
-                                return found;
-                            }
-
-                            break;
-                        }
-
-                        if (depth < 0) break;
-                    }
-                }
-            }
-
-            return "";
+        } catch (error) {
+            if (error.importValidationError) throw error;
         }
 
-        let extracted = "";
+        // JSON以外の前置き・後書き・Markdownコードフェンスを許容。
+        // ただしJSON本体の不完全な補完は行わない。
+        const source = original.replace(
+            /```(?:json|javascript|js)?[ \t]*(?:\r?\n)?/gi,
+            ""
+        ).replace(/```/g, "");
 
-        for (const candidate of candidates) {
-            extracted = extractJsonArray(candidate);
+        const extracted = collectImportJsonCandidates(source);
 
-            if (extracted) break;
-        }
-
-        if (!extracted) {
+        if (!extracted.length) {
             throw new Error(
-                "カード用JSON配列を見つけられませんでした。AIの回答全体をコピーし、JSONが途中で切れていないか確認してください。"
+                "カード用JSON配列を見つけられませんでした。AIの回答全体をコピーし、最後の閉じ括弧まで含まれているか確認してください。"
             );
         }
 
-        // Never modify a valid JSON document.
-        try {
-            JSON.parse(extracted);
-            return extracted;
-        } catch (error) {
-            // Apply only conservative syntax repairs below.
+        const valid = [];
+        const repaired = [];
+
+        for (const candidate of extracted) {
+            try {
+                const parsed = JSON.parse(candidate);
+
+                validateImportCardArray(parsed);
+
+                if (!valid.includes(candidate)) {
+                    valid.push(candidate);
+                }
+
+                continue;
+            } catch (error) {
+                if (error.importValidationError) continue;
+            }
+
+            const fixed = repairImportJsonSyntax(candidate);
+
+            if (!fixed || fixed === candidate) continue;
+
+            try {
+                const parsed = JSON.parse(fixed);
+                validateImportCardArray(parsed);
+
+                if (!repaired.some(item => item.text === fixed)) {
+                    repaired.push({
+                        text: fixed,
+                        original: candidate
+                    });
+                }
+            } catch (error) {
+                // 内容が不正な候補は採用しない。
+            }
         }
 
-        function repairJsonSyntax(source) {
-            let result = "";
-            let insideString = false;
-            let escaped = false;
-            let delimiter = "";
+        if (valid.length > 1) {
+            throw new Error(
+                "カード用JSONが複数見つかりました。取り込むJSON配列を1つだけコピーしてください。"
+            );
+        }
 
-            for (let i = 0; i < source.length; i++) {
+        if (valid.length === 1) {
+            // 正常な候補がある場合は、修復候補より優先する。
+            return valid[0];
+        }
+
+        if (repaired.length > 1) {
+            throw new Error(
+                "修復可能なJSONが複数見つかりました。取り込む配列を1つだけコピーしてください。"
+            );
+        }
+
+        if (repaired.length === 1) {
+            const approved = window.confirm(
+                "AIの回答にJSONの構文エラーが見つかりました。\n\n" +
+                "引用符・末尾の余分なカンマ・文字列内の改行などを補正すると、カードを取り込めます。\n\n" +
+                "補正後の内容を使用して取り込みを続けますか？\n" +
+                "不安な場合はキャンセルし、AIに正しいJSONで再出力させてください。"
+            );
+
+            if (!approved) {
+                const error = new Error(
+                    "JSONの自動補正をキャンセルしました。データは登録していません。"
+                );
+                error.importValidationError = true;
+                throw error;
+            }
+
+            return repaired[0].text;
+        }
+
+        throw new Error(
+            "JSONを安全に読み込めませんでした。AIの回答に必須項目の欠落、括弧の不足、引用符の不一致などがないか確認し、正しいJSON配列で再出力させてください。"
+        );
+    }
+
+    function validateImportCardArray(value) {
+        const fail = message => {
+            const error = new Error(message);
+            error.importValidationError = true;
+            throw error;
+        };
+
+        if (!Array.isArray(value) || value.length === 0) {
+            fail("カードデータは1件以上のJSON配列で指定してください。");
+        }
+
+        if (value.length > 1000) {
+            fail("一度に取り込めるカードは1000件までです。分割して取り込んでください。");
+        }
+
+        value.forEach((item, index) => {
+            if (
+                !item ||
+                typeof item !== "object" ||
+                Array.isArray(item)
+            ) {
+                fail(`${index + 1}件目がカード形式ではありません。`);
+            }
+
+            if (
+                typeof item.term !== "string" ||
+                !item.term.trim()
+            ) {
+                fail(`${index + 1}件目のtermがありません。`);
+            }
+
+            if (
+                typeof item.meaning !== "string" ||
+                !item.meaning.trim()
+            ) {
+                fail(`${index + 1}件目のmeaningがありません。`);
+            }
+        });
+
+        return true;
+    }
+
+    function collectImportJsonCandidates(source) {
+        const results = [];
+        const seen = new Set();
+
+        for (let start = 0; start < source.length; start++) {
+            if (source[start] !== "[") continue;
+
+            const stack = [];
+            let quote = "";
+            let escaped = false;
+            let end = -1;
+            let broken = false;
+
+            for (let i = start; i < source.length; i++) {
                 const char = source[i];
 
-                if (insideString) {
+                if (quote) {
                     if (escaped) {
-                        result += char;
                         escaped = false;
                         continue;
                     }
 
                     if (char === "\\") {
-                        result += char;
                         escaped = true;
                         continue;
                     }
 
-                    const closing =
-                        char === delimiter ||
-                        (delimiter === "“" && char === "”") ||
-                        (delimiter === "”" && char === "“");
-
-                    if (closing) {
-                        result += '"';
-                        insideString = false;
-                        delimiter = "";
-                        continue;
-                    }
-
-                    // Raw newlines and control characters are invalid
-                    // inside JSON strings, but escaped equivalents are valid.
-                    if (char === "\n") {
-                        result += "\\n";
-                    } else if (char === "\r") {
-                        result += "\\r";
-                    } else if (char === "\t") {
-                        result += "\\t";
-                    } else if (char.charCodeAt(0) < 32) {
-                        result += "\\u" +
-                            char.charCodeAt(0).toString(16).padStart(4, "0");
-                    } else {
-                        result += char;
+                    if (
+                        char === quote ||
+                        (quote === "“" && char === "”")
+                    ) {
+                        quote = "";
                     }
 
                     continue;
@@ -6038,52 +6110,134 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                 if (
                     char === '"' ||
                     char === "“" ||
-                    char === "”" ||
                     char === "＂"
                 ) {
-                    insideString = true;
-                    delimiter = char;
-                    result += '"';
+                    quote = char;
                     continue;
                 }
 
-                // Remove a trailing comma immediately before } or ].
-                if (char === ",") {
-                    let next = i + 1;
-
-                    while (
-                        next < source.length &&
-                        /\s/.test(source[next])
-                    ) {
-                        next++;
-                    }
-
-                    if (source[next] === "}" || source[next] === "]") {
-                        continue;
-                    }
+                if (char === "[" || char === "{") {
+                    stack.push(char);
+                    continue;
                 }
 
-                result += char;
+                if (char === "]" || char === "}") {
+                    const opening = stack.pop();
+
+                    if (
+                        (char === "]" && opening !== "[") ||
+                        (char === "}" && opening !== "{")
+                    ) {
+                        broken = true;
+                        break;
+                    }
+
+                    if (stack.length === 0) {
+                        end = i + 1;
+                        break;
+                    }
+                }
             }
 
-            return result;
-        }
+            if (broken || end < 0) continue;
 
-        const repaired = repairJsonSyntax(extracted);
+            const candidate = source.slice(start, end).trim();
 
-        try {
-            const parsed = JSON.parse(repaired);
-
-            if (!Array.isArray(parsed)) {
-                throw new Error("JSONの最上位が配列ではありません。");
+            if (
+                !/^\[\s*\{/.test(candidate) ||
+                seen.has(candidate)
+            ) {
+                continue;
             }
 
-            return repaired;
-        } catch (error) {
-            throw new Error(
-                "JSONの自動補正を試みましたが、構文を修復できませんでした。AIの回答が途中で切れているか、引用符・括弧などに複雑な誤りがあります。AIに正しいJSON配列で再出力するよう依頼してください。"
-            );
+            seen.add(candidate);
+            results.push(candidate);
         }
+
+        return results;
+    }
+
+    function repairImportJsonSyntax(source) {
+        let result = "";
+        let quote = "";
+        let escaped = false;
+
+        for (let i = 0; i < source.length; i++) {
+            const char = source[i];
+
+            if (quote) {
+                if (escaped) {
+                    result += char;
+                    escaped = false;
+                    continue;
+                }
+
+                if (char === "\\") {
+                    result += char;
+                    escaped = true;
+                    continue;
+                }
+
+                if (
+                    char === quote ||
+                    (quote === "“" && char === "”")
+                ) {
+                    result += '"';
+                    quote = "";
+                    continue;
+                }
+
+                if (char === "\n") {
+                    result += "\\n";
+                } else if (char === "\r") {
+                    result += "\\r";
+                } else if (char === "\t") {
+                    result += "\\t";
+                } else if (char.charCodeAt(0) < 32) {
+                    result += "\\u" +
+                        char.charCodeAt(0).toString(16).padStart(4, "0");
+                } else {
+                    result += char;
+                }
+
+                continue;
+            }
+
+            if (
+                char === '"' ||
+                char === "“" ||
+                char === "＂"
+            ) {
+                quote = char;
+                result += '"';
+                continue;
+            }
+
+            if (char === ",") {
+                let next = i + 1;
+
+                while (
+                    next < source.length &&
+                    /\s/.test(source[next])
+                ) {
+                    next++;
+                }
+
+                if (
+                    source[next] === "}" ||
+                    source[next] === "]"
+                ) {
+                    continue;
+                }
+            }
+
+            result += char;
+        }
+
+        // 閉じていない文字列を推測で補完しない。
+        if (quote || escaped) return "";
+
+        return result;
     }
 
     function parseImportedCards(rawText) {
