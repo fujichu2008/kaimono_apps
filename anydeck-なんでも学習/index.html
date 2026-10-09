@@ -4074,16 +4074,149 @@
     let dataRecoveryRequired = false;
     let originalRecoveryData = null;
 
-    function setUnsavedWarning(visible) {
+    // 保存状態はここで一元管理する。
+    // activityPendingには未保存の回答履歴全体を保持する。
+    const persistenceState = {
+        dataDirty: false,
+        activityDirty: false,
+        activityPending: null,
+        activityReadFailed: false
+    };
+
+    function updateUnsavedBanner() {
         const banner = document.getElementById("unsaved-banner");
-        if (banner) {
-            banner.classList.toggle("hidden", !visible);
+        if (!banner) return;
+
+        const unsaved =
+            persistenceState.dataDirty ||
+            persistenceState.activityDirty;
+
+        banner.classList.toggle("hidden", !unsaved);
+    }
+
+    function setUnsavedWarning(visible) {
+        // 既存のバックアップ復元処理との互換性を維持する。
+        // falseは全保存状態の解消を確認した復元処理で使用する。
+        if (!visible) {
+            persistenceState.dataDirty = false;
+            persistenceState.activityDirty = false;
+            persistenceState.activityPending = null;
+            persistenceState.activityReadFailed = false;
+        } else {
+            persistenceState.dataDirty = true;
+        }
+
+        updateUnsavedBanner();
+    }
+
+    function markSaveResult(kind, saved) {
+        if (kind === "data") {
+            persistenceState.dataDirty = !saved;
+        } else if (kind === "activity") {
+            persistenceState.activityDirty = !saved;
+        }
+
+        updateUnsavedBanner();
+        return saved;
+    }
+
+    function readStoredActivity() {
+        const raw = localStorage.getItem(ACTIVITY_KEY);
+        const parsed = JSON.parse(raw === null ? "{}" : raw);
+
+        if (
+            !parsed ||
+            typeof parsed !== "object" ||
+            Array.isArray(parsed)
+        ) {
+            throw new Error("日別学習履歴の形式が不正です。");
+        }
+
+        return parsed;
+    }
+
+    function getActivityForUpdate() {
+        if (persistenceState.activityPending !== null) {
+            return clone(persistenceState.activityPending);
+        }
+
+        if (persistenceState.activityReadFailed) {
+            throw new Error("日別学習履歴を安全に読み込めません。");
+        }
+
+        try {
+            return readStoredActivity();
+        } catch (error) {
+            persistenceState.activityReadFailed = true;
+            markSaveResult("activity", false);
+            throw error;
+        }
+    }
+
+    function saveActivity(activity) {
+        if (dataRecoveryRequired) {
+            persistenceState.activityPending = clone(activity);
+            markSaveResult("activity", false);
+            return false;
+        }
+
+        // 書き込みが失敗しても、次の回答や再試行で使えるよう保持する。
+        persistenceState.activityPending = clone(activity);
+
+        try {
+            const serialized = JSON.stringify(activity);
+            localStorage.setItem(ACTIVITY_KEY, serialized);
+
+            // 再試行時を含め、保存済みの回答件数を読み戻して確認する。
+            const stored = readStoredActivity();
+
+            if (JSON.stringify(stored) !== serialized) {
+                throw new Error("日別学習履歴の保存後検証に失敗しました。");
+            }
+
+            persistenceState.activityPending = null;
+            persistenceState.activityReadFailed = false;
+            return markSaveResult("activity", true);
+        } catch (error) {
+            console.warn("Activity Save Error:", error);
+            return markSaveResult("activity", false);
         }
     }
 
     function retrySaveData() {
-        if (saveData()) {
-            showToast("保存しました。");
+        if (dataRecoveryRequired) {
+            showToast("保存データの復旧が必要です。");
+            return;
+        }
+
+        // 未保存の対象だけを再試行し、一方の成功で他方を解除しない。
+        const dataSaved = !persistenceState.dataDirty || saveData({
+            silent: true
+        });
+
+        let activitySaved = !persistenceState.activityDirty;
+
+        if (!activitySaved && persistenceState.activityPending !== null) {
+            activitySaved = saveActivity(
+                persistenceState.activityPending
+            );
+        }
+
+        updateUnsavedBanner();
+
+        if (
+            dataSaved &&
+            activitySaved &&
+            !persistenceState.dataDirty &&
+            !persistenceState.activityDirty
+        ) {
+            showToast("未保存の変更を保存しました。");
+        } else {
+            showToast(
+                persistenceState.activityReadFailed
+                    ? "日別学習履歴を安全に読み込めません。元のデータを保護しています。"
+                    : "一部の変更を保存できませんでした。再試行してください。"
+            );
         }
     }
 
@@ -4482,17 +4615,21 @@
 
     function saveData(options = {}) {
         if (dataRecoveryRequired) {
+            markSaveResult("data", false);
             return false;
         }
 
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
-            setUnsavedWarning(false);
-            return true;
+            return markSaveResult("data", true);
         } catch (error) {
             console.error("Save Data Error:", error);
-            setUnsavedWarning(true);
-            showToast("保存できませんでした。変更は未保存です。");
+            markSaveResult("data", false);
+
+            if (!options.silent) {
+                showToast("保存できませんでした。変更は未保存です。");
+            }
+
             return false;
         }
     }
@@ -4555,15 +4692,17 @@
 
     function recordActivity(result) {
         if (dataRecoveryRequired) {
+            markSaveResult("activity", false);
             return false;
         }
 
-        let activity = {};
+        let activity;
 
         try {
-            activity = JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "{}");
+            activity = getActivityForUpdate();
         } catch (error) {
-            activity = {};
+            console.warn("Activity Read Error:", error);
+            return false;
         }
 
         const key = todayKey();
@@ -4575,22 +4714,30 @@
             };
         }
 
-        activity[key][result] =
-            Number(activity[key][result] || 0) + 1;
+        const previous = Number(activity[key][result] || 0);
 
-        try {
-            localStorage.setItem(ACTIVITY_KEY, JSON.stringify(activity));
-            return true;
-        } catch (error) {
-            console.warn("Activity Save Error:", error);
+        if (!Number.isSafeInteger(previous) || previous < 0) {
+            persistenceState.activityReadFailed = true;
+            markSaveResult("activity", false);
             return false;
         }
+
+        activity[key][result] = previous + 1;
+
+        return saveActivity(activity);
     }
 
     function readActivity() {
+        if (persistenceState.activityPending !== null) {
+            return clone(persistenceState.activityPending);
+        }
+
         try {
-            return JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "{}");
+            return readStoredActivity();
         } catch (error) {
+            console.warn("Activity Read Error:", error);
+            persistenceState.activityReadFailed = true;
+            markSaveResult("activity", false);
             return {};
         }
     }
@@ -9624,32 +9771,34 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
     }
 
     function revertStudyActivity(dateKey, result) {
-        const activity = readActivity();
+        let activity;
+
+        try {
+            activity = getActivityForUpdate();
+        } catch (error) {
+            console.warn("Activity Revert Read Error:", error);
+            return false;
+        }
 
         if (
             !activity ||
             typeof activity !== "object" ||
             !activity[dateKey]
         ) {
-            return;
-        }
-
-        activity[dateKey][result] = Math.max(
-            0,
-            Number(activity[dateKey][result] || 0) - 1
-        );
-
-        try {
-            localStorage.setItem(
-                ACTIVITY_KEY,
-                JSON.stringify(activity)
-            );
-
-            return true;
-        } catch (error) {
-            console.warn("Activity Revert Error:", error);
+            markSaveResult("activity", false);
             return false;
         }
+
+        const previous = Number(activity[dateKey][result]);
+
+        if (!Number.isSafeInteger(previous) || previous <= 0) {
+            markSaveResult("activity", false);
+            return false;
+        }
+
+        activity[dateKey][result] = previous - 1;
+
+        return saveActivity(activity);
     }
 
     function undoLastAnswer() {
@@ -9684,7 +9833,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         deck.lastStudiedAt = undo.lastStudiedAt;
 
         const activityReverted =
-            revertStudyActivity(undo.dateKey, undo.result) !== false;
+            revertStudyActivity(undo.dateKey, undo.result);
 
         studyRound.known = undo.round.known;
         studyRound.unknown = undo.round.unknown;
