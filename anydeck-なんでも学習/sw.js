@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-anydeck-なんでも学習-491f6c57e499c1337674";
+const CACHE_NAME = "appstudio-pwa-anydeck-なんでも学習-94114d08016d7737a27a";
 const CACHE_PREFIX = "appstudio-pwa-anydeck-なんでも学習-";
 const PRECACHE_URLS = [
     "./",

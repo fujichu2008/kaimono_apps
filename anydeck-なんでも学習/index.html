@@ -324,7 +324,8 @@
         }
 
         #view-study .swipe-shell {
-            height: clamp(250px, calc(100dvh - 386px), 570px);
+            /* ヘッダー、集計、進捗、操作列、復習表示、回答ボタン、下部ナビと余白を確保する。 */
+            height: clamp(180px, calc(100dvh - 440px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 570px);
             min-height: 0;
         }
 
@@ -352,13 +353,15 @@
         /* 高さの低いスマホ・横向き画面への対応。 */
         @media (max-height: 650px) {
             #view-study .swipe-shell {
-                height: clamp(210px, calc(100dvh - 326px), 420px);
+                /* 低い画面ではカードを縮め、収まらない分はページをスクロールする。 */
+                height: clamp(150px, calc(100dvh - 430px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 420px);
             }
         }
 
         @media (orientation: landscape) and (max-height: 500px) {
             #view-study .swipe-shell {
-                height: clamp(180px, calc(100dvh - 261px), 320px);
+                /* 横向きでも回答ボタンをカード直下に保ち、下部ナビとの重なりを避ける。 */
+                height: clamp(120px, calc(100dvh - 420px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 320px);
             }
         }
 
@@ -4120,8 +4123,7 @@
         return saved;
     }
 
-    function readStoredActivity() {
-        const raw = localStorage.getItem(ACTIVITY_KEY);
+    function parseStoredActivity(raw) {
         const parsed = JSON.parse(raw === null ? "{}" : raw);
 
         if (
@@ -4132,7 +4134,36 @@
             throw new Error("日別学習履歴の形式が不正です。");
         }
 
+        // バックアップ検証と同じ基準で日別の回答件数を確認する。
+        // 壊れた項目を補完して元のデータへ上書きすることはしない。
+        for (const [date, value] of Object.entries(parsed)) {
+            if (
+                !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+                !value ||
+                typeof value !== "object" ||
+                Array.isArray(value)
+            ) {
+                throw new Error("日別学習履歴に不正な項目があります。");
+            }
+
+            const known = Number(value.known);
+            const unknown = Number(value.unknown);
+
+            if (
+                !Number.isSafeInteger(known) ||
+                !Number.isSafeInteger(unknown) ||
+                known < 0 ||
+                unknown < 0
+            ) {
+                throw new Error("日別学習履歴の回答件数が不正です。");
+            }
+        }
+
         return parsed;
+    }
+
+    function readStoredActivity() {
+        return parseStoredActivity(localStorage.getItem(ACTIVITY_KEY));
     }
 
     function getActivityForUpdate() {
@@ -4183,6 +4214,83 @@
         }
     }
 
+    function retryReadFailedActivity() {
+        // 未保存の履歴がある場合は呼び出さない。
+        // 保存済みデータとの推測による合算も行わない。
+        if (persistenceState.activityPending !== null) {
+            return false;
+        }
+
+        let raw;
+
+        try {
+            // 保存領域へのアクセス失敗と、取得内容の破損を区別する。
+            raw = localStorage.getItem(ACTIVITY_KEY);
+        } catch (error) {
+            console.warn("Activity Retry Read Error:", error);
+            persistenceState.activityReadFailed = true;
+            markSaveResult("activity", false);
+            return false;
+        }
+
+        try {
+            parseStoredActivity(raw);
+        } catch (error) {
+            console.warn("Activity Retry Parse Error:", error);
+
+            const approved = confirm(
+                "日別の学習記録を読み込めません。\n\n" +
+                "日別の記録をリセットしますか？\n\n" +
+                "リセットされるのは、今日の回答数、直近7日間の記録、連続学習日数だけです。\n\n" +
+                "カード、デッキ、カードごとの学習履歴は消えません。\n\n" +
+                "キャンセルすると元の日別記録を保護し、何も書き換えません。"
+            );
+
+            if (!approved) {
+                persistenceState.activityReadFailed = true;
+                markSaveResult("activity", false);
+                return false;
+            }
+
+            try {
+                localStorage.setItem(ACTIVITY_KEY, "{}");
+
+                // 書き込み後の読み戻しに成功するまで復旧完了としない。
+                const restored = readStoredActivity();
+
+                if (Object.keys(restored).length !== 0) {
+                    throw new Error("日別学習履歴のリセット後検証に失敗しました。");
+                }
+
+                // リセット前の回答を取り消して新しい履歴を減算しない。
+                if (studyUndo) {
+                    studyUndo.activityCounted = false;
+                }
+            } catch (writeError) {
+                console.warn("Activity Reset Error:", writeError);
+                persistenceState.activityReadFailed = true;
+                markSaveResult("activity", false);
+                return false;
+            }
+        }
+
+        persistenceState.activityReadFailed = false;
+        persistenceState.activityPending = null;
+        markSaveResult("activity", true);
+
+        // 学習画面と、表示中なら実績画面の集計を更新する。
+        renderStudyStats();
+
+        if (
+            !document.getElementById("view-dashboard")
+                .classList.contains("hidden")
+        ) {
+            renderDashboard();
+        }
+
+        return true;
+    }
+
     function retrySaveData() {
         if (dataRecoveryRequired) {
             showToast("保存データの復旧が必要です。");
@@ -4197,9 +4305,16 @@
         let activitySaved = !persistenceState.activityDirty;
 
         if (!activitySaved && persistenceState.activityPending !== null) {
+            // メモリ上の未保存内容をそのまま保存する。二重加算しない。
             activitySaved = saveActivity(
                 persistenceState.activityPending
             );
+        } else if (
+            persistenceState.activityReadFailed &&
+            persistenceState.activityPending === null
+        ) {
+            // 未保存内容がない読み込み失敗だけ、安全な再取得を試す。
+            activitySaved = retryReadFailedActivity();
         }
 
         updateUnsavedBanner();
@@ -4716,13 +4831,23 @@
 
         const previous = Number(activity[key][result] || 0);
 
-        if (!Number.isSafeInteger(previous) || previous < 0) {
+        if (
+            !Number.isSafeInteger(previous) ||
+            previous < 0 ||
+            previous >= Number.MAX_SAFE_INTEGER
+        ) {
             persistenceState.activityReadFailed = true;
             markSaveResult("activity", false);
             return false;
         }
 
         activity[key][result] = previous + 1;
+
+        // 加算が成立した事実と、永続保存の成功は区別する。
+        // 保存失敗でも未保存データとして保持される回答は取り消し対象になる。
+        if (studyUndo) {
+            studyUndo.activityCounted = true;
+        }
 
         return saveActivity(activity);
     }
@@ -7084,6 +7209,9 @@
         }
 
         const activitySaved = recordActivity(result);
+
+        // 日別履歴の加算成立 여부はrecordActivityがstudyUndoへ記録する。
+        // 保存失敗と加算不成立を混同せず、既存の回答処理順序を維持する。
 
         // 回答を記録した時点で、次の出題位置も確定する。
         // 再出題の挿入は、この処理より前のstudyIndexを基準に行う。
@@ -9730,6 +9858,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
             cardId: card.id,
             result,
             dateKey: todayKey(),
+            activityCounted: false,
             card: {
                 known: card.known,
                 unknown: card.unknown,
@@ -9832,8 +9961,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
 
         deck.lastStudiedAt = undo.lastStudiedAt;
 
-        const activityReverted =
-            revertStudyActivity(undo.dateKey, undo.result);
+        // この回答が日別履歴に加算されていない場合、別の回答を減らさない。
+        const activityReverted = undo.activityCounted === true
+            ? revertStudyActivity(undo.dateKey, undo.result)
+            : true;
 
         studyRound.known = undo.round.known;
         studyRound.unknown = undo.round.unknown;
