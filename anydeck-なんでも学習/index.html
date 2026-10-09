@@ -1008,6 +1008,12 @@
             transition: none !important;
         }
 
+        /* カード面はスクロール領域のため、横スワイプをブラウザに取られないよう面と中身にも指定する。 */
+        #view-study .card-face,
+        #view-study .card-face * {
+            touch-action: pan-y;
+        }
+
         .swipe-shell.snapback {
             transition: transform 0.24s cubic-bezier(.22,.75,.25,1);
         }
@@ -6714,13 +6720,13 @@
                 <div class="answer-buttons">
                     <button
                         class="answer-button unknown"
-                        onclick="answerCurrentCard('unknown')">
+                        onclick="handleAnswerButton('unknown')">
                         ← わからなかった
                     </button>
 
                     <button
                         class="answer-button known"
-                        onclick="answerCurrentCard('known')">
+                        onclick="handleAnswerButton('known')">
                         わかった →
                     </button>
                 </div>
@@ -6801,6 +6807,31 @@
         }, 400);
     }
 
+    // 回答ボタン：表面ならまずめくり、答えの面なら回答して次のカードへ進む。
+    function handleAnswerButton(result) {
+        if (!isCurrentCardInteractionValid()) return;
+
+        if (
+            cardInteraction.phase === "answering" ||
+            cardInteraction.phase === "dragging"
+        ) {
+            return;
+        }
+
+        if (cardInteraction.flipped) {
+            answerCurrentCard(result);
+            return;
+        }
+
+        // めくり戻しのアニメーション中でも、押した操作を無視しない。
+        if (cardInteraction.phase === "flipping") {
+            clearCardAnimationTimer();
+            cardInteraction.phase = "idle";
+        }
+
+        toggleCurrentCardFlip();
+    }
+
     function initCardSwipe() {
         const shell = document.getElementById("swipe-shell");
         const flipCard = document.getElementById("flip-card");
@@ -6812,7 +6843,7 @@
         const unknownLabel = document.getElementById("swipe-unknown-label");
 
         const directionThreshold = 10;
-        const answerThreshold = 55;
+        const answerThreshold = 36;
 
         let pointerId = null;
         let startX = 0;
@@ -6870,10 +6901,27 @@
         }
 
         function getRevealThreshold() {
-            return Math.max(
-                45,
-                Math.min(85, flipCard.clientWidth * 0.20)
-            );
+            return 24;
+        }
+
+        // アニメーション途中でも次の操作を受け付けられるよう、表示状態を即座に確定する。
+        function settleAnimation() {
+            clearCardAnimationTimer();
+
+            flipCard.classList.remove("drag-flipping");
+
+            inner.style.transition = "";
+            inner.style.webkitTransition = "";
+            inner.style.transform = "";
+            inner.style.webkitTransform = "";
+
+            shell.classList.remove("snapback", "dragging");
+            shell.style.transform = "";
+
+            resetLabels();
+
+            currentAngle = 0;
+            cardInteraction.phase = "idle";
         }
 
         function finishFlip(shouldFlip) {
@@ -6978,7 +7026,11 @@
             }
 
             if (!wasFlipped) {
-                finishFlip(false);
+                // 中断されても、十分に動かしていればめくりを確定する。
+                finishFlip(Math.abs(deltaX) >= getRevealThreshold());
+            } else if (Math.abs(deltaX) >= answerThreshold) {
+                // 中断されても、十分に動かしていれば回答を確定する。
+                finishAnswerDrag();
             } else {
                 cardInteraction.phase = "flipping";
 
@@ -6997,10 +7049,18 @@
 
         shell.addEventListener("pointerdown", event => {
             if (
-                cardInteraction.phase !== "idle" ||
                 pointerId !== null ||
                 !isCurrentCardInteractionValid()
             ) {
+                return;
+            }
+
+            // めくりアニメーション中の操作も無視せず、すぐに次の操作を始める。
+            if (cardInteraction.phase === "flipping") {
+                settleAnimation();
+            }
+
+            if (cardInteraction.phase !== "idle") {
                 return;
             }
 
@@ -7057,7 +7117,8 @@
 
                 moved = true;
 
-                if (Math.abs(deltaY) > Math.abs(deltaX)) {
+                // 少し斜めのスワイプも横方向として扱う。
+                if (Math.abs(deltaY) > Math.abs(deltaX) * 1.5) {
                     gesture = "vertical";
                     return;
                 }
@@ -7142,10 +7203,19 @@
 
                 if (totalDistance >= directionThreshold) {
                     completedGesture =
-                        Math.abs(deltaX) >= Math.abs(deltaY)
+                        Math.abs(deltaX) * 1.5 >= Math.abs(deltaY)
                             ? "horizontal"
                             : "vertical";
                 }
+            }
+
+            // 出だしが縦と判定されても、最終的に明確な横移動ならスワイプとして扱う。
+            if (
+                completedGesture === "vertical" &&
+                Math.abs(deltaX) >= answerThreshold &&
+                Math.abs(deltaX) > Math.abs(deltaY) * 1.5
+            ) {
+                completedGesture = "horizontal";
             }
 
             clearGesture();
@@ -7888,21 +7958,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         }
 
         if (repaired.length === 1) {
-            const approved = window.confirm(
-                "AIの回答にJSONの構文エラーが見つかりました。\n\n" +
-                "引用符・末尾の余分なカンマ・文字列内の改行などを補正すると、カードを取り込めます。\n\n" +
-                "補正後の内容を使用して取り込みを続けますか？\n" +
-                "不安な場合はキャンセルし、AIに正しいJSONで再出力させてください。"
-            );
-
-            if (!approved) {
-                const error = new Error(
-                    "JSONの自動補正をキャンセルしました。データは登録していません。"
-                );
-                error.importValidationError = true;
-                throw error;
-            }
-
+            // 構文エラーを補正できた場合は、確認せずにそのまま取り込む。
             return repaired[0].text;
         }
 
