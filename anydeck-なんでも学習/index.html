@@ -5860,61 +5860,216 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
     }
 
     function normalizeJsonText(raw) {
-        let text = String(raw || "").trim();
+        const original = String(raw || "").replace(/^\uFEFF/, "").trim();
 
-        if (!text) {
+        if (!original) {
             throw new Error("取り込むテキストが空です。");
         }
 
-        // Preserve compatibility with the previous Markdown response format.
-        const fenced = text.match(
-            /^```(?:json)?\s*([\s\S]*?)\s*```$/i
+        // Prefer fenced content when the AI includes an introductory guide.
+        // Do not treat brackets in explanatory prose as JSON.
+        const fences = Array.from(
+            original.matchAll(/```(?:json|javascript|js)?[ \t]*\r?\n?([\s\S]*?)```/gi)
         );
 
-        if (fenced) {
-            text = fenced[1].trim();
-        } else {
-            // The introductory guide is outside the JSON data.
-            // Find the beginning of the JSON array without rewriting its body.
-            const start = text.indexOf("[");
+        const candidates = [
+            ...fences.map(match => match[1].trim()),
+            original
+        ];
 
-            if (start === -1) {
-                throw new Error(
-                    "JSON配列が見つかりません。AIの回答全体をコピーしてください。"
-                );
+        function extractJsonArray(text) {
+            const source = String(text || "").trim();
+            const starts = [];
+
+            for (let i = 0; i < source.length; i++) {
+                if (source[i] === "[") {
+                    starts.push(i);
+                }
             }
 
-            // Only the known AnyDeck guide is accepted before the JSON.
-            // This avoids silently ignoring unrelated error messages.
-            const prefix = text.slice(0, start).trim();
-            const expectedGuide =
-                "以下のコードをコピーして、AnyDeckの『カードを取り込む』から読み込んでください。";
+            for (const start of starts) {
+                let depth = 0;
+                let quote = "";
+                let escaped = false;
 
-            if (prefix && prefix !== expectedGuide) {
-                throw new Error(
-                    "JSONの前に想定外の文章があります。AIの回答形式を確認してください。"
-                );
+                for (let i = start; i < source.length; i++) {
+                    const char = source[i];
+
+                    if (quote) {
+                        if (escaped) {
+                            escaped = false;
+                            continue;
+                        }
+
+                        if (char === "\\") {
+                            escaped = true;
+                            continue;
+                        }
+
+                        if (
+                            char === quote ||
+                            (quote === "“" && char === "”") ||
+                            (quote === "”" && char === "“")
+                        ) {
+                            quote = "";
+                        }
+
+                        continue;
+                    }
+
+                    if (char === '"' || char === "“" || char === "”" || char === "＂") {
+                        quote = char;
+                        continue;
+                    }
+
+                    if (char === "[") {
+                        depth++;
+                    } else if (char === "]") {
+                        depth--;
+
+                        if (depth === 0) {
+                            const found = source.slice(start, i + 1);
+
+                            // An actual deck import contains an array of objects.
+                            // Avoid selecting unrelated arrays from introductory text.
+                            if (/^\[\s*(?:\{|])/.test(found)) {
+                                return found;
+                            }
+
+                            break;
+                        }
+
+                        if (depth < 0) break;
+                    }
+                }
             }
 
-            text = text.slice(start).trim();
-
-            // Accept a fenced JSON block following the guide as well.
-            const nestedFence = text.match(
-                /^```(?:json)?\s*([\s\S]*?)\s*```$/i
-            );
-
-            if (nestedFence) {
-                text = nestedFence[1].trim();
-            }
+            return "";
         }
 
-        if (!text.startsWith("[") || !text.endsWith("]")) {
+        let extracted = "";
+
+        for (const candidate of candidates) {
+            extracted = extractJsonArray(candidate);
+
+            if (extracted) break;
+        }
+
+        if (!extracted) {
             throw new Error(
-                "JSON配列の形式が正しくありません。回答が途中で切れていないか確認してください。"
+                "カード用JSON配列を見つけられませんでした。AIの回答全体をコピーし、JSONが途中で切れていないか確認してください。"
             );
         }
 
-        return text;
+        // Never modify a valid JSON document.
+        try {
+            JSON.parse(extracted);
+            return extracted;
+        } catch (error) {
+            // Apply only conservative syntax repairs below.
+        }
+
+        function repairJsonSyntax(source) {
+            let result = "";
+            let insideString = false;
+            let escaped = false;
+            let delimiter = "";
+
+            for (let i = 0; i < source.length; i++) {
+                const char = source[i];
+
+                if (insideString) {
+                    if (escaped) {
+                        result += char;
+                        escaped = false;
+                        continue;
+                    }
+
+                    if (char === "\\") {
+                        result += char;
+                        escaped = true;
+                        continue;
+                    }
+
+                    const closing =
+                        char === delimiter ||
+                        (delimiter === "“" && char === "”") ||
+                        (delimiter === "”" && char === "“");
+
+                    if (closing) {
+                        result += '"';
+                        insideString = false;
+                        delimiter = "";
+                        continue;
+                    }
+
+                    // Raw newlines and control characters are invalid
+                    // inside JSON strings, but escaped equivalents are valid.
+                    if (char === "\n") {
+                        result += "\\n";
+                    } else if (char === "\r") {
+                        result += "\\r";
+                    } else if (char === "\t") {
+                        result += "\\t";
+                    } else if (char.charCodeAt(0) < 32) {
+                        result += "\\u" +
+                            char.charCodeAt(0).toString(16).padStart(4, "0");
+                    } else {
+                        result += char;
+                    }
+
+                    continue;
+                }
+
+                if (
+                    char === '"' ||
+                    char === "“" ||
+                    char === "”" ||
+                    char === "＂"
+                ) {
+                    insideString = true;
+                    delimiter = char;
+                    result += '"';
+                    continue;
+                }
+
+                // Remove a trailing comma immediately before } or ].
+                if (char === ",") {
+                    let next = i + 1;
+
+                    while (
+                        next < source.length &&
+                        /\s/.test(source[next])
+                    ) {
+                        next++;
+                    }
+
+                    if (source[next] === "}" || source[next] === "]") {
+                        continue;
+                    }
+                }
+
+                result += char;
+            }
+
+            return result;
+        }
+
+        const repaired = repairJsonSyntax(extracted);
+
+        try {
+            const parsed = JSON.parse(repaired);
+
+            if (!Array.isArray(parsed)) {
+                throw new Error("JSONの最上位が配列ではありません。");
+            }
+
+            return repaired;
+        } catch (error) {
+            throw new Error(
+                "JSONの自動補正を試みましたが、構文を修復できませんでした。AIの回答が途中で切れているか、引用符・括弧などに複雑な誤りがあります。AIに正しいJSON配列で再出力するよう依頼してください。"
+            );
+        }
     }
 
     function parseImportedCards(rawText) {
