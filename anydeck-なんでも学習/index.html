@@ -2291,6 +2291,123 @@
             transform: translate(-50%, 0);
         }
 
+        /* Persistent unsaved-data warning */
+        .unsaved-banner {
+            position: sticky;
+            top: 0;
+            z-index: 45;
+            width: 100%;
+            padding: 11px 16px;
+            border-bottom: 1px solid #fcd34d;
+            background: #fffbeb;
+            color: #92400e;
+            box-shadow: 0 5px 15px rgba(146,64,14,0.08);
+        }
+
+        .unsaved-banner-inner {
+            width: min(100%, 488px);
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .unsaved-banner-text {
+            flex: 1;
+            min-width: 0;
+            font-size: 11px;
+            line-height: 1.6;
+            font-weight: 850;
+        }
+
+        .unsaved-retry-button {
+            flex-shrink: 0;
+            min-width: 72px;
+            min-height: 44px;
+            padding: 0 12px;
+            border: 1px solid #f59e0b;
+            border-radius: 12px;
+            background: white;
+            color: #92400e;
+            font-size: 12px;
+            font-weight: 950;
+            touch-action: manipulation;
+        }
+
+        /* Full-screen recovery mode */
+        .recovery-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 500;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding:
+                calc(20px + env(safe-area-inset-top))
+                18px
+                calc(20px + env(safe-area-inset-bottom));
+            overflow-y: auto;
+            background: var(--bg);
+        }
+
+        .recovery-panel {
+            width: min(100%, 430px);
+            max-height: 100%;
+            overflow-y: auto;
+            padding: 22px 18px;
+            border: 1px solid var(--line-strong);
+            border-radius: var(--radius-lg);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+
+        .recovery-title {
+            margin: 0 0 12px;
+            color: var(--text);
+            font-size: 21px;
+            font-weight: 950;
+        }
+
+        .recovery-description {
+            margin: 0 0 18px;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        .recovery-actions {
+            display: grid;
+            gap: 10px;
+        }
+
+        .recovery-actions button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .recovery-note {
+            margin: 10px 0 16px;
+            color: #b45309;
+            font-size: 11px;
+            line-height: 1.7;
+        }
+
+        .recovery-danger {
+            margin-top: 12px;
+        }
+
+        body.recovery-mode {
+            padding-bottom: 0;
+        }
+
+        body.recovery-mode .app-shell,
+        body.recovery-mode .bottom-nav,
+        body.recovery-mode #splash-screen,
+        body.recovery-mode #unsaved-banner {
+            display: none !important;
+        }
+
         @media (max-width: 360px) {
             .card-face,
             .flip-inner,
@@ -2757,6 +2874,63 @@
     </div>
 </div>
 
+<!-- Data recovery screen -->
+<div id="recovery-screen"
+     class="recovery-screen hidden"
+     role="dialog"
+     aria-modal="true"
+     aria-labelledby="recovery-title">
+    <div class="recovery-panel">
+        <h2 id="recovery-title" class="recovery-title">
+            学習データを読み込めません
+        </h2>
+
+        <p class="recovery-description">
+            保存されているデータを正常に読み込めませんでした。
+            データを守るため、自動的な初期化と上書き保存を停止しています。
+        </p>
+
+        <div class="recovery-actions">
+            <button type="button"
+                    class="primary-button"
+                    onclick="location.reload()">
+                再読み込み
+            </button>
+
+            <button id="recovery-export-button"
+                    type="button"
+                    class="secondary-button"
+                    onclick="exportRecoveryData()">
+                ↓ 復旧用データを書き出す
+            </button>
+        </div>
+
+        <p id="recovery-export-note"
+           class="recovery-note"
+           role="status"></p>
+
+        <div class="recovery-actions">
+            <button type="button"
+                    class="secondary-button"
+                    onclick="openAnyDeckBackupFile()">
+                ↑ バックアップから復元
+            </button>
+
+            <button type="button"
+                    class="danger-button recovery-danger"
+                    onclick="resetCorruptedData()">
+                データを消して最初から始める
+            </button>
+        </div>
+
+        <input id="recovery-backup-file"
+               type="file"
+               accept=".json,application/json"
+               class="hidden"
+               onchange="importAnyDeckBackup(event)">
+    </div>
+</div>
+
 <div class="app-shell">
 
     <header class="app-header">
@@ -2778,6 +2952,22 @@
             </button>
         </div>
     </header>
+
+    <div id="unsaved-banner"
+         class="unsaved-banner hidden"
+         role="alert"
+         aria-live="polite">
+        <div class="unsaved-banner-inner">
+            <span class="unsaved-banner-text">
+                保存できていない変更があります。このまま閉じると変更が失われます。
+            </span>
+            <button type="button"
+                    class="unsaved-retry-button"
+                    onclick="retrySaveData()">
+                再試行
+            </button>
+        </div>
+    </div>
 
     <main>
 
@@ -3719,6 +3909,104 @@
         decks: []
     };
 
+    // 読み込み不能時は元の保存文字列を保持し、通常の書き込みを禁止する。
+    let dataRecoveryRequired = false;
+    let originalRecoveryData = null;
+
+    function setUnsavedWarning(visible) {
+        const banner = document.getElementById("unsaved-banner");
+        if (banner) {
+            banner.classList.toggle("hidden", !visible);
+        }
+    }
+
+    function retrySaveData() {
+        if (saveData()) {
+            showToast("保存しました。");
+        }
+    }
+
+    function showRecoveryScreen() {
+        document.body.classList.add("recovery-mode");
+
+        const screen = document.getElementById("recovery-screen");
+        const button = document.getElementById("recovery-export-button");
+        const note = document.getElementById("recovery-export-note");
+
+        screen.classList.remove("hidden");
+        button.disabled = originalRecoveryData === null;
+
+        note.textContent = originalRecoveryData === null
+            ? "元の保存文字列を取得できませんでした。復旧用データの書き出しはできません。"
+            : "最初に復旧用データを書き出し、安全な場所に保管することをおすすめします。";
+    }
+
+    function hideRecoveryScreen() {
+        document.body.classList.remove("recovery-mode");
+        document.getElementById("recovery-screen").classList.add("hidden");
+    }
+
+    function exportRecoveryData() {
+        if (originalRecoveryData === null) {
+            showToast("元の保存データを取得できませんでした。");
+            return;
+        }
+
+        try {
+            // 解析・正規化・再JSON化を行わず、取得した文字列をそのまま出力する。
+            const blob = new Blob(
+                [originalRecoveryData],
+                { type: "text/plain;charset=utf-8" }
+            );
+
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement("a");
+
+            anchor.href = url;
+            anchor.download =
+                `AnyDeck_Recovery_Raw_${todayKey()}_${Date.now()}.txt`;
+
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+            showToast("復旧用データの書き出しを開始しました。");
+        } catch (error) {
+            console.error("Recovery Export Error:", error);
+            showToast("復旧用データを書き出せませんでした。");
+        }
+    }
+
+    function resetCorruptedData() {
+        const approved = confirm(
+            "現在の保存データを削除して最初から始めます。\n\n" +
+            "復旧できる可能性を残すため、先に「復旧用データを書き出す」で元のデータを保存してください。\n\n" +
+            "削除したデータは、この操作だけでは元に戻せません。\n\n" +
+            "本当に削除して最初から始めますか？"
+        );
+
+        if (!approved) return;
+
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+
+            // 削除に成功した場合だけ保護状態を解除する。
+            dataRecoveryRequired = false;
+            originalRecoveryData = null;
+
+            appData = { decks: [] };
+            activeDeckId = null;
+
+            hideRecoveryScreen();
+            init();
+        } catch (error) {
+            console.error("Recovery Reset Error:", error);
+            showToast("データを削除できませんでした。元の保存データは保護されています。");
+        }
+    }
+
     let activeDeckId = null;
     let currentStudyMode = "all";
     let studyQueue = [];
@@ -3967,40 +4255,89 @@
     }
 
     function loadData() {
-        try {
-            const saved = localStorage.getItem(STORAGE_KEY);
+        let saved = null;
 
-            if (saved) {
+        dataRecoveryRequired = false;
+        originalRecoveryData = null;
+
+        try {
+            saved = localStorage.getItem(STORAGE_KEY);
+
+            if (saved !== null) {
+                // 正常に取得できた元の文字列を、加工せず保持する。
+                originalRecoveryData = saved;
+
                 const parsed = JSON.parse(saved);
 
-                if (parsed && Array.isArray(parsed.decks)) {
-                    appData = parsed;
+                if (
+                    !parsed ||
+                    typeof parsed !== "object" ||
+                    Array.isArray(parsed) ||
+                    !Array.isArray(parsed.decks)
+                ) {
+                    throw new Error("保存データのdecksが配列ではありません。");
+                }
 
-                    appData.decks.forEach(deck => {
-                        deck.cards = Array.isArray(deck.cards)
-                            ? deck.cards.map(defaultCard)
-                            : [];
+                // 途中まで正規化できても、全件成功するまでappDataへ反映しない。
+                const normalizedDecks = parsed.decks.map(deck => {
+                    if (
+                        !deck ||
+                        typeof deck !== "object" ||
+                        Array.isArray(deck)
+                    ) {
+                        throw new Error("デッキの構造が不正です。");
+                    }
 
-                        deck.tts = normalizeDeckTts(deck.tts);
-                        deck.aiSettings = normalizeDeckAiSettings(deck.aiSettings);
-                        deck.studyDirection =
-                            normalizeStudyDirection(deck.studyDirection);
-                        deck.favorite = deck.favorite === true;
-                        deck.lastStudiedAt =
+                    const cards = Array.isArray(deck.cards)
+                        ? deck.cards.map(card => {
+                            if (
+                                !card ||
+                                typeof card !== "object" ||
+                                Array.isArray(card)
+                            ) {
+                                throw new Error("カードの構造が不正です。");
+                            }
+
+                            return defaultCard(card);
+                        })
+                        : [];
+
+                    return {
+                        ...deck,
+                        cards,
+                        tts: normalizeDeckTts(deck.tts),
+                        aiSettings: normalizeDeckAiSettings(deck.aiSettings),
+                        studyDirection:
+                            normalizeStudyDirection(deck.studyDirection),
+                        favorite: deck.favorite === true,
+                        lastStudiedAt:
                             typeof deck.lastStudiedAt === "string" &&
                             !Number.isNaN(Date.parse(deck.lastStudiedAt))
                                 ? deck.lastStudiedAt
-                                : null;
-                    });
-                }
+                                : null
+                    };
+                });
+
+                appData = {
+                    ...parsed,
+                    decks: normalizedDecks
+                };
+
+                originalRecoveryData = null;
             } else {
+                // 保存キーが存在しない場合だけ初回起動として扱う。
                 appData = createStarterData();
                 saveData();
             }
         } catch (error) {
             console.error("Load Data Error:", error);
-            appData = createStarterData();
-            saveData();
+
+            dataRecoveryRequired = true;
+            originalRecoveryData = saved;
+            appData = { decks: [] };
+            activeDeckId = null;
+
+            return false;
         }
 
         try {
@@ -4014,32 +4351,40 @@
         }
 
         saveActiveDeck();
+        return true;
     }
 
     function saveData(options = {}) {
+        if (dataRecoveryRequired) {
+            return false;
+        }
+
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
+            setUnsavedWarning(false);
             return true;
         } catch (error) {
             console.error("Save Data Error:", error);
-            // 呼び出し元が専用の通知を出す場合は、ここでは通知しない。
-            if (!options.silent) {
-                showToast("保存に失敗しました。ブラウザ容量を確認してください。");
-            }
-
+            setUnsavedWarning(true);
             return false;
         }
     }
 
     function saveActiveDeck() {
+        if (dataRecoveryRequired) {
+            return false;
+        }
+
         try {
             if (activeDeckId) {
                 localStorage.setItem(ACTIVE_DECK_KEY, activeDeckId);
             } else {
                 localStorage.removeItem(ACTIVE_DECK_KEY);
             }
+            return true;
         } catch (error) {
             console.warn("Active Deck Save Error:", error);
+            return false;
         }
     }
 
@@ -4082,6 +4427,10 @@
     }
 
     function recordActivity(result) {
+        if (dataRecoveryRequired) {
+            return false;
+        }
+
         let activity = {};
 
         try {
@@ -4648,14 +4997,16 @@
 
         deck.favorite = !deck.favorite;
 
-        saveData();
+        const saved = saveData();
         renderDecks();
 
-        showToast(
-            deck.favorite
-                ? "お気に入りに追加しました。"
-                : "お気に入りを解除しました。"
-        );
+        if (saved) {
+            showToast(
+                deck.favorite
+                    ? "お気に入りに追加しました。"
+                    : "お気に入りを解除しました。"
+            );
+        }
     }
 
     function openAiForDeck(deckId) {
@@ -4916,14 +5267,16 @@
             document.getElementById("edit-card-example-meaning").value.trim();
 
         // ID、学習履歴、タグ、言語、作成日時は変更しない。
-        saveData();
+        const saved = saveData();
         closeModal("edit-card-modal");
 
         refreshStudyAfterCardChange();
         renderCardManager();
         openModal("card-manager-modal");
 
-        showToast("カードを更新しました。");
+        if (saved) {
+            showToast("カードを更新しました。");
+        }
     }
 
     function deleteManagedCard(cardId) {
@@ -4946,11 +5299,13 @@
 
         deck.cards = deck.cards.filter(item => item.id !== cardId);
 
-        saveData();
+        const saved = saveData();
         refreshStudyAfterCardChange();
         renderCardManager();
 
-        showToast("カードを削除しました。");
+        if (saved) {
+            showToast("カードを削除しました。");
+        }
     }
 
     function openDeckEdit(deckId) {
@@ -4999,7 +5354,7 @@
         deck.category = category || "自由学習";
         deck.description = description;
 
-        saveData();
+        const saved = saveData();
 
         closeModal("edit-deck-modal");
         deckLibraryState.editDeckId = null;
@@ -5010,7 +5365,9 @@
         renderCreationDeckOptions();
         updateAiTargetDeck();
 
-        showToast("デッキ情報を更新しました。");
+        if (saved) {
+            showToast("デッキ情報を更新しました。");
+        }
     }
 
     function selectDeck(deckId, goStudy = false) {
@@ -5070,14 +5427,17 @@
             updateStudyModeTabs();
         }
 
-        saveData();
+        const saved = saveData();
         saveActiveDeck();
 
         studyIndex = 0;
         rebuildStudyQueue(true);
 
         renderAll();
-        showToast("デッキを削除しました。");
+
+        if (saved) {
+            showToast("デッキを削除しました。");
+        }
     }
 
     function openCreateDeckModal() {
@@ -5123,7 +5483,7 @@
         appData.decks.unshift(deck);
         activeDeckId = deck.id;
 
-        saveData();
+        const saved = saveData();
         saveActiveDeck();
 
         closeModal("create-deck-modal");
@@ -5142,7 +5502,11 @@
         document.getElementById("ai-topic").value = deck.title;
 
         resetAiWorkflow();
-        openModal("deck-created-modal");
+
+        // 保存できなかった場合は成功を意味するモーダルを出さない。
+        if (saved) {
+            openModal("deck-created-modal");
+        }
     }
 
     function startAiForActiveDeck() {
@@ -5275,13 +5639,15 @@
                 document.getElementById("manual-example-meaning").value
         }));
 
-        saveData();
+        const saved = saveData();
 
         closeModal("manual-card-modal");
 
         refreshStudyAfterCardChange();
 
-        showToast("カードを追加しました。");
+        if (saved) {
+            showToast("カードを追加しました。");
+        }
     }
 
     function setStudyMode(mode) {
@@ -6693,7 +7059,7 @@
                 document.getElementById("ai-extra").value.trim()
         });
 
-        saveData();
+        const saved = saveData();
         updateCreationSettingsSummary();
         closeCreationSettings();
 
@@ -6703,7 +7069,9 @@
             renderStudy();
         }
 
-        showToast("詳細設定を保存しました。");
+        if (saved) {
+            showToast("詳細設定を保存しました。");
+        }
     }
 
     function setAiStep(step) {
@@ -7477,14 +7845,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
             }
         });
 
-        saveData();
+        const saved = saveData();
 
         refreshStudyAfterCardChange();
 
         return {
             added: plan.added,
             updated: plan.updated,
-            duplicate: plan.duplicate
+            duplicate: plan.duplicate,
+            saved
         };
     }
 
@@ -7541,10 +7910,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                 return;
             }
 
-            showImportResult(result);
-            showToast(
-                `追加 ${result.added}件・更新 ${result.updated}件`
-            );
+            if (result.saved) {
+                showImportResult(result);
+                showToast(
+                    `追加 ${result.added}件・更新 ${result.updated}件`
+                );
+            } else {
+                document.getElementById("import-result")?.classList.add("hidden");
+                document.getElementById("ai-import-complete")?.classList.add("hidden");
+            }
         } catch (error) {
             console.warn("JSON Import Error:", error);
 
@@ -7586,11 +7960,16 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
 
             closeModal("paste-modal");
 
-            showImportResult(result);
+            if (result.saved) {
+                showImportResult(result);
 
-            showToast(
-                `追加 ${result.added}件・更新 ${result.updated}件`
-            );
+                showToast(
+                    `追加 ${result.added}件・更新 ${result.updated}件`
+                );
+            } else {
+                document.getElementById("import-result")?.classList.add("hidden");
+                document.getElementById("ai-import-complete")?.classList.add("hidden");
+            }
         } catch (error) {
             showToast(
                 error.message ||
@@ -8189,7 +8568,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
     }
 
     function openAnyDeckBackupFile() {
-        const input = document.getElementById("anydeck-backup-file");
+        const input = document.getElementById(
+            dataRecoveryRequired
+                ? "recovery-backup-file"
+                : "anydeck-backup-file"
+        );
 
         if (!input) return;
 
@@ -8441,6 +8824,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                     "保存に失敗したため、元のデータに戻しました。"
                 );
             }
+
+            // 全キーの書き込み成功後だけ、読み込み不能の保護状態を解除する。
+            dataRecoveryRequired = false;
+            originalRecoveryData = null;
+            hideRecoveryScreen();
+            setUnsavedWarning(false);
 
             resetCardInteraction();
             resetStudyRound();
@@ -8928,7 +9317,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         }
 
         deck.studyDirection = normalizeStudyDirection(value);
-        saveData();
+        const saved = saveData();
 
         resetCardInteraction();
         resetStudyRound();
@@ -8936,6 +9325,8 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         studyIndex = 0;
         rebuildStudyQueue(true);
         renderStudy();
+
+        return saved;
     }
 
     // ===== 学習画面の音声設定 =====
@@ -9002,7 +9393,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                 document.getElementById("study-tts-rate").value
         });
 
-        saveData();
+        const ttsSaved = saveData();
 
         // 「教材の詳細設定」側の音声項目にも同じ値を反映する。
         document.getElementById("creation-tts-enabled").checked =
@@ -9020,9 +9411,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
         closeModal("study-tts-modal");
         stopCardSpeech();
 
+        let directionSaved = true;
+
         if (directionChanged) {
             // 出題方向が変わった場合だけ、既存処理で周回をリセットする。
-            changeStudyDirection(nextDirection);
+            directionSaved = changeStudyDirection(nextDirection);
         } else if (
             !document
                 .getElementById("view-study")
@@ -9032,7 +9425,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
             renderStudy();
         }
 
-        showToast("学習設定を保存しました。");
+        if (ttsSaved || directionSaved === true && directionChanged) {
+            // 方向変更時の再保存が成功すれば、音声設定も含めた最新状態が保存済み。
+            showToast("学習設定を保存しました。");
+        }
     }
 
     // ===== 直前の回答を取り消す =====
@@ -9241,7 +9637,14 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
     }
 
     function init() {
-        loadData();
+        const loaded = loadData();
+
+        if (!loaded || dataRecoveryRequired) {
+            showRecoveryScreen();
+            return;
+        }
+
+        hideRecoveryScreen();
 
         currentStudyMode = getDefaultStudyMode(getActiveDeck());
 
