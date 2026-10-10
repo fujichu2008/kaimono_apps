@@ -2307,6 +2307,16 @@
             gap: 6px;
         }
 
+        .town-book-button {
+            grid-column: 1 / -1;
+        }
+
+        /* 図鑑の小画面では、見出しを1行分の幅にする。 */
+        .town-book .town-book-title {
+            flex: 0 0 100%;
+            margin-top: 4px;
+        }
+
         .town-book-chip {
             padding: 5px 9px;
             border: 1px solid var(--line);
@@ -4260,6 +4270,21 @@
         <button class="primary-button" onclick="importCardsFromTextArea()">
             JSONを読み込む
         </button>
+    </div>
+</div>
+
+<!-- Town event book -->
+<div id="town-book-modal" class="modal-backdrop hidden" onclick="if(event.target===this) closeModal('town-book-modal')">
+    <div class="modal-sheet">
+        <div class="modal-header">
+            <div>
+                <h3 class="modal-title">イベント図鑑</h3>
+                <p id="town-book-count" class="modal-desc"></p>
+            </div>
+            <button class="close-button" onclick="closeModal('town-book-modal')">×</button>
+        </div>
+
+        <div id="town-book-list" class="town-book"></div>
     </div>
 </div>
 
@@ -10991,14 +11016,29 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             create: createTownWordFlyer
         },
         {
-            name: "車",
-            canStart: context => context.roads === true,
-            create: createTownCar
-        },
-        {
             name: "ホタル",
             canStart: context => context.night,
             create: createTownFireflies
+        },
+        {
+            name: "配達ドローン",
+            canStart: () => true,
+            create: createTownDrone
+        },
+        {
+            name: "渡り鳥の群れ",
+            canStart: context => !context.night,
+            create: createTownGeese
+        },
+        {
+            name: "夜の流れ星",
+            canStart: context => context.night,
+            create: createTownSingleStar
+        },
+        {
+            name: "季節の演出",
+            canStart: () => getTownSeason() !== "summer",
+            create: createTownSeasonDrift
         }
     ];
 
@@ -11720,11 +11760,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         // 大通りがあるときだけ、車を走らせる。
         townState.hasRoads = count >= 3;
 
-        // 住人。大通りがある街で、よく覚えたカードが増えるほど人数が増える。
+        // にぎわい。まず通行人を作る。人数は街の段階と、よく覚えたカードの枚数で決まる。
         // 建物や木の配置を変えないよう、別の種の乱数を使う。
         townState.residents = [];
 
-        const residentCount = count >= 3 ? getTownResidentCount(deck) : 0;
+        // 段階に応じたにぎわい（通行人・自転車・車・バス・動物）の数。
+        const bustle = getTownBustleCounts(deck, score);
+        const hasRoads = count >= 3;
+        const hasOuterRoads = count >= 12;
+        const residentCount = bustle.people;
 
         if (residentCount > 0) {
             const residentRandom = createTownRandom(
@@ -11761,8 +11805,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                 const alongX = residentRandom() < 0.5;
 
                 // 車道と街灯の間（歩道にあたる位置）を歩かせる。
-                const lane = (residentRandom() < 0.5 ? 1 : -1) * 0.95;
-                const along = (residentRandom() - 0.5) * 24;
+                // 外側の道路がある街では、そちらにも分散させる。
+                const roadOffset = hasOuterRoads
+                    ? [-9, 0, 9][Math.floor(residentRandom() * 3)]
+                    : 0;
+
+                const lane = roadOffset +
+                    (residentRandom() < 0.5 ? 1 : -1) * 0.95;
+                // 道路がまだない街では、中心の近くだけを歩かせる。
+                const along = (residentRandom() - 0.5) * (hasRoads ? 24 : 7);
                 const direction = residentRandom() < 0.5 ? 1 : -1;
                 const speed = 0.5 + residentRandom() * 0.5;
 
@@ -11776,11 +11827,179 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
                 townState.residents.push({
                     object: person,
+                    limit: hasRoads ? 12.5 : 3.5,
                     alongX,
                     direction,
                     speed
                 });
             }
+        }
+
+        // 乗り物と動物。通行人と同じ配列に入れ、townFrameでまとめて動かす。
+        // 建物や通行人の配置を変えないよう、別の種の乱数を使う。
+        const bustleRandom = createTownRandom(String(deck.id) + "|bustle");
+
+        const vehicleColors = [
+            0xef4444, 0x3b82f6, 0xf59e0b,
+            0x10b981, 0xffffff, 0x8b5cf6
+        ];
+
+        // 形状と素材は街の中で共有する。
+        const addBustlePart = (parent, color, sx, sy, sz, x, y, z) => {
+            const mesh = new THREE.Mesh(boxGeometry, material(color));
+
+            mesh.scale.set(sx, sy, sz);
+            mesh.position.set(x, y, z);
+            parent.add(mesh);
+        };
+
+        // 前方が+xになるように作った物を道路に置き、進む向きへ回す。
+        const placeOnRoad = (object, alongX, direction, roadOffset, side, along) => {
+            if (alongX) {
+                object.position.set(
+                    along, 0.06, roadOffset + side * direction
+                );
+                object.rotation.y = direction > 0 ? 0 : Math.PI;
+            } else {
+                object.position.set(
+                    roadOffset - side * direction, 0.06, along
+                );
+                object.rotation.y =
+                    direction > 0 ? -Math.PI / 2 : Math.PI / 2;
+            }
+
+            group.add(object);
+        };
+
+        if (hasRoads) {
+            // 車線は「道路 × 縦横 × 進行方向」で分ける。
+            const lanes = [];
+
+            (hasOuterRoads ? [0, -9, 9] : [0]).forEach(roadOffset => {
+                [true, false].forEach(alongX => {
+                    [1, -1].forEach(direction => {
+                        lanes.push({ roadOffset, alongX, direction });
+                    });
+                });
+            });
+
+            const vehicleTotal = bustle.cars + bustle.buses;
+
+            for (let i = 0; i < vehicleTotal; i++) {
+                const laneIndex = i % lanes.length;
+                const lane = lanes[laneIndex];
+                const vehicle = new THREE.Group();
+
+                if (i < bustle.buses) {
+                    // バスは車より長い。
+                    addBustlePart(vehicle, 0xf59e0b, 2.2, 0.6, 0.5, 0, 0.42, 0);
+                    addBustlePart(vehicle, 0x1f2937, 1.9, 0.2, 0.52, 0, 0.55, 0);
+                } else {
+                    const color = vehicleColors[
+                        Math.floor(bustleRandom() * vehicleColors.length)
+                    ];
+
+                    addBustlePart(vehicle, color, 1.1, 0.35, 0.5, 0, 0.3, 0);
+                    addBustlePart(vehicle, 0x1f2937, 0.6, 0.28, 0.46, -0.05, 0.6, 0);
+                }
+
+                // 同じ車線の乗り物は間隔を空けて置き、同じ速さで走らせる。
+                const slot = Math.floor(i / lanes.length);
+
+                const along =
+                    ((laneIndex * 5.3 + slot * 9 + bustleRandom() * 3) % 26) - 13;
+
+                placeOnRoad(
+                    vehicle, lane.alongX, lane.direction,
+                    lane.roadOffset, 0.36, along
+                );
+
+                townState.residents.push({
+                    object: vehicle,
+                    alongX: lane.alongX,
+                    direction: lane.direction,
+                    speed: 2.6 + (laneIndex % 3) * 0.5,
+                    limit: 13.5,
+                    wrap: true
+                });
+            }
+
+            // 自転車は大通りの端を走る。
+            for (let i = 0; i < bustle.bikes; i++) {
+                const bike = new THREE.Group();
+
+                const shirt = vehicleColors[
+                    Math.floor(bustleRandom() * vehicleColors.length)
+                ];
+
+                addBustlePart(bike, 0x374151, 0.6, 0.08, 0.06, 0, 0.22, 0);
+                addBustlePart(bike, 0x111827, 0.2, 0.2, 0.05, 0.28, 0.12, 0);
+                addBustlePart(bike, 0x111827, 0.2, 0.2, 0.05, -0.28, 0.12, 0);
+                addBustlePart(bike, shirt, 0.18, 0.34, 0.16, -0.02, 0.48, 0);
+                addBustlePart(bike, 0xf3d2b3, 0.15, 0.15, 0.15, 0, 0.74, 0);
+
+                const alongX = i % 2 === 0;
+                const direction = bustleRandom() < 0.5 ? 1 : -1;
+
+                placeOnRoad(
+                    bike, alongX, direction, 0, 0.74,
+                    (bustleRandom() - 0.5) * 26
+                );
+
+                townState.residents.push({
+                    object: bike,
+                    alongX,
+                    direction,
+                    speed: 1.5 + bustleRandom() * 0.4,
+                    limit: 13.5,
+                    wrap: true
+                });
+            }
+        }
+
+        // 動物は、建物のない外周の草地を動き回る。
+        for (let i = 0; i < bustle.animals; i++) {
+            const kind = i % 3;
+            const animal = new THREE.Group();
+
+            if (kind === 0) {
+                // 犬。
+                addBustlePart(animal, 0x8a5a44, 0.42, 0.2, 0.16, 0, 0.2, 0);
+                addBustlePart(animal, 0x8a5a44, 0.16, 0.16, 0.16, 0.26, 0.3, 0);
+                addBustlePart(animal, 0x6b4634, 0.12, 0.05, 0.05, -0.26, 0.3, 0);
+            } else if (kind === 1) {
+                // 猫。
+                const fur = [0x9ca3af, 0xf59e0b, 0x1f2937][
+                    Math.floor(bustleRandom() * 3)
+                ];
+
+                addBustlePart(animal, fur, 0.32, 0.15, 0.13, 0, 0.15, 0);
+                addBustlePart(animal, fur, 0.13, 0.13, 0.13, 0.2, 0.24, 0);
+                addBustlePart(animal, fur, 0.05, 0.16, 0.05, -0.18, 0.28, 0);
+            } else {
+                // うさぎ。
+                addBustlePart(animal, 0xffffff, 0.22, 0.16, 0.14, 0, 0.14, 0);
+                addBustlePart(animal, 0xffffff, 0.12, 0.12, 0.12, 0.14, 0.24, 0);
+                addBustlePart(animal, 0xffffff, 0.03, 0.14, 0.03, 0.14, 0.38, 0.035);
+                addBustlePart(animal, 0xffffff, 0.03, 0.14, 0.03, 0.14, 0.38, -0.035);
+            }
+
+            group.add(animal);
+
+            const entity = {
+                object: animal,
+                ring: true,
+                radius: 20 + bustleRandom() * 2.5,
+                angle: bustleRandom() * Math.PI * 2,
+                direction: bustleRandom() < 0.5 ? 1 : -1,
+                speed: kind === 2 ? 0.9 : 0.6 + bustleRandom() * 0.3,
+                phase: bustleRandom() * 8,
+                hop: kind === 2
+            };
+
+            // 最初の位置と向きを決める。
+            updateTownAnimal(entity, 0, 0);
+            townState.residents.push(entity);
         }
 
         // 街が大きくなるほどカメラを引く。
@@ -12049,21 +12268,33 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         townState.lastTime = time;
 
-        // 住人を道に沿って歩かせ、端で折り返す。
+        // にぎわい（通行人・自転車・車・バス・動物）をまとめて動かす。
         (townState.residents || []).forEach((resident, index) => {
+            // 動物は外周の草地を回り、ときどき立ち止まる。
+            if (resident.ring) {
+                updateTownAnimal(resident, time, dt);
+                return;
+            }
             const position = resident.object.position;
             const axis = resident.alongX ? "x" : "z";
 
             position[axis] += resident.direction * resident.speed * dt;
 
-            if (Math.abs(position[axis]) > 12.5) {
-                position[axis] = Math.sign(position[axis]) * 12.5;
+            const limit = resident.limit || 12.5;
+
+            // 乗り物は端まで行ったら反対の端から入り直す。通行人は折り返す。
+            if (resident.wrap && Math.abs(position[axis]) > limit) {
+                position[axis] = -Math.sign(position[axis]) * limit;
+            } else if (Math.abs(position[axis]) > limit) {
+                position[axis] = Math.sign(position[axis]) * limit;
                 resident.direction *= -1;
             }
 
             // 歩いているように、少しだけ上下させる。
             position.y =
-                0.06 + Math.abs(Math.sin(time / 160 + index)) * 0.05;
+                0.06 + (resident.wrap
+                    ? 0
+                    : Math.abs(Math.sin(time / 160 + index)) * 0.05);
         });
 
         // ドラッグ中は自動周回を止める。
@@ -12185,7 +12416,13 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         { id: "parachutes", icon: "🪂", name: "パラシュート", rarity: "common", create: createTownParachutes },
         { id: "lanterns", icon: "🏮", name: "ランタン祭り", rarity: "uncommon", dark: true, create: createTownLanterns },
         { id: "comet", icon: "☄️", name: "彗星", rarity: "rare", dark: true, create: createTownComet },
-        { id: "whale", icon: "🐋", name: "空飛ぶクジラ", rarity: "rare", create: createTownWhale }
+        { id: "whale", icon: "🐋", name: "空飛ぶクジラ", rarity: "rare", create: createTownWhale },
+        { id: "parade", icon: "🎉", name: "パレード", rarity: "common", create: createTownParade },
+        { id: "kites", icon: "🪁", name: "凧揚げ", rarity: "common", create: createTownKites },
+        { id: "rocket", icon: "🚀", name: "ロケットの打ち上げ", rarity: "uncommon", create: createTownRocket },
+        { id: "storm", icon: "⛈️", name: "雷雨", rarity: "uncommon", dark: true, create: createTownStorm },
+        { id: "skytrain", icon: "🚂", name: "空飛ぶ列車", rarity: "rare", dark: true, create: createTownSkyTrain },
+        { id: "moon", icon: "🌕", name: "巨大な満月", rarity: "rare", dark: true, create: createTownGiantMoon }
     ];
 
     // これまでの総回答数。日別の学習記録から数える。
@@ -12271,16 +12508,53 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             found.includes(definition.id)
         ).length;
 
-        const bookTitle = document.createElement("div");
+        // 街の画面には図鑑のボタンだけを置き、一覧は小画面に表示する。
+        const bookTitle = document.createElement("button");
 
-        bookTitle.className = "town-book-title";
+        bookTitle.type = "button";
+
+        bookTitle.className = "town-event-button town-book-button";
         bookTitle.textContent =
-            `見つけたイベント ${foundCount}/${TOWN_PAID_EVENTS.length}（★はレア）`;
+            `📖 図鑑（${foundCount}/${TOWN_PAID_EVENTS.length}）`;
 
-        const book = document.createElement("div");
-        book.className = "town-book";
+        bookTitle.addEventListener("click", openTownBook);
 
-        TOWN_PAID_EVENTS.forEach(definition => {
+        const bookCount = document.getElementById("town-book-count");
+
+        if (bookCount) {
+            bookCount.textContent =
+                `見つけたイベント ${foundCount}/${TOWN_PAID_EVENTS.length}（★はレア）`;
+        }
+
+        // 札は小画面の一覧へ並べ直す。
+        const book = document.getElementById("town-book-list");
+
+        if (book) {
+            book.replaceChildren();
+        }
+
+        let lastRarity = "";
+        
+
+        // 「よく出る・ときどき出る・レア」の順に、見出しを付けて並べる。
+        TOWN_PAID_EVENTS
+            .slice()
+            .sort((a, b) =>
+                TOWN_RARITY_ORDER.indexOf(a.rarity) -
+                TOWN_RARITY_ORDER.indexOf(b.rarity)
+            )
+            .forEach(definition => {
+            if (book && definition.rarity !== lastRarity) {
+                lastRarity = definition.rarity;
+
+                const heading = document.createElement("div");
+
+                heading.className = "town-book-title";
+                heading.textContent =
+                    TOWN_RARITY_LABELS[definition.rarity] || "";
+
+                book.appendChild(heading);
+            }
             const chip = document.createElement("span");
             const known = found.includes(definition.id);
             const rare = definition.rarity === "rare";
@@ -12294,10 +12568,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                 ? `${rare ? "★ " : ""}${definition.icon} ${definition.name}`
                 : `${rare ? "★ " : ""}？？？`;
 
-            book.appendChild(chip);
+            if (book) {
+                book.appendChild(chip);
+            }
         });
 
-        list.append(button, bookTitle, book);
+        list.append(button, bookTitle);
     }
 
     function playTownPaidEvent() {
@@ -13230,42 +13506,6 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     }
 
     // ===== 街の追加イベント =====
-    // 大通りを走る車。
-    function createTownCar() {
-        const car = new THREE.Group();
-        const colors = [0xef4444, 0x3b82f6, 0xf59e0b, 0x10b981, 0xffffff];
-        const color = colors[Math.floor(Math.random() * colors.length)];
-
-        makeTownEventMesh(car, color, 1.1, 0.35, 0.55, 0, 0.3, 0);
-        makeTownEventMesh(car, 0x1f2937, 0.6, 0.28, 0.5, -0.05, 0.6, 0);
-
-        const alongX = Math.random() < 0.5;
-        const direction = Math.random() < 0.5 ? 1 : -1;
-        const lane = 0.4 * direction;
-
-        if (alongX) {
-            car.position.set(-13.5 * direction, 0.06, lane);
-        } else {
-            car.rotation.y = Math.PI / 2;
-            car.position.set(-lane, 0.06, -13.5 * direction);
-        }
-
-        return {
-            object: car,
-            update(dt) {
-                if (alongX) {
-                    car.position.x += direction * 4 * dt;
-                } else {
-                    car.position.z += direction * 4 * dt;
-                }
-
-                const along = alongX ? car.position.x : car.position.z;
-
-                return Math.abs(along) < 13.6;
-            }
-        };
-    }
-
     // 夜に街の中を漂うホタル。
     function createTownFireflies() {
         const count = 40;
@@ -13892,6 +14132,721 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                 flyer.rotation.x = Math.sin(time * 1.2) * 0.08;
 
                 return Math.abs(flyer.position.x) < 42;
+            }
+        };
+    }
+
+    // ===== 街のにぎわい・図鑑の小画面・追加イベント =====
+    // 段階ごとの、街に常にいる物の数。TOWN_STAGESと同じ順に並べる。
+    // にぎやかさを調整したいときは、この表の数だけを書き換える。
+    const TOWN_BUSTLE_TABLE = [
+        { people: 0, bikes: 0, cars: 0, buses: 0, animals: 2 },
+        { people: 1, bikes: 0, cars: 0, buses: 0, animals: 2 },
+        { people: 3, bikes: 1, cars: 1, buses: 0, animals: 3 },
+        { people: 5, bikes: 2, cars: 2, buses: 0, animals: 3 },
+        { people: 8, bikes: 3, cars: 3, buses: 1, animals: 4 },
+        { people: 11, bikes: 4, cars: 5, buses: 1, animals: 4 },
+        { people: 14, bikes: 5, cars: 7, buses: 2, animals: 5 },
+        { people: 18, bikes: 6, cars: 9, buses: 2, animals: 6 }
+    ];
+
+    // 通行人には、よく覚えたカードによる上乗せ（最大6人）を加える。
+    function getTownBustleCounts(deck, score) {
+        const base =
+            TOWN_BUSTLE_TABLE[getTownStageIndex(score)] ||
+            TOWN_BUSTLE_TABLE[0];
+
+        return {
+            ...base,
+            people: base.people + Math.min(6, getTownResidentCount(deck))
+        };
+    }
+
+    // 動物を外周に沿って動かす。8秒のうち2.5秒は立ち止まる。
+    function updateTownAnimal(animal, time, dt) {
+        const t = time / 1000 + animal.phase;
+        const moving = t % 8 < 5.5;
+
+        if (moving) {
+            animal.angle +=
+                animal.direction * animal.speed / animal.radius * dt;
+        }
+
+        const hop = moving && animal.hop
+            ? Math.abs(Math.sin(t * 7)) * 0.12
+            : 0;
+
+        animal.object.position.set(
+            Math.cos(animal.angle) * animal.radius,
+            0.04 + hop,
+            Math.sin(animal.angle) * animal.radius
+        );
+
+        // 進む向きへ体を向ける。
+        animal.object.rotation.y = Math.atan2(
+            -Math.cos(animal.angle) * animal.direction,
+            -Math.sin(animal.angle) * animal.direction
+        );
+    }
+
+    const TOWN_RARITY_ORDER = ["common", "uncommon", "rare"];
+
+    const TOWN_RARITY_LABELS = {
+        common: "よく出る",
+        uncommon: "ときどき出る",
+        rare: "レア"
+    };
+
+    function openTownBook() {
+        // 開く前に、最新の発見状況へ更新する。
+        renderTownCoins();
+        openModal("town-book-modal");
+    }
+
+    // 画面に収まる空の高さ。街が小さいほど視点が近いので、低くする。
+    function getTownSkyHeight() {
+        return Math.max(8, (townState.radius || 24) * 0.45);
+    }
+
+    // 荷物を下げた配達ドローン。
+    function createTownDrone() {
+        const drone = new THREE.Group();
+        const direction = Math.random() < 0.5 ? 1 : -1;
+
+        makeTownEventMesh(drone, 0x374151, 0.5, 0.12, 0.5);
+        makeTownEventMesh(drone, 0x9ca3af, 0.03, 0.3, 0.03, 0, -0.2, 0);
+        makeTownEventMesh(drone, 0xb45309, 0.3, 0.26, 0.3, 0, -0.42, 0);
+
+        const rotors = [[0.3, 0.3], [0.3, -0.3], [-0.3, 0.3], [-0.3, -0.3]]
+            .map(([x, z]) => makeTownEventMesh(
+                drone, 0xe5e7eb, 0.36, 0.03, 0.06, x, 0.1, z
+            ));
+
+        const baseY = getTownSkyHeight() * 0.5;
+
+        drone.position.set(
+            -30 * direction,
+            baseY,
+            (Math.random() - 0.5) * 16
+        );
+
+        let time = 0;
+
+        return {
+            object: drone,
+            update(dt) {
+                time += dt;
+
+                drone.position.x += direction * 5 * dt;
+                drone.position.y = baseY + Math.sin(time * 2) * 0.25;
+
+                rotors.forEach(rotor => {
+                    rotor.rotation.y += dt * 30;
+                });
+
+                return Math.abs(drone.position.x) < 32;
+            }
+        };
+    }
+
+    // V字に並んで飛ぶ渡り鳥。
+    function createTownGeese() {
+        const flock = new THREE.Group();
+        const direction = Math.random() < 0.5 ? 1 : -1;
+        const wings = [];
+
+        for (let i = 0; i < 7; i++) {
+            const bird = new THREE.Group();
+            const offset = i - 3;
+
+            makeTownEventMesh(bird, 0xf1f5f9, 0.5, 0.14, 0.16);
+
+            wings.push(
+                makeTownEventMesh(bird, 0xcbd5e1, 0.22, 0.04, 0.5, 0, 0.04, 0.3),
+                makeTownEventMesh(bird, 0xcbd5e1, 0.22, 0.04, 0.5, 0, 0.04, -0.3)
+            );
+
+            bird.position.set(
+                -Math.abs(offset) * 1.1 * direction,
+                0,
+                offset * 0.9
+            );
+
+            flock.add(bird);
+        }
+
+        flock.position.set(
+            -36 * direction,
+            getTownSkyHeight() * 0.8,
+            (Math.random() - 0.5) * 12
+        );
+
+        let time = 0;
+
+        return {
+            object: flock,
+            update(dt) {
+                time += dt;
+
+                flock.position.x += direction * 6 * dt;
+
+                const flap = Math.sin(time * 9) * 0.5;
+
+                wings.forEach((wing, index) => {
+                    wing.rotation.x = index % 2 === 0 ? flap : -flap;
+                });
+
+                return Math.abs(flock.position.x) < 40;
+            }
+        };
+    }
+
+    // 夜に1本だけ流れる流れ星。
+    function createTownSingleStar() {
+        const star = new THREE.Mesh(
+            new THREE.BoxGeometry(2.2, 0.08, 0.08),
+            new THREE.MeshBasicMaterial({
+                color: 0xfff7c2,
+                transparent: true,
+                opacity: 1
+            })
+        );
+
+        star.position.set(
+            6 + Math.random() * 10,
+            getTownSkyHeight() * 0.95,
+            (Math.random() - 0.5) * 20
+        );
+
+        star.rotation.z = Math.atan2(-4, -9);
+
+        let time = 0;
+
+        return {
+            object: star,
+            update(dt) {
+                time += dt;
+
+                star.position.x -= 11 * dt;
+                star.position.y -= 4.9 * dt;
+                star.material.opacity = Math.max(0, 1 - time / 1.5);
+
+                return time < 1.5;
+            }
+        };
+    }
+
+    // 季節の演出。春は花びら、秋は落ち葉、冬は粉雪が少しだけ舞う。
+    function createTownSeasonDrift() {
+        const season = getTownSeason();
+
+        if (season === "summer") return createTownCloud();
+
+        const colors = season === "spring"
+            ? [0xffb7d5, 0xffd6e7]
+            : season === "autumn"
+                ? [0xe8742c, 0xc8392b]
+                : [0xffffff, 0xf1f5f9];
+
+        const group = new THREE.Group();
+        const geometry = new THREE.BoxGeometry(0.2, 0.03, 0.2);
+
+        const pieceMaterials = colors.map(
+            color => new THREE.MeshLambertMaterial({ color })
+        );
+
+        const height = getTownSkyHeight();
+        const pieces = [];
+
+        for (let i = 0; i < 30; i++) {
+            const mesh = new THREE.Mesh(geometry, pieceMaterials[i % 2]);
+
+            mesh.position.set(
+                (Math.random() - 0.5) * 26,
+                height * 0.5 + Math.random() * height * 0.6,
+                (Math.random() - 0.5) * 26
+            );
+
+            group.add(mesh);
+
+            pieces.push({
+                mesh,
+                speed: 1 + Math.random(),
+                phase: Math.random() * 6
+            });
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                let alive = false;
+
+                pieces.forEach(piece => {
+                    const position = piece.mesh.position;
+
+                    position.y -= piece.speed * dt;
+                    position.x +=
+                        Math.sin(time * 1.3 + piece.phase) * 0.8 * dt;
+
+                    piece.mesh.rotation.x += dt * 2;
+                    piece.mesh.rotation.z += dt * 1.4;
+                    piece.mesh.visible = position.y > 0.1;
+
+                    if (position.y > 0.1) {
+                        alive = true;
+                    }
+                });
+
+                return alive && time < 20;
+            }
+        };
+    }
+
+    // 色とりどりの山車の列が、大通りをゆっくり行進する。
+    function createTownParade() {
+        const group = new THREE.Group();
+        const direction = Math.random() < 0.5 ? 1 : -1;
+        const topGeometry = new THREE.ConeGeometry(0.4, 0.8, 6);
+
+        const colors = [
+            0xff5d73, 0xffd166, 0x7bdff2,
+            0xb388ff, 0x9cff8f, 0xff9f68
+        ];
+
+        const floats = [];
+
+        colors.forEach((color, index) => {
+            const float = new THREE.Group();
+
+            makeTownEventMesh(float, color, 1.5, 0.5, 0.75, 0, 0.4, 0);
+            makeTownEventMesh(float, 0xffffff, 1.1, 0.12, 0.6, 0, 0.72, 0);
+
+            const top = new THREE.Mesh(
+                topGeometry,
+                new THREE.MeshLambertMaterial({
+                    color: colors[(index + 2) % colors.length]
+                })
+            );
+
+            top.position.y = 1.2;
+            float.add(top);
+
+            float.position.x = -index * 2.3 * direction;
+            group.add(float);
+
+            floats.push({ float, top });
+        });
+
+        group.position.set(-15 * direction, 0.06, 0);
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                group.position.x += direction * 1.6 * dt;
+
+                floats.forEach((item, index) => {
+                    item.top.rotation.y += dt * 2;
+                    item.float.position.y =
+                        Math.abs(Math.sin(time * 3 + index)) * 0.08;
+                });
+
+                // 最後尾が反対の端を抜けるまで続ける。
+                return group.position.x * direction < 27;
+            }
+        };
+    }
+
+    // 色の違う凧がいくつも上がり、風に揺れる。
+    function createTownKites() {
+        const group = new THREE.Group();
+        const sailGeometry = new THREE.BoxGeometry(0.9, 0.9, 0.04);
+        const tailGeometry = new THREE.BoxGeometry(0.06, 1.2, 0.03);
+
+        const tailMaterial = new THREE.MeshLambertMaterial({
+            color: 0xffffff
+        });
+
+        const colors = [0xff5d73, 0xffd166, 0x7bdff2, 0xb388ff, 0x9cff8f];
+        const height = getTownSkyHeight();
+        const kites = [];
+
+        for (let i = 0; i < 7; i++) {
+            const kite = new THREE.Group();
+
+            const sail = new THREE.Mesh(
+                sailGeometry,
+                new THREE.MeshLambertMaterial({
+                    color: colors[i % colors.length]
+                })
+            );
+
+            sail.rotation.z = Math.PI / 4;
+
+            const tail = new THREE.Mesh(tailGeometry, tailMaterial);
+
+            tail.position.y = -1.1;
+            kite.add(sail, tail);
+            group.add(kite);
+
+            kites.push({
+                kite,
+                tail,
+                x: (Math.random() - 0.5) * 18,
+                z: (Math.random() - 0.5) * 18,
+                target: height * (0.4 + Math.random() * 0.35),
+                phase: Math.random() * 6
+            });
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                kites.forEach(item => {
+                    let y = Math.min(item.target, 0.5 + time * 2.5);
+
+                    // 最後は風に乗って高く飛んでいく。
+                    if (time > 15) {
+                        y += (time - 15) * (time - 15) * 2;
+                    }
+
+                    item.kite.position.set(
+                        item.x + Math.sin(time * 0.9 + item.phase) * 1.2,
+                        y + Math.sin(time * 1.7 + item.phase) * 0.3,
+                        item.z + Math.cos(time * 0.7 + item.phase) * 0.8
+                    );
+
+                    item.kite.rotation.z =
+                        Math.sin(time * 1.3 + item.phase) * 0.25;
+
+                    item.tail.rotation.z =
+                        Math.sin(time * 3 + item.phase) * 0.4;
+                });
+
+                return time < 20;
+            }
+        };
+    }
+
+    // 街の端から、ロケットが煙を引いて上昇する。
+    function createTownRocket() {
+        const group = new THREE.Group();
+        const rocket = new THREE.Group();
+
+        const body = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.4, 0.4, 2.2, 10),
+            new THREE.MeshLambertMaterial({ color: 0xf8fafc })
+        );
+
+        const nose = new THREE.Mesh(
+            new THREE.ConeGeometry(0.4, 0.8, 10),
+            new THREE.MeshLambertMaterial({ color: 0xef4444 })
+        );
+
+        nose.position.y = 1.5;
+        rocket.add(body, nose);
+
+        makeTownEventMesh(rocket, 0xef4444, 1.3, 0.5, 0.08, 0, -0.9, 0);
+        makeTownEventMesh(rocket, 0xef4444, 0.08, 0.5, 1.3, 0, -0.9, 0);
+
+        // 大通りの延長上（建物のない場所）から打ち上げる。
+        const angle = Math.floor(Math.random() * 4) * Math.PI / 2;
+        const baseX = Math.cos(angle) * 15;
+        const baseZ = Math.sin(angle) * 15;
+
+        rocket.position.set(baseX, 1.2, baseZ);
+        group.add(rocket);
+
+        const puffGeometry = new THREE.SphereGeometry(0.5, 8, 6);
+        const puffs = [];
+
+        for (let i = 0; i < 22; i++) {
+            const mesh = new THREE.Mesh(
+                puffGeometry,
+                new THREE.MeshBasicMaterial({
+                    color: 0xe5e7eb,
+                    transparent: true,
+                    opacity: 0,
+                    depthWrite: false
+                })
+            );
+
+            mesh.visible = false;
+            group.add(mesh);
+            puffs.push({ mesh, started: false });
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                // 2秒間は地上で揺れ、その後に加速しながら上昇する。
+                const flight = Math.max(0, time - 2);
+
+                rocket.position.y = 1.2 + 2.6 * flight * flight;
+                rocket.position.x =
+                    baseX + (time < 2 ? Math.sin(time * 40) * 0.03 : 0);
+
+                puffs.forEach((puff, index) => {
+                    const age = time - (0.4 + index * 0.2);
+
+                    if (age < 0) return;
+
+                    if (!puff.started) {
+                        puff.started = true;
+
+                        puff.mesh.position.set(
+                            baseX + (Math.random() - 0.5) * 0.6,
+                            Math.max(0.4, rocket.position.y - 1.4),
+                            baseZ + (Math.random() - 0.5) * 0.6
+                        );
+                    }
+
+                    if (age > 2.2) {
+                        puff.mesh.visible = false;
+                        return;
+                    }
+
+                    puff.mesh.visible = true;
+                    puff.mesh.scale.setScalar(0.6 + age * 0.9);
+                    puff.mesh.material.opacity =
+                        Math.max(0, 0.75 * (1 - age / 2.2));
+                });
+
+                return time < 7.5;
+            }
+        };
+    }
+
+    // 雨が降り、ときどき稲光で空が一瞬明るくなる。
+    function createTownStorm() {
+        const group = new THREE.Group();
+        const height = getTownSkyHeight();
+        const top = height * 1.1;
+
+        const dropGeometry = new THREE.BoxGeometry(0.04, 0.6, 0.04);
+
+        const dropMaterial = new THREE.MeshBasicMaterial({
+            color: 0xa9c8ff,
+            transparent: true,
+            opacity: 0.7
+        });
+
+        const drops = [];
+
+        for (let i = 0; i < 130; i++) {
+            const mesh = new THREE.Mesh(dropGeometry, dropMaterial);
+
+            mesh.position.set(
+                (Math.random() - 0.5) * 30,
+                Math.random() * top,
+                (Math.random() - 0.5) * 30
+            );
+
+            group.add(mesh);
+            drops.push({ mesh, speed: 14 + Math.random() * 6 });
+        }
+
+        // 稲妻。折れ線に見えるよう、3つの棒を互い違いに傾ける。
+        const bolt = new THREE.Group();
+        const boltGeometry = new THREE.BoxGeometry(0.14, height * 0.3, 0.14);
+
+        const boltMaterial = new THREE.MeshBasicMaterial({
+            color: 0xfffbe0
+        });
+
+        for (let k = 0; k < 3; k++) {
+            const segment = new THREE.Mesh(boltGeometry, boltMaterial);
+
+            segment.position.set(
+                k % 2 ? 0.5 : -0.5,
+                height * 0.75 - k * height * 0.26,
+                0
+            );
+
+            segment.rotation.z = k % 2 ? -0.4 : 0.4;
+            bolt.add(segment);
+        }
+
+        bolt.visible = false;
+        group.add(bolt);
+
+        const duration = 16;
+
+        let time = 0;
+        let nextFlash = 1.5 + Math.random() * 2;
+        let flashUntil = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                drops.forEach(drop => {
+                    const position = drop.mesh.position;
+
+                    position.y -= drop.speed * dt;
+
+                    if (position.y < 0) {
+                        position.set(
+                            (Math.random() - 0.5) * 30,
+                            top,
+                            (Math.random() - 0.5) * 30
+                        );
+                    }
+                });
+
+                if (time >= nextFlash && time < duration - 1) {
+                    flashUntil = time + 0.14;
+                    nextFlash = time + 2 + Math.random() * 3;
+
+                    bolt.position.set(
+                        (Math.random() - 0.5) * 24,
+                        0,
+                        (Math.random() - 0.5) * 24
+                    );
+                }
+
+                const flashing = time < flashUntil;
+
+                bolt.visible = flashing;
+
+                // 稲光の間だけ空を明るくする。終了後は既存の処理が空を元に戻す。
+                if (townState.scene) {
+                    townState.scene.background.setHex(
+                        flashing ? 0xcfdcff : TOWN_DARK_SETTING.sky
+                    );
+                }
+
+                return time < duration;
+            }
+        };
+    }
+
+    // 窓の光る列車が、弧を描いて夜空を走る。
+    function createTownSkyTrain() {
+        const group = new THREE.Group();
+        const height = getTownSkyHeight();
+        const windowGeometry = new THREE.BoxGeometry(1.3, 0.28, 0.74);
+
+        const windowMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffe08a
+        });
+
+        const cars = [];
+
+        for (let i = 0; i < 8; i++) {
+            const car = new THREE.Group();
+
+            makeTownEventMesh(
+                car, i === 0 ? 0x1e3a8a : 0x1e40af, 1.7, 0.8, 0.7
+            );
+
+            const windows = new THREE.Mesh(windowGeometry, windowMaterial);
+
+            windows.position.y = 0.12;
+            car.add(windows);
+
+            // 先頭車両には煙突を付ける。
+            if (i === 0) {
+                makeTownEventMesh(car, 0x9ca3af, 0.25, 0.4, 0.25, 0.5, 0.6, 0);
+            }
+
+            car.visible = false;
+            group.add(car);
+            cars.push(car);
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                // 遠くから現れて街の上を一周し、遠くへ走り去る。
+                const radius =
+                    16 +
+                    Math.max(0, 1.5 - time) * 18 +
+                    Math.max(0, time - 12) * 18;
+
+                cars.forEach((car, index) => {
+                    const s = time * 0.55 - index * 0.12;
+
+                    car.visible = s > 0;
+
+                    car.position.set(
+                        Math.cos(s) * radius,
+                        height * 0.6 + Math.sin(s * 2) * height * 0.12,
+                        Math.sin(s) * radius
+                    );
+
+                    car.rotation.y =
+                        Math.atan2(-Math.cos(s), -Math.sin(s));
+                });
+
+                return time < 15;
+            }
+        };
+    }
+
+    // 大きな月がゆっくり昇り、街を照らして沈む。
+    function createTownGiantMoon() {
+        const height = getTownSkyHeight();
+        const size = Math.min(5, height * 0.32);
+
+        const moon = new THREE.Mesh(
+            new THREE.SphereGeometry(size, 20, 14),
+            new THREE.MeshBasicMaterial({ color: 0xfff6c9 })
+        );
+
+        // 街の外れ（建物のない場所）から昇らせる。
+        const angle = Math.random() * Math.PI * 2;
+        const low = -size - 1;
+        const high = height * 0.7;
+
+        moon.position.set(Math.cos(angle) * 19, low, Math.sin(angle) * 19);
+
+        const duration = 18;
+
+        let time = 0;
+
+        return {
+            object: moon,
+            update(dt) {
+                time += dt;
+
+                const k = time < 5
+                    ? time / 5
+                    : time < 13
+                        ? 1
+                        : Math.max(0, 1 - (time - 13) / 5);
+
+                const ease = k * k * (3 - 2 * k);
+
+                moon.position.y = low + (high - low) * ease;
+
+                // 月が高いほど街を明るくする。終了後は既存の処理が明るさを元に戻す。
+                if (townState.ambient) {
+                    townState.ambient.intensity =
+                        TOWN_DARK_SETTING.ambient + ease * 0.3;
+                }
+
+                return time < duration;
             }
         };
     }
