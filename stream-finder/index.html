@@ -309,10 +309,30 @@ video{
   </div>
 
   <div class="hint">
-    公開HTMLから動画URLを検出します。
-    サイト側のCORS設定や埋め込み制限により、
-    検出・表示できない場合があります。
+    「開く」でページを表示し、「動画を検出」で公開HTMLを解析します。
+    ページによってはCORSやiframeの制限で操作できません。
+    その場合は下のHTML貼り付け解析を利用できます。
   </div>
+
+  <details id="manualAnalysis" style="margin-top:12px">
+    <summary style="cursor:pointer;color:var(--accent);font-size:13px;min-height:44px;display:flex;align-items:center">
+      🧩 HTMLを貼り付けて解析
+    </summary>
+    <div class="hint">
+      閲覧権限のあるページのHTMLソースを貼り付けてください。
+      上のURL欄は相対URLの解決に使用します。
+      JavaScript実行後に生成される動画は、HTMLソースだけでは検出できません。
+    </div>
+    <textarea
+      id="manualHtml"
+      placeholder="ここにHTMLソースを貼り付け"
+      spellcheck="false"
+      style="width:100%;min-height:150px;margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#0c1425;color:var(--text);font:13px monospace;resize:vertical"
+    ></textarea>
+    <button class="primary" id="manualScanBtn" style="width:100%;margin-top:10px">
+      貼り付けたHTMLを解析
+    </button>
+  </details>
 
   <div id="status" class="status" role="status" aria-live="polite">
     URLを入力してください。
@@ -556,7 +576,12 @@ function openPage() {
   state.currentUrl = url;
   clearVideos();
 
-  $("browserFrame").src = url;
+  const frame = $("browserFrame");
+
+  // srcdocが残るとsrcより優先されるため解除する。
+  frame.removeAttribute("srcdoc");
+  frame.removeAttribute("src");
+  frame.src = url;
 
   const player = $("player");
   player.pause();
@@ -566,7 +591,11 @@ function openPage() {
   $("previewName").textContent =
     "動画を選択してください。";
 
-  setStatus("ページを開いています。");
+  setStatus(
+    "ページの表示を要求しました。\n" +
+    "表示されない場合はサイト側でiframeが禁止されている可能性があります。\n" +
+    "その場合は「外部ブラウザー」を使用してください。"
+  );
 
   if (isVideoUrl(url)) {
     addVideo(
@@ -597,9 +626,116 @@ function openExternal() {
 }
 
 function reloadPage() {
-  if (!state.currentUrl) return;
+  if (!state.currentUrl) {
+    setStatus("先にURLを入力してページを開いてください。");
+    return;
+  }
 
-  $("browserFrame").src = state.currentUrl;
+  const frame = $("browserFrame");
+  frame.removeAttribute("srcdoc");
+  frame.src = state.currentUrl;
+  setStatus("ページの再読み込みを要求しました。");
+}
+
+function scanEmbeddedFrame(url) {
+  const frame = $("browserFrame");
+
+  try {
+    const doc = frame.contentDocument;
+
+    if (!doc || !doc.documentElement) {
+      return null;
+    }
+
+    const frameUrl = frame.contentWindow.location.href;
+
+    if (
+      frameUrl === "about:blank" ||
+      frameUrl !== url
+    ) {
+      return null;
+    }
+
+    const before = state.videos.length;
+
+    parseVideoElements(doc, frameUrl);
+    renderVideos();
+
+    return state.videos.length - before;
+
+  } catch {
+    // クロスオリジンのiframeは読み取れない。
+    return null;
+  }
+}
+
+function scanManualHtml() {
+  const html = $("manualHtml").value.trim();
+
+  if (!html) {
+    setStatus(
+      "解析するHTMLを貼り付けてください。",
+      "error"
+    );
+    return;
+  }
+
+  if (new Blob([html]).size > MAX_HTML_SIZE) {
+    setStatus(
+      "HTMLが5MBの上限を超えています。",
+      "error"
+    );
+    return;
+  }
+
+  const base = inputUrl();
+
+  if (!base) {
+    setStatus(
+      "先に元ページのURLを入力してください。",
+      "error"
+    );
+    return;
+  }
+
+  if (state.scanController) {
+    state.scanController.abort();
+  }
+
+  try {
+    const doc = new DOMParser().parseFromString(
+      html,
+      "text/html"
+    );
+
+    state.currentUrl = base;
+    clearVideos();
+
+    parseVideoElements(doc, base);
+    renderVideos();
+
+    if (state.videos.length) {
+      setStatus(
+        "貼り付けたHTMLから" +
+        state.videos.length +
+        "件の動画候補を検出しました。",
+        "success"
+      );
+    } else {
+      setStatus(
+        "貼り付けたHTMLから動画は検出されませんでした。\n" +
+        "動画がJavaScriptで後から生成される場合は、" +
+        "HTMLソースだけでは検出できません。"
+      );
+    }
+
+  } catch (error) {
+    setStatus(
+      "HTML解析に失敗しました。\n" +
+      error.message,
+      "error"
+    );
+  }
 }
 
 function parseVideoElements(doc, base) {
@@ -710,6 +846,19 @@ async function scanPage() {
 
     setStatus(
       "動画URLを直接検出しました。",
+      "success"
+    );
+    return;
+  }
+
+  // 同一オリジンのiframeはDOMから直接検出する。
+  const frameResult = scanEmbeddedFrame(url);
+
+  if (frameResult !== null && frameResult > 0) {
+    setStatus(
+      "表示中のページから" +
+      frameResult +
+      "件の動画候補を検出しました。",
       "success"
     );
     return;
@@ -832,14 +981,19 @@ async function scanPage() {
   } catch (error) {
     if (error.name === "AbortError") {
       setStatus(
-        "解析が中断またはタイムアウトしました。",
+        "解析が中断またはタイムアウトしました。\n" +
+        "別のページを開いた場合や、通信に時間がかかった場合に発生します。",
         "error"
       );
     } else {
       setStatus(
-        "ページを解析できませんでした。\n" +
-        "外部サイトのCORS制限、アクセス制限、" +
-        "または通信エラーが考えられます。\n" +
+        "ページの自動解析に失敗しました。\n" +
+        "主な原因はCORS制限、通信エラー、またはアクセス制限です。\n" +
+        "ブラウザーの制限はこのアプリ内から解除できません。\n\n" +
+        "対処方法：\n" +
+        "1. 外部ブラウザーで対象ページを確認\n" +
+        "2. 許可されたHTMLソースを貼り付けて解析\n" +
+        "3. 直接MP4 URLが分かる場合はURL欄に入力\n\n" +
         "詳細: " + error.message,
         "error"
       );
@@ -848,7 +1002,9 @@ async function scanPage() {
   } finally {
     clearTimeout(timeoutId);
     state.scanning = false;
-    state.scanController = null;
+    if (state.scanController === controller) {
+      state.scanController = null;
+    }
     $("scanBtn").disabled = false;
   }
 }
@@ -1174,6 +1330,11 @@ $("openBtn").addEventListener(
 $("scanBtn").addEventListener(
   "click",
   scanPage
+);
+
+$("manualScanBtn").addEventListener(
+  "click",
+  scanManualHtml
 );
 
 $("externalBtn").addEventListener(

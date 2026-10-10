@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-stream-finder-0706d5da7aa023f206f5";
+const CACHE_NAME = "appstudio-pwa-stream-finder-723f59cb6a8389c32835";
 const CACHE_PREFIX = "appstudio-pwa-stream-finder-";
 const PRECACHE_URLS = [
     "./",
