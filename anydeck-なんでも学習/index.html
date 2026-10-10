@@ -2328,6 +2328,19 @@
             background: #fffbeb;
             color: #92400e;
         }
+        .town-card-info {
+            margin-top: 8px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: white;
+            color: var(--text);
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.6;
+            overflow-wrap: anywhere;
+        }
+
         .town-coin-label {
             margin: 10px 0 8px;
             color: var(--text);
@@ -3675,6 +3688,8 @@
                 <div id="town-message" class="town-message hidden" role="status"></div>
             </div>
 
+            <div id="town-card-info" class="town-card-info" aria-live="polite"></div>
+
             <div id="town-coin-label" class="town-coin-label" aria-live="polite"></div>
             <div id="town-event-list" class="town-event-list"></div>
         </section>
@@ -4832,6 +4847,9 @@
         studyRound.wrongIds = [];
         studyRound.complete = false;
         studyRound.overrideIds = null;
+
+        // 周回の開始時点の街のスコア。最初の回答の直前に控える。
+        studyRound.townScoreStart = null;
         studyUndo = null;
     }
 
@@ -7738,6 +7756,11 @@
         const townStageBefore = getTownStageIndex(getTownScore(deck));
         const townCoinsBefore = getTownCoinsEarned();
         const landmarksBefore = getTownLandmarkCount(getBestStreak());
+
+        // 周回の最初の回答の直前に、街のスコアを控える（完了画面で成長を表示するため）。
+        if (typeof studyRound.townScoreStart !== "number") {
+            studyRound.townScoreStart = getTownScore(deck);
+        }
 
         captureStudyUndo(deck, card, result);
 
@@ -10955,6 +10978,27 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             name: "雲",
             canStart: () => true,
             create: createTownCloud
+        },
+        {
+            name: "単語の車",
+            canStart: () =>
+                townState.hasRoads === true && hasTownLearnedWords(),
+            create: createTownWordCar
+        },
+        {
+            name: "空飛ぶ単語",
+            canStart: () => hasTownLearnedWords(),
+            create: createTownWordFlyer
+        },
+        {
+            name: "車",
+            canStart: context => context.roads === true,
+            create: createTownCar
+        },
+        {
+            name: "ホタル",
+            canStart: context => context.night,
+            create: createTownFireflies
         }
     ];
 
@@ -11150,6 +11194,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
     function openTownView() {
         renderTownInfo();
+        resetTownCardInfo();
         renderTownCoins();
 
         const deck = getActiveDeck();
@@ -11229,6 +11274,47 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         scene.add(ambient, sun, group, eventGroup);
 
+        // 夜空の星。夜と、空を暗くするイベントの間だけ表示する。
+        // 街を見下ろす視点でも見えるよう、街を囲む球面全体に散らす。
+        const starCount = 260;
+        const starPositions = new Float32Array(starCount * 3);
+
+        for (let i = 0; i < starCount; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const distance = 85 + Math.random() * 10;
+
+            starPositions[i * 3] =
+                Math.sin(phi) * Math.cos(theta) * distance;
+            starPositions[i * 3 + 1] = Math.cos(phi) * distance;
+            starPositions[i * 3 + 2] =
+                Math.sin(phi) * Math.sin(theta) * distance;
+        }
+
+        const starGeometry = new THREE.BufferGeometry();
+
+        starGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(starPositions, 3)
+        );
+
+        const stars = new THREE.Points(
+            starGeometry,
+            new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 0.9,
+                transparent: true,
+                opacity: 0.9,
+                depthWrite: false
+            })
+        );
+
+        stars.visible = false;
+        stars.frustumCulled = false;
+
+        scene.add(stars);
+        townState.stars = stars;
+
         townState.renderer = renderer;
         townState.scene = scene;
         townState.camera = camera;
@@ -11246,6 +11332,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             if (townState.dragId !== null) return;
 
             townState.dragId = event.pointerId;
+
+            // タップかどうかを判定するため、押した位置を覚えておく。
+            townState.tapX = event.clientX;
+            townState.tapY = event.clientY;
             townState.dragX = event.clientX;
 
             try {
@@ -11272,7 +11362,22 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             }
         };
 
-        canvas.addEventListener("pointerup", endDrag);
+        canvas.addEventListener("pointerup", event => {
+            const wasDragging = event.pointerId === townState.dragId;
+
+            endDrag(event);
+
+            // ほとんど動かさずに離したときは、タップとして建物を調べる。
+            if (
+                wasDragging &&
+                Math.hypot(
+                    event.clientX - townState.tapX,
+                    event.clientY - townState.tapY
+                ) < 8
+            ) {
+                showTownBuildingCard(event.clientX, event.clientY);
+            }
+        });
         canvas.addEventListener("pointercancel", endDrag);
         canvas.addEventListener("lostpointercapture", endDrag);
     }
@@ -11292,6 +11397,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             }
 
             disposed.add(resource);
+
+            // 単語の看板のように、素材が画像を持つ場合は画像も解放する。
+            if (resource.map && typeof resource.map.dispose === "function") {
+                resource.map.dispose();
+            }
             resource.dispose();
         };
 
@@ -11326,7 +11436,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         const green = Math.round(getTownGreenRate(deck) * 10);
         const landmarkCount = getTownLandmarkCount(getBestStreak());
         const signature =
-            `${deck.id}|${score}|${green}|${landmarkCount}`;
+            `${deck.id}|${score}|${green}|${landmarkCount}|${getTownResidentCount(deck)}|${getTownSeason()}`;
 
         // 別の単語帳に切り替えたら、飛んでいるイベントも片付ける。
         if (deck.id !== townState.deckId) {
@@ -11358,6 +11468,14 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const materials = new Map();
 
+        // 季節で地面・木・花の見た目を変える。
+        const season = getTownSeason();
+
+        // 建物を作っている間だけ、その建物に割り当てたカードを部品へ記録する。
+        const buildingCards = getTownBuildingCards(deck);
+        let buildingActive = false;
+        let buildingCardId = null;
+
         const material = color => {
             if (!materials.has(color)) {
                 materials.set(
@@ -11371,6 +11489,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const add = (geometry, meshMaterial, x, y, z, sx, sy, sz, rotationY) => {
             const mesh = new THREE.Mesh(geometry, meshMaterial);
+
+            // 建物の部品には目印を付ける（タップで単語を出すため）。
+            if (buildingActive) {
+                mesh.userData.building = true;
+                mesh.userData.cardId = buildingCardId;
+            }
 
             mesh.position.set(x, y, z);
             mesh.scale.set(sx, sy, sz);
@@ -11388,7 +11512,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         // 地面。
         add(
             new THREE.CylinderGeometry(24, 24, 0.4, 40),
-            material(0x8fcf7a),
+            material(season === "winter" ? 0xeef3f7 : 0x8fcf7a),
             0, -0.2, 0,
             1, 1, 1
         );
@@ -11456,6 +11580,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             const lot = lots[k];
             const pick = Math.floor(lot.tone * 4) % 4;
 
+            // 中心に近い建物から順に、点数の高いカードを割り当てる。
+            buildingActive = true;
+            buildingCardId = buildingCards[k] ? buildingCards[k].id : null;
+
             let kind = "house";
 
             if (k >= 12) {
@@ -11495,6 +11623,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             }
         }
 
+        buildingActive = false;
+        buildingCardId = null;
+
         // 道路。
         const roadMaterial = material(0x6b7280);
 
@@ -11513,6 +11644,29 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             });
         }
 
+        // 街灯。大通りができたら道沿いに並べ、夜は明るく光らせる。
+        townState.lampMaterial = null;
+
+        if (count >= 3) {
+            const lampMaterial = new THREE.MeshBasicMaterial({
+                color: 0xd1d5db
+            });
+
+            const postMaterial = material(0x4b5563);
+
+            townState.lampMaterial = lampMaterial;
+
+            [-12, -8, -4, 4, 8, 12].forEach(offset => {
+                [[offset, 1.2], [1.2, offset]].forEach(([x, z]) => {
+                    add(boxGeometry, postMaterial,
+                        x, 0.7, z, 0.12, 1.4, 0.12);
+
+                    add(boxGeometry, lampMaterial,
+                        x, 1.5, z, 0.32, 0.22, 0.32);
+                });
+            });
+        }
+
         // 木と花の数は、街の大きさと正答率で決める。
         const treeCount = Math.min(
             trees.length,
@@ -11522,20 +11676,38 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         const trunkMaterial = material(0x8a5a44);
         const leafMaterial = material(0x3f9d5a);
 
+        // 季節ごとの木の色。春は3本に1本を桜色、秋は紅葉、冬は濃い緑にする。
+        const getLeafMaterial = index => {
+            if (season === "spring" && index % 3 === 0) {
+                return material(0xffb7d5);
+            }
+
+            if (season === "autumn") {
+                return material(index % 2 === 0 ? 0xe8742c : 0xc8392b);
+            }
+
+            if (season === "winter") {
+                return material(0x2f6b45);
+            }
+
+            return leafMaterial;
+        };
+
         for (let i = 0; i < treeCount; i++) {
             const tree = trees[i];
 
             add(boxGeometry, trunkMaterial,
                 tree.x, 0.4, tree.z, 0.25, 0.8, 0.25);
 
-            add(leafGeometry, leafMaterial,
+            add(leafGeometry, getLeafMaterial(i),
                 tree.x, 0.8 + tree.size, tree.z,
                 tree.size, tree.size * 2, tree.size);
         }
 
         const flowerColors = [0xff8fab, 0xffd166, 0xffffff, 0xc77dff];
 
-        const flowerCount = Math.min(
+        // 冬は花を咲かせない。
+        const flowerCount = season === "winter" ? 0 : Math.min(
             flowers.length,
             Math.floor(greenRate * flowers.length)
         );
@@ -11543,6 +11715,72 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         for (let i = 0; i < flowerCount; i++) {
             add(boxGeometry, material(flowerColors[i % 4]),
                 flowers[i].x, 0.12, flowers[i].z, 0.22, 0.24, 0.22);
+        }
+
+        // 大通りがあるときだけ、車を走らせる。
+        townState.hasRoads = count >= 3;
+
+        // 住人。大通りがある街で、よく覚えたカードが増えるほど人数が増える。
+        // 建物や木の配置を変えないよう、別の種の乱数を使う。
+        townState.residents = [];
+
+        const residentCount = count >= 3 ? getTownResidentCount(deck) : 0;
+
+        if (residentCount > 0) {
+            const residentRandom = createTownRandom(
+                String(deck.id) + "|residents"
+            );
+
+            const clothes = [
+                0xef4444, 0x3b82f6, 0xf59e0b,
+                0x10b981, 0x8b5cf6, 0xec4899
+            ];
+
+            const skinMaterial = material(0xf3d2b3);
+
+            for (let i = 0; i < residentCount; i++) {
+                const person = new THREE.Group();
+
+                const body = new THREE.Mesh(
+                    boxGeometry,
+                    material(
+                        clothes[Math.floor(residentRandom() * clothes.length)]
+                    )
+                );
+
+                body.scale.set(0.22, 0.42, 0.18);
+                body.position.y = 0.27;
+
+                const head = new THREE.Mesh(boxGeometry, skinMaterial);
+
+                head.scale.set(0.18, 0.18, 0.18);
+                head.position.y = 0.58;
+
+                person.add(body, head);
+
+                const alongX = residentRandom() < 0.5;
+
+                // 車道と街灯の間（歩道にあたる位置）を歩かせる。
+                const lane = (residentRandom() < 0.5 ? 1 : -1) * 0.95;
+                const along = (residentRandom() - 0.5) * 24;
+                const direction = residentRandom() < 0.5 ? 1 : -1;
+                const speed = 0.5 + residentRandom() * 0.5;
+
+                if (alongX) {
+                    person.position.set(along, 0.06, lane);
+                } else {
+                    person.position.set(lane, 0.06, along);
+                }
+
+                group.add(person);
+
+                townState.residents.push({
+                    object: person,
+                    alongX,
+                    direction,
+                    speed
+                });
+            }
         }
 
         // 街が大きくなるほどカメラを引く。
@@ -11620,6 +11858,17 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         );
 
         townState.night = setting.night;
+
+        // 夜は星を出し、街灯を光らせる。
+        if (townState.stars) {
+            townState.stars.visible = setting.night;
+        }
+
+        if (townState.lampMaterial) {
+            townState.lampMaterial.color.setHex(
+                setting.night ? 0xfff2a8 : 0xd1d5db
+            );
+        }
     }
 
     function resizeTown() {
@@ -11768,7 +12017,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     function spawnTownEvent() {
         if (townState.events.length >= 3) return;
 
-        const context = { night: townState.night };
+        const context = {
+            night: townState.night,
+            roads: townState.hasRoads === true
+        };
 
         const candidates = TOWN_EVENTS.filter(definition =>
             definition.canStart(context)
@@ -11796,6 +12048,23 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         );
 
         townState.lastTime = time;
+
+        // 住人を道に沿って歩かせ、端で折り返す。
+        (townState.residents || []).forEach((resident, index) => {
+            const position = resident.object.position;
+            const axis = resident.alongX ? "x" : "z";
+
+            position[axis] += resident.direction * resident.speed * dt;
+
+            if (Math.abs(position[axis]) > 12.5) {
+                position[axis] = Math.sign(position[axis]) * 12.5;
+                resident.direction *= -1;
+            }
+
+            // 歩いているように、少しだけ上下させる。
+            position.y =
+                0.06 + Math.abs(Math.sin(time / 160 + index)) * 0.05;
+        });
 
         // ドラッグ中は自動周回を止める。
         if (townState.dragId === null) {
@@ -11912,7 +12181,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         { id: "ufo", icon: "🛸", name: "UFO", rarity: "rare", create: createTownUfo },
         { id: "aurora", icon: "🌌", name: "オーロラ", rarity: "rare", dark: true, create: createTownAurora },
         { id: "dragon", icon: "🐉", name: "ドラゴン", rarity: "rare", create: createTownDragon },
-        { id: "grand", icon: "🎇", name: "大花火大会", rarity: "rare", dark: true, create: createTownGrandFireworks }
+        { id: "grand", icon: "🎇", name: "大花火大会", rarity: "rare", dark: true, create: createTownGrandFireworks },
+        { id: "parachutes", icon: "🪂", name: "パラシュート", rarity: "common", create: createTownParachutes },
+        { id: "lanterns", icon: "🏮", name: "ランタン祭り", rarity: "uncommon", dark: true, create: createTownLanterns },
+        { id: "comet", icon: "☄️", name: "彗星", rarity: "rare", dark: true, create: createTownComet },
+        { id: "whale", icon: "🐋", name: "空飛ぶクジラ", rarity: "rare", create: createTownWhale }
     ];
 
     // これまでの総回答数。日別の学習記録から数える。
@@ -12465,7 +12738,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     // ===== 街のイベント抽選と図鑑 =====
     const TOWN_FOUND_EVENTS_KEY = "anydeck_town_found_events_v1";
 
-    // 出やすさの重み。レアは全体の約7%。
+    // 出やすさの重み。レアは全体の約9%。
     const TOWN_RARITY_WEIGHTS = {
         common: 10,
         uncommon: 5,
@@ -12956,6 +13229,673 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         };
     }
 
+    // ===== 街の追加イベント =====
+    // 大通りを走る車。
+    function createTownCar() {
+        const car = new THREE.Group();
+        const colors = [0xef4444, 0x3b82f6, 0xf59e0b, 0x10b981, 0xffffff];
+        const color = colors[Math.floor(Math.random() * colors.length)];
+
+        makeTownEventMesh(car, color, 1.1, 0.35, 0.55, 0, 0.3, 0);
+        makeTownEventMesh(car, 0x1f2937, 0.6, 0.28, 0.5, -0.05, 0.6, 0);
+
+        const alongX = Math.random() < 0.5;
+        const direction = Math.random() < 0.5 ? 1 : -1;
+        const lane = 0.4 * direction;
+
+        if (alongX) {
+            car.position.set(-13.5 * direction, 0.06, lane);
+        } else {
+            car.rotation.y = Math.PI / 2;
+            car.position.set(-lane, 0.06, -13.5 * direction);
+        }
+
+        return {
+            object: car,
+            update(dt) {
+                if (alongX) {
+                    car.position.x += direction * 4 * dt;
+                } else {
+                    car.position.z += direction * 4 * dt;
+                }
+
+                const along = alongX ? car.position.x : car.position.z;
+
+                return Math.abs(along) < 13.6;
+            }
+        };
+    }
+
+    // 夜に街の中を漂うホタル。
+    function createTownFireflies() {
+        const count = 40;
+        const positions = new Float32Array(count * 3);
+        const seeds = [];
+
+        for (let i = 0; i < count; i++) {
+            seeds.push({
+                x: (Math.random() - 0.5) * 36,
+                y: 0.5 + Math.random() * 2.5,
+                z: (Math.random() - 0.5) * 36,
+                phase: Math.random() * 6
+            });
+        }
+
+        const geometry = new THREE.BufferGeometry();
+
+        geometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(positions, 3)
+        );
+
+        const points = new THREE.Points(
+            geometry,
+            new THREE.PointsMaterial({
+                color: 0xd9ff6b,
+                size: 0.35,
+                transparent: true,
+                opacity: 0,
+                depthWrite: false
+            })
+        );
+
+        points.frustumCulled = false;
+
+        let time = 0;
+        const duration = 22;
+
+        return {
+            object: points,
+            update(dt) {
+                time += dt;
+
+                seeds.forEach((seed, i) => {
+                    positions[i * 3] =
+                        seed.x + Math.sin(time * 0.7 + seed.phase) * 0.8;
+                    positions[i * 3 + 1] =
+                        seed.y + Math.sin(time * 1.1 + seed.phase * 2) * 0.4;
+                    positions[i * 3 + 2] =
+                        seed.z + Math.cos(time * 0.6 + seed.phase) * 0.8;
+                });
+
+                geometry.attributes.position.needsUpdate = true;
+
+                const fade = Math.max(
+                    0,
+                    Math.min(1, time / 2, (duration - time) / 2)
+                );
+
+                points.material.opacity =
+                    fade * (0.7 + Math.sin(time * 3) * 0.3);
+
+                return time < duration;
+            }
+        };
+    }
+
+    // 空からゆっくり降りてくるパラシュート。
+    function createTownParachutes() {
+        const group = new THREE.Group();
+        const canopyGeometry = new THREE.ConeGeometry(0.9, 0.7, 8);
+        const loadGeometry = new THREE.BoxGeometry(0.25, 0.35, 0.25);
+
+        const loadMaterial = new THREE.MeshLambertMaterial({
+            color: 0x374151
+        });
+
+        const colors = [0xff5d73, 0xffd166, 0x7bdff2, 0xb388ff, 0x9cff8f];
+        const items = [];
+
+        for (let i = 0; i < 10; i++) {
+            const unit = new THREE.Group();
+
+            const canopy = new THREE.Mesh(
+                canopyGeometry,
+                new THREE.MeshLambertMaterial({
+                    color: colors[i % colors.length]
+                })
+            );
+
+            canopy.position.y = 1.1;
+
+            unit.add(canopy, new THREE.Mesh(loadGeometry, loadMaterial));
+
+            unit.position.set(
+                (Math.random() - 0.5) * 22,
+                22 + Math.random() * 14,
+                (Math.random() - 0.5) * 22
+            );
+
+            group.add(unit);
+
+            items.push({
+                unit,
+                speed: 1.8 + Math.random() * 0.9,
+                phase: Math.random() * 6
+            });
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                let alive = false;
+
+                items.forEach(item => {
+                    const position = item.unit.position;
+
+                    if (position.y <= 0.5) {
+                        item.unit.visible = false;
+                        return;
+                    }
+
+                    position.y -= item.speed * dt;
+                    position.x +=
+                        Math.sin(time * 1.2 + item.phase) * 0.5 * dt;
+
+                    item.unit.rotation.z =
+                        Math.sin(time * 1.5 + item.phase) * 0.15;
+
+                    alive = true;
+                });
+
+                return alive;
+            }
+        };
+    }
+
+    // 光るランタンが、街からゆっくり空へ昇っていく。
+    function createTownLanterns() {
+        const group = new THREE.Group();
+        const geometry = new THREE.BoxGeometry(0.35, 0.45, 0.35);
+
+        const lanternMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffb347
+        });
+
+        const lanterns = [];
+
+        for (let i = 0; i < 36; i++) {
+            const mesh = new THREE.Mesh(geometry, lanternMaterial);
+
+            mesh.position.set(
+                (Math.random() - 0.5) * 24,
+                -Math.random() * 10,
+                (Math.random() - 0.5) * 24
+            );
+
+            mesh.visible = false;
+            group.add(mesh);
+
+            lanterns.push({
+                mesh,
+                speed: 1 + Math.random() * 0.6,
+                phase: Math.random() * 6
+            });
+        }
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                let alive = false;
+
+                lanterns.forEach(lantern => {
+                    const position = lantern.mesh.position;
+
+                    position.y += lantern.speed * dt;
+                    position.x +=
+                        Math.sin(time * 0.8 + lantern.phase) * 0.3 * dt;
+
+                    lantern.mesh.visible =
+                        position.y > 0.3 && position.y < 26;
+
+                    if (position.y < 26) {
+                        alive = true;
+                    }
+                });
+
+                return alive;
+            }
+        };
+    }
+
+    // 長い尾を引いて、空をゆっくり横切る彗星。
+    function createTownComet() {
+        const group = new THREE.Group();
+        const geometry = new THREE.SphereGeometry(1, 10, 8);
+        const segments = [];
+        const segmentCount = 16;
+
+        for (let i = 0; i < segmentCount; i++) {
+            const mesh = new THREE.Mesh(
+                geometry,
+                new THREE.MeshBasicMaterial({
+                    color: i === 0 ? 0xffffff : 0x9fd8ff,
+                    transparent: true,
+                    opacity: (1 - i / segmentCount) * 0.85,
+                    depthWrite: false
+                })
+            );
+
+            mesh.scale.setScalar(
+                i === 0 ? 1.2 : Math.max(0.2, 1 - i / segmentCount)
+            );
+
+            mesh.visible = false;
+            group.add(mesh);
+            segments.push(mesh);
+        }
+
+        const duration = 10;
+
+        const placeAt = (mesh, t) => {
+            const k = t / duration;
+
+            mesh.position.set(
+                -46 + 92 * k,
+                21 - 11 * k + Math.sin(k * Math.PI) * 3,
+                -10 + 6 * k
+            );
+        };
+
+        let time = 0;
+
+        return {
+            object: group,
+            update(dt) {
+                time += dt;
+
+                segments.forEach((mesh, i) => {
+                    const t = time - i * 0.11;
+
+                    mesh.visible = t > 0 && t < duration;
+
+                    if (mesh.visible) {
+                        placeAt(mesh, t);
+                    }
+                });
+
+                return time < duration + 2;
+            }
+        };
+    }
+
+    // 尾を振りながら、街の上をゆったり泳ぐクジラ。
+    function createTownWhale() {
+        const whale = new THREE.Group();
+        const direction = Math.random() < 0.5 ? 1 : -1;
+
+        const body = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 14, 10),
+            new THREE.MeshLambertMaterial({ color: 0x4f7cac })
+        );
+
+        body.scale.set(5, 2, 2.2);
+        whale.add(body);
+
+        // 尾びれ。
+        const tail = new THREE.Group();
+
+        tail.position.set(-4.8, 0.2, 0);
+
+        makeTownEventMesh(tail, 0x3f678f, 1.6, 0.25, 1.4, -0.9, 0, 1);
+        makeTownEventMesh(tail, 0x3f678f, 1.6, 0.25, 1.4, -0.9, 0, -1);
+
+        whale.add(tail);
+
+        // 胸びれと目。
+        makeTownEventMesh(whale, 0x3f678f, 1.4, 0.2, 1.2, 1.2, -1, 2.2);
+        makeTownEventMesh(whale, 0x3f678f, 1.4, 0.2, 1.2, 1.2, -1, -2.2);
+        makeTownEventMesh(whale, 0x111827, 0.25, 0.25, 0.1, 3.6, 0.3, 1.55);
+        makeTownEventMesh(whale, 0x111827, 0.25, 0.25, 0.1, 3.6, 0.3, -1.55);
+
+        if (direction < 0) {
+            whale.rotation.y = Math.PI;
+        }
+
+        whale.position.set(
+            -44 * direction,
+            14,
+            (Math.random() - 0.5) * 8
+        );
+
+        let time = 0;
+
+        return {
+            object: whale,
+            update(dt) {
+                time += dt;
+
+                whale.position.x += direction * 3.4 * dt;
+                whale.position.y = 14 + Math.sin(time * 0.6) * 1.2;
+
+                tail.rotation.z = Math.sin(time * 2) * 0.35;
+
+                return Math.abs(whale.position.x) < 46;
+            }
+        };
+    }
+
+    // ===== 街と単語のつながり・住人・季節 =====
+    const TOWN_SEASON_LABELS = {
+        spring: "春",
+        summer: "夏",
+        autumn: "秋",
+        winter: "冬"
+    };
+
+    // 端末の日付の月から季節を決める。
+    function getTownSeason(date = new Date()) {
+        const month = date.getMonth() + 1;
+
+        if (month >= 3 && month <= 5) return "spring";
+        if (month >= 6 && month <= 8) return "summer";
+        if (month >= 9 && month <= 11) return "autumn";
+
+        return "winter";
+    }
+
+    // 住人の数。復習の段階が3以上のカード3枚ごとに1人、最大12人。
+    function getTownResidentCount(deck) {
+        if (!deck) return 0;
+
+        const settled = deck.cards.filter(
+            card => normalizeCardBox(card.box) >= 3
+        ).length;
+
+        return Math.min(12, Math.floor(settled / 3));
+    }
+
+    // 建物へ割り当てるカード。点数の高い順（同点は登録順）に並べる。
+    // 一度も回答していないカードは含めない。
+    function getTownBuildingCards(deck) {
+        return deck.cards
+            .map((card, index) => {
+                const answers =
+                    Number(card.known || 0) + Number(card.unknown || 0);
+
+                return {
+                    card,
+                    index,
+                    answers,
+                    score:
+                        Math.min(answers, 5) +
+                        normalizeCardBox(card.box) * 3
+                };
+            })
+            .filter(item => item.answers > 0)
+            .sort((a, b) => b.score - a.score || a.index - b.index)
+            .map(item => item.card);
+    }
+
+    function resetTownCardInfo() {
+        const info = document.getElementById("town-card-info");
+
+        if (info) {
+            info.textContent =
+                "建物をタップすると、覚えた単語が見られます。";
+        }
+    }
+
+    // タップした位置の建物を調べ、割り当てられたカードを表示する。
+    function showTownBuildingCard(clientX, clientY) {
+        const canvas = document.getElementById("town-canvas");
+        const info = document.getElementById("town-card-info");
+
+        if (
+            !canvas ||
+            !info ||
+            !window.THREE ||
+            !townState.renderer ||
+            !townState.group
+        ) {
+            return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+
+        if (rect.width <= 0 || rect.height <= 0) return;
+
+        const pointer = new THREE.Vector2(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1
+        );
+
+        townState.camera.updateMatrixWorld();
+
+        const raycaster = new THREE.Raycaster();
+
+        raycaster.setFromCamera(pointer, townState.camera);
+
+        const hits = raycaster.intersectObjects(
+            townState.group.children,
+            true
+        );
+
+        const target = hits.length ? hits[0].object : null;
+
+        // 地面・木・道路・記念建物などをタップしたときは、表示を変えない。
+        if (!target || !target.userData.building) return;
+
+        const deck = getActiveDeck();
+
+        const card = deck && target.userData.cardId
+            ? deck.cards.find(item => item.id === target.userData.cardId)
+            : null;
+
+        // textContentで表示するため、語句や意味はそのまま文字として扱われる。
+        info.textContent = card
+            ? `🏠 この建物の単語：${card.term} ／ ${card.meaning}`
+            : "この建物には、まだ単語がありません。";
+    }
+
+    // ===== 覚えた単語が街に現れるイベント =====
+    // 直前の回答が「わかった」のカードを、覚えた単語として扱う。
+    function getTownLearnedCards(deck) {
+        if (!deck) return [];
+
+        return deck.cards.filter(card =>
+            Number(card.known || 0) > 0 &&
+            card.lastResult === "known"
+        );
+    }
+
+    function hasTownLearnedWords() {
+        return getTownLearnedCards(getActiveDeck()).length > 0;
+    }
+
+    function pickTownLearnedCard() {
+        const cards = getTownLearnedCards(getActiveDeck());
+
+        return cards.length
+            ? cards[Math.floor(Math.random() * cards.length)]
+            : null;
+    }
+
+    // 現れた単語と意味を、街の下の欄に表示する。
+    function showTownWordEventInfo(label, card) {
+        const info = document.getElementById("town-card-info");
+
+        if (info) {
+            info.textContent =
+                `${label}：${card.term} ／ ${card.meaning}`;
+        }
+    }
+
+    // 語句を書いた、厚みのある看板を作る。表と裏の両面に文字を出す。
+    function createTownWordSign(card, height) {
+        const characters = Array.from(String(card.term || ""));
+
+        const text = characters.length > 16
+            ? characters.slice(0, 16).join("") + "…"
+            : characters.join("");
+
+        const font = "bold 80px sans-serif";
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+
+        context.font = font;
+
+        const width = Math.max(
+            160,
+            Math.min(1024, Math.ceil(context.measureText(text).width) + 64)
+        );
+
+        // 大きさを変えると描画の設定が初期化されるため、ここで設定し直す。
+        canvas.width = width;
+        canvas.height = 128;
+
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, width, 128);
+
+        context.strokeStyle = "#2563eb";
+        context.lineWidth = 10;
+        context.strokeRect(5, 5, width - 10, 118);
+
+        context.font = font;
+        context.fillStyle = "#10233f";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText(text, width / 2, 68, width - 40);
+
+        const texture = new THREE.CanvasTexture(canvas);
+
+        texture.minFilter = THREE.LinearFilter;
+        texture.generateMipmaps = false;
+
+        // 文字の面は、夜でも読めるよう光の影響を受けない素材にする。
+        const faceMaterial = new THREE.MeshBasicMaterial({ map: texture });
+
+        const sideMaterial = new THREE.MeshLambertMaterial({
+            color: 0x2563eb
+        });
+
+        const length = height * width / 128;
+
+        const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(length, height, 0.3),
+            [
+                sideMaterial, sideMaterial,
+                sideMaterial, sideMaterial,
+                faceMaterial, faceMaterial
+            ]
+        );
+
+        return { mesh, length };
+    }
+
+    // 単語の看板を載せた台車が、大通りを走る。
+    function createTownWordCar() {
+        const card = pickTownLearnedCard();
+
+        if (!card) return createTownCloud();
+
+        const sign = createTownWordSign(card, 0.8);
+        const car = new THREE.Group();
+
+        sign.mesh.position.y = 0.76;
+        car.add(sign.mesh);
+
+        // 荷台と車輪。
+        makeTownEventMesh(
+            car, 0x374151, sign.length + 0.3, 0.16, 0.6, 0, 0.28, 0
+        );
+
+        [-1, 1].forEach(endSide => {
+            [-1, 1].forEach(laneSide => {
+                makeTownEventMesh(
+                    car, 0x111827, 0.28, 0.28, 0.12,
+                    endSide * (sign.length / 2 - 0.05),
+                    0.14,
+                    laneSide * 0.3
+                );
+            });
+        });
+
+        const alongX = Math.random() < 0.5;
+        const direction = Math.random() < 0.5 ? 1 : -1;
+        const lane = 0.4 * direction;
+        const limit = 13.6 + sign.length / 2;
+        const start = -(13.5 + sign.length / 2) * direction;
+
+        if (alongX) {
+            car.position.set(start, 0.06, lane);
+        } else {
+            car.rotation.y = Math.PI / 2;
+            car.position.set(-lane, 0.06, start);
+        }
+
+        showTownWordEventInfo("🚚 走っている単語", card);
+
+        return {
+            object: car,
+            update(dt) {
+                if (alongX) {
+                    car.position.x += direction * 2.5 * dt;
+                } else {
+                    car.position.z += direction * 2.5 * dt;
+                }
+
+                const along = alongX ? car.position.x : car.position.z;
+
+                return Math.abs(along) < limit;
+            }
+        };
+    }
+
+    // 翼の付いた単語の看板が、街の上空を横切る。
+    function createTownWordFlyer() {
+        const card = pickTownLearnedCard();
+
+        if (!card) return createTownCloud();
+
+        const sign = createTownWordSign(card, 1.5);
+        const flyer = new THREE.Group();
+        const direction = Math.random() < 0.5 ? 1 : -1;
+
+        flyer.add(sign.mesh);
+
+        // 左右の翼と尾翼。
+        makeTownEventMesh(flyer, 0xe2e8f0, 1.2, 0.1, 2.2, 0, 0.1, 1.2);
+        makeTownEventMesh(flyer, 0xe2e8f0, 1.2, 0.1, 2.2, 0, 0.1, -1.2);
+        makeTownEventMesh(
+            flyer, 0x2563eb, 0.4, 0.7, 0.1,
+            -(sign.length / 2 + 0.1) * direction, 0.6, 0
+        );
+
+        const baseY = 11 + Math.random() * 4;
+
+        flyer.position.set(
+            -40 * direction,
+            baseY,
+            (Math.random() - 0.5) * 16
+        );
+
+        showTownWordEventInfo("✈️ 飛んでいる単語", card);
+
+        let time = 0;
+
+        return {
+            object: flyer,
+            update(dt) {
+                time += dt;
+
+                flyer.position.x += direction * 4.5 * dt;
+                flyer.position.y = baseY + Math.sin(time * 1.2) * 0.6;
+                flyer.rotation.x = Math.sin(time * 1.2) * 0.08;
+
+                return Math.abs(flyer.position.x) < 42;
+            }
+        };
+    }
+
     // ===== 1日の目標 =====
     const DAILY_GOAL_KEY = "anydeck_daily_goal_v1";
     const DAILY_GOAL_DONE_KEY = "anydeck_daily_goal_done_v1";
@@ -13123,6 +14063,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         note.textContent = next
             ? `連続の最高記録 ${best}日 ・ 次の記念建物まであと${next.days - best}日`
             : `連続の最高記録 ${best}日`;
+
+        // 現在の季節も添える。
+        note.textContent +=
+            ` ・ 季節：${TOWN_SEASON_LABELS[getTownSeason()]}`;
     }
 
     // 記念建物の部品を1つ追加する。
@@ -13265,10 +14209,19 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                 : "（最高段階）") +
             ` ・ 🪙コイン${getTownCoinBalance()}枚`;
 
+        // 今回の周回で街がどれだけ育ったか。増えていない場合は表示しない。
+        const townGrowth = typeof studyRound.townScoreStart === "number"
+            ? score - studyRound.townScoreStart
+            : 0;
+
+        const townGrowthHtml = townGrowth > 0
+            ? `<br>この周回で街が +${townGrowth}ポイント育ちました`
+            : "";
+
         let html = `
             <div class="study-complete-extra">
                 <div class="study-complete-note">
-                    ${escapeHtml(townText)}
+                    ${escapeHtml(townText)}${townGrowthHtml}
                 </div>
 
                 <button
