@@ -3920,6 +3920,17 @@
 
         <div id="study-tts-options" class="hidden">
             <div class="field">
+                <div class="tts-setting-row">
+                    <label for="study-tts-autospeak">
+                        答えを見たら自動で読み上げる
+                    </label>
+                    <input
+                        id="study-tts-autospeak"
+                        class="tts-toggle"
+                        type="checkbox">
+                </div>
+            </div>
+            <div class="field">
                 <label for="study-tts-language">読み上げ言語</label>
                 <select id="study-tts-language" class="select">
                     <option value="auto" selected>自動（カードの言語を優先）</option>
@@ -5021,6 +5032,8 @@
 
         return {
             enabled: source.enabled === true,
+            // 答えを見たときに自動で読み上げるか。値がない既存データはオフ。
+            autoSpeak: source.autoSpeak === true,
             language: SPEECH_LANGUAGES.includes(source.language)
                 ? source.language
                 : "auto",
@@ -7082,13 +7095,7 @@
                                             : ""
                                     }
 
-                                    <div class="card-prompt">
-                                        <span class="tap-circle">↔</span>
-                                        <span>
-                                            右：わかった ／ 左：わからなかった<br>
-                                            タップで問題に戻る
-                                        </span>
-                                    </div>
+                                    
                                 </div>
                             </div>
                         </div>
@@ -7160,6 +7167,11 @@
 
         cardInteraction.phase = "flipping";
         cardInteraction.flipped = !cardInteraction.flipped;
+
+        // 表から裏へめくったときだけ、設定に応じて語句を読み上げる。
+        if (cardInteraction.flipped) {
+            autoSpeakCurrentCard();
+        }
         syncAnswerButtons();
 
         inner.style.transition = "";
@@ -7362,6 +7374,11 @@
 
             setFlipAngle(targetAngle);
             cardInteraction.flipped = shouldFlip;
+
+            // スワイプで表から裏へめくったときも、同じように読み上げる。
+            if (shouldFlip) {
+                autoSpeakCurrentCard();
+            }
             syncAnswerButtons();
             flipCard.classList.toggle("flipped", shouldFlip);
 
@@ -8061,6 +8078,8 @@
         deck.tts = normalizeDeckTts({
             enabled:
                 document.getElementById("creation-tts-enabled").checked,
+            // この画面にない設定は、現在の値を引き継ぐ。
+            autoSpeak: normalizeDeckTts(deck.tts).autoSpeak,
             language:
                 document.getElementById("creation-tts-language").value,
             rate:
@@ -9597,7 +9616,17 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         ) || null;
     }
 
-    function speakCurrentCard(event, target) {
+    // 設定がオンのときだけ、語句を通知なしで読み上げる。
+    function autoSpeakCurrentCard() {
+        const tts = normalizeDeckTts(getActiveDeck()?.tts);
+
+        if (!tts.enabled || !tts.autoSpeak) return;
+
+        speakCurrentCard(null, "term", true);
+    }
+
+    // silentがtrueのときは、失敗しても通知を出さない（自動の読み上げ用）。
+    function speakCurrentCard(event, target, silent) {
         if (event) {
             event.preventDefault();
             event.stopPropagation();
@@ -9621,13 +9650,16 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             !("speechSynthesis" in window) ||
             !("SpeechSynthesisUtterance" in window)
         ) {
-            showToast("このブラウザは音声読み上げに対応していません。");
+            if (!silent) {
+                showToast("このブラウザは音声読み上げに対応していません。");
+            }
             return;
         }
 
         const language = resolveCardSpeechLanguage(card, deck);
 
         if (!language) {
+            if (silent) return;
             showToast(
                 "読み上げ言語を判定できません。学習設定で言語を指定してください。"
             );
@@ -9685,7 +9717,8 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             if (
                 token === speechRuntime.token &&
                 speechEvent.error !== "canceled" &&
-                speechEvent.error !== "interrupted"
+                speechEvent.error !== "interrupted" &&
+                !silent
             ) {
                 showToast(
                     "音声を再生できませんでした。この言語の音声が端末にない可能性があります。端末の音声設定をご確認ください。"
@@ -9697,7 +9730,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             window.speechSynthesis.speak(utterance);
         } catch (error) {
             finish();
-            showToast("音声再生に失敗しました。");
+            if (!silent) {
+                showToast("音声再生に失敗しました。");
+            }
         }
     }
 
@@ -10182,6 +10217,19 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                 String(getReviewDueCount(getActiveDeck()));
         }
 
+        // 「苦手」タブにも、「復習」タブと同じ形式で枚数を出す。
+        const weakTab = document.getElementById("mode-weak");
+
+        if (weakTab) {
+            const weakDeck = getActiveDeck();
+
+            const weakCount = weakDeck
+                ? weakDeck.cards.filter(card => isWeakCard(card)).length
+                : 0;
+
+            weakTab.textContent = `苦手 ${weakCount}`;
+        }
+
         updateReviewRemainingLabel();
     }
 
@@ -10220,7 +10268,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const remaining = getReviewDueCount(deck);
 
-        const baseText = remaining > 0
+        // 一度も回答していないカードが含まれる場合は、「復習」と呼ばない。
+        const newCount = getNewDueCount(deck);
+
+        const baseText = newCount > 0
+            ? `今日の学習　残り${remaining}枚（新規${newCount}枚）`
+            : remaining > 0
             ? `今日の復習　残り${remaining}枚`
             : "今日の復習は完了";
 
@@ -10289,6 +10342,16 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
     // ===== デッキごとの今日の復習枚数 =====
     // カードが0枚のデッキは null を返し、何も表示しない。
+    // 今日の対象のうち、一度も回答していないカードの枚数。
+    function getNewDueCount(deck) {
+        if (!deck) return 0;
+
+        return deck.cards.filter(card =>
+            isCardDue(card) &&
+            Number(card.known || 0) + Number(card.unknown || 0) === 0
+        ).length;
+    }
+
     function getDeckDueInfo(deck) {
         if (!deck || !deck.cards.length) return null;
 
@@ -10296,7 +10359,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         return {
             done: count === 0,
-            text: count > 0
+            text: getNewDueCount(deck) > 0
+                ? `今日の学習 ${count}枚（新規${getNewDueCount(deck)}枚）`
+                : count > 0
                 ? `今日の復習 ${count}枚`
                 : "今日の復習は完了"
         };
@@ -10586,6 +10651,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         document.getElementById("study-tts-enabled").checked =
             tts.enabled;
 
+        document.getElementById("study-tts-autospeak").checked =
+            tts.autoSpeak;
+
         document.getElementById("study-tts-language").value =
             tts.language;
 
@@ -10619,6 +10687,8 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         deck.tts = normalizeDeckTts({
             enabled:
                 document.getElementById("study-tts-enabled").checked,
+            autoSpeak:
+                document.getElementById("study-tts-autospeak").checked,
             language:
                 document.getElementById("study-tts-language").value,
             rate:
@@ -13601,9 +13671,10 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
                 const tts = normalizeDeckTts(deck.tts);
 
-                if (tts.enabled) return;
+                if (tts.enabled && tts.autoSpeak) return;
 
-                deck.tts = { ...tts, enabled: true };
+                // 語学の単語帳は、音声と自動の読み上げの両方をオンにする。
+                deck.tts = { ...tts, enabled: true, autoSpeak: true };
                 changed = true;
             });
 
