@@ -3774,6 +3774,7 @@
             <div class="creation-setting-note">
                 更新して追加でも、単語帳全体は削除しません。
                 同じ語句の教材内容だけ更新し、学習履歴は維持します。
+                「更新して追加」は、同じ語句を含むJSONを別に用意して、教材の内容を更新するときに使います。
             </div>
         </div>
 
@@ -3811,7 +3812,7 @@
             </div>
             <div class="creation-setting-note">
                 ONにすると学習カードに音声ボタンを表示します。
-                音声はボタンを押したときだけ再生します。
+                答えを見たときに自動で読み上げたい場合は、学習設定でオンにできます。
             </div>
         </div>
 
@@ -4272,22 +4273,6 @@
 
 
     const SPEECH_LANGUAGES = [
-        "ko-KR",
-        "th-TH",
-        "vi-VN",
-        "id-ID",
-        "it-IT",
-        "pt-BR",
-        "ru-RU",
-        "hi-IN",
-        "ko-KR",
-        "th-TH",
-        "vi-VN",
-        "id-ID",
-        "it-IT",
-        "pt-BR",
-        "ru-RU",
-        "hi-IN",
         "ko-KR",
         "th-TH",
         "vi-VN",
@@ -6213,11 +6198,15 @@
     function selectDeck(deckId, goStudy = false) {
         if (!appData.decks.some(deck => deck.id === deckId)) return;
 
-        resetCardInteraction();
-        resetStudyRound();
-        stopCardSpeech();
-
         const deckChanged = activeDeckId !== deckId;
+
+        // 同じ単語帳を選び直しただけなら、出題中の周回を消さない。
+        if (deckChanged) {
+            resetCardInteraction();
+            resetStudyRound();
+        }
+
+        stopCardSpeech();
 
         activeDeckId = deckId;
 
@@ -6232,8 +6221,11 @@
         updateAiTargetDeck();
         saveActiveDeck();
 
-        studyIndex = 0;
-        rebuildStudyQueue(true);
+        // 出題位置と並びを作り直すのは、別の単語帳へ切り替えたときだけ。
+        if (deckChanged) {
+            studyIndex = 0;
+            rebuildStudyQueue(true);
+        }
 
         renderHeader();
         renderDecks();
@@ -6950,9 +6942,7 @@
                                         class="${reverseStudy
                                             ? "answer-meaning" + getMeaningDisplayClass(card.meaning)
                                             : "card-term"}"
-                                        dir="auto">
-                                        ${escapeHtml(reverseStudy ? card.meaning : card.term)}
-                                    </h3>
+                                        dir="auto">${escapeHtml(reverseStudy ? card.meaning : card.term)}</h3>
 
                                     ${
                                         showTtsButton
@@ -7057,9 +7047,7 @@
                                         class="answer-meaning${reverseStudy
                                             ? ""
                                             : getMeaningDisplayClass(card.meaning)}"
-                                        dir="auto">
-                                        ${escapeHtml(reverseStudy ? card.term : card.meaning)}
-                                    </h3>
+                                        dir="auto">${escapeHtml(reverseStudy ? card.term : card.meaning)}</h3>
 
                                     ${reverseAnswerExtras}
 
@@ -7995,14 +7983,19 @@
     }
 
     function loadDeckCreationSettings() {
-        const deck = getActiveDeck();
-
+        // 単語帳を切り替えたときは、取り込み方式を「追加」へ戻す。
         creationImportMode = "append";
+        fillCreationSettingsForm();
+    }
+
+    // 保存済みの設定を、詳細設定の編集欄と要約へ表示する。
+    function fillCreationSettingsForm() {
+        const deck = getActiveDeck();
 
         const tts = normalizeDeckTts(deck?.tts);
         const ai = normalizeDeckAiSettings(deck?.aiSettings);
 
-        document.getElementById("ai-import-mode").value = "append";
+        document.getElementById("ai-import-mode").value = creationImportMode;
         document.getElementById("ai-level").value = ai.difficulty;
         document.getElementById("ai-explanation-language").value =
             ai.explanationLanguage;
@@ -8022,8 +8015,8 @@
     }
 
     function openCreationSettings() {
-        document.getElementById("ai-import-mode").value =
-            creationImportMode;
+        // 開くたびに保存済みの値へ戻す。閉じただけの編集は残さない。
+        fillCreationSettingsForm();
 
         updateCreationTtsControls();
         openModal("creation-settings-modal");
@@ -8052,11 +8045,13 @@
             ? "更新して追加"
             : "追加";
 
-        const level =
-            document.getElementById("ai-level").value;
+        // 編集欄ではなく、保存済みの設定から作る。
+        const summaryDeck = getActiveDeck();
 
-        const enabled =
-            document.getElementById("creation-tts-enabled").checked;
+        const level =
+            normalizeDeckAiSettings(summaryDeck?.aiSettings).difficulty;
+
+        const enabled = normalizeDeckTts(summaryDeck?.tts).enabled;
 
         summary.textContent =
             `${mode}・${level}・音声${enabled ? "ON" : "OFF"}`;
@@ -8184,16 +8179,12 @@
         const count =
             document.getElementById("ai-count").value;
 
-        const level =
-            document.getElementById("ai-level").value;
+        // 編集欄ではなく、保存済みの設定を使う。閉じただけの編集は反映しない。
+        const aiSettings = normalizeDeckAiSettings(deck.aiSettings);
 
-        const explanationLanguage =
-            document
-                .getElementById("ai-explanation-language")
-                .value;
-
-        const extra =
-            document.getElementById("ai-extra").value.trim();
+        const level = aiSettings.difficulty;
+        const explanationLanguage = aiSettings.explanationLanguage;
+        const extra = aiSettings.extra.trim();
 
         // 対象の単語帳にある既存語句をすべて取得する。
         // 表記ゆれによる重複を整理し、AIへ除外対象として渡す。
@@ -8333,7 +8324,7 @@ JSON.parseでそのまま解析できる正しい構文にしてください。
 【音声読み上げ用の言語情報】
 カードごとに、学習語句の言語を示す speechLanguage を追加してください。
 値は BCP 47 の言語コードとし、以下から選択してください。
-ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / id-ID / it-IT / pt-BR / ru-RU / hi-IN / ko-KR / th-TH / vi-VN / id-ID / it-IT / pt-BR / ru-RU / hi-IN / ko-KR / th-TH / vi-VN / id-ID / it-IT / pt-BR / ru-RU / hi-IN
+ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / id-ID / it-IT / pt-BR / ru-RU / hi-IN
 言語を確実に判断できない場合は空文字にしてください。
 説明文の言語ではなく、term自体の言語を指定してください。
 読み上げ言語の指定が困難な場合も、termとmeaningの生成は優先してください。
@@ -8907,6 +8898,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             }
         });
 
+        // 語学の教材なら音声ボタンを自動でオンにし、カードの反映とまとめて1回だけ保存する。
+        enableTtsForLanguageDecks();
+
         const saved = saveData();
 
         refreshStudyAfterCardChange();
@@ -8922,25 +8916,25 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     function addImportedCards(cards) {
         const plan = prepareCardImport(cards);
 
+        // 新しく取り込めるカードが1枚もない場合は、何も変更せずに結果だけを返す。
+        if (plan.added + plan.updated === 0) {
+            return {
+                added: 0,
+                updated: 0,
+                duplicate: plan.duplicate,
+                saved: true
+            };
+        }
+
         if (!confirmCardImport(plan)) {
             return null;
         }
 
         const result = applyCardImport(plan);
 
-        // 語学の教材を取り込んだ単語帳は、音声読み上げを自動でオンにする。
-        if (enableTtsForLanguageDecks()) {
-            saveData({ silent: true });
-
-            // 教材の詳細設定の表示も、現在の単語帳の状態に合わせる。
-            const activeTts = normalizeDeckTts(getActiveDeck()?.tts);
-
-            document.getElementById("creation-tts-enabled").checked =
-                activeTts.enabled;
-
-            updateCreationTtsControls();
-            updateCreationSettingsSummary();
-        }
+        // 音声ボタンの自動オンと保存は applyCardImport の中で行う。
+        // ここでは、詳細設定の要約だけを現在の状態に合わせる。
+        updateCreationSettingsSummary();
 
         return result;
     }
@@ -9434,50 +9428,6 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         if (/[\u3040-\u309f\u30a0-\u30ff]/.test(value)) {
             return "ja-JP";
-        }
-
-        // 文字の種類だけで判定できる言語。
-        if (/[\u0e00-\u0e7f]/.test(value)) {
-            return "th-TH";
-        }
-
-        if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(value)) {
-            return "ko-KR";
-        }
-
-        if (/[\u0400-\u04ff]/.test(value)) {
-            return "ru-RU";
-        }
-
-        if (/[\u0900-\u097f]/.test(value)) {
-            return "hi-IN";
-        }
-
-        // ベトナム語に特有の文字（声調記号つきの母音など）。
-        if (/[\u1ea0-\u1ef9ơưƠƯ]/.test(value)) {
-            return "vi-VN";
-        }
-
-        // 文字の種類だけで判定できる言語。
-        if (/[\u0e00-\u0e7f]/.test(value)) {
-            return "th-TH";
-        }
-
-        if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(value)) {
-            return "ko-KR";
-        }
-
-        if (/[\u0400-\u04ff]/.test(value)) {
-            return "ru-RU";
-        }
-
-        if (/[\u0900-\u097f]/.test(value)) {
-            return "hi-IN";
-        }
-
-        // ベトナム語に特有の文字（声調記号つきの母音など）。
-        if (/[\u1ea0-\u1ef9ơưƠƯ]/.test(value)) {
-            return "vi-VN";
         }
 
         // 文字の種類だけで判定できる言語。
@@ -13621,22 +13571,6 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         return language ? language.split("-")[0] : "";
     }
 
-    // カードの語句の言語コード（先頭部分）。記録がなければ文字から判定する。
-    function getCardLanguageCode(card) {
-        const language =
-            card.speechLanguage || inferSpeechLanguage(card.term);
-
-        return language ? language.split("-")[0] : "";
-    }
-
-    // カードの語句の言語コード（先頭部分）。記録がなければ文字から判定する。
-    function getCardLanguageCode(card) {
-        const language =
-            card.speechLanguage || inferSpeechLanguage(card.term);
-
-        return language ? language.split("-")[0] : "";
-    }
-
     // カードの半分以上が「語句の言語が説明の言語と違い、例文の訳がある」場合に、
     // 語学の単語帳とみなす。用語を説明するだけの単語帳は対象にしない。
     function isLanguageDeck(deck) {
@@ -13658,23 +13592,26 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         return languageCards.length >= deck.cards.length / 2;
     }
 
-    // 語学の単語帳で、まだ自分で設定を保存していないものの音声をオンにする。
+    // 語学の単語帳で、まだ自分で設定を保存していないものの音声ボタンをオンにする。
+    // 自動の読み上げは既定でオフ。学習設定で利用者が保存した場合だけオンになる。
     // 変更があればtrueを返す。読み込み処理の中から呼ぶため、例外を外へ出さない。
     function enableTtsForLanguageDecks() {
         try {
             let changed = false;
 
             appData.decks.forEach(deck => {
-                if (deck.ttsChosen === true || !isLanguageDeck(deck)) {
-                    return;
-                }
+                // 自分で設定を保存した単語帳は、音声も自動の読み上げも変更しない。
+                if (deck.ttsChosen === true) return;
 
                 const tts = normalizeDeckTts(deck.tts);
 
-                if (tts.enabled && tts.autoSpeak) return;
+                // 語学の単語帳は、音声ボタンだけを自動でオンにする。
+                const enabled = tts.enabled || isLanguageDeck(deck);
 
-                // 語学の単語帳は、音声と自動の読み上げの両方をオンにする。
-                deck.tts = { ...tts, enabled: true, autoSpeak: true };
+                if (enabled === tts.enabled && !tts.autoSpeak) return;
+
+                // 以前の版が自動でオンにした自動の読み上げは、既定のオフへ戻す。
+                deck.tts = { ...tts, enabled, autoSpeak: false };
                 changed = true;
             });
 
