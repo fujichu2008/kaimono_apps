@@ -308,6 +308,11 @@ video{
     </button>
   </div>
 
+  <label style="display:flex;align-items:center;gap:8px;margin-top:10px;min-height:44px;font-size:12px;color:var(--muted)">
+    <input type="checkbox" id="proxyToggle">
+    直接取得できない場合は中継サーバー（api.allorigins.win）経由で取得する
+  </label>
+
   <div class="hint">
     「開く」でページを表示し、「動画を検出」で公開HTMLを解析します。
     ページによってはCORSやiframeの制限で操作できません。
@@ -822,6 +827,30 @@ function parseVideoElements(doc, base) {
     ) found++;
   });
 
+  // スクリプト・JSON・data属性などに埋め込まれた動画URL
+  const rawText = (
+    doc.documentElement ?
+      doc.documentElement.innerHTML : ""
+  )
+    .replace(/\\u002F/gi, "/")
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&");
+
+  const RAW_URL_RE =
+    /(?:https?:)?\/\/[^\s"'<>\\()]+?\.(?:mp4|webm|mov|m4v|ogv|m3u8|mpd)(?:\?[^\s"'<>\\()]*)?/gi;
+
+  let rawCount = 0;
+
+  for (const match of rawText.matchAll(RAW_URL_RE)) {
+    if (rawCount >= 200) break;
+    rawCount++;
+
+    if (addVideo(match[0], "", "script", base)) {
+      found++;
+    }
+  }
+
   return found;
 }
 
@@ -878,13 +907,40 @@ async function scanPage() {
   setStatus("HTMLを取得して動画を解析しています…");
 
   try {
-    const response = await fetch(url, {
+    const fetchOptions = {
       method: "GET",
       mode: "cors",
       credentials: "omit",
       redirect: "follow",
       signal: controller.signal
-    });
+    };
+
+    let response;
+    let viaProxy = false;
+
+    try {
+      response = await fetch(url, fetchOptions);
+    } catch (directError) {
+      if (
+        directError.name === "AbortError" ||
+        !$("proxyToggle").checked
+      ) {
+        throw directError;
+      }
+
+      // CORS等で直接取得できない場合のみ中継サーバーを使う。
+      viaProxy = true;
+
+      setStatus(
+        "直接取得できないため、中継サーバー経由で再試行しています…"
+      );
+
+      response = await fetch(
+        "https://api.allorigins.win/raw?url=" +
+          encodeURIComponent(url),
+        fetchOptions
+      );
+    }
 
     if (!response.ok) {
       throw new Error(
@@ -896,6 +952,7 @@ async function scanPage() {
       response.headers.get("content-type") || "";
 
     if (
+      !viaProxy &&
       !/text\/html|application\/xhtml\+xml/i
         .test(contentType)
     ) {
@@ -959,7 +1016,9 @@ async function scanPage() {
       "text/html"
     );
 
-    const base = response.url || url;
+    const base = viaProxy ?
+      url :
+      (response.url || url);
 
     parseVideoElements(doc, base);
     renderVideos();
