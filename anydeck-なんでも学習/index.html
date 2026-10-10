@@ -3399,7 +3399,7 @@
             <button type="button"
                     class="danger-button recovery-danger"
                     onclick="resetCorruptedData()">
-                データを消して最初から始める
+                単語帳とカードを初期化する
             </button>
         </div>
 
@@ -4834,12 +4834,22 @@
             const approved = confirm(
                 "日別の学習記録を読み込めません。\n\n" +
                 "日別の記録をリセットしますか？\n\n" +
-                "リセットされるのは、今日の回答数、直近7日間の記録、連続学習日数だけです。\n\n" +
-                "カード、単語帳、カードごとの学習履歴は消えません。\n\n" +
+                "リセットされるのは、今日の回答数、直近7日間の記録、現在の連続学習日数、残りのコインです。\n" +
+                "コインは、以後20問ごとに1枚もらえる状態へ戻ります。\n\n" +
+                "カード、単語帳、カードごとの学習履歴、街の発展、イベント図鑑、連続日数の最高記録は消えません。\n\n" +
                 "キャンセルすると元の日別記録を保護し、何も書き換えません。"
             );
 
             if (!approved) {
+                persistenceState.activityReadFailed = true;
+                markSaveResult("activity", false);
+                return false;
+            }
+
+            // 先に使用済みコインを0へ戻す。日別の記録を消すと獲得コインも0になるため、
+            // この順なら途中で失敗しても利用者が損をしない。
+            // 保存できなかった場合は、日別の記録を書き換えずに中止する。
+            if (!saveTownCoinsSpent(0)) {
                 persistenceState.activityReadFailed = true;
                 markSaveResult("activity", false);
                 return false;
@@ -4872,7 +4882,12 @@
         markSaveResult("activity", true);
 
         // 学習画面と、表示中なら実績画面の集計を更新する。
+        // ヘッダーの街ボタンのコインの印も、この中で更新される。
         renderStudyStats();
+
+        if (isTownVisible()) {
+            renderTownCoins();
+        }
 
         if (
             !document.getElementById("view-dashboard")
@@ -4983,10 +4998,12 @@
 
     function resetCorruptedData() {
         const approved = confirm(
-            "現在の保存データを削除して最初から始めます。\n\n" +
+            "単語帳とカードを初期化します。\n\n" +
+            "消えるもの：単語帳、カード、カードごとの学習履歴、単語帳の街の成長\n" +
+            "残るもの：日別の学習記録、コイン、イベント図鑑、連続日数の最高記録\n\n" +
             "復旧できる可能性を残すため、先に「復旧用データを書き出す」で元のデータを保存してください。\n\n" +
             "削除したデータは、この操作だけでは元に戻せません。\n\n" +
-            "本当に削除して最初から始めますか？"
+            "本当に初期化しますか？"
         );
 
         if (!approved) return;
@@ -9837,7 +9854,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     }
 
     function resolveCardSpeechLanguage(card, deck) {
-        // 語句に外国語の文字があれば、記録や設定より優先する。
+        // 1. 利用者が「自動」以外の言語を選んでいる場合は、その言語を最優先にする。
+        const settings = normalizeDeckTts(deck.tts);
+
+        if (settings.language !== "auto") {
+            return settings.language;
+        }
+
+        // 2. 語句に外国語の文字があれば、カードの記録より優先する。
+        // 語句が外国語の文字なのに記録が別の言語になっている場合、記録のほうが誤りであるため。
         // 日本語の読みが併記されていてもよいよう、カナを除いてから判定する。
         const scriptLanguage = inferSpeechLanguage(
             String(card.term || "").replace(/[\u3040-\u30ff]/g, "")
@@ -9846,6 +9871,8 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         if (scriptLanguage && scriptLanguage !== "ja-JP") {
             return scriptLanguage;
         }
+
+        // 3. カードに有効な記録があれば、それを使う。
         if (
             card.speechLanguage &&
             SPEECH_LANGUAGES.includes(card.speechLanguage)
@@ -9853,11 +9880,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
             return card.speechLanguage;
         }
 
-        const settings = normalizeDeckTts(deck.tts);
-
-        if (settings.language !== "auto") {
-            return settings.language;
-        }
+        // 4. どれにも当たらなければ、自動推測を使う。
 
         return inferSpeechLanguage(card.term) ||
             getDeckDominantLanguage(deck) ||
@@ -15766,8 +15789,12 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
     // カードの語句の言語コード（先頭部分）。記録がなければ文字から判定する。
     function getCardLanguageCode(card) {
+        // 記録のないアルファベットの語句も、特有の文字と既定から言語を判定する。
         const language =
-            card.speechLanguage || inferSpeechLanguage(card.term);
+            card.speechLanguage ||
+            inferSpeechLanguage(card.term) ||
+            detectLatinLanguage(card.term) ||
+            getDefaultSpeechLanguage(card.term);
 
         return language ? language.split("-")[0] : "";
     }
@@ -15784,11 +15811,22 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const baseCode = EXPLANATION_LANGUAGE_CODES[explanation] || "ja";
 
-        const languageCards = deck.cards.filter(card =>
-            getCardLanguageCode(card) &&
-            getCardLanguageCode(card) !== baseCode &&
-            card.exampleMeaning
-        );
+        // 利用者が読み上げ言語を選んでいる単語帳は、その言語で判定する。
+        const chosenLanguage = normalizeDeckTts(deck.tts).language;
+
+        const chosenCode = chosenLanguage !== "auto"
+            ? chosenLanguage.split("-")[0]
+            : "";
+
+        const languageCards = deck.cards.filter(card => {
+            const code = chosenCode || getCardLanguageCode(card);
+
+            return Boolean(
+                code &&
+                code !== baseCode &&
+                card.exampleMeaning
+            );
+        });
 
         return languageCards.length >= deck.cards.length / 2;
     }
