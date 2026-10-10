@@ -3380,6 +3380,7 @@
                 <p class="page-desc">
                     作成済みの単語帳を確認・選択・管理できます。
                     新しい教材は「教材を作る」から追加できます。
+                    不要な単語帳（サンプルを含む）は、各単語帳の「⋯」から削除できます。
                 </p>
             </div>
 
@@ -5059,10 +5060,18 @@
                     decks: normalizedDecks
                 };
 
+                // 新しく追加されたサンプルを、まだ受け取っていない場合だけ追加する。
+                if (ensureSampleDecks()) {
+                    saveData({ silent: true });
+                }
+
                 originalRecoveryData = null;
             } else {
                 // 保存キーが存在しない場合だけ初回起動として扱う。
                 appData = createStarterData();
+
+                // サンプルを30語にそろえ、旅行英語のサンプルも追加する。
+                ensureSampleDecks();
                 saveData();
             }
         } catch (error) {
@@ -7224,7 +7233,7 @@
         const knownLabel = document.getElementById("swipe-known-label");
         const unknownLabel = document.getElementById("swipe-unknown-label");
 
-        const directionThreshold = 10;
+        const directionThreshold = 8;
         const answerThreshold = 36;
 
         let pointerId = null;
@@ -7280,6 +7289,20 @@
             );
 
             return Math.sign(distance) * 180 * progress;
+        }
+
+        // 途中で打ち切られたスワイプを回答として扱ってよいかを判定する。
+        // 画面の端から始まった操作は、端末の「戻る」操作の可能性があるので除く。
+        function isDeliberateAnswerSwipe() {
+            const edge = 28;
+
+            const startedAtEdge =
+                startX <= edge ||
+                startX >= window.innerWidth - edge;
+
+            return !startedAtEdge &&
+                Math.abs(deltaX) >= answerThreshold * 1.5 &&
+                Math.abs(deltaX) > Math.abs(deltaY) * 1.5;
         }
 
         function getRevealThreshold() {
@@ -7408,11 +7431,17 @@
                 return;
             }
 
+            // 裏面では、はっきりした横スワイプだけを回答として確定する。
+            if (wasFlipped && isDeliberateAnswerSwipe()) {
+                finishAnswerDrag();
+                return;
+            }
+
             if (!wasFlipped) {
                 // 中断されても、十分に動かしていればめくりを確定する。
                 finishFlip(Math.abs(deltaX) >= getRevealThreshold());
             } else {
-                // 裏面で中断された場合は、動かした距離に関係なく回答しない。
+                // はっきりした横スワイプでない中断は、回答にしない。
                 // カードを元の位置へ戻す。
                 cardInteraction.phase = "flipping";
 
@@ -7639,6 +7668,17 @@
                 toggleCurrentCardFlip();
             }
         });
+
+        // 横スワイプと判定した後は、ブラウザに縦スクロールを始めさせない。
+        shell.addEventListener("touchmove", event => {
+            if (
+                pointerId !== null &&
+                gesture === "horizontal" &&
+                event.cancelable
+            ) {
+                event.preventDefault();
+            }
+        }, { passive: false });
 
         shell.addEventListener("pointercancel", event => {
             if (
@@ -9754,7 +9794,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
             : decks[0]?.id || null;
 
         return {
-            data: { decks },
+            data: {
+                decks,
+                // 受け取り済みのサンプルの記録。削除したサンプルを復活させないために引き継ぐ。
+                samplesAdded: Array.isArray(raw.data.samplesAdded)
+                    ? raw.data.samplesAdded.filter(
+                        key => typeof key === "string"
+                    )
+                    : []
+            },
             activity,
             activeDeckId: nextActive,
             extras: normalizeBackupExtras(raw.extras)
@@ -13159,6 +13207,162 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA
                 ⌂ 街を見る
             </button>
         `;
+    }
+
+    // ===== サンプルの単語帳 =====
+    // 各行は [語句, 読み方, 意味, 例文, 例文の訳]。
+    // create が false のサンプルは、同じ名前の単語帳がある場合だけ語句を補う。
+    // （削除または改名された単語帳を、勝手に作り直さないため。）
+    const SAMPLE_DECKS = [
+        {
+            key: "ai-basics-30",
+            title: "生成AI・IT 基礎",
+            category: "IT",
+            description: "生成AIやWebサービスを理解するための基礎用語",
+            create: false,
+            tags: ["AI", "IT"],
+            speechLanguage: "",
+            cards: [
+                ["LLM", "エルエルエム", "大量の文章から学習し、文章の理解や生成を行う大規模言語モデル。", "多くの対話型AIサービスは、LLMを使って動いている。", ""],
+                ["Token", "トークン", "AIが文章を処理するときの最小単位。料金や文字数上限の基準になる。", "長い文章ほどトークン数が増え、利用料金も上がる。", ""],
+                ["Hallucination", "ハルシネーション", "AIが事実ではない内容を、もっともらしく答えてしまう現象。", "存在しない論文を引用するのは、ハルシネーションの一例。", ""],
+                ["RAG", "ラグ", "外部の資料を検索し、その内容をもとにAIに回答させる仕組み。", "社内規程を検索して答えるチャットボットにRAGを使う。", ""],
+                ["Fine-tuning", "ファインチューニング", "学習済みのAIを追加のデータで調整し、特定の用途に合わせること。", "自社の問い合わせ履歴でファインチューニングする。", ""],
+                ["Context Window", "コンテキストウィンドウ", "AIが一度に読み取れる文章量の上限。", "長い資料は、コンテキストウィンドウに収まらないことがある。", ""],
+                ["Multimodal", "マルチモーダル", "文章・画像・音声など、複数の種類の情報を扱えること。", "マルチモーダルAIは、写真を見て内容を説明できる。", ""],
+                ["AI Agent", "エーアイエージェント", "目標に向けて、手順を自分で考えて作業を進めるAI。", "AIエージェントに、資料集めから要約までを任せる。", ""],
+                ["Machine Learning", "マシンラーニング（機械学習）", "データから規則を学び、予測や分類を行う技術。", "過去の販売データから、来月の需要を機械学習で予測する。", ""],
+                ["Deep Learning", "ディープラーニング（深層学習）", "多層のニューラルネットワークを使う機械学習の手法。", "画像認識の精度は、ディープラーニングで大きく向上した。", ""],
+                ["Neural Network", "ニューラルネットワーク", "脳の神経回路をまねた、AIの計算の仕組み。", "入力から出力までを、いくつもの層で順に計算する。", ""],
+                ["Training Data", "トレーニングデータ（学習データ）", "AIを学習させるために使うデータ。", "学習データに偏りがあると、AIの答えも偏る。", ""],
+                ["Inference", "インファレンス（推論）", "学習済みのAIが、入力に対して答えを出す処理。", "質問を送ってから回答が返るまでが、推論にあたる。", ""],
+                ["Temperature", "テンパラチャー", "AIの回答のばらつきを調整する設定値。", "値を低くすると、毎回ほぼ同じ回答になりやすい。", ""],
+                ["System Prompt", "システムプロンプト", "AIの役割や振る舞いを、あらかじめ指定する指示文。", "「あなたは丁寧な翻訳者です」と最初に指定する。", ""],
+                ["Chatbot", "チャットボット", "会話形式で質問に答えるプログラム。", "問い合わせ窓口にチャットボットを導入する。", ""],
+                ["Cloud", "クラウド", "インターネット経由でサーバーやソフトを利用する仕組み。", "写真をクラウドに保存して、別の端末から見る。", ""],
+                ["Server", "サーバー", "他のコンピューターに機能やデータを提供するコンピューター。", "Webサイトのデータは、サーバーに置かれている。", ""],
+                ["Database", "データベース", "大量のデータを整理して保存し、検索できるようにした仕組み。", "顧客情報をデータベースで管理する。", ""],
+                ["Backend", "バックエンド", "利用者から見えない、サーバー側の処理やデータ管理の部分。", "ログインの確認は、バックエンドで行われる。", ""],
+                ["Browser", "ブラウザ", "Webサイトを表示するためのソフト。", "ChromeやSafariはブラウザである。", ""],
+                ["Cache", "キャッシュ", "一度使ったデータを一時的に保存し、次回の表示を速くする仕組み。", "表示がおかしいときは、キャッシュを削除してみる。", ""],
+                ["Open Source", "オープンソース", "設計図にあたるソースコードが公開されているソフトウェア。", "オープンソースのソフトは、誰でも中身を確認できる。", ""],
+                ["Bug", "バグ", "プログラムの誤りや不具合。", "ボタンを押しても反応しないバグを修正する。", ""]
+            ]
+        },
+        {
+            key: "travel-english-30",
+            title: "旅行で役立つ英語",
+            category: "英語",
+            description: "空港・ホテル・食事・買い物・困ったときに使える表現",
+            create: true,
+            tags: ["旅行", "英語"],
+            speechLanguage: "en-US",
+            cards: [
+                ["Excuse me.", "", "すみません。", "Excuse me, where is the restroom?", "すみません、お手洗いはどこですか。"],
+                ["Where is ...?", "", "…はどこですか。", "Where is the nearest station?", "一番近い駅はどこですか。"],
+                ["How much is this?", "", "これはいくらですか。", "How much is this T-shirt?", "このTシャツはいくらですか。"],
+                ["I'd like ...", "", "…をお願いします。", "I'd like a coffee, please.", "コーヒーをお願いします。"],
+                ["Can I have the check, please?", "", "お会計をお願いします。", "Excuse me, can I have the check, please?", "すみません、お会計をお願いします。"],
+                ["Do you accept credit cards?", "", "クレジットカードは使えますか。", "Do you accept credit cards here?", "ここでクレジットカードは使えますか。"],
+                ["I have a reservation.", "", "予約しています。", "I have a reservation under Tanaka.", "田中の名前で予約しています。"],
+                ["check in", "", "チェックインする", "I'd like to check in, please.", "チェックインをお願いします。"],
+                ["check out", "", "チェックアウトする", "What time do I need to check out?", "何時までにチェックアウトすればいいですか。"],
+                ["boarding pass", "", "搭乗券", "May I see your boarding pass?", "搭乗券を拝見できますか。"],
+                ["gate", "", "搭乗口", "Which gate does my flight leave from?", "私の便は何番搭乗口から出ますか。"],
+                ["baggage claim", "", "手荷物受取所", "Where is the baggage claim?", "手荷物受取所はどこですか。"],
+                ["customs", "", "税関", "Do I need to go through customs?", "税関を通る必要がありますか。"],
+                ["one-way ticket", "", "片道切符", "A one-way ticket to Boston, please.", "ボストンまで片道切符を1枚お願いします。"],
+                ["round-trip ticket", "", "往復切符", "How much is a round-trip ticket?", "往復切符はいくらですか。"],
+                ["transfer", "", "乗り換える", "Where do I transfer to the Red Line?", "レッドラインにはどこで乗り換えますか。"],
+                ["Could you take our picture?", "", "写真を撮っていただけますか。", "Excuse me, could you take our picture?", "すみません、写真を撮っていただけますか。"],
+                ["I'm lost.", "", "道に迷いました。", "I'm lost. Could you help me?", "道に迷いました。助けていただけますか。"],
+                ["How do I get to ...?", "", "…へはどう行けばいいですか。", "How do I get to the museum?", "美術館へはどう行けばいいですか。"],
+                ["Is it far from here?", "", "ここから遠いですか。", "Is the hotel far from here?", "ホテルはここから遠いですか。"],
+                ["What do you recommend?", "", "おすすめは何ですか。", "What do you recommend for dessert?", "デザートのおすすめは何ですか。"],
+                ["I'm allergic to ...", "", "…にアレルギーがあります。", "I'm allergic to shrimp.", "エビにアレルギーがあります。"],
+                ["to go", "", "持ち帰りで", "Can I get this to go?", "これを持ち帰りにできますか。"],
+                ["Can I try this on?", "", "試着してもいいですか。", "Can I try this jacket on?", "このジャケットを試着してもいいですか。"],
+                ["Do you have a smaller size?", "", "もっと小さいサイズはありますか。", "Do you have this in a smaller size?", "これのもっと小さいサイズはありますか。"],
+                ["Just looking, thank you.", "", "見ているだけです。ありがとう。", "I'm just looking, thank you.", "見ているだけです。ありがとうございます。"],
+                ["Could you speak more slowly?", "", "もう少しゆっくり話していただけますか。", "Sorry, could you speak more slowly?", "すみません、もう少しゆっくり話していただけますか。"],
+                ["pharmacy", "", "薬局", "Is there a pharmacy near here?", "この近くに薬局はありますか。"],
+                ["I need a doctor.", "", "医者に診てもらいたいです。", "I feel sick. I need a doctor.", "気分が悪いです。医者に診てもらいたいです。"],
+                ["I lost my passport.", "", "パスポートをなくしました。", "I lost my passport. What should I do?", "パスポートをなくしました。どうすればいいですか。"]
+            ]
+        }
+    ];
+
+    // まだ受け取っていないサンプルを追加する。変更があればtrueを返す。
+    // 受け取り済みのサンプルは記録しておき、削除しても次回の起動で復活させない。
+    // 読み込み処理の中から呼ぶため、失敗しても例外を外へ出さない。
+    function ensureSampleDecks() {
+        try {
+            const done = Array.isArray(appData.samplesAdded)
+                ? appData.samplesAdded.filter(
+                    key => typeof key === "string"
+                )
+                : [];
+
+            let changed = false;
+
+            SAMPLE_DECKS.forEach(sample => {
+                if (done.includes(sample.key)) return;
+
+                let deck = appData.decks.find(
+                    item => item.title === sample.title
+                );
+
+                if (!deck && sample.create) {
+                    deck = {
+                        id: uid(),
+                        title: sample.title,
+                        category: sample.category,
+                        description: sample.description,
+                        createdAt: new Date().toISOString(),
+                        cards: []
+                    };
+
+                    appData.decks.push(deck);
+                }
+
+                if (deck) {
+                    // すでにある語句は追加せず、学習履歴もそのまま残す。
+                    const existingKeys = new Set(
+                        deck.cards.map(card => normalizeTermKey(card.term))
+                    );
+
+                    sample.cards.forEach(row => {
+                        const key = normalizeTermKey(row[0]);
+
+                        if (existingKeys.has(key)) return;
+
+                        existingKeys.add(key);
+
+                        deck.cards.push(defaultCard({
+                            term: row[0],
+                            reading: row[1],
+                            meaning: row[2],
+                            example: row[3],
+                            exampleMeaning: row[4],
+                            tags: sample.tags,
+                            speechLanguage: sample.speechLanguage
+                        }));
+                    });
+                }
+
+                done.push(sample.key);
+                changed = true;
+            });
+
+            if (changed) {
+                appData.samplesAdded = done;
+            }
+
+            return changed;
+        } catch (error) {
+            console.warn("Sample Deck Error:", error);
+            return false;
+        }
     }
 
     function init() {
