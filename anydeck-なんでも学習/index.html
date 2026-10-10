@@ -747,6 +747,16 @@
             transform: scale(.97);
         }
 
+        /* 読み上げている文は青くし、いま読んでいる語は背景で強調する。 */
+        #view-study .tts-reading {
+            color: var(--blue);
+        }
+
+        #view-study .tts-word {
+            border-radius: 4px;
+            background: var(--blue-soft-2);
+        }
+
         .tts-button.speaking {
             background: var(--blue);
             color: white;
@@ -6932,7 +6942,7 @@
                     </div>
                     ${
                         card.example
-                            ? `<div class="example-main" dir="auto">${escapeHtml(card.example)}</div>${exampleTtsButtonHtml}`
+                            ? `<div class="example-main" dir="auto" data-tts-text="example">${escapeHtml(card.example)}</div>${exampleTtsButtonHtml}`
                             : ""
                     }
                     ${
@@ -6985,7 +6995,7 @@
                                         class="${reverseStudy
                                             ? "answer-meaning" + getMeaningDisplayClass(card.meaning)
                                             : "card-term"}"
-                                        dir="auto">${escapeHtml(reverseStudy ? card.meaning : card.term)}</h3>
+                                        dir="auto"${reverseStudy ? "" : ' data-tts-text="term"'}>${escapeHtml(reverseStudy ? card.meaning : card.term)}</h3>
 
                                     ${
                                         showTtsButton
@@ -7050,7 +7060,7 @@
                                     
 
                                     <div
-                                        class="answer-question"
+                                        class="answer-question"${reverseStudy ? "" : ' data-tts-text="term"'}
                                         dir="auto">
                                         ${escapeHtml(reverseStudy ? card.meaning : card.term)}
                                     </div>
@@ -7090,7 +7100,7 @@
                                         class="answer-meaning${reverseStudy
                                             ? ""
                                             : getMeaningDisplayClass(card.meaning)}"
-                                        dir="auto">${escapeHtml(reverseStudy ? card.term : card.meaning)}</h3>
+                                        dir="auto"${reverseStudy ? ' data-tts-text="term"' : ""}>${escapeHtml(reverseStudy ? card.term : card.meaning)}</h3>
 
                                     ${reverseAnswerExtras}
 
@@ -9437,6 +9447,86 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         splash.setAttribute("aria-hidden", "false");
     }
 
+    // ===== 読み上げ中の文字の強調 =====
+    // 強調している要素と、その元の文字列。
+    const ttsHighlight = {
+        elements: [],
+        text: ""
+    };
+
+    // 読み上げる文（語句または例文）を表示している要素を青くする。
+    function startTtsHighlight(kind, text) {
+        clearTtsHighlight();
+
+        ttsHighlight.text = text;
+
+        ttsHighlight.elements = Array.from(
+            document.querySelectorAll(
+                `#study-container [data-tts-text="${kind}"]`
+            )
+        );
+
+        ttsHighlight.elements.forEach(element => {
+            // 読み上げ位置と文字の位置を合わせるため、前後の空白を除いた文にそろえる。
+            element.textContent = text;
+            element.classList.add("tts-reading");
+        });
+    }
+
+    // いま読んでいる語に背景を付ける。位置が届かない端末では何もしない。
+    function highlightTtsWord(charIndex, charLength) {
+        const text = ttsHighlight.text;
+
+        if (
+            !ttsHighlight.elements.length ||
+            !Number.isFinite(charIndex) ||
+            charIndex < 0 ||
+            charIndex >= text.length
+        ) {
+            return;
+        }
+
+        let length = Number(charLength);
+
+        if (!Number.isFinite(length) || length <= 0) {
+            // 長さが届かない端末では、次の空白までを1語とみなす。
+            // 空白のない文（日本語など）では語を区切れないので、強調しない。
+            if (!/\s/.test(text)) return;
+
+            const match = text.slice(charIndex).match(/^\S+/);
+
+            if (!match) return;
+
+            length = match[0].length;
+        }
+
+        const end = Math.min(text.length, charIndex + length);
+
+        ttsHighlight.elements.forEach(element => {
+            const word = document.createElement("span");
+
+            word.className = "tts-word";
+            word.textContent = text.slice(charIndex, end);
+
+            element.replaceChildren(
+                document.createTextNode(text.slice(0, charIndex)),
+                word,
+                document.createTextNode(text.slice(end))
+            );
+        });
+    }
+
+    // 強調を外し、元の表示へ戻す。
+    function clearTtsHighlight() {
+        ttsHighlight.elements.forEach(element => {
+            element.classList.remove("tts-reading");
+            element.textContent = ttsHighlight.text;
+        });
+
+        ttsHighlight.elements = [];
+        ttsHighlight.text = "";
+    }
+
     function stopCardSpeech() {
         speechRuntime.token++;
 
@@ -9449,6 +9539,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         }
 
         speechRuntime.utterance = null;
+
+        // 途中で止めたときも、文字の強調を外す。
+        clearTtsHighlight();
 
         document.querySelectorAll(".tts-button.speaking")
             .forEach(button => {
@@ -9679,6 +9772,25 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const utterance = new SpeechSynthesisUtterance(speechText);
 
+        // 読み上げている文を青くする。
+        startTtsHighlight(
+            target === "example" && card.example ? "example" : "term",
+            speechText
+        );
+
+        // 端末が読み上げ位置を知らせてくれる場合は、いま読んでいる語も強調する。
+        utterance.onboundary = boundaryEvent => {
+            if (
+                token === speechRuntime.token &&
+                (!boundaryEvent.name || boundaryEvent.name === "word")
+            ) {
+                highlightTtsWord(
+                    boundaryEvent.charIndex,
+                    boundaryEvent.charLength
+                );
+            }
+        };
+
         utterance.lang = language;
         if (voice) {
             utterance.voice = voice;
@@ -9699,6 +9811,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const finish = () => {
             if (token !== speechRuntime.token) return;
+
+            // 読み終わったら、文字の強調を外す。
+            clearTtsHighlight();
 
             speechRuntime.utterance = null;
 
