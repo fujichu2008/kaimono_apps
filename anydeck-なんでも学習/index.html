@@ -3614,7 +3614,7 @@
             <div class="page-heading">
                 <h2 class="page-title">教材を作る</h2>
                 <p class="page-desc">
-                    単語帳を選んでAIにお願いするだけ。
+                    依頼文をコピー → 外部AIで生成 → 回答を取り込み、の3ステップで教材を作ります。
                     新しい単語帳もここから作成できます。
                 </p>
             </div>
@@ -3704,9 +3704,8 @@
                 <div id="ai-copy-guide" class="next-step-box hidden" aria-live="polite">
                     <h3 class="next-step-title">AIへの依頼文をコピーしました</h3>
                     <p class="next-step-text">
-                        ChatGPTなどの外部AIへ依頼文を貼り付けてください。
-                        AIが生成したJSON回答全体をコピーしたら、
-                        このアプリへ戻り、上の「③ AIの回答を取り込む」を押してください。
+                        次は、外部AIに貼り付けて送信してください。
+                        回答をコピーしたら、上の「③ AIの回答を取り込む」を押します。
                     </p>
                 </div>
 
@@ -4426,6 +4425,50 @@
         <button class="primary-button" onclick="importCardsFromTextArea()">
             JSONを読み込む
         </button>
+    </div>
+</div>
+
+<!-- Manual Copy Modal -->
+<div id="manual-copy-modal" class="modal-backdrop hidden" onclick="if(event.target===this) closeModal('manual-copy-modal')">
+    <div class="modal-sheet">
+        <div class="modal-header">
+            <div>
+                <h3 class="modal-title">依頼文を手動でコピー</h3>
+                <p class="modal-desc">
+                    自動でコピーできませんでした。下の依頼文をコピーしてください。
+                </p>
+            </div>
+
+            <button class="close-button" type="button" aria-label="閉じる" onclick="closeModal('manual-copy-modal')">×</button>
+        </div>
+
+        <textarea
+            id="manual-copy-text"
+            class="textarea"
+            style="min-height:200px;"
+            readonly
+            aria-label="AIへの依頼文"></textarea>
+
+        <div
+            id="manual-copy-status"
+            class="creation-setting-note"
+            role="status"
+            aria-live="polite"></div>
+
+        <div class="button-stack" style="margin-top:12px;">
+            <button class="primary-button" type="button" onclick="selectManualCopyText()">
+                全文を選択
+            </button>
+
+            <button class="secondary-button" type="button" onclick="closeModal('manual-copy-modal')">
+                閉じる
+            </button>
+        </div>
+
+        <p class="modal-desc" style="margin-top:12px;">
+            コピーできたら外部AIへ貼り付けて送信し、回答をコピーしてから
+            「③ AIの回答を取り込む」を押してください。
+        </p>
     </div>
 </div>
 
@@ -6063,18 +6106,25 @@
         }
     }
 
-    function openAiForDeck(deckId) {
-        if (!appData.decks.some(deck => deck.id === deckId)) return;
+    // 学習中の単語帳が別の単語帳に変わったときに、教材作成画面を合わせる。
+    // テーマを新しい単語帳の名前にし、古いコピー案内と取り込み結果を消す。
+    function syncCreationViewForDeckChange() {
+        const topicInput = document.getElementById("ai-topic");
 
-        selectDeck(deckId, false);
-
-        const topic = document.getElementById("ai-topic");
-
-        if (topic) {
-            topic.value = getActiveDeck()?.title || "";
+        if (topicInput) {
+            topicInput.value = getActiveDeck()?.title || "";
         }
 
         resetAiWorkflow();
+    }
+
+    function openAiForDeck(deckId) {
+        if (!appData.decks.some(deck => deck.id === deckId)) return;
+
+        // テーマと作成案内の同期は、selectDeck が単語帳の切り替え時だけ行う。
+        // 同じ単語帳を開いた場合は、入力済みのテーマと作成ステップを維持する。
+        selectDeck(deckId, false);
+
         showView("ai");
     }
 
@@ -6444,8 +6494,20 @@
             currentStudyMode = getDefaultStudyMode(getActiveDeck());
             updateStudyModeTabs();
         }
+        // 別の単語帳へ切り替えたとき（または追加先がずれていたとき）だけ、設定を読み直す。
+        // 同じ単語帳の選び直しでは、取り込み方式を「追加」へ戻さない。
+        const creationTargetChanged = creationTargetDeckId !== deckId;
+
         creationTargetDeckId = deckId;
-        loadDeckCreationSettings();
+
+        if (deckChanged || creationTargetChanged) {
+            loadDeckCreationSettings();
+        }
+
+        // テーマと作成案内を合わせるのは、単語帳が実際に変わったときだけ。
+        if (deckChanged) {
+            syncCreationViewForDeckChange();
+        }
         renderCreationDeckOptions();
         updateAiTargetDeck();
         saveActiveDeck();
@@ -6482,6 +6544,11 @@
 
         if (activeDeckId === deckId) {
             activeDeckId = appData.decks[0]?.id || null;
+
+            // 教材作成画面の追加先・設定・テーマも、新しい単語帳に合わせる。
+            creationTargetDeckId = activeDeckId;
+            loadDeckCreationSettings();
+            syncCreationViewForDeckChange();
 
             // 学習中のデッキが変わるため、復習対象の有無でモードを選び直す。
             currentStudyMode = getDefaultStudyMode(getActiveDeck());
@@ -8181,16 +8248,8 @@
     function selectCreationDeck(deckId) {
         if (!appData.decks.some(deck => deck.id === deckId)) return;
 
-        const changed = activeDeckId !== deckId;
-
+        // テーマと作成案内の同期は、selectDeck が単語帳の切り替え時だけ行う。
         selectDeck(deckId, false);
-
-        if (changed) {
-            document.getElementById("ai-topic").value =
-                getActiveDeck()?.title || "";
-
-            resetAiWorkflow();
-        }
 
         renderStudy();
         updateAiTargetDeck();
@@ -8577,8 +8636,15 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
     async function copyAiPrompt() {
         try {
+            // 依頼文は1回だけ生成し、自動コピーと手動コピーの両方で同じ文字列を使う。
             const promptText = buildAiPrompt();
-            await copyText(promptText);
+            const copied = await copyText(promptText);
+
+            // 自動コピーできなかった場合は、成功の案内を出さずに手動コピーへ切り替える。
+            if (!copied) {
+                openManualCopyModal(promptText);
+                return;
+            }
 
             showAiCopyGuide();
             showToast("AIへのお願いをコピーしました。");
@@ -8588,27 +8654,120 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         }
     }
 
+    // コピーできたらtrue、できなければfalseを返す。例外は外へ出さない。
     async function copyText(text) {
+        const value = String(text ?? "");
+
         if (
             navigator.clipboard &&
+            typeof navigator.clipboard.writeText === "function" &&
             window.isSecureContext
         ) {
-            await navigator.clipboard.writeText(text);
+            try {
+                await navigator.clipboard.writeText(value);
+                return true;
+            } catch (error) {
+                // 拒否された場合は、下の代替処理を試す。
+                console.warn("Clipboard Write Error:", error);
+            }
+        }
+
+        const previousFocus = document.activeElement;
+        const tempArea = document.createElement("textarea");
+
+        tempArea.value = value;
+        tempArea.setAttribute("readonly", "");
+        tempArea.setAttribute("aria-hidden", "true");
+        tempArea.style.position = "fixed";
+        tempArea.style.top = "0";
+        tempArea.style.left = "-99999px";
+
+        let copied = false;
+
+        try {
+            document.body.appendChild(tempArea);
+            tempArea.focus({ preventScroll: true });
+            tempArea.setSelectionRange(0, tempArea.value.length);
+
+            // 戻り値がtrueのときだけ成功として扱う。
+            copied = document.execCommand("copy") === true;
+        } catch (error) {
+            console.warn("Fallback Copy Error:", error);
+            copied = false;
+        } finally {
+            // 成功・失敗・例外にかかわらず、一時的な入力欄を片付ける。
+            tempArea.remove();
+
+            if (
+                previousFocus &&
+                typeof previousFocus.focus === "function"
+            ) {
+                try {
+                    previousFocus.focus({ preventScroll: true });
+                } catch (focusError) {
+                    // フォーカスを戻せなくても、コピーの結果には影響しない。
+                }
+            }
+        }
+
+        return copied;
+    }
+
+    // 自動コピーできなかったときに、生成済みの依頼文をそのまま表示する。
+    // 開いただけではコピー完了として扱わない。
+    function openManualCopyModal(text) {
+        const area = document.getElementById("manual-copy-text");
+        const status = document.getElementById("manual-copy-status");
+
+        if (!area) {
+            showToast("依頼文をコピーできませんでした。もう一度お試しください。");
             return;
         }
 
-        const textarea =
-            document.createElement("textarea");
+        // valueで設定し、HTMLとしては解釈させない。
+        area.value = String(text ?? "");
 
-        textarea.value = text;
-        textarea.style.position = "fixed";
-        textarea.style.left = "-99999px";
+        if (status) {
+            status.textContent = "";
+        }
 
-        document.body.appendChild(textarea);
-        textarea.select();
+        openModal("manual-copy-modal");
+        area.scrollTop = 0;
+    }
 
-        document.execCommand("copy");
-        textarea.remove();
+    // 全文を選択するだけで、コピー完了としては扱わない。
+    function selectManualCopyText() {
+        const area = document.getElementById("manual-copy-text");
+        const status = document.getElementById("manual-copy-status");
+
+        if (!area) return;
+
+        try {
+            // iOSではselect()だけでは選択されない場合があるため、範囲を明示する。
+            area.focus();
+            area.setSelectionRange(0, area.value.length);
+        } catch (error) {
+            console.warn("Manual Copy Select Error:", error);
+        }
+
+        if (status) {
+            status.textContent =
+                "選択した文章を端末のコピー操作でコピーしてください。";
+        }
+    }
+
+    // 手動コピー用モーダルを閉じたときに、表示していた依頼文を消す。
+    function clearManualCopyModal() {
+        const area = document.getElementById("manual-copy-text");
+        const status = document.getElementById("manual-copy-status");
+
+        if (area) {
+            area.value = "";
+        }
+
+        if (status) {
+            status.textContent = "";
+        }
     }
 
     function normalizeJsonText(raw) {
@@ -11239,6 +11398,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
     // ===== モーダル間の戻り先 =====
     function handleModalClosed(id) {
+        // 手動コピー用モーダルは、閉じるたびに内容を空にする。
+        if (id === "manual-copy-modal") {
+            clearManualCopyModal();
+        }
+
         if (cardManagerState.returnTo !== id) return;
 
         cardManagerState.returnTo = null;
