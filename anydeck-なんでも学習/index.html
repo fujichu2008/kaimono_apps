@@ -8771,6 +8771,9 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
     }
 
     function normalizeJsonText(raw) {
+        // 前回の取り込みの補正結果を持ち越さない。
+        lastImportRepaired = false;
+
         const original = String(raw || "").replace(/^\uFEFF/, "").trim();
 
         if (!original) {
@@ -8810,16 +8813,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         const extracted = collectImportJsonCandidates(source);
 
-        if (!extracted.length) {
-            throw new Error(
-                "カード用JSON配列を見つけられませんでした。AIの回答全体をコピーし、最後の閉じ括弧まで含まれているか確認してください。"
-            );
-        }
-
         const valid = [];
         const repaired = [];
 
-        for (const candidate of extracted) {
+        // 候補を、そのままの形、補正した形の順に確かめる。
+        const examineCandidate = candidate => {
             try {
                 const parsed = JSON.parse(candidate);
 
@@ -8829,28 +8827,47 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
                     valid.push(candidate);
                 }
 
-                continue;
+                return;
             } catch (error) {
-                if (error.importValidationError) continue;
+                if (error.importValidationError) return;
             }
 
-            const fixed = repairImportJsonSyntax(candidate);
+            for (const fixed of getImportRepairCandidates(candidate)) {
+                try {
+                    const parsed = JSON.parse(fixed);
+                    validateImportCardArray(parsed);
 
-            if (!fixed || fixed === candidate) continue;
+                    if (!repaired.some(item => item.text === fixed)) {
+                        repaired.push({
+                            text: fixed,
+                            original: candidate
+                        });
+                    }
 
-            try {
-                const parsed = JSON.parse(fixed);
-                validateImportCardArray(parsed);
-
-                if (!repaired.some(item => item.text === fixed)) {
-                    repaired.push({
-                        text: fixed,
-                        original: candidate
-                    });
+                    // 最初に通った補正だけを採用する。
+                    return;
+                } catch (error) {
+                    // 内容が不正な補正は採用せず、次の補正を試す。
                 }
-            } catch (error) {
-                // 内容が不正な候補は採用しない。
             }
+        };
+
+        extracted.forEach(examineCandidate);
+
+        // 引用符の崩れで範囲を切り出せなかった場合は、最初の「[{」から最後の「]」までで試す。
+        if (!valid.length && !repaired.length) {
+            const whole = getOuterImportArrayText(source);
+
+            if (whole && !extracted.includes(whole)) {
+                extracted.push(whole);
+                examineCandidate(whole);
+            }
+        }
+
+        if (!extracted.length) {
+            throw new Error(
+                "カード用JSON配列を見つけられませんでした。AIの回答全体をコピーし、最後の閉じ括弧まで含まれているか確認してください。"
+            );
         }
 
         if (valid.length > 1) {
@@ -8872,6 +8889,7 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         if (repaired.length === 1) {
             // 構文エラーを補正できた場合は、確認せずにそのまま取り込む。
+            lastImportRepaired = true;
             return repaired[0].text;
         }
 
@@ -9088,6 +9106,309 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
 
         // 閉じていない文字列を推測で補完しない。
         if (quote || escaped) return "";
+
+        return result;
+    }
+
+    // 取り込みで想定するカードの項目名。崩れた引用符の補正で、本物の項目名かを見分けるのに使う。
+    const IMPORT_CARD_KEYS = new Set([
+        "term",
+        "reading",
+        "meaning",
+        "note",
+        "example",
+        "exampleMeaning",
+        "tags",
+        "speechLanguage"
+    ]);
+
+    // 文字列の区切りとして扱う引用符（半角・全角・スマートクオート）。
+    const IMPORT_QUOTE_CHARS = "\"“”＂";
+
+    // 直近の取り込みで、JSONの崩れを自動補正したかどうか。
+    let lastImportRepaired = false;
+
+    function isImportQuoteChar(char) {
+        return Boolean(char) && IMPORT_QUOTE_CHARS.includes(char);
+    }
+
+    // 最初の「[{」から最後の「]」までを切り出す。範囲の判定が崩れたときの予備の候補。
+    function getOuterImportArrayText(source) {
+        const match = /\[\s*\{/.exec(source);
+        const end = source.lastIndexOf("]");
+
+        if (!match || end <= match.index) return "";
+
+        return source.slice(match.index, end + 1).trim();
+    }
+
+    // 補正のしかたを、安全なものから順に並べて返す。
+    function getImportRepairCandidates(candidate) {
+        const results = [];
+
+        [
+            repairImportJsonSyntax(candidate),
+            repairImportJsonQuotes(candidate, "known"),
+            repairImportJsonQuotes(candidate, "loose")
+        ].forEach(fixed => {
+            if (fixed && fixed !== candidate && !results.includes(fixed)) {
+                results.push(fixed);
+            }
+        });
+
+        return results;
+    }
+
+    // 文字列中のエスケープされていない引用符を補正する。
+    // 画面からのコピーで「\"」の「\」が消えた場合や、AIが引用符をエスケープし忘れた場合に使う。
+    // 引用符の直後が「:」「,」「}」「]」と次の項目名のように続くときだけ、文字列の終わりとみなす。
+    // keyMode が "known" のときは、次の項目名がカードの項目名の場合だけを区切りとみなす。
+    // あわせて、カンマの抜け・余分なカンマ・不正な「\」・文字列内の改行も補正する。
+    // 補正できない場合は空文字を返す。
+    function repairImportJsonQuotes(source, keyMode) {
+        const length = source.length;
+
+        const skipSpace = index => {
+            while (index < length && /\s/.test(source[index])) {
+                index++;
+            }
+
+            return index;
+        };
+
+        // index の位置から「"項目名":」が始まるかを調べる。
+        const startsKeyAt = index => {
+            if (!isImportQuoteChar(source[index])) return false;
+
+            let end = index + 1;
+
+            while (
+                end < length &&
+                end - index <= 40 &&
+                !isImportQuoteChar(source[end])
+            ) {
+                end++;
+            }
+
+            if (!isImportQuoteChar(source[end])) return false;
+            if (source[skipSpace(end + 1)] !== ":") return false;
+
+            const name = source.slice(index + 1, end);
+
+            return keyMode === "known"
+                ? IMPORT_CARD_KEYS.has(name)
+                : /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+        };
+
+        // index の引用符が、文字列の終わりとして自然かを調べる。
+        const closesString = (index, role) => {
+            const next = skipSpace(index + 1);
+            const char = source[next];
+
+            if (next >= length) return true;
+
+            if (role === "key") return char === ":";
+
+            if (role === "array") {
+                // カンマが抜けたまま次の要素が始まっている場合も、区切りとみなす。
+                if (char === "]" || isImportQuoteChar(char)) return true;
+                if (char !== ",") return false;
+
+                const after = source[skipSpace(next + 1)];
+
+                return isImportQuoteChar(after) || after === "]";
+            }
+
+            if (char === "}") {
+                const after = skipSpace(next + 1);
+
+                return after >= length || /[,\]}{]/.test(source[after]);
+            }
+
+            if (char === ",") {
+                const after = skipSpace(next + 1);
+
+                // 余分なカンマの後に閉じ括弧が続く場合も、区切りとみなす。
+                return source[after] === "}" ||
+                    source[after] === "]" ||
+                    startsKeyAt(after);
+            }
+
+            // カンマが抜けたまま次の項目が始まっている場合。
+            return startsKeyAt(next);
+        };
+
+        const stack = [];
+        const top = () => stack[stack.length - 1];
+
+        const finishValue = () => {
+            const container = top();
+
+            if (container) {
+                container.state = "after";
+            }
+        };
+
+        // 値の直後にカンマなしで次の要素が始まった場合は、カンマを補う。
+        const insertMissingComma = () => {
+            const container = top();
+
+            if (container && container.state === "after") {
+                result += ",";
+                container.state = container.type === "{" ? "key" : "value";
+            }
+        };
+
+        let result = "";
+        let inString = false;
+        let role = "value";
+
+        for (let i = 0; i < length; i++) {
+            const char = source[i];
+
+            if (inString) {
+                if (char === "\\") {
+                    const next = source[i + 1];
+                    const validUnicode =
+                        next === "u" &&
+                        /^[0-9a-fA-F]{4}$/.test(source.slice(i + 2, i + 6));
+
+                    if (
+                        next !== undefined &&
+                        ("\"\\/bfnrt".includes(next) || validUnicode)
+                    ) {
+                        result += char + next;
+                        i++;
+                    } else {
+                        // JSONで使えない「\」は、文字としての「\」にする。
+                        result += "\\\\";
+                    }
+
+                    continue;
+                }
+
+                if (isImportQuoteChar(char)) {
+                    if (closesString(i, role)) {
+                        result += '"';
+                        inString = false;
+
+                        if (role !== "key") {
+                            finishValue();
+                        }
+                    } else {
+                        // 文中の引用符。半角は文字としてエスケープし、全角などはそのまま残す。
+                        result += char === '"' ? '\\"' : char;
+                    }
+
+                    continue;
+                }
+
+                const code = char.charCodeAt(0);
+
+                if (char === "\n") {
+                    result += "\\n";
+                } else if (char === "\r") {
+                    result += "\\r";
+                } else if (char === "\t") {
+                    result += "\\t";
+                } else if (code < 32) {
+                    result += "\\u" + code.toString(16).padStart(4, "0");
+                } else {
+                    result += char;
+                }
+
+                continue;
+            }
+
+            if (isImportQuoteChar(char)) {
+                insertMissingComma();
+
+                const container = top();
+
+                role = !container
+                    ? "value"
+                    : container.type === "["
+                        ? "array"
+                        : container.state === "key"
+                            ? "key"
+                            : "value";
+
+                inString = true;
+                result += '"';
+                continue;
+            }
+
+            if (char === "{" || char === "[") {
+                insertMissingComma();
+
+                stack.push({
+                    type: char,
+                    state: char === "{" ? "key" : "value"
+                });
+
+                result += char;
+                continue;
+            }
+
+            if (char === "}" || char === "]") {
+                const container = stack.pop();
+
+                if (
+                    !container ||
+                    (char === "}") !== (container.type === "{")
+                ) {
+                    return "";
+                }
+
+                // 閉じ括弧の直前の余分なカンマを除く。
+                result = result.replace(/,\s*$/, "");
+                result += char;
+                finishValue();
+                continue;
+            }
+
+            if (char === ":") {
+                const container = top();
+
+                if (container && container.type === "{") {
+                    container.state = "value";
+                }
+
+                result += char;
+                continue;
+            }
+
+            if (char === ",") {
+                const container = top();
+
+                // 値のない位置のカンマ（連続したカンマなど）は除く。
+                if (container && container.state !== "after") {
+                    continue;
+                }
+
+                if (container) {
+                    container.state =
+                        container.type === "{" ? "key" : "value";
+                }
+
+                result += char;
+                continue;
+            }
+
+            if (!/\s/.test(char)) {
+                // 数値・true・false・null などの値。
+                const container = top();
+
+                if (container && container.state === "value") {
+                    container.state = "after";
+                }
+            }
+
+            result += char;
+        }
+
+        // 閉じていない文字列や括弧は、推測で補わない。
+        if (inString || stack.length) return "";
 
         return result;
     }
@@ -9453,6 +9774,11 @@ ja-JP / en-US / zh-CN / fr-FR / de-DE / es-ES / ar-SA / ko-KR / th-TH / vi-VN / 
         if (result.added + result.updated === 0) {
             box.textContent +=
                 "。新しく取り込まれたカードはありません。";
+        }
+
+        if (lastImportRepaired) {
+            box.textContent +=
+                "（AIの回答の記号の崩れを自動で補正しました。例文などの内容を確認してください）";
         }
 
         showAiImportComplete(result);
