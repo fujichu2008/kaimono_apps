@@ -537,6 +537,9 @@ const GEO_LABEL = {
 
 const geoLabel = t => GEO_LABEL[t] || t;
 
+// 表面の仕上げ（surface.type）に使える種類
+const SURFACE_TYPES = ['noise','brushed','grid','stripes','grain'];
+
 // ============================================================
 // 2. Default Data
 // サンプルをデータとして組み立てる。描画は必ず共通Rendererが担当。
@@ -776,6 +779,8 @@ const state = {
  ai: {
   request: '',
   idea: '',
+  // 新しく作るときの精細度（high: 高精細 / standard: 標準）
+  detail: 'high',
   patch: '',
   prompt: '',
   motion: '',
@@ -1155,19 +1160,52 @@ function validateGeometry(g,label) {
   );
  }
 
+ // 角の丸み（任意）。GEO の既定キーではないので個別に検証する
+ if (g.bevel !== undefined || g.bevelSegments !== undefined) {
+  assert(
+   ['box','cylinder','extrude'].includes(g.type),
+   label+': 角の丸み（bevel）は箱・円柱・押し出しにだけ付けられます'
+  );
+ }
+
+ if (g.bevel !== undefined) {
+  number(g.bevel,label+'.bevel',0,10000);
+
+  const d0 = {...base,...g};
+  const lim = g.type === 'box' ? Math.min(...d0.size)/2
+   : g.type === 'cylinder' ? d0.height/2
+   : d0.depth/2;
+
+  assert(
+   g.bevel < lim,
+   label+': 角の丸み（bevel）は'
+    +(g.type === 'box' ? '最も短い辺' : g.type === 'cylinder' ? '高さ' : '厚み（depth）')
+    +'の半分より小さくしてください'
+  );
+ }
+
+ if (g.bevelSegments !== undefined) {
+  number(g.bevelSegments,label+'.bevelSegments',1,8);
+  assert(Number.isInteger(g.bevelSegments),label+': bevelSegments（丸みの分割数）は整数です');
+ }
+
  const d = {...base,...g};
 
  switch (d.type) {
-  case 'box': return 12;
+  case 'box':
+   return d.bevel > 0 ? 12*Math.pow((d.bevelSegments ?? 3)*2+1,2) : 12;
   case 'plane': return 2;
   case 'sphere': return d.widthSegments*d.heightSegments*2;
   case 'cylinder':
+   if (d.bevel > 0) return d.radialSegments*((d.bevelSegments ?? 3)*2+3)*2;
+   return d.radialSegments*4;
   case 'cone': return d.radialSegments*4;
   case 'torus':
   case 'tube': return d.radialSegments*d.tubularSegments*2;
   case 'capsule': return d.radialSegments*(d.capSegments*2+3)*2;
   case 'lathe': return d.segments*d.points.length*2;
-  case 'extrude': return d.points.length*4;
+  case 'extrude':
+   return d.points.length*(d.bevel > 0 ? 4+(d.bevelSegments ?? 3)*4 : 4);
  }
 }
 
@@ -1295,7 +1333,10 @@ function validateModelSpec(s) {
    validId(id) && obj(m),
    '色・質感の識別名（'+id+'）が正しくありません。英字で始まる英数字の名前にしてください'
   );
-  assert(m.type === 'standard','Material.typeはstandardです');
+  assert(
+   ['standard','physical'].includes(m.type),
+   'Material.typeは standard か physical です'
+  );
   assert(
    m.name === undefined || typeof m.name === 'string',
    'Material.nameは文字列です'
@@ -1319,6 +1360,40 @@ function validateModelSpec(s) {
   }
   if (m.transparent !== undefined) {
    assert(typeof m.transparent === 'boolean','transparentはbooleanです');
+  }
+
+  for (const k of ['clearcoat','clearcoatRoughness','transmission']) {
+   if (m[k] !== undefined) {
+    assert(
+     m.type === 'physical',
+     id+'.'+k+': type が "physical" の色・質感だけで使えます'
+    );
+    number(m[k],id+'.'+k,0,1);
+   }
+  }
+
+  if (m.envIntensity !== undefined) {
+   number(m.envIntensity,id+'.envIntensity（映り込みの強さ）',0,3);
+  }
+  if (m.flatShading !== undefined) {
+   assert(typeof m.flatShading === 'boolean',id+'.flatShading はtrue/falseです');
+  }
+
+  if (m.surface !== undefined) {
+   const sf = m.surface;
+
+   assert(
+    obj(sf) && SURFACE_TYPES.includes(sf.type),
+    id+'.surface（表面の仕上げ）: type は '+SURFACE_TYPES.join(' / ')+' のどれかです'
+   );
+   if (sf.scale !== undefined) number(sf.scale,id+'.surface.scale',.1,100);
+   if (sf.strength !== undefined) number(sf.strength,id+'.surface.strength',0,1);
+   if (sf.color2 !== undefined) {
+    assert(
+     /^#[0-9a-f]{6}$/i.test(sf.color2),
+     id+'.surface.color2: #rrggbb が必要です'
+    );
+   }
   }
  }
 
@@ -1408,10 +1483,306 @@ function validateModelSpec(s) {
 // ============================================================
 
 function createModelRenderer(THREE) {
+ // 角を丸めた箱。分割した箱の頂点を「内側の箱にクランプした点＋方向×丸み」へ移動する
+ function roundedBox(size,bevel,segs) {
+  const half = size.map(v => v/2);
+  const r = Math.min(bevel,Math.min(...half)*.999);
+  const n = Math.max(1,Math.round(segs));
+  const s = n*2+1;
+  const geo = new THREE.BoxGeometry(size[0],size[1],size[2],s,s,s);
+  const pos = geo.attributes.position;
+  const nor = geo.attributes.normal;
+  const p = [0,0,0];
+  const inner = [0,0,0];
+  const off = [0,0,0];
+
+  for (let i=0;i<pos.count;i++) {
+   p[0] = pos.getX(i);
+   p[1] = pos.getY(i);
+   p[2] = pos.getZ(i);
+
+   let len = 0;
+
+   for (let a=0;a<3;a++) {
+    const h = half[a];
+    // 分割の位置を、丸み部分（両端の n 区間）と平らな部分（中央の1区間）に振り分け直す
+    const k = Math.round((p[a]+h)/(2*h)*s);
+    const v = k <= n ? -h+r*k/n : h-r*(s-k)/n;
+
+    inner[a] = Math.min(h-r,Math.max(-h+r,v));
+    off[a] = v-inner[a];
+    len += off[a]*off[a];
+   }
+
+   len = Math.sqrt(len);
+
+   if (len > 1e-9) {
+    for (let a=0;a<3;a++) off[a] /= len;
+    pos.setXYZ(i,inner[0]+off[0]*r,inner[1]+off[1]*r,inner[2]+off[2]*r);
+    nor.setXYZ(i,off[0],off[1],off[2]);
+   } else {
+    pos.setXYZ(i,inner[0],inner[1],inner[2]);
+   }
+  }
+
+  pos.needsUpdate = true;
+  nor.needsUpdate = true;
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+ }
+
+ // 上下の角を丸めた円柱（輪郭を回転体で作る）
+ function roundedCylinder(g) {
+  const rt = g.radiusTop ?? .5;
+  const rb = g.radiusBottom ?? .5;
+  const h = g.height ?? 1;
+  const n = Math.max(1,Math.round(g.bevelSegments ?? 3));
+  const cb = rb > 0 ? Math.min(g.bevel,rb*.999,h/2*.999) : 0;
+  const ct = rt > 0 ? Math.min(g.bevel,rt*.999,h/2*.999) : 0;
+  const pts = [new THREE.Vector2(0,-h/2)];
+
+  if (cb > 0) {
+   for (let i=0;i<=n;i++) {
+    const a = -Math.PI/2+i*Math.PI/(2*n);
+    pts.push(new THREE.Vector2(rb-cb+Math.cos(a)*cb,-h/2+cb+Math.sin(a)*cb));
+   }
+  } else if (rb > 0) {
+   pts.push(new THREE.Vector2(rb,-h/2));
+  }
+
+  if (ct > 0) {
+   for (let i=0;i<=n;i++) {
+    const a = i*Math.PI/(2*n);
+    pts.push(new THREE.Vector2(rt-ct+Math.cos(a)*ct,h/2-ct+Math.sin(a)*ct));
+   }
+  } else if (rt > 0) {
+   pts.push(new THREE.Vector2(rt,h/2));
+  }
+
+  pts.push(new THREE.Vector2(0,h/2));
+
+  return new THREE.LatheGeometry(pts,g.radialSegments ?? 20);
+ }
+
+ // 表面の仕上げ（凹凸・粗さ・まだら）の模様。同じ設定は共有し、使う素材がなくなったら破棄する
+ const surfaceCache = new Map();
+
+ function surfaceKey(d) {
+  const s = d.surface;
+  if (!s || typeof s !== 'object' || !s.type) return null;
+
+  return JSON.stringify([
+   s.type,
+   s.scale ?? 4,
+   s.strength ?? .5,
+   s.color2 ? String(d.color).toLowerCase() : '',
+   s.color2 ? String(s.color2).toLowerCase() : ''
+  ]);
+ }
+
+ function surfaceHeights(type,N) {
+  const h = new Float32Array(N*N);
+  let seed = 20240607;
+  const rnd = () => (seed = seed*16807 % 2147483647)/2147483647;
+
+  const lattice = cells => {
+   const g = new Float32Array(cells*cells);
+   for (let i=0;i<g.length;i++) g[i] = rnd();
+   return g;
+  };
+
+  // 端がつながる（くり返しても継ぎ目が出ない）なめらかなノイズ
+  const smooth = (g,cells,x,y) => {
+   const fx = x/N*cells;
+   const fy = y/N*cells;
+   const x0 = Math.floor(fx);
+   const y0 = Math.floor(fy);
+   const tx = fx-x0;
+   const ty = fy-y0;
+   const sx = tx*tx*(3-2*tx);
+   const sy = ty*ty*(3-2*ty);
+   const at = (i,j) => g[(j%cells)*cells+(i%cells)];
+   const a = at(x0,y0)+(at(x0+1,y0)-at(x0,y0))*sx;
+   const b = at(x0,y0+1)+(at(x0+1,y0+1)-at(x0,y0+1))*sx;
+   return a+(b-a)*sy;
+  };
+
+  const g1 = lattice(8);
+  const g2 = lattice(16);
+  const g3 = lattice(32);
+  const rows = new Float32Array(N).map(() => rnd());
+  const cell = N/8;
+
+  for (let y=0;y<N;y++) {
+   for (let x=0;x<N;x++) {
+    let v;
+
+    if (type === 'noise') {
+     v = smooth(g1,8,x,y)*.55+smooth(g2,16,x,y)*.3+smooth(g3,32,x,y)*.15;
+    } else if (type === 'brushed') {
+     v = rows[y]*.75+rnd()*.25;
+    } else if (type === 'grid') {
+     const gx = x%cell;
+     const gy = y%cell;
+     v = Math.min(1,Math.min(gx,cell-gx,gy,cell-gy)/2);
+    } else if (type === 'stripes') {
+     v = .5+.5*Math.sin(x/N*Math.PI*16);
+    } else {
+     v = rnd();
+    }
+
+    h[y*N+x] = v;
+   }
+  }
+
+  return h;
+ }
+
+ function makeSurfaceTextures(key) {
+  const [type,scale,strength,c1,c2] = JSON.parse(key);
+  const N = 256;
+  const h = surfaceHeights(type,N);
+  const k = {noise:6,brushed:1.5,grid:2,stripes:3,grain:1}[type] || 2;
+  const at = (x,y) => h[((y+N)%N)*N+(x+N)%N];
+  const col = c2 ? [new THREE.Color(c1),new THREE.Color(c2)] : null;
+
+  const layer = fill => {
+   const c = document.createElement('canvas');
+   c.width = c.height = N;
+   const ctx = c.getContext('2d');
+   const img = ctx.createImageData(N,N);
+
+   for (let y=0;y<N;y++) {
+    for (let x=0;x<N;x++) fill(img.data,(y*N+x)*4,x,y);
+   }
+
+   ctx.putImageData(img,0,0);
+
+   const t = new THREE.CanvasTexture(c);
+   t.wrapS = t.wrapT = THREE.RepeatWrapping;
+   t.repeat.set(scale,scale);
+   t.anisotropy = 4;
+   return t;
+  };
+
+  const normal = layer((d,i,x,y) => {
+   const dx = (at(x+1,y)-at(x-1,y))*k;
+   const dy = (at(x,y+1)-at(x,y-1))*k;
+   const l = Math.hypot(dx,dy,1);
+   d[i] = (-dx/l*.5+.5)*255;
+   d[i+1] = (dy/l*.5+.5)*255;
+   d[i+2] = (1/l*.5+.5)*255;
+   d[i+3] = 255;
+  });
+
+  const rough = layer((d,i,x,y) => {
+   d[i] = d[i+1] = d[i+2] = 255*(1-.45*strength*(1-at(x,y)));
+   d[i+3] = 255;
+  });
+
+  let color = null;
+
+  if (col) {
+   color = layer((d,i,x,y) => {
+    const t = at(x,y);
+    d[i] = (col[0].r+(col[1].r-col[0].r)*t)*255;
+    d[i+1] = (col[0].g+(col[1].g-col[0].g)*t)*255;
+    d[i+2] = (col[0].b+(col[1].b-col[0].b)*t)*255;
+    d[i+3] = 255;
+   });
+   color.encoding = THREE.sRGBEncoding;
+  }
+
+  return {normal,rough,color};
+ }
+
+ function acquireSurface(key) {
+  let e = surfaceCache.get(key);
+
+  if (!e) {
+   let maps;
+   try {
+    maps = makeSurfaceTextures(key);
+   } catch (_) {
+    maps = {normal:null,rough:null,color:null};
+   }
+   e = {maps,refs:0};
+   surfaceCache.set(key,e);
+  }
+
+  e.refs++;
+  return e.maps;
+ }
+
+ function releaseSurface(key) {
+  const e = key && surfaceCache.get(key);
+  if (!e) return;
+
+  e.refs--;
+
+  if (e.refs <= 0) {
+   Object.values(e.maps).forEach(t => t?.dispose());
+   surfaceCache.delete(key);
+  }
+ }
+
+ // 映り込み用の環境（スタジオの照明を写した環境マップ）。外部ファイルなしで作る。
+ // 使い方: scene.environment = createStudioEnvironment(renderer).texture;
+ function createStudioEnvironment(renderer) {
+  const scene = new THREE.Scene();
+  const room = new THREE.Mesh(
+   new THREE.BoxGeometry(10,6,10),
+   new THREE.MeshBasicMaterial({color:0x2a313b,side:THREE.BackSide})
+  );
+  room.position.y = 2;
+  scene.add(room);
+
+  // ソフトボックス（光る板） [位置, 大きさ, 明るさ]
+  const panels = [
+   [[0,4.8,0],[4,4],3],
+   [[-4.8,2.6,2.5],[2.6,2],2.2],
+   [[4.8,2,-2.5],[2.6,1.6],1.5],
+   [[1.5,1.2,4.8],[3,1],1]
+  ];
+
+  for (const [p,s,k] of panels) {
+   const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(s[0],s[1]),
+    new THREE.MeshBasicMaterial({side:THREE.DoubleSide})
+   );
+   m.material.color.setRGB(k,k*.97,k*.92);
+   m.position.set(...p);
+   m.lookAt(0,1.5,0);
+   scene.add(m);
+  }
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  let target;
+
+  try {
+   target = pmrem.fromScene(scene,.04);
+  } finally {
+   pmrem.dispose();
+   scene.traverse(o => {
+    o.geometry?.dispose();
+    o.material?.dispose();
+   });
+  }
+
+  return {
+   texture: target.texture,
+   dispose: () => target.dispose()
+  };
+ }
+
  function buildGeometry(g) {
   switch (g.type) {
-   case 'box':
-    return new THREE.BoxGeometry(...(g.size || [1,1,1]));
+   case 'box': {
+    const size = g.size || [1,1,1];
+    if (g.bevel > 0) return roundedBox(size,g.bevel,g.bevelSegments ?? 3);
+    return new THREE.BoxGeometry(...size);
+   }
 
    case 'sphere':
     return new THREE.SphereGeometry(
@@ -1421,6 +1792,7 @@ function createModelRenderer(THREE) {
     );
 
    case 'cylinder':
+    if (g.bevel > 0) return roundedCylinder(g);
     return new THREE.CylinderGeometry(
      g.radiusTop ?? .5,
      g.radiusBottom ?? .5,
@@ -1459,6 +1831,24 @@ function createModelRenderer(THREE) {
      else shape.moveTo(...p);
     });
     shape.closePath();
+
+    const bev = g.bevel > 0 ? g.bevel : 0;
+
+    if (bev > 0) {
+     // 角を丸めても外形（輪郭と厚み）が変わらないよう、内側へずらして作る
+     const geo = new THREE.ExtrudeGeometry(shape,{
+      depth: Math.max(.0001,(g.depth ?? .4)-bev*2),
+      steps: 1,
+      bevelEnabled: true,
+      bevelThickness: bev,
+      bevelSize: bev,
+      bevelOffset: -bev,
+      bevelSegments: Math.max(1,Math.round(g.bevelSegments ?? 3)),
+      curveSegments: 8
+     });
+     geo.translate(0,0,bev);
+     return geo;
+    }
 
     return new THREE.ExtrudeGeometry(shape,{
      depth: g.depth ?? .4,
@@ -1514,21 +1904,48 @@ function createModelRenderer(THREE) {
   }
  }
 
+ // type（standard / physical）の切り替えはできないため、type を変えるときは buildMaterial で作り直す
  function updateMaterial(m,d) {
-  m.color.set(d.color);
+  const key = surfaceKey(d);
+
+  if ((m.userData.surfaceKey || null) !== key) {
+   const maps = key ? acquireSurface(key) : null;
+   releaseSurface(m.userData.surfaceKey);
+   m.userData.surfaceKey = key;
+   m.normalMap = maps?.normal || null;
+   m.roughnessMap = maps?.rough || null;
+   m.map = maps?.color || null;
+  }
+
+  const st = d.surface?.strength ?? .5;
+  m.normalScale.set(st,st);
+
+  // まだら模様（color2）があるときは、模様側に色を持たせる
+  m.color.set(m.map ? '#ffffff' : d.color);
   m.roughness = d.roughness ?? .6;
   m.metalness = d.metalness ?? 0;
   m.opacity = d.opacity ?? 1;
   m.transparent = d.transparent ?? false;
   m.emissive.set(d.emissive ?? '#000000');
   m.emissiveIntensity = d.emissiveIntensity ?? 0;
+  m.envMapIntensity = d.envIntensity ?? 1;
+  m.flatShading = d.flatShading === true;
+
+  if (m.isMeshPhysicalMaterial) {
+   m.clearcoat = d.clearcoat ?? 0;
+   m.clearcoatRoughness = d.clearcoatRoughness ?? 0;
+   if ('transmission' in m) m.transmission = d.transmission ?? 0;
+  }
+
   m.side = THREE.DoubleSide;
   m.depthWrite = !m.transparent;
   m.needsUpdate = true;
  }
 
  function buildMaterial(d) {
-  const m = new THREE.MeshStandardMaterial();
+  const m = d.type === 'physical'
+   ? new THREE.MeshPhysicalMaterial()
+   : new THREE.MeshStandardMaterial();
   updateMaterial(m,d);
   return m;
  }
@@ -1574,7 +1991,11 @@ function createModelRenderer(THREE) {
 
   Object.values(root.userData.materials || {}).forEach(m => ms.add(m));
   gs.forEach(g => g.dispose());
-  ms.forEach(m => m.dispose());
+  ms.forEach(m => {
+   releaseSurface(m.userData?.surfaceKey);
+   if (m.userData) m.userData.surfaceKey = null;
+   m.dispose();
+  });
  }
 
  function buildModel(spec) {
@@ -2019,6 +2440,7 @@ function createModelRenderer(THREE) {
  }
 
  return {
+  createStudioEnvironment,
   buildGeometry,
   buildMaterial,
   updateMaterial,
@@ -2083,16 +2505,24 @@ function initScene() {
   ground.rotation.x = -Math.PI/2;
   ground.receiveShadow = true;
 
+  // 映り込み用の環境。作れない環境では従来の照明だけで表示する
+  let envOk = false;
+
+  try {
+   scene.environment = state.engine.createStudioEnvironment(renderer).texture;
+   envOk = true;
+  } catch (_) {}
+
   scene.add(
    grid,
    ground,
-   new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,.9)
+   new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,envOk ? .35 : .9)
   );
 
   const key = new THREE.DirectionalLight(0xfff2dc,1.5);
   key.position.set(4,8,5);
   key.castShadow = true;
-  key.shadow.mapSize.set(1024,1024);
+  key.shadow.mapSize.set(2048,2048);
   key.shadow.bias = -.0003;
   key.shadow.normalBias = .025;
   scene.add(key,key.target);
@@ -2679,8 +3109,12 @@ function setPreviewMode() {
  r.grid.visible = !studio && state.showGrid;
  r.ground.visible = true;
 
- r.key.intensity = studio ? 1.7 : 1.35;
- r.rim.intensity = studio ? 1.25 : .75;
+ // 映り込みがあるときは、そのぶん直接光と露出を下げて白飛びを防ぐ
+ const env = !!r.scene.environment;
+
+ r.renderer.toneMappingExposure = env ? 1 : 1.15;
+ r.key.intensity = env ? (studio ? 1.25 : 1) : (studio ? 1.7 : 1.35);
+ r.rim.intensity = env ? (studio ? .8 : .45) : (studio ? 1.25 : .75);
  r.key.shadow.radius = studio ? 4 : 1;
 
  $('studioBtn').textContent = studio ? '編集表示に戻る' : '仕上がり確認';
@@ -7032,6 +7466,30 @@ function shapeEditor(d) {
   `;
  }
 
+ if (g.type === 'box' || g.type === 'cylinder') {
+  const dd = {...GEO[g.type],...g};
+  const lim = g.type === 'box' ? Math.min(...dd.size)/2 : dd.height/2;
+  const bmax = Math.floor(lim*.95*10000)/10000;
+  const bcur = Math.min(round4(g.bevel ?? 0),bmax);
+
+  if (bmax > 0) {
+   html += `
+    <label>角の丸み（m） <output id="dim_bevel_v">${bcur}</output>
+     <input
+      type="range"
+      min="0"
+      max="${bmax}"
+      step="${Math.max(.0001,Math.floor(bmax/100*10000)/10000)}"
+      value="${bcur}"
+      data-dim="bevel"
+      data-dimi=""
+     >
+    </label>
+    <p class="hint">角を少し丸めると、光の当たり方がなめらかになり、本物らしく見えます。</p>
+   `;
+  }
+ }
+
  return html+'<p class="hint">スライダーから指を離すと形に反映します（↶で戻せます）。</p>';
 }
 
@@ -7078,19 +7536,85 @@ function changeGeoType(type) {
 function setDimension(key,idx,v) {
  const id = state.selectedPartId;
  assert(id && own(state.modelSpec.parts,id),'寸法を変える部品を選んでください');
- assert(Number.isFinite(v) && v > 0,'寸法は0より大きい数にしてください');
+ assert(
+  Number.isFinite(v) && (v > 0 || key === 'bevel' && v === 0),
+  '寸法は0より大きい数にしてください'
+ );
 
  stopMotion();
 
  mutate(s => {
   const g = s.parts[id].geometry;
 
-  if (idx === null) {
+  if (key === 'bevel') {
+   if (v > 0) g.bevel = round4(v);
+   else delete g.bevel;
+  } else if (idx === null) {
    g[key] = round4(v);
   } else {
    const arr = (g[key] ?? GEO[g.type][key]).slice();
    arr[idx] = round4(v);
    g[key] = arr;
+  }
+
+  // 寸法を小さくして角の丸みが上限を超えたら、上限の内側に収める
+  if (g.bevel > 0) {
+   const d = {...GEO[g.type],...g};
+   const lim = g.type === 'box' ? Math.min(...d.size)/2
+    : g.type === 'cylinder' ? d.height/2
+    : g.type === 'extrude' ? d.depth/2
+    : Infinity;
+
+   if (g.bevel >= lim) {
+    const b = Math.floor(lim*.9*10000)/10000;
+    if (b > 0) g.bevel = b;
+    else delete g.bevel;
+   }
+  }
+ });
+}
+
+// 色・質感の「表面の仕上げ」を変える（type を空にすると仕上げなし）
+function setMaterialSurface(field,value) {
+ const id = state.selectedMaterialId;
+ assert(own(state.modelSpec.materials,id),'色・質感を選んでください');
+
+ mutate(s => {
+  const m = s.materials[id];
+
+  if (field === 'type') {
+   if (!value) delete m.surface;
+   else m.surface = {scale:4,strength:.5,...(m.surface || {}),type:value};
+   return;
+  }
+
+  if (!m.surface) return;
+
+  const n = Number(value);
+  if (!Number.isFinite(n)) return;
+
+  if (field === 'scale') m.surface.scale = Math.min(100,Math.max(.1,round4(n)));
+  if (field === 'strength') m.surface.strength = Math.min(1,Math.max(0,round4(n)));
+ });
+}
+
+// 塗装のツヤ（クリアコート）。0より大きいと physical に切り替えて作り直す
+function setClearcoat(v) {
+ const id = state.selectedMaterialId;
+ assert(own(state.modelSpec.materials,id),'色・質感を選んでください');
+ assert(Number.isFinite(v),'数値が必要です');
+
+ mutate(s => {
+  const m = s.materials[id];
+
+  if (v > 0) {
+   m.type = 'physical';
+   m.clearcoat = Math.min(1,round4(v));
+   m.clearcoatRoughness ??= .1;
+  } else {
+   delete m.clearcoat;
+   delete m.clearcoatRoughness;
+   if (m.transmission === undefined) m.type = 'standard';
   }
  });
 }
@@ -7117,7 +7641,10 @@ function paintPart(color) {
   opacity: m.opacity ?? 1,
   transparent: m.transparent ?? false,
   emissive: String(m.emissive ?? '#000000').toLowerCase(),
-  emissiveIntensity: m.emissiveIntensity ?? 0
+  emissiveIntensity: m.emissiveIntensity ?? 0,
+  envIntensity: m.envIntensity ?? 1,
+  clearcoat: m.clearcoat ?? 0,
+  surface: JSON.stringify(m.surface ?? null)
  });
  const keys = Object.keys(norm(spec.materials[mid]));
 
@@ -7645,9 +8172,18 @@ function makeThumbnail(spec) {
 
    const scene = new THREE.Scene();
    scene.background = new THREE.Color('#1c2633');
-   scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,.9));
 
-   const key = new THREE.DirectionalLight(0xfff2dc,1.5);
+   let envOk = false;
+
+   try {
+    scene.environment = state.engine.createStudioEnvironment(renderer).texture;
+    envOk = true;
+   } catch (_) {}
+
+   renderer.toneMappingExposure = envOk ? 1 : 1.15;
+   scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,envOk ? .35 : .9));
+
+   const key = new THREE.DirectionalLight(0xfff2dc,envOk ? 1.1 : 1.5);
    key.position.set(4,8,5);
    scene.add(key);
 
@@ -8043,10 +8579,13 @@ function demoHtmlText() {
   'renderer.outputEncoding = THREE.sRGBEncoding;',
   'renderer.shadowMap.enabled = true;',
   'document.body.appendChild(renderer.domElement);',
+  'renderer.toneMapping = THREE.ACESFilmicToneMapping;',
   'const scene = new THREE.Scene();',
   'scene.background = new THREE.Color("#1c2633");',
-  'scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,.9));',
-  'const sun = new THREE.DirectionalLight(0xfff2dc,1.4);',
+  'let envOk = false;',
+  'try { scene.environment = ModelRenderer.createStudioEnvironment(renderer).texture; envOk = true; } catch (e) {}',
+  'scene.add(new THREE.HemisphereLight(0xbce5ff,0x4d4e5d,envOk ? .35 : .9));',
+  'const sun = new THREE.DirectionalLight(0xfff2dc,envOk ? 1.1 : 1.4);',
   'sun.position.set(4,8,5);',
   'scene.add(sun);',
   'const hero = ModelRenderer.createCharacter(MODEL_DATA);',
@@ -8188,18 +8727,40 @@ function exportGLB() {
     state.engine.dispose(root);
    };
 
+   let stripped = false;
+
+   const run = () => new THREE.GLTFExporter().parse(root,result => {
+    try {
+     downloadBlob(result,fileBase()+'.glb','model/gltf-binary');
+     toast(
+      stripped
+       ? 'GLBを保存しました（動きと表面の仕上げは含まれません）'
+       : 'GLBを保存しました（動きは含まれません）'
+     );
+    } finally {
+     finish();
+    }
+   },{binary:true});
+
    try {
-    new THREE.GLTFExporter().parse(root,result => {
-     try {
-      downloadBlob(result,fileBase()+'.glb','model/gltf-binary');
-      toast('GLBを保存しました（動きは含まれません）');
-     } finally {
-      finish();
-     }
-    },{binary:true});
+    run();
    } catch (e) {
-    finish();
-    throw e;
+    try {
+     // 生成した表面の模様が原因で失敗したときは、模様を外して書き出し直す
+     stripped = true;
+     Object.entries(data.materials || {}).forEach(([id,m]) => {
+      m.map = null;
+      m.normalMap = null;
+      m.roughnessMap = null;
+      const d = state.modelSpec.materials[id];
+      if (d) m.color.set(d.color);
+      m.needsUpdate = true;
+     });
+     run();
+    } catch (e2) {
+     finish();
+     throw e2;
+    }
    }
   })
   .catch(e => showError(e));
@@ -9073,7 +9634,7 @@ parent循環禁止、深さ32以下。
 
 Material={
  name,
- type:"standard",
+ type:"standard"または"physical",
  color:"#rrggbb",
  roughness:0〜1,
  metalness:0〜1,
@@ -9083,6 +9644,9 @@ Material={
  emissiveIntensity:0〜10
 }。
 不透明度を下げるときtransparent:trueも指定。
+Materialの任意項目: envIntensity:0〜3（周りの景色の映り込みの強さ。既定1）、flatShading:boolean（面をカクカクに見せる）。
+type:"physical"のときだけ clearcoat:0〜1（塗装・陶器のツヤ。表面の透明な塗膜）、clearcoatRoughness:0〜1、transmission:0〜1（ガラスの透過）を使える。
+surface（表面の仕上げ、任意）={type:"noise"（ざらざら）|"brushed"（金属のヘアライン）|"grid"（格子状のパネルライン）|"stripes"（しま）|"grain"（細かい粒）, scale:0.1〜100（1つの面にくり返す回数。既定4）, strength:0〜1（凹凸の強さ。既定0.5）, color2:"#rrggbb"（任意。colorとまだらに混ぜる2色目）}。
 
 Anchor={
  id,
@@ -9100,6 +9664,7 @@ lathe points=[半径,Y]。
 extrude points=[X,Y]の自己交差しない輪郭、+Zにdepth押出し、穴/ベベルなし。
 tube points=[X,Y,Z]、隣接同一点禁止。
 capsuleはY軸、lengthは円筒部分の長さ。
+box・cylinder・extrudeは任意で bevel（角の丸みの半径m。boxは最も短い辺の半分未満、cylinderは高さの半分未満、extrudeはdepthの半分未満）と bevelSegments（丸みの分割数、整数1〜8、既定3）を持てる。bevelを付けても外形の大きさは変わらない。
 sphere/cylinder/cone/capsule/latheはY軸、torus/planeはXY面。
 分割数は整数3〜128、pointsは最大128点。
 Part上限300、Material100、Anchor100、推定triangle20万以下。
@@ -9122,7 +9687,17 @@ function createAIPrompt(mode) {
    + '\n次の要望に合う完全なMODEL_SPEC_V1をJSONのみで出力してください。'
    + '出力はプレーンテキストとし、Markdown・コードフェンス（```）・見出し・説明文は禁止。'
    + '先頭文字は{、末尾文字は}としてください。'
-   + '意味のあるID、軽量な30〜80 Parts以下を目安にし、不要なPartを増やさないでください。'
+   + '意味のあるIDを付けてください。'
+   + (state.ai.detail === 'standard'
+    ? '部品数は40〜100個を目安にしてください。'
+    : '高精細なモデルとして、部品数は100〜250個を目安にしてください（上限300個）。')
+   + '推定三角形数（面の数）は20万以下を守ってください。'
+   + '次の3段階で設計してください。1) シルエット（全体の輪郭と比率を決める大きな部品） 2) 二次形状（くぼみ・段差・張り出し・面の分け目） 3) 細部（パネルライン、ボルト、縁取り、通気口、継ぎ目、ライトなど）。'
+   + '箱（box）と円柱（cylinder）には原則 bevel（角の丸み）を付けてください。目安は部品の短い辺の5〜15%で、bevelSegments は小さな部品で1〜2、大きな部品でも3までにしてください。'
+   + '色・質感は6〜12種類にし、roughness（ざらつき）と metalness（金属っぽさ）に差を付けてください。塗装・陶器・つやのある樹脂には type:"physical" と clearcoat（表面の透明な塗膜）を使ってください。'
+   + '広い面の色・質感には surface（表面の仕上げ）を付け、のっぺりさせないでください。'
+   + '左右対称の部品は、X座標の符号だけを反転し、Y・Zと大きさは完全に同じ値にしてください。'
+   + '実物に近い大きさ（メートル単位）で作ってください。'
    + 'シルエットと配色を優先。外部アセット禁止。'
    + '動く部位（脚・腕・首・尾・車輪・扉・翼）は、関節位置に置いた group を親にして、その下に形の部品を置くこと。'
    + '車輪は回転軸が分かるように置くこと（車輪の中心に group を置き、左右方向のX軸で回る向きにする）。'
@@ -9145,6 +9720,62 @@ function createAIPrompt(mode) {
  }
 
  return state.ai.prompt;
+}
+
+// 推定三角形数（検証と同じ計算）
+function estimateTriangles(s) {
+ let n = 0;
+
+ for (const p of Object.values(s.parts)) {
+  if (p.type !== 'primitive') continue;
+  try {
+   n += validateGeometry(p.geometry,p.id) || 0;
+  } catch (_) {}
+ }
+
+ return Math.round(n);
+}
+
+// 形を変えずに細部だけを足してもらう依頼文（ディテールアップ）
+function createDetailUpPrompt() {
+ const s = state.modelSpec;
+ const parts = Object.keys(s.parts).length;
+
+ assert(parts,'先にモデルを作ってください');
+
+ const tri = estimateTriangles(s);
+
+ return 'あなたはゲーム用3Dアセット設計者です。以下はモデルデータの精細化（ディテールアップ）の依頼です。\n'
+  + schemaGuide()
+  + '\n今のモデルの形を保ったまま、細部を足して見た目の精細さを上げてください。\n'
+  + '守ること:\n'
+  + '- 全体のシルエット（輪郭）を変えない。既存部品の position・rotation・scale と、形の大きさ（size・radius・radiusTop・radiusBottom・height・length・depth・tube・points）は変更しない。既存部品の削除・ID変更・parentの変更もしない。\n'
+  + '- 変更してよいのは次の3つだけ: (1) 細部の部品の追加（op:"add"） (2) 既存の箱・円柱・押し出しの geometry への bevel・bevelSegments の追加（op:"add"。外形の大きさは変わらない） (3) 色・質感の追加と調整（roughness・metalness・type・clearcoat・clearcoatRoughness・surface・envIntensity など）。\n'
+  + '- 足す細部の例: パネルライン（細い box を面にわずかに埋め込む）、ボルト・リベット（小さな cylinder）、縁取り・モール、通気口、継ぎ目、ライト・レンズ、ゴムや金属の部品。\n'
+  + '- 追加する部品は、取り付け先の既存部品を parent にし、面から浮かず、めり込みすぎない位置に置く（親から見た座標で計算する）。左右対称の位置には、X座標の符号だけを反転して置く。\n'
+  + '- 追加は30〜100部品を目安にする。部品数の合計は300個以下（現在'+parts+'個）、推定三角形数は20万以下（現在約'+tri.toLocaleString()+'）を守る。小さな部品の分割数（Segments）は8〜12程度、bevelSegments は1〜2に抑える。\n'
+  + '- 動き（animations）は変更しない。追加した部品は親と一緒に動く。\n'
+  + '\n出力は MODELSTUDIO_PATCH_V1 のJSONのみ。形式は {"format":"MODELSTUDIO_PATCH_V1","operations":[...]}。'
+  + 'addは存在しないキーのみ、replaceは既存のキーのみに使う。部品を追加するときは必須項目をすべて書く。'
+  + '出力はプレーンテキストとし、Markdown・コードフェンス（バッククォート3つ）・見出し・説明文は禁止。先頭文字は{、末尾文字は}としてください。'
+  + '\n現在のModelSpec:\n'+json(s);
+}
+
+function detailUpCard() {
+ return `
+  <div class="card">
+   <h3>ディテールを足す（精細化）</h3>
+   <p class="hint">
+    今の形（輪郭・大きさ）はそのままに、パネルライン・ボルト・縁取りなどの細かい部品と、
+    角の丸み・表面の仕上げをAIに足してもらいます。何回かくり返すと、少しずつ作り込めます。
+   </p>
+   <div class="row">
+    ${button('promptDetailUp','ディテールアップの依頼文をコピー','primary')}
+    ${promptShareButton()}
+   </div>
+   <p class="hint">回答は上の「AIの回答を読み込む」で読み込みます（↶で戻せます）。</p>
+  </div>
+ `;
 }
 
 function exportAssetCapsule(withSpec=true) {
@@ -9294,6 +9925,7 @@ function bundleText() {
   '- ジャンプや攻撃などの入力では hero.action("動きID") を呼ぶ。終わると自動で移動の動きに戻る（die は戻らず、hero.reset() で復活）。',
   '- くり返しの演出付きの動き（例: 炎を吹いて飛ぶ fly）を続けて再生するには hero.play("動きID")、速さによる自動の切り替えに戻すには hero.play(null) を呼ぶ。',
   '- effect:true の部品（炎・煙・光などの効果部品）は、それを使う動きの再生中だけ自動で表示される。ゲーム側で個別に表示・非表示を操作しない。',
+  '- アプリと同じ映り込みの見た目にするには、renderer を作った後に scene.environment = ModelRenderer.createStudioEnvironment(renderer).texture; を1回だけ実行する（すでに環境マップを設定しているゲームでは不要）。renderer.outputEncoding = THREE.sRGBEncoding と renderer.toneMapping = THREE.ACESFilmicToneMapping の設定もおすすめ。',
   '- 動きの一覧: '+list,
   '- 合図の名前: '+events+'（hero.on("合図名", fn) で受け取る。hit は攻撃が当たる瞬間、land は着地の瞬間）',
   '- 取付点: '+anchors,
@@ -9444,6 +10076,55 @@ function selfTest() {
   assert(next.meta.description === '動作チェック','修正が反映されませんでした');
   assert(JSON.stringify(spec) === before,'適用前のデータが書き換わりました');
   return '適用でき、元のデータは変わりませんでした';
+ });
+
+ run('⑥ 高精細の形と素材',() => {
+  if (!have3D) return {skip:'3D表示なし'};
+
+  const t = emptySpec();
+  t.meta.id = 'selftest_detail';
+  t.meta.name = '動作チェック';
+  t.materials = {
+   paint: {type:'physical',color:'#d8433b',roughness:.35,metalness:.1,clearcoat:1,clearcoatRoughness:.1},
+   metal: {type:'standard',color:'#b8c0c8',roughness:.4,metalness:.9,surface:{type:'brushed',scale:4,strength:.6,color2:'#8a929a'}}
+  };
+  t.parts = {
+   box: {
+    id:'box',name:'box',type:'primitive',
+    geometry:{type:'box',size:[1,.5,.8],bevel:.08,bevelSegments:3},
+    position:[0,.25,0],rotation:[0,0,0],scale:[1,1,1],
+    material:'paint',parent:null,visible:true
+   },
+   cyl: {
+    id:'cyl',name:'cyl',type:'primitive',
+    geometry:{type:'cylinder',radiusTop:.2,radiusBottom:.2,height:.4,radialSegments:20,bevel:.04},
+    position:[0,.7,0],rotation:[0,0,0],scale:[1,1,1],
+    material:'metal',parent:null,visible:true
+   }
+  };
+
+  const spec2 = normalizeSpec(t);
+  validateModelSpec(spec2);
+
+  const root = state.engine.buildModel(spec2);
+
+  try {
+   let meshes = 0;
+
+   root.traverse(o => {
+    if (!o.isMesh) return;
+    meshes++;
+    assert(o.geometry.attributes.position.count > 24,'角丸の形が作られていません');
+   });
+
+   assert(meshes === 2,'部品の数が合いません');
+   assert(root.userData.materials.paint.isMeshPhysicalMaterial,'physical の素材になっていません');
+   assert(root.userData.materials.metal.normalMap,'表面の仕上げが作られていません');
+  } finally {
+   state.engine.dispose(root);
+  }
+
+  return '角丸の形・physical素材・表面の仕上げを構築・破棄できました';
  });
 
  const ng = rows.filter(r => r[1] === 'ng').length;
@@ -10376,8 +11057,9 @@ function materialPanel() {
     ['roughness',.6,1,'ざらつき（0=つるつる／1=ざらざら）'],
     ['metalness',0,1,'金属っぽさ（0=普通／1=金属）'],
     ['opacity',1,1,'不透明度（1=透けない／0=見えない）'],
-    ['emissiveIntensity',0,10,'発光の強さ']
-   ].filter(([key]) => !easy() || key !== 'emissiveIntensity').map(([key,def,max,text]) => `
+    ['emissiveIntensity',0,10,'発光の強さ'],
+    ['envIntensity',1,3,'映り込みの強さ（周りの景色の映り込み）']
+   ].filter(([key]) => !easy() || !['emissiveIntensity','envIntensity'].includes(key)).map(([key,def,max,text]) => `
     <label>
      ${text} <output id="out_${key}">${m[key] ?? def}</output>
      <input
@@ -10392,6 +11074,35 @@ function materialPanel() {
      >
     </label>
    `).join('')}
+
+   <h3>表面の仕上げ</h3>
+   ${selectField(
+    '仕上げの種類',
+    'data-surf="type"',
+    [
+     ['','なし（なめらか）'],
+     ['noise','ざらざら'],
+     ['brushed','ヘアライン（金属のすじ）'],
+     ['grid','格子（パネルの継ぎ目）'],
+     ['stripes','しま'],
+     ['grain','粒（細かい凹凸）']
+    ],
+    m.surface?.type || ''
+   )}
+   ${m.surface ? `
+    <label>強さ <output id="out_surf_strength">${m.surface.strength ?? .5}</output>
+     <input type="range" min="0" max="1" step=".05" data-surf="strength" value="${m.surface.strength ?? .5}">
+    </label>
+    <label>細かさ（1つの面にくり返す回数） <output id="out_surf_scale">${m.surface.scale ?? 4}</output>
+     <input type="range" min="1" max="20" step="1" data-surf="scale" value="${m.surface.scale ?? 4}">
+    </label>
+   ` : ''}
+   ${easy() ? '' : `
+    <label>塗装のツヤ（クリアコート：表面の透明な塗膜） <output id="out_surf_clearcoat">${m.clearcoat ?? 0}</output>
+     <input type="range" min="0" max="1" step=".05" data-surf="clearcoat" value="${m.clearcoat ?? 0}">
+    </label>
+   `}
+   <p class="hint">表面の仕上げとツヤは、指を離すと反映します（↶で戻せます）。</p>
 
    <label>
     <input
@@ -10494,6 +11205,15 @@ function aiPanel() {
       : '前側のローターを20%大きく。配色は維持してください。'}"
     >${esc(creating ? state.ai.idea : state.ai.request)}</textarea>
    </label>
+   ${creating ? selectField(
+    '精細度（どこまで細かく作るか）',
+    'data-ai="detail"',
+    [
+     ['high','高精細（部品100〜250個・おすすめ）'],
+     ['standard','標準（部品40〜100個・軽め）']
+    ],
+    state.ai.detail || 'high'
+   ) : ''}
    <div class="row">
     ${button(creating ? 'promptNew' : 'promptEdit','AIへの依頼文をコピー','primary')}
     ${promptShareButton()}
@@ -10505,6 +11225,8 @@ function aiPanel() {
   </div>
 
   ${answerImportCard()}
+
+  ${creating ? '' : detailUpCard()}
 
   ${creating ? `
    <div class="card">
@@ -10911,6 +11633,10 @@ function handleChangeNow(e) {
  if (d.meta) {
   safe(() => mutate(s => s.meta[d.meta] = el.value));
   renderPanel();
+ } else if (d.surf) {
+  safe(() => d.surf === 'clearcoat'
+   ? setClearcoat(Number(el.value))
+   : setMaterialSurface(d.surf,el.value));
  } else if (el.id === 'materialSelect') {
   state.selectedMaterialId = el.value;
   renderPanel();
@@ -11046,6 +11772,10 @@ function handleInput(e) {
  } else if (d.dim) {
   // 形の寸法は指を離したときに反映する（ここでは数値表示だけ更新）
   const out = $('dim_'+d.dim+'_'+(d.dimi || 'v'));
+  if (out) out.value = e.target.value;
+ } else if (d.surf) {
+  // 表面の仕上げ・ツヤは指を離したときに反映する（ここでは数値表示だけ更新）
+  const out = $('out_surf_'+d.surf);
   if (out) out.value = e.target.value;
  } else if (d.live) {
   safe(() => handleEdit(e.target,true));
@@ -11248,6 +11978,10 @@ const actions = {
  promptEdit: () => copyPrompt(
   createAIPrompt('edit'),
   '指示文をコピーしました。ChatGPTなどに貼り付けて送信してください'
+ ),
+ promptDetailUp: () => copyPrompt(
+  createDetailUpPrompt(),
+  'ディテールアップの依頼文をコピーしました。ChatGPTなどに貼り付けて送信してください'
  ),
 
  stopMotion: () => {
