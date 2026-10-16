@@ -1289,6 +1289,7 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
 </div>
 <div class="hud" id="zoomCtl" title="カメラの距離"><span class="zl" aria-hidden="true">遠</span><input type="range" id="zoomRange" orient="vertical" min="0.6" max="2.4" step="0.05" value="1" aria-label="カメラの距離（上へ動かすと遠く）"><span class="zl" aria-hidden="true">近</span></div>
 <div class="hud" id="prey"></div>
+<div class="hud" id="shortTimer" style="display:none;left:50%;top:max(10px,env(safe-area-inset-top));transform:translateX(-50%);padding:6px 14px;border-radius:12px;background:rgba(12,30,22,.82);color:#e0f3bd;font-size:17px;font-weight:800;letter-spacing:.04em;pointer-events:none;z-index:12">残り 5:00</div>
 <div class="hud" id="ambush"><span class="ring"></span><span id="ambTxt">じっとしている…</span></div>
 <div class="hud" id="toast" role="status" style="top:calc(env(safe-area-inset-top, 0px) + 96px);bottom:auto;max-width:calc(100vw - 32px);box-sizing:border-box;pointer-events:none"></div>
 <div class="hud" id="bossBar" aria-live="polite"><div class="bbName"></div><div class="bbBar"><i></i></div><div class="bbTxt"></div></div>
@@ -1803,6 +1804,50 @@ let leafTex;
   can.position.set(.8,0,.14); can.rotation.y = 2.4; garden.add(can);
 }
 
+// 獲物の水中振動（リングを使い回して描画負荷を一定に保つ）
+const preySignals = [];
+{
+  const geo = new THREE.RingGeometry(.75,1,24);
+  for (let i=0;i<18;i++){
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color:0xc6e5d4, transparent:true, opacity:0,
+      depthWrite:false, depthTest:true, side:THREE.DoubleSide}));
+    m.visible = false; m.renderOrder = 7; scene.add(m);
+    preySignals.push({m, t:0, dur:1, strong:false});
+  }
+}
+let signalClock = 0;
+function emitPreySignal(pos, strong){
+  const s = preySignals.find(x => x.t <= 0);
+  if (!s) return;
+  s.strong = !!strong; s.t = s.dur = strong ? 1 : .7;
+  s.m.position.copy(pos); s.m.visible = true;
+}
+function updatePreySignals(dt){
+  for (const s of preySignals){
+    if (s.t <= 0) continue;
+    s.t -= dt;
+    if (s.t <= 0 || game.mode !== 'play'){ s.t = 0; s.m.visible = false; continue; }
+    const k = 1 - s.t/s.dur;
+    s.m.scale.setScalar((s.strong ? .003 : .0015) + k*(s.strong ? .014 : .007));
+    s.m.material.opacity = (s.strong ? .25 : .12)*(1 - k)*(Y.ambush ? 1.5 : 1);
+    s.m.quaternion.copy(cam.quaternion);
+  }
+}
+function preySignalTick(dt){
+  if (game.mode !== 'play') return;
+  signalClock -= dt;
+  if (signalClock > 0) return;
+  const head = headPos(), first = game.catches === 0;
+  const range = Y.ambush ? .1 : first ? .12 : .065;
+  const near = prey.filter(p => p.state !== 'caught' && p.state !== 'held' && !inRefuge(p.pos,p.kind) &&
+    p.pos.distanceTo(head) < range && (p.vel.lengthSq() > .000005 || game.guide.has(p)));
+  const fleeing = near.some(p => p.state === 'flee' || p.state === 'jump');
+  signalClock = fleeing ? .12 : Y.ambush ? .16 : .28;   // 逃走中は間隔を詰めて、逃げた方向を軌跡で見せる
+  if (!near.length) return;
+  const p = near[Math.floor(Math.random()*near.length)];
+  emitPreySignal(preyCenter(p), p.state === 'flee' || p.state === 'jump');
+}
+
 // 入水の波紋
 const ripples = [];
 for (let i=0;i<4;i++){
@@ -1901,7 +1946,7 @@ const STRIKE = Object.freeze({
   escapeMovement:.002, escapeDistanceGain:.001
 });
 const STARTER_GUIDE = Object.freeze({
-  count:3, duration:45, radius:.004, verticalRadius:.002,
+  count:3, duration:90, radius:.004, verticalRadius:.002,
   speed:.009, response:6, phaseSpeed:1.6,
   safety:.002, separation:.018, floorGap:.004
 });
@@ -2063,6 +2108,7 @@ function updateStarterDaphnia(p,dt){
 
 function alarm(p){
   if (p.state === 'caught' || p.state === 'held') return;
+  if (game.mode === 'play') emitPreySignal(preyCenter(p), true);
   // 一度警戒した個体は通常AIへ戻し、逃走後に元の場所へ引き戻さない。
   game.guide.delete(p);
   const away = p.pos.clone().sub(headPos()); away.y *= .3; away.normalize();
@@ -2114,7 +2160,8 @@ function updatePrey(p, dt, head){
   const th = c.alert * sizeK * (.6+.6*Y.s) * (.5 + .7*(Y.speedRatio||0)) * ambushK() * (Y.shade ? .6 : 1) * envAlertK();
   const center = preyCenter(p);
   if (game.mode === 'play' && !p.hidden && !Y.molting && (p.state === 'free' || p.state === 'forage' || p.state === 'rise')
-      && center.distanceTo(head) < th) alarm(p);
+      && center.distanceTo(head) < th &&
+      !(game.catches === 0 && game.guide.has(p) && center.distanceTo(head) > .012)) alarm(p);   // 初回捕食前の支援ミジンコは、ごく近くまで警戒しない
 
   if (!updateStarterDaphnia(p,dt)){
     const B = PREY_AI[p.kind];
@@ -2293,7 +2340,8 @@ function newGame(withIntro){
   game.tagameLost = false; game.frogHits = 0; game.frogAmbush = 0; game.frogStrikes = 0;
   game.paused = false; $('#ovPause').classList.add('hide');
   camRigReset();
-  game.short = false;
+  game.short = false; game.shortExpired = false; game.perfectCatches = 0;
+  Y.strikePerfect = false;
   toastQueue.length = 0;
   bgmPlay('main');
   game.tagameNightRolled = false; game.tagameHitT = -99;
@@ -3921,6 +3969,16 @@ function inputVy(){
   return clamp(vy,-1,1);
 }
 function lockReach(p){ return .045*Y.s + preyR(p); }
+// 捕食の判定（HUDの「届く」と同じ lockReach を基準にし、命中側にゆとりを持たせる）
+const SHORT_LIMIT = 300;
+const PERFECT = Object.freeze({angle:.35, dist:.8, growth:1.08});
+function perfectStrike(p, rec){
+  if (!p || !rec || !rec.ambush) return false;
+  const head = headPos(), c = preyCenter(p);
+  const yaw = Math.atan2(c.x-head.x, c.z-head.z);
+  return Math.abs(angDiff(rec.yaw, yaw)) <= PERFECT.angle &&
+    c.distanceTo(head) <= lockReach(p)*PERFECT.dist && !inRefuge(p.pos, p.kind);
+}
 function lockYaw(){ return view === 'fp' ? camYaw : Y.yaw; }
 // ロックできる獲物なら頭からの距離、できなければ Infinity
 function lockable(p, head, yaw){
@@ -4057,7 +4115,8 @@ function strike(){
   Y.pitch = Y.strikePitch;
   Y.ch.object.rotation.set(Y.pitch,Y.yaw,0);
   Y.ch.object.updateMatrixWorld(true);
-  Y.strikeRecord = t ? {target:t, position:preyCenter(t)} : null;
+  Y.strikeRecord = t ? {target:t, position:preyCenter(t), yaw:Y.yaw, ambush:!!Y.ambush,
+    startOk: preyCenter(t).distanceTo(headPos()) <= lockReach(t)} : null;
   sfx('strike');
   doAction(Y.ch,'attack',STRIKE.duration);
   Y.busyT = STRIKE.duration; Y.strikeT = STRIKE.hitTime;
@@ -4069,38 +4128,64 @@ function resolveStrike(){
   Y.strikeRecord = null;
   if (game.mode !== 'play' || Y.molting) return;
   const head = headPos();
+  const first = game.catches === 0;   // 初回捕食までは判定にゆとりを持たせる
   let best = null, bd = Infinity, blocked = null, tooBig = null;
-  const consider = p => {
-    if (!p || p.state === 'caught' || !prey.includes(p)) return;
+  const consider = (p, k) => {
+    if (!p || p.state === 'caught' || p.state === 'held' || !prey.includes(p)) return;
     const d = preyCenter(p).distanceTo(head);
-    if (d > lockReach(p)*1.15) return;
+    if (d > lockReach(p)*k) return;
     if (inRefuge(p.pos,p.kind)){ if (!blocked) blocked = p; return; }
     if (!canTarget(p)){ if (!tooBig) tooBig = p; return; }
     if (d < bd){ bd = d; best = p; }
   };
   const t = attempt && attempt.target;
-  consider(t);
-  if (!best){
+  const live = !!t && prey.includes(t) && t.state !== 'caught' && t.state !== 'held';
+  let moved = 0;
+  if (live){
+    // 攻撃を始めた時に狙っていた獲物だけを判定する（別の獲物を捕まえない）
+    moved = preyCenter(t).distanceTo(attempt.position);
+    consider(t, (first ? 1.4 : 1.15) + (moved <= .002 ? .1 : 0));
+  } else {
+    // ロックなしで攻撃した場合だけ、前方の獲物を探す
     for (const p of prey){
-      if (p === t) continue;
       const c = preyCenter(p);
       if (Math.abs(angDiff(Y.yaw, Math.atan2(c.x-head.x, c.z-head.z))) > LOCK.angle) continue;
-      consider(p);
+      consider(p, first ? 1.4 : 1.15);
     }
   }
-  if (best) return sizeClass(best) === 'big' ? startFight(best) : catchPrey(best);
-  let msg = '空振り';
+  if (best){
+    const perfect = perfectStrike(best, attempt);
+    if (sizeClass(best) === 'big'){ Y.strikePerfect = perfect; return startFight(best); }
+    return catchPrey(best, false, 0, perfect);
+  }
+  let msg = '届かなかった';
   if (blocked) msg = preyName(blocked) + 'は隙間の奥。届かない';
   else if (tooBig) msg = tooBig.cfg.sizeMax ? preyName(tooBig) + 'はまだ大きすぎる' : 'まだ小さくて' + tooBig.cfg.label + 'ははさめない';
-  else if (t && prey.includes(t) && t.state !== 'caught')
-    msg = preyCenter(t).distanceTo(attempt.position) > .003 ? '逃げられた' : '届かなかった';
+  else if (live) msg = (moved > .003 && attempt.startOk) ? '逃げられた' : '届かなかった';
+  else msg = '空振り';
   toast(msg,0);
   sfx('miss');
-  disturb(head,.06);
+  disturb(head, first ? .03 : .06);   // 初回の失敗では周りを驚かせすぎない
 }
-function catchPrey(p, fightWin, fd){
+function catchPrey(p, fightWin, fd, perfect=false){
   Y.strikeRecord = null;
   game.guide.clear();
+  if (fightWin){ perfect = !!Y.strikePerfect; }
+  Y.strikePerfect = false;
+  {
+    // 捕食の水中エフェクト（微粒子は既存の emitPuff を少量だけ使う）
+    const c = preyCenter(p);
+    if (perfect){
+      game.perfectCatches = (game.perfectCatches || 0) + 1;
+      game.slowT = Math.max(game.slowT || 0, .2);
+      game.fovKick = 1;
+      sfx('perfect');
+      for (let i=0;i<12;i++) emitPuff(c, V(rand(-.025,.025),rand(-.008,.025),rand(-.025,.025)), rand(.0008,.002)*Y.s);
+      if (navigator.vibrate) navigator.vibrate([15,20,25]);
+    } else {
+      for (let i=0;i<5;i++) emitPuff(c, V(rand(-.015,.015),rand(-.006,.015),rand(-.015,.015)), rand(.0006,.0014));
+    }
+  }
   p.state = 'caught'; p.st = 1.5; p.ch.busy = 0;
   if (p.ch.clips.Eaten) setAnim(p.ch,'Eaten'); else setAnim(p.ch,'swim');
   // 大きさの2乗に比例（ミジンコ・ボウフラは従来どおり）
@@ -4109,7 +4194,7 @@ function catchPrey(p, fightWin, fd){
   // 戦闘の難しさに応じたご褒美
   const d = fightWin ? (fd ?? fightDiff(p)) : 0;
   const amb = Y.strikeAmb ? 1.5 : 1;
-  const growK = amb * (sized && fightWin ? 1 + .6*d : 1);
+  const growK = amb * (sized && fightWin ? 1 + .6*d : 1) * (perfect ? PERFECT.growth : 1);
   const energyK = amb * (sized && fightWin ? 1 + .4*d : 1);
   // 齢が上がると小物の価値が下がる（体力の回復量はそのまま）
   const worth = (p.kind === 'daphnia' && Y.stage >= 2) || (p.kind === 'bowfura' && Y.stage >= 3) ? .5 : 1;
@@ -4126,7 +4211,8 @@ function catchPrey(p, fightWin, fd){
   if (p.kind === 'medaka') game.maxMedaka = Math.max(game.maxMedaka || 0, p.size || 1);
   const combo = game.combo >= 1 ? '　連続' + (game.combo + 1) + '！' : '';
   const name = preyName(p);
-  if (big) toast('大物の' + name + 'を仕留めた！' + combo, 2);
+  if (perfect) toast('✨ パーフェクト捕食！ ' + name + combo, 2);
+  else if (big) toast('大物の' + name + 'を仕留めた！' + combo, 2);
   else if (fightWin) toast(name + 'を仕留めた' + combo, 2);
   else toast((Y.strikeAmb ? '待ち伏せ成功！ ' : '') + name + 'をつかまえた' + combo);
   sfx('catch');
@@ -5096,11 +5182,12 @@ function showEnd(clear){
   const byBird = !clear && game.lastCause === 'bird' && game.time - (game.birdHitT ?? -99) < 3;
   const byTagame = !clear && game.lastCause === 'tagame' && game.time - (game.tagameHitT ?? -99) < 3;
   const byFrog = !clear && !!game.frogLost;
-  $('#endTitle').textContent = clear ? '羽化しました' : byFrog ? 'カエルに敗れた' : byTagame ? 'タガメに捕まった' : byBird ? '鳥に見つかった' : '力尽きました';
+  const timedOut = !clear && !!game.short && !!game.shortExpired;
+  $('#endTitle').textContent = timedOut ? '5分チャレンジ終了' : clear ? '羽化しました' : byFrog ? 'カエルに敗れた' : byTagame ? 'タガメに捕まった' : byBird ? '鳥に見つかった' : '力尽きました';
   const rankEl = $('#endRank'), det = $('#endDetail');
   if (clear){
     const r = computeRank();
-    const saved = saveBest(true, r.rank, game.time);
+    const saved = game.short ? {newRecord:false} : saveBest(true, r.rank, game.time);   // 5分チャレンジは自己ベストを更新しない
     rankEl.textContent = r.rank; rankEl.style.display = '';
     det.textContent = `スコア${r.score}（${m}分${s}秒・待ち伏せ${Math.round(r.amb*100)}%・大物${game.bigCatches}・被弾${game.birdHits}・カエル戦 被弾${game.frogHits||0}／待ち伏せ噛みつき${game.frogAmbush||0}）`;
     $('#endMsg').textContent =
@@ -5109,7 +5196,9 @@ function showEnd(clear){
   } else {
     saveBest(false);
     rankEl.textContent = ''; rankEl.style.display = 'none'; det.textContent = '';
-    $('#endMsg').textContent = byFrog
+    $('#endMsg').textContent = timedOut
+      ? `制限時間に到達しました。${game.catches}匹を捕食し、${Y.stage+1}齢まで成長しました。次は羽化を目指そう！`
+      : byFrog
       ? '喉がふくらんで赤い輪が点滅したら、舌が来る合図です。輪の外へ逃げましょう。捕まったら、光った側の端にマーカーが来た瞬間にその側をタップして振りほどきます。カエルがメダカを食べている間が、喉（急所）を狙うチャンスです。'
       : byTagame
       ? 'タガメが近くにいるときは、じっとしていれば見つかりません。構えたら噴射で逃げましょう。'
@@ -5125,6 +5214,7 @@ function showEnd(clear){
 }
 function setHud(on){
   for (const id of ['#stat','#prey','#bStrike','#bJet','#bView','#bUp','#bDown','#bSound','#bPause','#bMenu','#zoomCtl','#joyHint']) $(id).style.display = on ? '' : 'none';
+  $('#shortTimer').style.display = on && game.short ? 'block' : 'none';
   if (!on){
     $('#bossBar').style.display = 'none';
     $('#tutHint').style.display = 'none';
@@ -5158,6 +5248,22 @@ function toast(msg,priority=1){
 }
 let hudT = 0;
 function updateHud(dt){
+  // 5分チャレンジ：残り時間の表示と、時間切れの判定
+  {
+    const st = $('#shortTimer');
+    const vis = game.mode === 'play' && game.short;
+    if (st){
+      st.style.display = vis ? 'block' : 'none';
+      if (vis){
+        const rem = Math.max(0, Math.ceil(SHORT_LIMIT - game.time));
+        st.textContent = '残り ' + Math.floor(rem/60) + ':' + String(rem%60).padStart(2,'0');
+        st.style.color = rem <= 30 ? '#ffb6a8' : '#e0f3bd';
+      }
+    }
+    if (vis && game.time >= SHORT_LIMIT){ game.time = SHORT_LIMIT; game.shortExpired = true; gameOver(); return; }
+  }
+  preySignalTick(dt);
+  updatePreySignals(dt);
   updateBossBar();
   updateAlertFx();
   tutorialTick();
@@ -5299,6 +5405,44 @@ $('#bPause').addEventListener('pointerdown', e => {
   document.body.classList.remove('menuOpen');
   pauseGame();
 });
+/* ---------- 入力の取りこぼし対策（ジョイスティックの張り付き防止） ---------- */
+function releaseJoy(){
+  joyId = null;
+  joy.style.display = 'none'; knob.style.transform = '';
+  input.jx = input.jy = 0;
+}
+function releaseAllTouch(){
+  releaseJoy();
+  dragId = null;
+}
+// 既存の処理を先に通し（バブリング）、解除が残っていたときだけ働く
+for (const ev of ['pointerup','pointercancel']){
+  window.addEventListener(ev, e => {
+    if (joyId !== null && e.pointerId === joyId) releaseJoy();
+    if (dragId !== null && e.pointerId === dragId) dragId = null;
+  });
+}
+window.addEventListener('touchcancel', releaseAllTouch);
+window.addEventListener('blur', releaseAllTouch);
+window.addEventListener('pagehide', releaseAllTouch);
+// 壁に押し付けたまま動けない状態を検出して解除する
+const stuckW = {t:0, p:V()};
+function updateWallRescue(dt){
+  if (game.mode !== 'play' || game.paused || Y.molting || game.fight || game.escape || !Y.pos){ stuckW.t = 0; return; }
+  const h = Math.hypot(Y.pos.x, Y.pos.z), wr = wallR(Y.pos.y);
+  const pushing = Math.hypot(input.jx || 0, input.jy || 0) > .3;
+  if (!pushing || h < 1e-6 || h <= wr - .035){ stuckW.t = 0; return; }
+  // 動いているあいだ（壁沿いに泳いでいるとき）は計測をやり直す
+  if (stuckW.t === 0 || Y.pos.distanceTo(stuckW.p) > .015){ stuckW.t = .001; stuckW.p.copy(Y.pos); return; }
+  stuckW.t += dt;
+  if (stuckW.t > 2.5){
+    stuckW.t = 0;
+    releaseAllTouch();
+    Y.pos.x -= Y.pos.x/h*.012; Y.pos.z -= Y.pos.z/h*.012;
+    Y.vel.set(0,0,0); Y.jetVel.set(0,0,0);
+    toast('壁から離れた', 0);
+  }
+}
 $('#bMenu').addEventListener('pointerdown', e => {
   e.preventDefault(); e.stopPropagation();
   document.body.classList.toggle('menuOpen');
@@ -5386,7 +5530,9 @@ $('#bShort').addEventListener('click', () => {
   Y.stage = 2; Y.s = SIZES[2]; Y.ch.object.scale.setScalar(Y.s);
   Y.growth = 0; Y.energy = 100;
   game.tagameDone = true;
-  toast('5分チャレンジ：3齢から羽化をめざせ', 3);
+  game.shortExpired = false;
+  $('#shortTimer').style.display = 'block';
+  toast('5分チャレンジ：残り5分で羽化をめざせ', 3);
 });
 $('#bSplash').addEventListener('click', () => { audioInit(); $('#ovSplash').classList.add('hide'); startOpening(); });
 $('#opLayer').addEventListener('pointerdown', e => { e.preventDefault(); endOpening(); });
@@ -5502,7 +5648,7 @@ function loop(now){
       school.pos.copy(envPhaseId() === 'night' ? randomInWater(SURF-.02, SURF-.01) : randomInWater(SURF-.1, SURF-.025));
     }
     if (game.mode !== 'ending') updateYago(dt); else updateEnding(dt);
-    if (game.mode === 'play'){ updateTagame(dt); updateFrog(dt); }
+    if (game.mode === 'play'){ updateTagame(dt); updateFrog(dt); updateWallRescue(dt); }
     updateGuideLifecycle();
     const head = headPos(), cp = cam.position;
     for (let i = prey.length-1; i >= 0; i--){
