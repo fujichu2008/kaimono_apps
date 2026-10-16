@@ -80,6 +80,10 @@ canvas{display:block}
 #fx{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0;transition:opacity .45s;background:radial-gradient(ellipse at 50% 50%,rgba(0,0,0,0) 55%,rgba(6,18,14,.55) 100%)}
 #fx.focus{opacity:1}
 #fx.danger{opacity:1;transition:none;background:radial-gradient(ellipse at 50% 50%,rgba(0,0,0,0) 48%,rgba(208,101,76,.6) 100%)}
+#alertFx{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0;transition:opacity .6s;background:radial-gradient(ellipse at 50% 50%,rgba(0,0,0,0) 58%,rgba(208,70,50,.32) 100%)}
+#alertFx.on{opacity:1;animation:alertPulse 1.6s ease-in-out infinite}
+@keyframes alertPulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){ #alertFx.on{animation:none} }
 #fx.flash{animation:fxFlash .5s ease-out}
 @keyframes fxFlash{0%{opacity:1;box-shadow:inset 0 0 0 3px rgba(111,216,138,.9),inset 0 0 90px rgba(111,216,138,.45)}100%{box-shadow:inset 0 0 0 0 rgba(111,216,138,0),inset 0 0 0 rgba(111,216,138,0)}}
 #ambush.ready{animation:ambReady .6s ease-out}
@@ -1239,6 +1243,7 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
 <div id="touch"></div>
 <div id="joy"><div id="knob"></div></div>
 <div id="fx" aria-hidden="true"></div>
+<div id="alertFx" aria-hidden="true"></div>
 <div id="offArrow" aria-hidden="true"></div>
 <div id="escape" aria-live="polite">
   <div class="ePanel ePL"><span>◀ 左</span></div>
@@ -2476,6 +2481,13 @@ function updateBossBar(){
   el.querySelector('.bbBar i').style.width = (clamp(ratio,0,1)*100) + '%';
   el.querySelector('.bbTxt').textContent = txt;
 }
+// 鳥の襲来・タガメ戦・カエル戦の間は、画面の周りを赤くうっすら点灯させる
+function updateAlertFx(){
+  const B = game.bird;
+  const on = game.mode === 'play' && (!!game.frog || (!!game.tagame && !!game.tagameBoss) ||
+    (!!B && (B.phase === 'warn' || B.phase === 'strike')));
+  $('#alertFx').classList.toggle('on', on);
+}
 function updateAudio(dt){
   if (!AUDIO.ctx || AUDIO.muted) return;
   AUDIO.bubbleT -= dt;
@@ -2665,19 +2677,54 @@ function applyEnv(dt, under){
 }
 
 /* ---------- 天敵：鳥の影 ---------- */
-const BIRD = Object.freeze({first:45, min:40, max:70, warn:3, strike:.4, depth:.06});
+const BIRD = Object.freeze({first:45, min:40, max:70, warn:3, strike:.7, depth:.06});
 const birdShadow = new THREE.Mesh(new THREE.CircleGeometry(1,32),
   new THREE.MeshBasicMaterial({color:0x000000, transparent:true, opacity:0, depthWrite:false, side:THREE.DoubleSide}));
 birdShadow.rotation.x = -Math.PI/2; birdShadow.visible = false; scene.add(birdShadow);
+// ついばむ鳥の頭（原点＝くちばしの先）
+const birdHead = new THREE.Group();
+{
+  const bodyMat = new THREE.MeshStandardMaterial({color:0x4a4038, roughness:.75});
+  const beakMat = new THREE.MeshStandardMaterial({color:0x2a2420, roughness:.4});
+  const eyeMat = new THREE.MeshStandardMaterial({color:0x0a0a0a, roughness:.15});
+  const beak = new THREE.Mesh(new THREE.ConeGeometry(.006,.04,12), beakMat);
+  beak.rotation.x = Math.PI; beak.position.y = .02;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(.018,16,12), bodyMat);
+  head.position.y = .052; head.scale.set(1,1.1,1.25);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(.012,.017,.14,12), bodyMat);
+  neck.position.y = .13;
+  for (const sx of [-1,1]){
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(.0035,8,6), eyeMat);
+    eye.position.set(sx*.015,.058,.006);
+    birdHead.add(eye);
+  }
+  birdHead.add(beak, head, neck);
+}
+birdHead.visible = false; scene.add(birdHead);
+// 上空から突っ込み、少し止まって引き上げる
+function updatePeck(B){
+  const t = B.t, top = SURF + .2, bottom = B.peck.y;
+  let y;
+  if (t < .12) y = top + (bottom - top)*smooth01(t/.12);
+  else if (t < .25) y = bottom;
+  else y = bottom + (top - bottom)*smooth01((t - .25)/.45);
+  birdHead.visible = t < BIRD.strike;
+  birdHead.position.set(B.peck.x, y, B.peck.z);
+  birdHead.rotation.set(0, Math.atan2(B.dir.x, B.dir.z), .25);
+  if (!B.splashed && y < SURF){
+    B.splashed = true;
+    splash(V(B.peck.x, SURF, B.peck.z));
+  }
+}
 let envSunBase = sun.intensity;   // applyEnv が更新する現在の日差し
 let SUN_BASE = envSunBase;        // 鳥の処理が参照する日差し（applyEnv が envSunBase と同期する）
 function resetBird(){
   game.bird = {next:BIRD.first, phase:'idle', t:0, pos:V(), dir:V(), target:V()};
-  birdShadow.visible = false; sun.intensity = SUN_BASE; game.shakeT = 0;
+  birdShadow.visible = false; birdHead.visible = false; sun.intensity = SUN_BASE; game.shakeT = 0;
 }
 function hideBird(){
   if (game.bird){ game.bird.phase = 'idle'; game.bird.next = rand(BIRD.min, BIRD.max); }
-  birdShadow.visible = false; sun.intensity = SUN_BASE;
+  birdShadow.visible = false; birdHead.visible = false; sun.intensity = SUN_BASE;
 }
 function updateBird(dt){
   const B = game.bird;
@@ -2711,24 +2758,29 @@ function updateBird(dt){
     if (B.t >= BIRD.warn){ B.phase = 'strike'; B.t = 0; birdStrike(); }
   } else if (B.phase === 'strike'){
     birdShadow.material.opacity = .35*Math.max(0, 1 - B.t/BIRD.strike);
+    updatePeck(B);
     if (B.t >= BIRD.strike){
       B.phase = 'idle'; B.next = rand(BIRD.min, BIRD.max);
-      birdShadow.visible = false; sun.intensity = SUN_BASE;
+      birdShadow.visible = false; birdHead.visible = false; sun.intensity = SUN_BASE;
     }
   }
 }
 function birdStrike(){
   const B = game.bird;
+  // ついばむ位置（影の下の浅い所。ボウフラやヤゴに当たればその位置）
+  B.splashed = false;
+  B.peck = V(B.target.x, SURF - .045, B.target.z);
   // 水面近くのボウフラを1匹さらう
   const bf = prey.find(p => p.kind === 'bowfura' && p.state !== 'caught' && p.state !== 'held' &&
     p.pos.y > SURF-.015 && Math.hypot(p.pos.x-B.pos.x, p.pos.z-B.pos.z) < .05);
-  if (bf) removePrey(bf);
+  if (bf){ B.peck = bf.pos.clone(); removePrey(bf); }
   // 振りほどき中は鳥の判定を行わない
   const safe = (Y.molting && Y.safeMolt) || !!game.escape;
   if (!safe && Y.pos.y > SURF - BIRD.depth && !Y.shade){
     const dmg = (Y.molting && !Y.safeMolt) ? 60 : 30;
     Y.energy -= dmg;
     game.birdHits++; game.lastCause = 'bird'; game.birdHitT = game.time;
+    B.peck = Y.pos.clone();
     Y.jetVel.y -= .08; game.shakeT = .5;
     toast('鳥についばまれた！', 3);
     sfx('hit');
@@ -4497,6 +4549,7 @@ function toast(msg,priority=1){
 let hudT = 0;
 function updateHud(dt){
   updateBossBar();
+  updateAlertFx();
   bgmPrefetchTick();
   if (toastTimer > 0){
     toastTimer -= dt;
