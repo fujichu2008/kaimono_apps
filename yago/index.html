@@ -2242,6 +2242,7 @@ function newGame(withIntro){
   clearFrog(); game.frogDone = false; game.frogLost = false;
   game.tagameLost = false; game.frogHits = 0; game.frogAmbush = 0; game.frogStrikes = 0;
   game.paused = false; $('#ovPause').classList.add('hide');
+  camRigReset();
   toastQueue.length = 0;
   bgmPlay('main');
   game.tagameNightRolled = false; game.tagameHitT = -99;
@@ -4060,6 +4061,7 @@ function startFight(p){
   E.root.classList.add('on');
   E.msg.textContent = 'かまえ…';
   updateFightUI(0);
+  startFightCamera();
   toast(preyName(p) + 'に組み付いた！ ' + stars(d), 2);
 }
 // 難しい相手は、輪を出すたびに円の位置をずらす
@@ -4093,8 +4095,8 @@ function fightPress(){
     return;
   }
   const diff = Math.abs(F.ring - F.targetD);
-  if (diff <= F.window.perfect){ F.score += 2; fightFeedback('ぴったり！','hit'); sfx('perfect'); }
-  else if (diff <= F.window.good){ F.score += 1; fightFeedback('おしい','hit'); sfx('good'); }
+  if (diff <= F.window.perfect){ F.score += 2; fightFeedback('ぴったり！','hit'); sfx('perfect'); camRig.kick = 1; }
+  else if (diff <= F.window.good){ F.score += 1; fightFeedback('おしい','hit'); sfx('good'); camRig.kick = 1; }
   else { fightMiss('はずれ'); return; }
   if (navigator.vibrate) navigator.vibrate(20);
   if (F.score >= F.need){ winFight(); return; }
@@ -4138,6 +4140,7 @@ function loseFight(){
 function clearFight(){
   const F = game.fight;
   game.fight = null;
+  if (F) endFightCamera();
   if (F && F.p && F.p.state === 'held') F.p.state = 'free';
   const E = fightUI();
   if (!E.root) return;
@@ -4481,27 +4484,147 @@ function updateCamZoom(dt){
   return CAMZ.cur;
 }
 const camFocus = V(), ZERO3 = V();
-// 組み付き中：少し寄せて小さく揺らす
-function fightCamera(dt){
-  const c = preyCenter(game.fight.p);
-  const target = Y.pos.clone().add(V(0,.012*Y.s,0)).lerp(c,.5);
-  const D = (.035 + .065*Y.s)*.7;
-  const want = target.clone().addScaledVector(dirFrom(Y.yaw+.5, -.3), -D);
-  want.y = clamp(want.y, groundY(want.x,want.z)+.005, SURF-.005);
-  const R = wallR(want.y) - .006, h = Math.hypot(want.x,want.z);
-  if (h > R){ want.x *= R/h; want.z *= R/h; }
-  cam.position.lerp(want, damp(6,dt));
-  if (!REDUCED_MOTION) cam.position.add(V(rand(-1,1),rand(-1,1),rand(-1,1)).multiplyScalar(.0006*Y.s));
-  cam.lookAt(target);
+/* ---------- カメラの状態（通常／組み付きへの移行／組み付き中／復帰） ---------- */
+const camRig = {mode:'normal', t:0, look:V(), pos:V(), viewY:0, kick:0, side:1,
+  fromPos:V(), fromLook:V(), fromFov:62, fromViewY:0,
+  normalPos:V(), normalLook:V(), needSync:true};
+const FIGHT_CAM = Object.freeze({inDur:.45, outDur:.5, fastDur:.2, fov:54,
+  yawOff:47*Math.PI/180, elev:18*Math.PI/180, viewShift:.17, wobble:.0002, kickAmp:.0012, kickDur:.15});
+const easeIOC = x => { x = clamp(x,0,1); return x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3)/2; };
+// カメラ位置を底〜水面・壁の内側に収める
+function clampCam(p){
+  p.y = clamp(p.y, groundY(p.x,p.z) + .005, SURF - .005);
+  const R = wallR(p.y) - .006, h = Math.hypot(p.x,p.z);
+  if (h > R){ p.x *= R/h; p.z *= R/h; }
+  return p;
+}
+// 組み付き中の構図（side：+1 / -1 でヤゴの正面から左右どちらに回るか）
+function fightPose(side){
+  const F = game.fight;
+  if (!F || !F.p) return null;
+  const head = headPos(), c = preyCenter(F.p);
+  const mid = head.clone().add(c).multiplyScalar(.5);
+  const dist = Math.max(.06, (head.distanceTo(c) + preyR(F.p)*2 + .012*Y.s)*1.9)*CAMZ.user;
+  const yaw = Y.yaw + side*FIGHT_CAM.yawOff, el = FIGHT_CAM.elev;
+  const raw = mid.clone().add(V(Math.sin(yaw)*Math.cos(el), Math.sin(el), Math.cos(yaw)*Math.cos(el)).multiplyScalar(dist));
+  const pos = clampCam(raw.clone());
+  // 押し戻された量と、根への近さを「見えにくさ」とする
+  let cost = pos.distanceTo(raw);
+  for (const r of ROOTS){
+    if (pos.y < r.y0 - .01 || pos.y > r.y1) continue;
+    cost += Math.max(0, r.r + .02 - Math.hypot(pos.x - r.x, pos.z - r.z))*2;
+  }
+  return {pos, mid, cost};
+}
+// mid を中心に、a から b へ弧を描いて補間する
+function arcLerp(a, b, mid, e){
+  const va = a.clone().sub(mid), vb = b.clone().sub(mid);
+  const la = va.length(), lb = vb.length();
+  if (la < 1e-5 || lb < 1e-5) return a.clone().lerp(b, e);
+  va.divideScalar(la); vb.divideScalar(lb);
+  const q = new THREE.Quaternion().setFromUnitVectors(va, vb);
+  const qe = new THREE.Quaternion().slerp(q, e);
+  return mid.clone().add(va.applyQuaternion(qe).multiplyScalar(la + (lb - la)*e));
+}
+function camRigReset(){
+  camRig.mode = 'normal'; camRig.viewY = 0; camRig.kick = 0; camRig.needSync = true;
+  if (cam.view && cam.view.enabled) cam.clearViewOffset();
+}
+// 組み付き開始：今の視点から斜め前の構図へ回り込む
+function startFightCamera(){
+  const R = camRig;
+  if (R.needSync){ R.normalPos.copy(cam.position); R.normalLook.copy(R.look); R.needSync = false; }
+  R.fromPos.copy(cam.position); R.fromLook.copy(R.look); R.fromFov = cam.fov; R.fromViewY = R.viewY;
+  const a = fightPose(1), b = fightPose(-1);
+  R.side = !a || !b || a.cost <= b.cost ? 1 : -1;
+  R.pos.copy(cam.position);
+  R.mode = 'fightIn'; R.t = 0; R.kick = 0;
+  const fx = $('#fx');
+  fx.classList.remove('flash'); void fx.offsetWidth; fx.classList.add('flash');
+}
+// 組み付き終了：通常の視点へ滑らかに戻す
+function endFightCamera(){
+  const R = camRig;
+  if (R.mode === 'normal' || R.mode === 'fightOut') return;
+  R.fromPos.copy(cam.position); R.fromLook.copy(R.look); R.fromFov = cam.fov; R.fromViewY = R.viewY;
+  R.pos.copy(cam.position);
+  R.mode = 'fightOut'; R.t = 0; R.kick = 0;
+}
+// 視野角（通常の値 base に、組み付きの演出を重ねる）
+function camRigFov(base){
+  const R = camRig;
+  if (REDUCED_MOTION || R.mode === 'normal') return base;
+  if (R.mode === 'fightIn') return R.fromFov + (FIGHT_CAM.fov - R.fromFov)*easeIOC(R.t/FIGHT_CAM.inDur);
+  if (R.mode === 'fight') return FIGHT_CAM.fov;
+  return R.fromFov + (base - R.fromFov)*easeIOC(R.t/FIGHT_CAM.outDur);
+}
+// カメラへの適用（通常の値か、組み付きの演出か）
+function applyCamRig(dt){
+  const R = camRig, fast = REDUCED_MOTION;
+  if (R.mode === 'normal'){
+    cam.position.copy(R.normalPos);
+    R.look.copy(R.normalLook);
+  } else {
+    R.t += dt;
+    if (R.mode === 'fightIn'){
+      const P = fightPose(R.side);
+      if (!P) endFightCamera();
+      else {
+        const dur = fast ? FIGHT_CAM.fastDur : FIGHT_CAM.inDur;
+        const e = fast ? clamp(R.t/dur, 0, 1) : easeIOC(R.t/dur);
+        R.pos.copy(fast ? R.fromPos.clone().lerp(P.pos, e) : arcLerp(R.fromPos, P.pos, P.mid, e));
+        clampCam(R.pos);
+        R.look.copy(R.fromLook).lerp(P.mid, e);
+        R.viewY = e;
+        if (R.t >= dur) R.mode = 'fight';
+      }
+    } else if (R.mode === 'fight'){
+      const P = fightPose(R.side);
+      if (P){ R.pos.lerp(P.pos, damp(5,dt)); R.look.lerp(P.mid, damp(8,dt)); }
+      R.viewY = 1;
+    }
+    if (R.mode === 'fightOut'){
+      const dur = fast ? FIGHT_CAM.fastDur : FIGHT_CAM.outDur;
+      const e = fast ? clamp(R.t/dur, 0, 1) : easeIOC(R.t/dur);
+      R.pos.copy(R.fromPos).lerp(R.normalPos, e);
+      R.look.copy(R.fromLook).lerp(R.normalLook, e);
+      R.viewY = R.fromViewY*(1 - e);
+      if (R.t >= dur){ R.mode = 'normal'; R.viewY = 0; }
+    }
+    cam.position.copy(R.pos);
+    // 組み付き中の揺れ：滑らかな揺らぎ＋命中時の短い強い揺れ
+    if (!fast && (R.mode === 'fight' || R.mode === 'fightIn')){
+      const tt = performance.now()/1000, a = FIGHT_CAM.wobble*Y.s;
+      cam.position.x += (Math.sin(tt*7.1) + .5*Math.sin(tt*13.7))*a;
+      cam.position.y += (Math.sin(tt*9.3) + .5*Math.sin(tt*15.1))*a;
+      cam.position.z += (Math.sin(tt*8.2) + .5*Math.sin(tt*11.9))*a;
+      if (R.kick > 0){
+        cam.position.add(V(rand(-1,1),rand(-1,1),rand(-1,1)).multiplyScalar(FIGHT_CAM.kickAmp*Y.s*R.kick));
+        R.kick = Math.max(0, R.kick - dt/FIGHT_CAM.kickDur);
+      }
+    }
+  }
+  cam.lookAt(R.look);
+  // 主役を画面の上側へずらし、組み付きの輪に隠れないようにする
+  if (R.viewY > .001){
+    cam.setViewOffset(innerWidth, innerHeight, 0, innerHeight*FIGHT_CAM.viewShift*R.viewY, innerWidth, innerHeight);
+  } else if (cam.view && cam.view.enabled){
+    cam.clearViewOffset();
+  }
 }
 function updateCamera(dt){
-  if (game.fight && game.mode === 'play') return fightCamera(dt);
-  if (game.mode === 'intro') return introCamera(dt);
-  if (game.mode === 'ending') return endingCamera(dt);
+  if (game.mode === 'intro'){ camRigReset(); return introCamera(dt); }
+  if (game.mode === 'ending'){ camRigReset(); return endingCamera(dt); }
+  normalCamera(dt);
+  applyCamRig(dt);
+}
+// 通常のカメラ（三人称・ヤゴ目線）が求める位置と注視点を計算する（カメラ自体は applyCamRig が動かす）
+function normalCamera(dt){
   if (view === 'fp'){
     const head = headPos(), f = yagoFwd();
-    cam.position.copy(head).addScaledVector(f, .005*Y.s).add(V(0,.004*Y.s,0));
-    cam.lookAt(cam.position.clone().add(dirFrom(camYaw,fpPitch)));
+    camRig.normalPos.copy(head).addScaledVector(f, .005*Y.s).add(V(0,.004*Y.s,0));
+    camRig.normalLook.copy(camRig.normalPos).add(dirFrom(camYaw,fpPitch));
+    camRig.needSync = false;
     return;
   }
   // 自動追従で入力の基準方向を回さず、見回し操作だけで視点方位を変える。
@@ -4524,8 +4647,11 @@ function updateCamera(dt){
   want.y = clamp(want.y, groundY(want.x,want.z)+.005, SURF-.005);
   const R = wallR(want.y) - .006, h = Math.hypot(want.x,want.z);
   if (h > R){ want.x *= R/h; want.z *= R/h; }
-  cam.position.lerp(want, damp(9,dt));
-  cam.lookAt(target);
+  if (camRig.needSync){
+    camRig.normalPos.copy(cam.position); camRig.normalLook.copy(target); camRig.needSync = false;
+  }
+  camRig.normalPos.lerp(want, damp(9,dt));
+  camRig.normalLook.lerp(target, damp(10,dt));
 }
 
 /* =========================================================
@@ -4981,7 +5107,7 @@ function loop(now){
     }
     // 待ち伏せ成功時に視野を一瞬寄せる
     if (game.fovKick > 0) game.fovKick = Math.max(0, game.fovKick - rawDt*3);
-    const fov = 62 - (REDUCED_MOTION ? 0 : 6*smooth01(game.fovKick || 0));
+    const fov = camRigFov(62 - (REDUCED_MOTION ? 0 : 6*smooth01(game.fovKick || 0)));
     if (Math.abs(cam.fov - fov) > .01){ cam.fov = fov; cam.updateProjectionMatrix(); }
     updateAids();
     updateHud(dt);
