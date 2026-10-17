@@ -2350,6 +2350,7 @@ function newGame(withIntro){
   clearFight();
   game.guide.clear();
   Y.strikeRecord = null;
+  Y.tagameCounter = null;
   while (prey.length) removePrey(prey[0]);
   if (Y.ch) Y.ch.dispose();
   if (game.fly){ game.fly.dispose(); game.fly = null; }
@@ -3153,7 +3154,8 @@ const tagRing = new THREE.Mesh(new THREE.RingGeometry(.019,.025,40),
   new THREE.MeshBasicMaterial({color:0xd0654c, transparent:true, opacity:.75, depthTest:false, depthWrite:false, side:THREE.DoubleSide}));
 tagRing.rotation.x = -Math.PI/2; tagRing.renderOrder = 19; tagRing.visible = false; scene.add(tagRing);
 const TAGAME = Object.freeze({scale:.58, minTime:90, chance:.7, warn:2, enter:2, lurk:50,
-  detect:.07, detectJet:.1, holdReach:.03, dash:.12, medakaReach:.04});
+  detect:.07, detectJet:.1, holdReach:.03, dash:.12, medakaReach:.04,
+  stuckTime:3.2, counterReach:.055, counterReduction:16, staggerTime:1.1});
 // 頭の先・獲物を抱える位置（モデルが無いときは本体の前方で代用）
 function tagPoint(kind){
   const T = game.tagame, f = V(Math.sin(T.yaw), 0, Math.cos(T.yaw));
@@ -3167,6 +3169,63 @@ function tagameNear(){
   const T = game.tagame;
   if (!T || T.state !== 'lurk' || game.mode !== 'play') return false;
   return tagPoint('head').distanceTo(Y.pos) < tagameRange()*1.5;
+}
+// 突進を外したタガメの鎌が底に引っかかり、短時間無防備になる。
+function tagameStuck(){
+  const T = game.tagame;
+  if (!T || !game.tagameBoss) return;
+  T.state = 'stuck';
+  T.t = 0;
+  T.stuckT = TAGAME.stuckTime;
+  T.pauseT = 0;
+  T.grabT = rand(6,9);
+  setAnim(T.ch,'Hurt');
+  toast('タガメの鎌が引っかかった！ 接近して捕食で反撃！', 3);
+  sfx('good');
+}
+// カウンター可能な相手と位置を取得する。
+function tagameCounterTarget(){
+  const T = game.tagame;
+  if (!T || !T.ch || !game.tagameBoss || T.state !== 'stuck' ||
+      game.mode !== 'play' || Y.molting || game.escape || game.fight) return null;
+  const pos = tagPoint('head');
+  if (headPos().distanceTo(pos) > TAGAME.counterReach) return null;
+  return {boss:T, pos};
+}
+// カウンター成功時は撃退までの残り時間を削り、タガメをひるませる。
+function tagameCounterHit(T){
+  if (!T || T !== game.tagame || !game.tagameBoss || T.state !== 'stuck') return false;
+  T.lurkT = Math.min(T.lurkMax, T.lurkT + TAGAME.counterReduction);
+  T.counterHits = (T.counterHits || 0) + 1;
+  T.state = 'stagger';
+  T.t = 0;
+  T.stuckT = 0;
+  T.pauseT = 0;
+  doAction(T.ch,'Hurt',TAGAME.staggerTime);
+
+  const pos = tagPoint('head');
+  for (let i=0;i<10;i++){
+    emitPuff(pos, V(rand(-.025,.025),rand(-.005,.025),rand(-.025,.025)),rand(.001,.0025));
+  }
+  const fx = $('#fx');
+  fx.classList.remove('flash');
+  void fx.offsetWidth;
+  fx.classList.add('flash');
+  game.shakeT = Math.max(game.shakeT || 0,.22);
+  game.slowT = Math.max(game.slowT || 0,.2);
+  game.fovKick = 1;
+  sfx('perfect');
+  sfx('hit');
+  if (navigator.vibrate) navigator.vibrate([25,35,45]);
+
+  const remaining = Math.max(0,Math.ceil(T.lurkMax - T.lurkT));
+  if (remaining <= 0){
+    toast('カウンター成功！ タガメを撃退した！', 3);
+    startLeave();
+  } else {
+    toast('カウンター成功！ 残り時間を16秒短縮！ あと' + remaining + '秒', 3);
+  }
+  return true;
 }
 function placeTagame(){
   const T = game.tagame;
@@ -3368,6 +3427,10 @@ function updateTagame(dt){
   if (!T) return;
   T.t += dt;
   if (T.cool > 0) T.cool -= dt;
+  // ボスの耐久時間は、突進・もがき・ひるみの間も進める。
+  if (game.tagameBoss && !['warn','enter','rise','fly'].includes(T.state)){
+    T.lurkT += dt;
+  }
   placeTagame();
   const faceYago = k => { T.yaw = lerpAngle(T.yaw, Math.atan2(Y.pos.x - T.pos.x, Y.pos.z - T.pos.z), damp(k, dt)); };
 
@@ -3388,7 +3451,7 @@ function updateTagame(dt){
       if (T.t >= TAGAME.enter){ T.state = 'lurk'; T.t = 0; setAnim(T.ch, 'idle'); }
       break; }
     case 'lurk': {
-      T.lurkT += dt;
+      if (!game.tagameBoss) T.lurkT += dt;
       faceYago(1.5);
       if (T.lurkT >= T.lurkMax || (!game.tagameBoss && envPhaseId() === 'morning')){
         if (game.tagameBoss) toast('しのぎきった！ タガメが去っていく', 3);
@@ -3445,8 +3508,49 @@ function updateTagame(dt){
       if (T.t >= len){
         tagRing.visible = false; $('#fx').classList.remove('danger');
         T.grabT = rand(6,9);
-        if (!Y.molting && !game.escape && Y.pos.distanceTo(T.aim) < .025){ startHold(); }
-        else { toast('かわした！', 2); T.state = 'lurk'; T.t = 0; T.pauseT = 2; setAnim(T.ch,'idle'); }
+        if (!Y.molting && !game.escape && Y.pos.distanceTo(T.aim) < .025){
+          startHold();
+        } else if (game.tagameBoss){
+          tagameStuck();
+        } else {
+          toast('かわした！', 2);
+          T.state = 'lurk'; T.t = 0; T.pauseT = 2;
+          setAnim(T.ch,'idle');
+        }
+      }
+      break; }
+    case 'stuck': {
+      // 鎌が底に刺さって身動きが取れない。
+      // プレイヤーはこの間に接近し、捕食でカウンターできる。
+      if (T.lurkT >= T.lurkMax){
+        toast('タガメが力尽きて退散する！', 3);
+        startLeave();
+        break;
+      }
+      T.stuckT -= dt;
+      if (T.stuckT <= 0){
+        T.state = 'lurk';
+        T.t = 0;
+        T.pauseT = 1;
+        T.grabT = rand(5,8);
+        setAnim(T.ch,'idle');
+        toast('タガメが鎌を引き抜いた！', 1);
+      } else if (T.ch.busy <= 0){
+        setAnim(T.ch,'Hurt');
+      }
+      break; }
+    case 'stagger': {
+      // カウンターを受けた後は短時間ひるみ、続けて攻撃しない。
+      if (T.t >= TAGAME.staggerTime){
+        if (T.lurkT >= T.lurkMax){
+          startLeave();
+        } else {
+          T.state = 'lurk';
+          T.t = 0;
+          T.pauseT = 1.5;
+          T.grabT = rand(5,8);
+          setAnim(T.ch,'idle');
+        }
       }
       break; }
     case 'ready': {
@@ -4894,10 +4998,33 @@ function updateAids(){
 }
 
 function strike(){
+  if (game.mode !== 'play' || game.paused || game.feedback.hitStop > 0) return;
   if (game.escape){ escapePress(null); return; }   // 振りほどき中は「光っている側」を押す
   if (game.fight){ fightPress(); return; }   // 組み付き中は「押す」操作
   if (game.mode !== 'play' || game.paused || game.feedback.hitStop > 0 || Y.molting || Y.busyT > 0) return;
   if (game.frog && frogTryWeak()) return;   // カエルの急所（喉）に届くなら、急所への攻撃を優先する
+
+  // もがいているタガメへの反撃は、通常の獲物より優先する。
+  // 命中の確定はアニメーションの命中時刻に resolveStrike で行う。
+  const counter = tagameCounterTarget();
+  if (counter){
+    const head = headPos(), pos = counter.pos;
+    Y.yaw = Math.atan2(pos.x-Y.pos.x,pos.z-Y.pos.z);
+    Y.strikePitch = clamp(-Math.atan2(pos.y-head.y,
+      Math.hypot(pos.x-head.x,pos.z-head.z)),-.7,.5);
+    Y.pitch = Y.strikePitch;
+    Y.ch.object.rotation.set(Y.pitch,Y.yaw,0);
+    Y.ch.object.updateMatrixWorld(true);
+    Y.tagameCounter = counter.boss;
+    Y.strikeRecord = null;
+    sfx('strike');
+    doAction(Y.ch,'attack',STRIKE.duration);
+    Y.busyT = STRIKE.duration;
+    Y.strikeT = STRIKE.hitTime;
+    Y.still = 0;
+    return;
+  }
+
   const t = Y.target;
   if (t){
     const head = headPos(), c = preyCenter(t);
@@ -4921,6 +5048,24 @@ function strike(){
 function resolveStrike(){
   const attempt = Y.strikeRecord;
   Y.strikeRecord = null;
+
+  // 捕食アニメーションの命中時刻にタガメのカウンターを判定する。
+  const counter = Y.tagameCounter;
+  Y.tagameCounter = null;
+  if (counter){
+    const hit = game.mode === 'play' && !Y.molting &&
+      counter === game.tagame && game.tagameBoss &&
+      counter.state === 'stuck' &&
+      headPos().distanceTo(tagPoint('head')) <= TAGAME.counterReach + .006;
+    if (hit){
+      tagameCounterHit(counter);
+    } else {
+      toast('カウンター失敗！', 1);
+      sfx('miss');
+    }
+    return;
+  }
+
   if (game.mode !== 'play' || Y.molting) return;
   const head = headPos();
   const first = game.catches === 0;   // 初回捕食までは判定にゆとりを持たせる
@@ -5004,7 +5149,9 @@ function catchPrey(p, fightWin, fd, perfect=false){
   feedback.gain = (feedback.pulse > 0 ? feedback.gain : 0) + gain;
   feedback.pulse = .65;
   Y.growth += gain; Y.energy = Math.min(100, Y.energy + p.cfg.energy*k*energyK);
-  game.catches++; if (Y.strikeAmb){ game.ambushCatches++; ambushHitFx(p); }
+  game.catches++;
+  zukanMark('prey:' + p.kind, 2);
+  if (Y.strikeAmb){ game.ambushCatches++; ambushHitFx(p); }
   const big = fightWin && d >= .5;
   if (big) game.bigCatches++;
   if (p.kind === 'medaka') game.maxMedaka = Math.max(game.maxMedaka || 0, p.size || 1);
@@ -5085,6 +5232,7 @@ function fightFeedback(text, cls){
   if (F) F.flash = .25;
 }
 function fightPress(){
+  if (game.mode !== 'play' || game.paused || game.feedback.hitStop > 0) return;
   const F = game.fight;
   if (!F) return;
   // かまえ中・輪と輪の間・早押し後の停止中は数えない
@@ -5339,13 +5487,23 @@ function updateYago(dt){
       Y.pos.y = ceiling;
       Y.vel.y = Math.min(0,Y.vel.y); Y.jetVel.y = Math.min(0,Y.jetVel.y);
     }
-    const R = wallR(Y.pos.y)-.014*Y.s, h = Math.hypot(Y.pos.x,Y.pos.z);
+    const R = wallR(Y.pos.y)-.024*Y.s, h = Math.hypot(Y.pos.x,Y.pos.z);
     if (h > R){
       const nx = Y.pos.x/h, nz = Y.pos.z/h;
       Y.pos.x = nx*R; Y.pos.z = nz*R;
       for (const v of [Y.vel,Y.jetVel]){
         const outward = v.x*nx+v.z*nz;
         if (outward > 0){ v.x -= outward*nx; v.z -= outward*nz; }
+      }
+    }
+    const f = yagoFwd(), headR = wallR(Y.pos.y+.006*Y.s)-.008*Y.s;
+    const hx = Y.pos.x+f.x*.022*Y.s, hz = Y.pos.z+f.z*.022*Y.s, hh = Math.hypot(hx,hz);
+    if (hh > headR){
+      const nx = hx/hh, nz = hz/hh;
+      Y.pos.x -= nx*(hh-headR); Y.pos.z -= nz*(hh-headR);
+      if (want && f.x*nx+f.z*nz > .2){
+        const side = f.x*nz - f.z*nx >= 0 ? 1 : -1;
+        Y.yaw = lerpAngle(Y.yaw, Math.atan2(nx,nz) + side*Math.PI*.55, damp(10,dt));
       }
     }
   }
@@ -5765,7 +5923,6 @@ function closeCinema(){
 const ZUKAN_KEY = 'yagoZukan';
 let zukanData = {};
 try { zukanData = JSON.parse(localStorage.getItem(ZUKAN_KEY)) || {}; } catch(e){ zukanData = {}; }
-const zukanState = {lastKind:null, lastCatches:0};
 function zukanMark(id, lvl){
   if ((zukanData[id] || 0) >= lvl) return;
   zukanData[id] = lvl;
@@ -5815,12 +5972,10 @@ function closeZukan(){
   $('#ovZukan').classList.add('hide');
   $('#ovTitle').classList.remove('hide', 'fade');
 }
-// 遊んでいる間の記録（ロックで「見つけた」、捕まえたら「捕まえた」、天敵は出会ったら）
+// 発見・遭遇を記録する。捕食済みの記録はcatchPreyの成功処理で確定する。
 function zukanTick(){
   if (game.mode !== 'play') return;
-  if (Y.target && Y.target.kind){ zukanState.lastKind = Y.target.kind; zukanMark('prey:' + Y.target.kind, 1); }
-  if (game.catches > zukanState.lastCatches && zukanState.lastKind) zukanMark('prey:' + zukanState.lastKind, 2);
-  zukanState.lastCatches = game.catches;
+  if (Y.target && Y.target.kind) zukanMark('prey:' + Y.target.kind, 1);
   if (game.tagame) zukanMark('foe:tagame', 1);
   if (game.frog) zukanMark('foe:kaeru', 1);
   const B = game.bird;
@@ -6098,14 +6253,24 @@ function updateHud(dt){
   if (tagameNear()){ amb.classList.add('on'); $('#ambTxt').textContent = 'タガメが近い…じっとして'; }
   if (game.frog && game.frog.state === 'windup'){ amb.classList.add('on'); $('#ambTxt').textContent = '舌が来る！ 赤い輪から逃げろ'; }
   if (game.tagame && game.tagame.state === 'aim'){ amb.classList.add('on'); $('#ambTxt').textContent = 'タガメが構えた！ 赤い輪から逃げろ'; }
+  if (game.tagame && game.tagame.state === 'stuck'){
+    amb.classList.add('on');
+    $('#ambTxt').textContent = tagameCounterTarget()
+      ? '反撃チャンス！ 捕食を押せ！'
+      : 'タガメがもがいている！ 接近して反撃！';
+  }
   if (game.event && game.event.warnTxt){ amb.classList.add('on'); $('#ambTxt').textContent = game.event.warnTxt; }
   const hint = $('#targetHint');
   const canAim = game.mode === 'play' && !Y.molting && Y.busyT <= 0;
   if (!canAim) hint.style.display = 'none';
   hudT -= dt; if (hudT > 0) return; hudT = .15;
-  const target = canAim ? Y.target : null;
-  hint.style.display = target ? 'block' : 'none';
-  if (target){
+  const counterTarget = canAim ? tagameCounterTarget() : null;
+  const target = counterTarget ? null : canAim ? Y.target : null;
+  hint.style.display = target || counterTarget ? 'block' : 'none';
+  if (counterTarget){
+    hint.textContent = '◎ タガメに反撃できる！';
+    hint.style.color = '#bff0c8';
+  } else if (target){
     const cls = sizeClass(target);
     const tag = cls === 'big' ? ' ' + stars(fightDiff(target)) : '';
     if (Y.targetInReach){
@@ -6144,17 +6309,23 @@ touch.addEventListener('pointerdown', e => {
   if (game.escape){ escapePress(e.clientX < innerWidth/2 ? 'L' : 'R'); return; }
   if (e.clientX < innerWidth*.45 && joyId === null){
     joyId = e.pointerId; joyO = {x:e.clientX, y:e.clientY};
+    input.jx = input.jy = 0; knob.style.transform = '';
     joy.style.display = 'block'; joy.style.left = e.clientX+'px'; joy.style.top = e.clientY+'px';
-  } else if (dragId === null){ dragId = e.pointerId; dragP = {x:e.clientX, y:e.clientY}; }
-  touch.setPointerCapture(e.pointerId);
+    if (touch.setPointerCapture) try { touch.setPointerCapture(e.pointerId); } catch(_){}
+  } else if (dragId === null){
+    dragId = e.pointerId; dragP = {x:e.clientX, y:e.clientY};
+    if (touch.setPointerCapture) try { touch.setPointerCapture(e.pointerId); } catch(_){}
+  }
 });
 touch.addEventListener('pointermove', e => {
   if (e.pointerId === joyId){
+    if (e.buttons === 0 && e.pointerType === 'mouse'){ releaseJoy(); return; }
     let dx = e.clientX-joyO.x, dy = e.clientY-joyO.y; const l = Math.hypot(dx,dy), R = 50;
     if (l > R){ dx *= R/l; dy *= R/l; }
     knob.style.transform = `translate(${dx}px,${dy}px)`;
     input.jx = dx/R; input.jy = -dy/R;
   } else if (e.pointerId === dragId){
+    if (e.buttons === 0 && e.pointerType === 'mouse'){ dragId = null; return; }
     const dx = e.clientX-dragP.x, dy = e.clientY-dragP.y; dragP = {x:e.clientX, y:e.clientY};
     lastDrag = performance.now();
     if (game.mode !== 'play') return;
@@ -6168,10 +6339,12 @@ touch.addEventListener('pointermove', e => {
   }
 });
 function endPtr(e){
-  if (e.pointerId === joyId){ joyId = null; input.jx = input.jy = 0; joy.style.display = 'none'; knob.style.transform = ''; }
+  if (e.pointerId === joyId) releaseJoy();
   if (e.pointerId === dragId) dragId = null;
 }
-touch.addEventListener('pointerup', endPtr); touch.addEventListener('pointercancel', endPtr);
+touch.addEventListener('pointerup', endPtr);
+touch.addEventListener('pointercancel', endPtr);
+touch.addEventListener('lostpointercapture', endPtr);
 function bindBtn(id, fn){
   const b = $(id);
   b.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); b.classList.add('press'); fn(); });
@@ -6224,6 +6397,7 @@ for (const ev of ['pointerup','pointercancel']){
     if (dragId !== null && e.pointerId === dragId) dragId = null;
   });
 }
+window.addEventListener('touchend', e => { if (e.touches && e.touches.length === 0) releaseAllTouch(); });
 window.addEventListener('touchcancel', releaseAllTouch);
 window.addEventListener('blur', releaseAllTouch);
 window.addEventListener('pagehide', releaseAllTouch);
@@ -6232,15 +6406,17 @@ const stuckW = {t:0, p:V()};
 function updateWallRescue(dt){
   if (game.mode !== 'play' || game.paused || Y.molting || game.fight || game.escape || !Y.pos){ stuckW.t = 0; return; }
   const h = Math.hypot(Y.pos.x, Y.pos.z), wr = wallR(Y.pos.y);
-  const pushing = Math.hypot(input.jx || 0, input.jy || 0) > .3;
-  if (!pushing || h < 1e-6 || h <= wr - .035){ stuckW.t = 0; return; }
+  const pushing = Math.hypot(input.jx || 0, input.jy || 0) > .25;
+  if (!pushing || h < 1e-6 || h <= wr - .04){ stuckW.t = 0; return; }
   // 動いているあいだ（壁沿いに泳いでいるとき）は計測をやり直す
-  if (stuckW.t === 0 || Y.pos.distanceTo(stuckW.p) > .015){ stuckW.t = .001; stuckW.p.copy(Y.pos); return; }
+  if (stuckW.t === 0 || Y.pos.distanceTo(stuckW.p) > .01){ stuckW.t = .001; stuckW.p.copy(Y.pos); return; }
   stuckW.t += dt;
-  if (stuckW.t > 2.5){
+  if (stuckW.t > 1.2){
     stuckW.t = 0;
     releaseAllTouch();
-    Y.pos.x -= Y.pos.x/h*.012; Y.pos.z -= Y.pos.z/h*.012;
+    const nx = Y.pos.x/h, nz = Y.pos.z/h;
+    Y.pos.x = nx*(wr - .032*Y.s); Y.pos.z = nz*(wr - .032*Y.s);
+    Y.yaw = Math.atan2(-nx, -nz);
     Y.vel.set(0,0,0); Y.jetVel.set(0,0,0);
     toast('壁から離れた', 0);
   }
