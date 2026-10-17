@@ -1334,6 +1334,19 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
     <div style="text-align:center"><button class="tlink" id="bZukanClose" type="button">閉じる</button></div>
   </div>
 </div>
+<div class="ov hide" id="ovDebug">
+  <div class="how" style="text-align:center;max-width:92vw">
+    <div style="font-weight:900;font-size:20px;letter-spacing:.06em">🛠 イベントテスト</div>
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:center;margin-top:12px">
+      <button class="go cineBtn" id="bDbgCat" type="button">🐈 ネコ襲来テスト</button>
+      <button class="go cineBtn" id="bDbgKid" type="button">🧒 子供襲来テスト</button>
+      <button class="go cineBtn" id="bDbgPlay" type="button">🎮 通常プレイ</button>
+    </div>
+    <p style="font-size:12px;opacity:.8;margin-top:10px">テストプレイでは途中セーブと自己ベストを更新しません</p>
+    <button class="tlink" id="bDbgClose" type="button">✕ 閉じる</button>
+  </div>
+</div>
+<div id="kidBubble" role="status" style="display:none;position:fixed;left:50%;top:calc(env(safe-area-inset-top, 0px) + 150px);transform:translateX(-50%);pointer-events:none;max-width:80vw;text-align:center;font-size:15px;font-weight:700;color:#3a2a10;background:#fff8e4;padding:8px 14px;border-radius:18px;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:13"></div>
 <div id="opLayer">
   <div class="bar t"></div><div class="bar b"></div>
   <div id="opTitle"><div class="opMain">YAGO</div><div class="opSub">～ 小鉢の捕食者 ～</div></div>
@@ -2253,6 +2266,7 @@ const PREY_AI = {
     p.vel.y = 0;
   },
   medaka(p, dt){
+    if (medakaPanic(p, dt)) return;   // ネコ・子供の襲来中は群れで避難する
     if (p.state === 'free'){
       p.forageT -= dt*envForageK();
       const tgt = school.pos.clone().add(p.off);
@@ -2337,6 +2351,7 @@ function newGame(withIntro){
   game.tagameEscapes = 0; game.tagameDone = false; game.tagameAt = null;
   game.tagameBoss = false;
   clearFrog(); game.frogDone = false; game.frogLost = false;
+  clearEvent(); game.eventT = rand(EVT.firstMin, EVT.firstMax); game.eventForce = null; game.debug = false;
   game.tagameLost = false; game.frogHits = 0; game.frogAmbush = 0; game.frogStrikes = 0;
   game.paused = false; $('#ovPause').classList.add('hide');
   camRigReset();
@@ -2663,7 +2678,7 @@ function updateBossBar(){
 // 鳥の襲来・タガメ戦・カエル戦の間は、画面の周りを赤くうっすら点灯させる
 function updateAlertFx(){
   const B = game.bird;
-  const on = game.mode === 'play' && (!!game.frog || (!!game.tagame && !!game.tagameBoss) ||
+  const on = game.mode === 'play' && (!!game.frog || !!game.event || (!!game.tagame && !!game.tagameBoss) ||
     (!!B && (B.phase === 'warn' || B.phase === 'strike')));
   $('#alertFx').classList.toggle('on', on);
 }
@@ -2692,7 +2707,7 @@ function tutorialTick(){
 }
 /* ---------- 脱皮ごとの自動セーブ ---------- */
 function saveProgress(){
-  if (game.short) return;   // 5分チャレンジは途中セーブを上書きしない
+  if (game.short || game.debug) return;   // 5分チャレンジ・イベントテストは途中セーブを上書きしない
   try {
     localStorage.setItem('yagoSave', JSON.stringify({stage:Y.stage, growth:Y.growth, energy:Y.energy, time:game.time,
       tagameDone:!!game.tagameDone, catches:game.catches, ambushCatches:game.ambushCatches,
@@ -2960,7 +2975,7 @@ function updateBird(dt){
   if (!B) return;
   if (game.mode !== 'play'){ if (B.phase !== 'idle') hideBird(); return; }
   if (B.phase === 'idle'){
-    if (game.tagame || game.frog) return;   // タガメ戦・カエル戦の間は鳥は来ない
+    if (game.tagame || game.frog || game.event) return;   // タガメ戦・カエル戦・突発イベントの間は鳥は来ない
     // 夜と雨は来ない。昼は早め、くもりは遅め
     B.next -= dt*envBirdK();
     if (B.next <= 0){
@@ -3147,6 +3162,7 @@ function startTagame(){
 }
 // 2齢の試練：タガメ戦をはじめる
 function startTagameBoss(){
+  clearEvent();
   if (game.fight) clearFight();
   game.tagameBoss = true;
   startTagame();
@@ -3239,7 +3255,7 @@ function escapePress(side){
     S.side = side === 'L' ? 'R' : 'L';
     sfx('good');
     if (navigator.vibrate) navigator.vibrate(15);
-    if (S.ok >= S.need){ if (S.frog) winFrogEscape(); else winEscape(); return; }
+    if (S.ok >= S.need){ if (S.net) winNetEscape(); else if (S.frog) winFrogEscape(); else winEscape(); return; }
   } else {
     S.flashOk = false;
     S.grip = Math.min(1, S.grip + .1);
@@ -3280,7 +3296,7 @@ function loseEscape(){
 function updateEscape(dt){
   const S = game.escape;
   if (!S) return;
-  const H = S.frog ? game.frog : game.tagame;
+  const H = S.net ? game.event : S.frog ? game.frog : game.tagame;
   if (!H){ endEscape(); return; }
   if (S.flash > 0) S.flash -= dt;
   const bounce = () => {
@@ -3296,11 +3312,11 @@ function updateEscape(dt){
     // マーカーは等速で往復する（三角波）
     S.pos += S.dir*dt*2/S.period; bounce();
     S.grip += dt/S.fill;
-    if (S.grip >= 1){ if (S.frog) loseFrogEscape(); else loseEscape(); return; }
+    if (S.grip >= 1){ if (S.net) loseNetEscape(); else if (S.frog) loseFrogEscape(); else loseEscape(); return; }
   }
   S.tilt *= Math.exp(-6*dt);
   // ヤゴを捕まえた相手（タガメの前脚の間／カエルの口先）に固定する
-  const hp = S.frog ? frogMouth() : tagPoint('hold');
+  const hp = S.net ? netHoldPos() : S.frog ? frogMouth() : tagPoint('hold');
   Y.pos.copy(hp); Y.vel.set(0,0,0); Y.jetVel.set(0,0,0);
   Y.busyT = Math.max(Y.busyT, .2); Y.still = 0;
   Y.yaw = H.yaw + Math.PI;
@@ -3516,6 +3532,7 @@ function frogPickMedaka(){
   return best;
 }
 function startFrog(){
+  clearEvent();
   if (game.fight) clearFight();
   const a = rand(0, Math.PI*2);
   const pos = V(Y.pos.x + Math.cos(a)*.1, frogSurfY(), Y.pos.z + Math.sin(a)*.1);
@@ -3799,6 +3816,664 @@ function updateFrog(dt){
   }
   placeFrog();
   tickChar(F.ch, dt*animK);
+}
+
+/* =========================================================
+   突発イベント：ネコ襲来・子供襲来（共通管理）
+   ========================================================= */
+const DEBUG_EVENTS = false;  // イベントテスト機能を無効化（通常の突発イベントは有効）
+const EVT = Object.freeze({firstMin:60, firstMax:90, coolMin:90, coolMax:120, catDmg:20, netDmg:25,
+  catReach:.22, catAim:1.2});
+const EV_UP = V(0,1,0), EV_TMP = V(), EV_SEG = V(), EV_M = new THREE.Matrix4();
+const EV_SPH = new THREE.SphereGeometry(1,18,12);
+function evMat(c){ return new THREE.MeshStandardMaterial({color:c, roughness:.75, fog:false}); }
+function evMesh(geo, mat, parent, p, s, r){
+  const m = new THREE.Mesh(geo, mat);
+  if (p) m.position.set(p[0], p[1], p[2]);
+  if (s) m.scale.set(s[0], s[1], s[2]);
+  if (r) m.rotation.set(r[0], r[1], r[2]);
+  parent.add(m);
+  return m;
+}
+// 円柱メッシュ（高さ1）を a→b の線分に合わせる
+function placeSeg(m, a, b){
+  const d = EV_SEG.copy(b).sub(a), L = d.length();
+  m.position.copy(a).add(b).multiplyScalar(.5);
+  if (L > 1e-6) m.quaternion.setFromUnitVectors(EV_UP, d.multiplyScalar(1/L));
+  m.scale.set(1, Math.max(L, 1e-4), 1);
+}
+function closestOnSeg(a, b, p){
+  const ab = b.clone().sub(a), l2 = ab.lengthSq();
+  const t = l2 > 1e-10 ? clamp(p.clone().sub(a).dot(ab)/l2, 0, 1) : 0;
+  return a.clone().addScaledVector(ab, t);
+}
+// ネコ（頭・耳・目・鼻・ヒゲ・胴と、前脚・肉球）。起動時に1回だけ作って使い回す
+const catRig = (() => {
+  const fur = evMat(0xc98a4a), fur2 = evMat(0xa86a34), white = evMat(0xf3eee4), pink = evMat(0xe8a0a6), dark = evMat(0x16120e);
+  const eyeM = new THREE.MeshStandardMaterial({color:0xc4cc3c, roughness:.15, emissive:0x2a3000, emissiveIntensity:.5, fog:false});
+  const root = new THREE.Group(); root.visible = false; scene.add(root);
+  evMesh(EV_SPH, fur, root, [0,.01,-.07], [.075,.075,.12]);
+  evMesh(EV_SPH, fur2, root, [0,.07,-.06], [.04,.012,.08]);
+  const head = new THREE.Group(); head.position.set(0,.1,.1); root.add(head);
+  evMesh(EV_SPH, fur, head, [0,0,0], [.056,.048,.05]);
+  evMesh(EV_SPH, fur2, head, [0,.03,.012], [.028,.012,.03]);
+  evMesh(EV_SPH, white, head, [.014,-.018,.04], [.02,.016,.016]);
+  evMesh(EV_SPH, white, head, [-.014,-.018,.04], [.02,.016,.016]);
+  evMesh(EV_SPH, white, head, [0,-.03,.03], [.016,.01,.014]);
+  evMesh(EV_SPH, pink, head, [0,-.008,.053], [.007,.005,.005]);
+  const earGeo = new THREE.ConeGeometry(.02,.038,10), earIn = new THREE.ConeGeometry(.012,.026,8);
+  const whisk = new THREE.CylinderGeometry(.0005,.0005,.05,3);
+  for (const sx of [-1,1]){
+    evMesh(EV_SPH, eyeM, head, [sx*.022,.008,.038], [.012,.012,.008]);
+    evMesh(EV_SPH, dark, head, [sx*.022,.008,.045], [.0028,.009,.003]);
+    evMesh(earGeo, fur, head, [sx*.03,.047,-.004], null, [0,0,-sx*.35]);
+    evMesh(earIn, pink, head, [sx*.03,.044,.004], null, [0,0,-sx*.35]);
+    for (let i=0;i<3;i++) evMesh(whisk, white, head, [sx*.042,-.021+i*.005,.046], null, [0,0,Math.PI/2 + sx*(i-1)*.15]);
+  }
+  const legGeo = new THREE.CylinderGeometry(.016,.013,1,10);
+  const paws = [-1,1].map(sx => {
+    const g = new THREE.Group(); g.visible = false; scene.add(g);
+    evMesh(EV_SPH, white, g, [0,0,0], [.022,.015,.026]);
+    evMesh(EV_SPH, pink, g, [0,-.012,-.004], [.009,.004,.008]);
+    for (let i=0;i<4;i++) evMesh(EV_SPH, pink, g, [(i-1.5)*.009,-.011,.014 - Math.abs(i-1.5)*.003], [.0042,.003,.0042]);
+    const leg = new THREE.Mesh(legGeo, fur); leg.visible = false; scene.add(leg);
+    return {g, leg, sx};
+  });
+  return {root, head, paws};
+})();
+// 子供（上半身・顔・帽子・腕）と、すくい網（持ち手・枠・網袋）
+const kidRig = (() => {
+  const skin = evMat(0xf2c7a0), shirt = evMat(0xf0b432), shorts = evMat(0x3f6fb0), hair = evMat(0x2a1c12),
+        dark = evMat(0x1a1410), straw = evMat(0xe6d29a), band = evMat(0xc0392b), cheek = evMat(0xf0a0a0);
+  const root = new THREE.Group(); root.visible = false; scene.add(root);
+  evMesh(new THREE.CylinderGeometry(.1,.1,.09,14), shorts, root, [0,-.02,0]);
+  for (const sx of [-1,1]) evMesh(new THREE.CylinderGeometry(.034,.03,.38,10), skin, root, [sx*.05,-.24,0]);
+  const lean = new THREE.Group(); lean.rotation.x = .4; root.add(lean);
+  evMesh(new THREE.CylinderGeometry(.085,.1,.26,14), shirt, lean, [0,.13,0]);
+  evMesh(EV_SPH, shirt, lean, [0,.25,0], [.11,.045,.075]);
+  evMesh(new THREE.CylinderGeometry(.03,.034,.05,10), skin, lean, [0,.285,0]);
+  const head = new THREE.Group(); head.position.set(0,.35,.01); lean.add(head);
+  evMesh(EV_SPH, skin, head, [0,0,0], [.074,.08,.072]);
+  evMesh(EV_SPH, hair, head, [0,.018,-.014], [.078,.072,.068]);
+  for (const sx of [-1,1]){
+    evMesh(EV_SPH, dark, head, [sx*.025,0,.066], [.008,.011,.005]);
+    evMesh(EV_SPH, cheek, head, [sx*.042,-.024,.054], [.013,.008,.006]);
+    evMesh(EV_SPH, skin, head, [sx*.074,-.005,0], [.012,.018,.012]);
+  }
+  evMesh(EV_SPH, dark, head, [0,-.036,.066], [.012,.004,.004]);
+  evMesh(new THREE.CylinderGeometry(.13,.13,.006,24), straw, head, [0,.058,-.004]);
+  evMesh(new THREE.CylinderGeometry(.072,.08,.06,18), straw, head, [0,.09,-.008]);
+  evMesh(new THREE.CylinderGeometry(.081,.081,.014,18), band, head, [0,.068,-.008]);
+  const armGeo = new THREE.CylinderGeometry(.02,.026,1,10);
+  const arms = [0,1].map(() => { const m = new THREE.Mesh(armGeo, skin); m.visible = false; scene.add(m); return m; });
+  const hands = [0,1].map(() => { const m = new THREE.Mesh(EV_SPH, skin); m.scale.setScalar(.024); m.visible = false; scene.add(m); return m; });
+  // 網：原点＝枠の中心、+Z＝網の口の向き、+Y＝持ち手の向き
+  const net = new THREE.Group(); net.visible = false; scene.add(net);
+  net.add(new THREE.Mesh(new THREE.TorusGeometry(.045,.0028,6,32), new THREE.MeshStandardMaterial({color:0x2f8f5a, roughness:.5, metalness:.2})));
+  const hdl = new THREE.Mesh(new THREE.CylinderGeometry(.0055,.0055,.34,8), new THREE.MeshStandardMaterial({color:0xd9b860, roughness:.6}));
+  hdl.position.y = .045 + .17; net.add(hdl);
+  const pts = [[.045,0],[.043,-.015],[.036,-.035],[.024,-.052],[.01,-.062],[.001,-.065]].map(p => new THREE.Vector2(p[0], p[1]));
+  const bagGeo = new THREE.LatheGeometry(pts, 16);
+  const meshTex = canvasTex(64, 64, (g,w,h) => {
+    g.clearRect(0,0,w,h); g.strokeStyle = 'rgba(235,245,240,.95)'; g.lineWidth = 2;
+    for (let i=0;i<=w;i+=16){ g.beginPath(); g.moveTo(i,0); g.lineTo(i,h); g.stroke(); g.beginPath(); g.moveTo(0,i); g.lineTo(w,i); g.stroke(); }
+  }, 4, 2);
+  const bag = new THREE.Mesh(bagGeo, new THREE.MeshBasicMaterial({map:meshTex, color:0xe8f2ec, transparent:true, opacity:.8, side:THREE.DoubleSide, depthWrite:false}));
+  bag.rotation.x = Math.PI/2; net.add(bag);
+  const fill = new THREE.Mesh(bagGeo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:.1, side:THREE.DoubleSide, depthWrite:false}));
+  fill.rotation.x = Math.PI/2; net.add(fill);
+  return {root, lean, head, arms, hands, net};
+})();
+// 攻撃位置の予告（水面の輪と、水中に伸びる柱）
+const evRing = new THREE.Mesh(new THREE.RingGeometry(.03,.037,40),
+  new THREE.MeshBasicMaterial({color:0xd0654c, transparent:true, opacity:.8, depthTest:false, depthWrite:false, side:THREE.DoubleSide}));
+evRing.rotation.x = -Math.PI/2; evRing.renderOrder = 19; evRing.visible = false; scene.add(evRing);
+const evCol = new THREE.Mesh(new THREE.CylinderGeometry(1,1,1,24,1,true),
+  new THREE.MeshBasicMaterial({color:0xd0654c, transparent:true, opacity:.12, depthWrite:false, side:THREE.DoubleSide}));
+evCol.renderOrder = 18; evCol.visible = false; scene.add(evCol);
+function evMarker(pos, r, h, col, on){
+  if (!pos){ evRing.visible = evCol.visible = false; return; }
+  evRing.material.color.setHex(col); evCol.material.color.setHex(col);
+  evRing.position.set(pos.x, SURF + .0012, pos.z); evRing.scale.setScalar(r/.0335); evRing.visible = on;
+  evCol.position.set(pos.x, SURF - h/2, pos.z); evCol.scale.set(r, h, r); evCol.visible = true;
+  evCol.material.opacity = on ? .16 : .08;
+}
+function evPhase(E, ph){ E.phase = ph; E.pt = 0; }
+function nearestMedaka(P){
+  let best = null, bd = Infinity;
+  for (const p of prey){
+    if (p.kind !== 'medaka' || p.state === 'caught' || p.state === 'held') continue;
+    const d = Math.hypot(p.pos.x - P.x, p.pos.z - P.z);
+    if (d < bd){ bd = d; best = p; }
+  }
+  return best;
+}
+// 狙い点を、届く範囲・壁の内側・根の外へ収める
+function evClampTarget(T, S0, reach, margin){
+  const hx = T.x - S0.x, hz = T.z - S0.z, L = Math.hypot(hx, hz);
+  if (L > reach){ T.x = S0.x + hx/L*reach; T.z = S0.z + hz/L*reach; }
+  for (let i=0;i<2;i++){
+    const W = wallR(SURF) - margin, rr = Math.hypot(T.x, T.z);
+    if (rr > W){ T.x *= W/rr; T.z *= W/rr; }
+    for (const r of ROOTS){
+      const dx = T.x - r.x, dz = T.z - r.z, d = Math.hypot(dx, dz), need = r.r + margin;
+      if (d < need){ const nx = d > 1e-5 ? dx/d : 1, nz = d > 1e-5 ? dz/d : 0; T.x = r.x + nx*need; T.z = r.z + nz*need; }
+    }
+  }
+}
+/* ---------- 音：ネコの鳴き声（ニャー）と子供の声 ---------- */
+function catMeow(vol, k, dur){
+  const ctx = AUDIO.ctx;
+  if (!ctx || AUDIO.muted || !AUDIO.master) return;
+  try {
+    const t0 = ctx.currentTime + .02, end = t0 + dur, f = 520*k;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(.0001, t0);
+    out.gain.exponentialRampToValueAtTime(vol, t0 + .09);
+    out.gain.setValueAtTime(vol*.85, t0 + dur*.55);
+    out.gain.exponentialRampToValueAtTime(.0001, end);
+    out.connect(AUDIO.master);
+    const o = ctx.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(f*.82, t0);
+    o.frequency.linearRampToValueAtTime(f*1.35, t0 + dur*.3);
+    o.frequency.linearRampToValueAtTime(f*1.2, t0 + dur*.6);
+    o.frequency.exponentialRampToValueAtTime(f*.7, end);
+    const lfo = ctx.createOscillator(), lg = ctx.createGain();
+    lfo.frequency.value = 6.5; lg.gain.value = f*.025;
+    lfo.connect(lg); lg.connect(o.frequency);
+    // 母音の変化（ミ→ア→オ）を2つの帯域フィルターで作る
+    const formant = (f0, f1, f2, q, g) => {
+      const b = ctx.createBiquadFilter(); b.type = 'bandpass'; b.Q.value = q;
+      b.frequency.setValueAtTime(f0, t0);
+      b.frequency.linearRampToValueAtTime(f1, t0 + dur*.4);
+      b.frequency.linearRampToValueAtTime(f2, end);
+      const gg = ctx.createGain(); gg.gain.value = g;
+      o.connect(b); b.connect(gg); gg.connect(out);
+    };
+    formant(650*k, 1150*k, 700*k, 4, 1.4);
+    formant(2200*k, 1700*k, 1100*k, 6, .8);
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+    const dg = ctx.createGain(); dg.gain.value = .25;
+    o.connect(lp); lp.connect(dg); dg.connect(out);
+    if (AUDIO.noise){
+      const n = ctx.createBufferSource(); n.buffer = AUDIO.noise;
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
+      const ng = ctx.createGain(); ng.gain.value = .12;
+      n.connect(hp); hp.connect(ng); ng.connect(out);
+      n.start(t0, Math.random()); n.stop(end + .02);
+    }
+    o.start(t0); lfo.start(t0); o.stop(end + .02); lfo.stop(end + .02);
+  } catch(e){}
+}
+function kidSay(text){
+  const el = $('#kidBubble');
+  el.textContent = '🧒「' + text + '」'; el.style.display = 'block';
+  if (game.event) game.event.bubbleT = 2.6;
+  if (AUDIO.muted || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.replace(/～/g,'ー').replace(/[…！]/g,''));
+    u.lang = 'ja-JP'; u.pitch = 1.8; u.rate = 1.1; u.volume = .9;
+    speechSynthesis.speak(u);
+  } catch(e){}
+}
+/* ---------- 共通：発生・抽選・終了 ---------- */
+function eventBlocked(){
+  const B = game.bird;
+  return game.mode !== 'play' || !!game.tagame || !!game.frog || !!game.tagameBoss ||
+    Y.molting || Y.pendingMolt > 0 || !!game.fight || !!game.escape || !!(B && B.phase !== 'idle');
+}
+function pickEvent(){
+  const ph = envPhaseId(), rain = isRaining(), list = [];
+  if (!rain) list.push(['cat', ph === 'night' ? .5 : 1]);
+  if (!rain && ph !== 'night') list.push(['kid', ph === 'day' ? 1.2 : .8]);
+  if (!list.length || Math.random() < .3) return null;
+  let s = list.reduce((a, b) => a + b[1], 0)*Math.random();
+  for (const [k, w] of list){ s -= w; if (s <= 0) return k; }
+  return list[list.length - 1][0];
+}
+function startEvent(kind){
+  if (game.event || game.mode !== 'play') return false;
+  const a = rand(0, Math.PI*2), dir = V(Math.cos(a), 0, Math.sin(a));
+  const E = {kind, phase:'call', t:0, pt:0, n:0, dir, yaw:Math.atan2(-dir.x, -dir.z),
+    max:kind === 'cat' ? (Math.random() < .5 ? 3 : 4) : (Math.random() < .5 ? 2 : 3),
+    panic:false, danger:null, warnTxt:'', look:V(0, SURF, 0), bubbleT:0};
+  game.event = E;
+  if (kind === 'cat') setupCat(E); else setupKid(E);
+  return true;
+}
+function clearEvent(){
+  const E = game.event;
+  if (game.escape && game.escape.net){ netDropYago(); endEscape(); }
+  game.event = null;
+  catRig.root.visible = false;
+  for (const pw of catRig.paws){ pw.g.visible = false; pw.leg.visible = false; }
+  kidRig.root.visible = false; kidRig.net.visible = false;
+  for (const m of kidRig.arms) m.visible = false;
+  for (const m of kidRig.hands) m.visible = false;
+  evMarker(null);
+  const bub = $('#kidBubble'); if (bub) bub.style.display = 'none';
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch(e){}
+  if (E){
+    $('#fx').classList.remove('danger');
+    game.eventT = Math.max(game.eventT || 0, rand(EVT.coolMin, EVT.coolMax));
+    if (game.bird && game.bird.phase === 'idle') game.bird.next = Math.max(game.bird.next, 15);
+  }
+}
+function updateEvent(dt){
+  if (game.mode !== 'play') return;
+  const E = game.event;
+  if (!E){
+    // デバッグからの強制発生（抽選とクールダウンを無視する）
+    const F = game.eventForce;
+    if (F){
+      F.t -= dt;
+      if (F.t <= 0){
+        if (game.tagame || game.frog || game.fight || game.escape || Y.molting || (game.bird && game.bird.phase !== 'idle')) F.t = .5;
+        else { game.eventForce = null; startEvent(F.kind); }
+      }
+      return;
+    }
+    if (game.debug) return;
+    game.eventT -= dt;
+    if (game.eventT > 0) return;
+    if (eventBlocked()){ game.eventT = 5; return; }
+    const k = pickEvent();
+    if (!k){ game.eventT = rand(20,35); return; }
+    startEvent(k);
+    return;
+  }
+  E.t += dt; E.pt += dt;
+  if (E.kind === 'cat') updateCat(E, dt); else updateKid(E, dt);
+  if (game.escape && game.escape.net) updateEscape(dt);
+  const E2 = game.event;
+  if (E2 && E2.bubbleT > 0){ E2.bubbleT -= dt; if (E2.bubbleT <= 0) $('#kidBubble').style.display = 'none'; }
+}
+/* ---------- メダカの集団パニック ---------- */
+function panicSpot(p, E){
+  let t;
+  if (E.kind === 'cat'){
+    const r = Math.random();
+    if (r < .4){ t = pointInRefuge(ROOTS[Math.floor(Math.random()*ROOTS.length)]); }
+    else if (r < .7){
+      t = V(p.pos.x - E.dir.x*.05 + rand(-.03,.03), 0, p.pos.z - E.dir.z*.05 + rand(-.03,.03));
+      t.y = groundY(t.x, t.z) + rand(.006,.018);
+    } else {
+      const rr = rand(.08,.15), a = Math.atan2(-E.dir.z, -E.dir.x) + rand(-.6,.6);
+      t = V(Math.cos(a)*rr, rand(SOIL + .03, SURF - .05), Math.sin(a)*rr);
+    }
+  } else {
+    const ref = E.danger || E.S || V();
+    const away = V(p.pos.x - ref.x, 0, p.pos.z - ref.z);
+    if (away.lengthSq() < 1e-6) away.set(rand(-1,1), 0, rand(-1,1));
+    away.normalize();
+    t = p.pos.clone().addScaledVector(away, rand(.07,.12));
+    t.y = rand(SOIL + .02, SURF - .04);
+  }
+  keepInBowl(t, .025, .006, .01);
+  return t;
+}
+// 突発イベント中は群れ全体で避難する。true を返したら通常のメダカAIは動かさない
+function medakaPanic(p, dt){
+  const E = game.event;
+  if (!E || !E.panic || game.mode !== 'play'){
+    if (!(p.panicT > 0)) return false;
+    // 危険が去ったら、少しずつ通常の泳ぎへ戻る
+    p.panicT -= dt;
+    const k = clamp(p.panicT/2.5, 0, 1);
+    steer(p, toward(p, p.panicTo || p.pos, .02 + .06*k), 2, dt);
+    setAnim(p.ch, k > .5 ? 'rapidswim' : 'swim');
+    if (p.panicT <= 0){ p.state = 'free'; p.panicTo = null; p.forageT = rand(8,18); }
+    return true;
+  }
+  p.state = 'panic'; p.panicT = 2.5;
+  p.panicRe = (p.panicRe || 0) - dt;
+  if (!p.panicTo || p.panicRe <= 0 || p.pos.distanceTo(p.panicTo) < .012){
+    p.panicTo = panicSpot(p, E); p.panicRe = rand(1.5,3);
+  }
+  const des = toward(p, p.panicTo, E.kind === 'cat' ? .13 : .08);
+  const D = E.danger;
+  let near = false;
+  if (D){
+    const away = p.pos.clone().sub(D), d = away.length(), R = E.kind === 'cat' ? .08 : .075;
+    if (d < R && d > 1e-5){
+      near = true;
+      away.multiplyScalar(1/d);
+      if (E.kind === 'cat') away.y = Math.min(away.y, -.3);
+      des.addScaledVector(away, (E.kind === 'kid' ? .18 : .14)*(1 - d/R));
+    }
+  }
+  steer(p, des, near ? 9 : 6, dt);
+  setAnim(p.ch, 'rapidswim');
+  return true;
+}
+/* ---------- ネコ襲来 ---------- */
+function catShoulder(sx){ return catRig.root.localToWorld(V(sx*.04, .06, .05)); }
+function catRest(sx){ return catRig.root.localToWorld(V(sx*.045, .012, .13)); }
+function setupCat(E){
+  const R = catRig;
+  R.root.visible = true;
+  for (const pw of R.paws){ pw.g.visible = true; pw.leg.visible = true; }
+  E.from = V(); E.tan = V(-E.dir.z, 0, E.dir.x);
+  catMeow(.5, 1, .85);
+  toast('ニャー… ネコが小鉢に近づいてきた！', 3);
+  updateCat(E, 0);
+}
+function catNextStrike(E){
+  const act = E.n % 2 ? 1 : -1, S0 = catShoulder(act);
+  const m = nearestMedaka(S0);
+  const T = m ? preyCenter(m) : V(rand(-.04,.04), 0, rand(-.04,.04));
+  evClampTarget(T, S0, EVT.catReach, .04);
+  T.y = SURF;
+  E.T = T; E.A = V(T.x, SURF + .065, T.z);
+  E.from = catRest(act);
+  E.swSign = Math.random() < .5 ? 1 : -1;
+  evPhase(E, 'aim');
+  sfx('warn');
+}
+// 前脚（球）と水中に入った脚（線分）で判定する。ダメージは1回の攻撃につき1回まで
+function catPawHit(E, P, S){
+  if (E.grabRoll && !E.fishTaken && P.y < SURF && count('medaka') > 2){
+    const m = prey.find(q => q.kind === 'medaka' && q.state !== 'caught' && q.state !== 'held' && preyCenter(q).distanceTo(P) < .03);
+    if (m){ removePrey(m); E.fishTaken = true; toast('ネコがメダカをすくい上げた！', 2); }
+  }
+  if (Y.shade || game.escape) return;
+  const yc = Y.pos.clone().add(V(0, .004*Y.s, 0)), body = .009*Y.s;
+  const dBall = yc.distanceTo(P);
+  const q = closestOnSeg(P, S, yc);
+  const dLeg = q.y < SURF ? q.distanceTo(yc) : Infinity;
+  if (!E.hitDone && (dBall < .024 + body || dLeg < .016 + body)){
+    E.hitDone = true;
+    Y.energy -= EVT.catDmg;
+    game.lastCause = 'cat'; game.shakeT = .45;
+    const away = yc.clone().sub(P);
+    if (away.lengthSq() < 1e-8) away.set(0, -1, 0);
+    Y.jetVel.addScaledVector(away.normalize(), .07);
+    sfx('hit');
+    if (navigator.vibrate) navigator.vibrate([50,30,50]);
+    toast('ネコの前脚に引っかかれた！', 3);
+  } else if (dBall < .075 && P.y < SURF){
+    // 近くを通っただけなら、弱い水流で押し戻す
+    const away = yc.clone().sub(P);
+    if (away.lengthSq() > 1e-8) Y.jetVel.addScaledVector(away.normalize(), .25*(1 - dBall/.075)*dt);
+  }
+}
+function updateCat(E, dt){
+  const R = catRig;
+  let k = 1;
+  if (E.phase === 'call') k = .35*smooth01(E.pt/1.6);
+  else if (E.phase === 'peek') k = .35 + .65*smooth01(E.pt/1.2);
+  else if (E.phase === 'leave') k = 1 - smooth01(E.pt/1.4);
+  const out = .37 + .14*(1 - k);
+  R.root.position.set(E.dir.x*out, .31 - .05*(1 - k), E.dir.z*out);
+  R.root.rotation.y = E.yaw;
+  R.root.updateMatrixWorld(true);
+  E.warnTxt = ''; E.danger = null;
+  evMarker(null);
+  const act = E.n % 2 ? 1 : -1;
+  let P = null, look = null;
+  switch (E.phase){
+    case 'call':
+      if (E.pt >= 1.6){ evPhase(E, 'peek'); catMeow(.35, 1.12, .55); toast('ネコが覗き込んでいる！ 深く潜るか根の陰へ', 3); }
+      break;
+    case 'peek':
+      if (!E.panic && E.pt >= .3){ E.panic = true; toast('メダカが一斉に逃げ出した！', 1); }
+      if (E.pt >= 1.2) catNextStrike(E);
+      break;
+    case 'aim': {
+      const kk = smooth01(E.pt/.5);
+      P = E.from.clone().lerp(E.A, kk);
+      P.y += Math.sin(E.pt*9)*.003*kk;
+      const blink = Math.floor(E.pt*8) % 2 === 0;
+      evMarker(E.T, .036, .065, 0xd0654c, blink);
+      $('#fx').classList.toggle('danger', blink);
+      E.warnTxt = '前脚が来る！ 赤い輪の下から離れろ';
+      E.danger = V(E.T.x, SURF - .03, E.T.z); look = E.T;
+      if (E.pt >= EVT.catAim){
+        $('#fx').classList.remove('danger');
+        evPhase(E, 'swipe'); E.hitDone = false; E.splashed = false; E.grabRoll = Math.random() < .35;
+        sfx('strike');
+      }
+      break; }
+    case 'swipe': {
+      const t = E.pt, W0 = V(E.T.x, SURF - .035, E.T.z);
+      const W1 = W0.clone().addScaledVector(E.tan, .06*E.swSign); W1.y -= .008;
+      if (t < .18) P = E.A.clone().lerp(W0, smooth01(t/.18));
+      else if (t < .55) P = W0.clone().lerp(W1, smooth01((t - .18)/.37));
+      else P = W1.clone().lerp(E.A, smooth01((t - .55)/.3));
+      evMarker(E.T, .036, .065, 0xd0654c, t < .55);
+      E.danger = P; look = P;
+      if (!E.splashed && P.y < SURF){ E.splashed = true; splash(V(P.x, SURF, P.z)); noiseBurst(.35, 2400, 250, .35); }
+      if (P.y < SURF + .01) catPawHit(E, P, catShoulder(act));
+      if (t >= .85){ E.from = P.clone(); evPhase(E, 'rest'); }
+      break; }
+    case 'rest':
+      P = E.from.clone().lerp(catRest(act), smooth01(E.pt/.6));
+      if (E.pt >= .8){
+        E.n++;
+        if (E.n >= E.max){ evPhase(E, 'leave'); E.panic = false; catMeow(.35, 1.2, .5); toast('ネコは飽きて立ち去った', 2); }
+        else catNextStrike(E);
+      }
+      break;
+    case 'leave':
+      if (E.pt >= 1.4){ clearEvent(); return; }
+      break;
+  }
+  for (const pw of R.paws){
+    const pos = (P && pw.sx === act) ? P : catRest(pw.sx);
+    pw.g.position.copy(pos);
+    pw.g.rotation.set(0, E.yaw, 0);
+    placeSeg(pw.leg, pos, catShoulder(pw.sx));
+  }
+  if (!look){
+    const m = nearestMedaka(R.head.getWorldPosition(V()));
+    look = m ? preyCenter(m) : V(0, SURF - .05, 0);
+  }
+  E.look.lerp(look, damp(look === P ? 8 : 3, dt));
+  R.head.lookAt(E.look);
+}
+/* ---------- 子供襲来 ---------- */
+function kidShoulders(){ return [kidRig.lean.localToWorld(V(.105,.24,0)), kidRig.lean.localToWorld(V(-.105,.24,0))]; }
+function kidNetRest(){ return kidRig.lean.localToWorld(V(.2,.15,.3)); }
+function kidClampNet(C){
+  const [sa, sb] = kidShoulders(), sm = sa.add(sb).multiplyScalar(.5);
+  const hx = C.x - sm.x, hz = C.z - sm.z, L = Math.hypot(hx, hz);
+  if (L > .46){ C.x = sm.x + hx/L*.46; C.z = sm.z + hz/L*.46; }
+  if (C.y < SURF + .02){
+    const W = wallR(clamp(C.y, .04, SURF)) - .055, rr = Math.hypot(C.x, C.z);
+    if (rr > W){ C.x *= W/rr; C.z *= W/rr; }
+    C.y = Math.max(C.y, groundY(C.x, C.z) + .05);
+  }
+}
+// 網の向き：持ち手は肩へ向け、網の口は want に近い向き（持ち手と直交）にする
+function orientNet(C, want){
+  const R = kidRig, [sa, sb] = kidShoulders();
+  const u = sa.clone().add(sb).multiplyScalar(.5).sub(C).normalize();
+  const n = want.clone().addScaledVector(u, -want.dot(u));
+  if (n.lengthSq() < 1e-6) n.set(-u.z, 0, u.x);
+  if (n.lengthSq() < 1e-6) n.set(1, 0, 0);
+  n.normalize();
+  const x = new THREE.Vector3().crossVectors(u, n);
+  EV_M.makeBasis(x, u, n);
+  R.net.quaternion.setFromRotationMatrix(EV_M);
+  R.net.position.copy(C);
+  R.net.updateMatrixWorld(true);
+  const h1 = R.net.localToWorld(V(0,.37,0)), h2 = R.net.localToWorld(V(0,.27,0));
+  const nearA = sa.distanceTo(h1) < sb.distanceTo(h1);
+  placeSeg(R.arms[0], nearA ? sa : sb, h1);
+  placeSeg(R.arms[1], nearA ? sb : sa, h2);
+  R.hands[0].position.copy(h1); R.hands[1].position.copy(h2);
+}
+// 網袋の内側にいるか（網の口から袋の奥まで、奥ほど細くなる）
+function netInside(P){
+  const L = kidRig.net.worldToLocal(P.clone()), z = -L.z;
+  if (z < -.012 || z > .062) return false;
+  return Math.hypot(L.x, L.y) < .043*(1 - Math.max(0, z)/.065*.85) + .005;
+}
+function netHoldPos(){ return kidRig.net.localToWorld(V(0, 0, -.028)); }
+function netDropYago(){
+  const p = netHoldPos();
+  Y.pos.set(p.x, SURF - .015, p.z); keepInBowl(Y.pos, .02);
+  Y.vel.set(0,0,0); Y.jetVel.set(0,-.06,0);
+  if (Y.ch){ Y.ch.object.position.copy(Y.pos); Y.ch.object.rotation.z = 0; }
+  splash(V(p.x, SURF, p.z));
+}
+function setupKid(E){
+  const R = kidRig;
+  R.root.visible = R.net.visible = true;
+  for (const m of R.arms) m.visible = true;
+  for (const m of R.hands) m.visible = true;
+  E.C = V(); E.from = V(); E.dirH = V(-E.dir.z, 0, E.dir.x);
+  updateKid(E, 0);
+  kidSay('メダカいるかな～？');
+  toast('庭の子供が網を持ってきた！ 網に入らないように', 3);
+}
+function kidNextScoop(E){
+  if (E.n >= E.max){ evPhase(E, 'leave'); E.panic = false; kidSay('またね～'); toast('子供は帰っていった', 2); return; }
+  E.n++;
+  const [sa, sb] = kidShoulders(), sm = sa.add(sb).multiplyScalar(.5);
+  const m = nearestMedaka(sm);
+  const T = m ? preyCenter(m) : V(rand(-.05,.05), 0, rand(-.05,.05));
+  evClampTarget(T, sm, .4, .07);
+  E.S = V(T.x, SURF, T.z); E.sAir = V(T.x, SURF + .07, T.z); E.sWater = V(T.x, SURF - .045, T.z);
+  const tan = V(-E.dir.z, 0, E.dir.x);
+  const sign = m ? (Math.sign((m.pos.x - T.x)*tan.x + (m.pos.z - T.z)*tan.z) || 1) : (Math.random() < .5 ? 1 : -1);
+  E.dirH = tan.multiplyScalar(sign);
+  E.from.copy(E.C);
+  evPhase(E, 'aim');
+  sfx('warn');
+}
+function kidCatchYago(E){
+  if (game.escape) return;
+  if (game.fight) clearFight();
+  evPhase(E, 'caught'); E.panic = false;
+  Y.vel.set(0,0,0); Y.jetVel.set(0,0,0); Y.strikeT = -1; Y.strikeRecord = null;
+  Y.busyT = Math.max(Y.busyT, .4); Y.still = 0;
+  game.escape = {net:true, side:Math.random() < .5 ? 'L' : 'R', pos:.5, dir:1,
+    period:1.1, minPeriod:.85, need:4, ok:0, grip:0, fill:6.5, dmg:EVT.netDmg, tilt:0,
+    intro:1.5, flash:0, flashOk:false, flashSide:'L'};
+  escUI().root.classList.add('on');
+  updateEscapeUI();
+  kidSay('わっ、ヤゴだ！');
+  toast('網ですくい上げられた！ 振りほどけ', 3);
+  sfx('hit');
+  if (navigator.vibrate) navigator.vibrate([60,30,60]);
+}
+function winNetEscape(){
+  const E = game.event;
+  endEscape();
+  Y.busyT = 0;
+  netDropYago();
+  toast('網から逃げ出した！', 3);
+  sfx('perfect');
+  if (E){ kidSay('あっ、にげた！'); evPhase(E, 'show'); }
+}
+function loseNetEscape(){
+  const E = game.event;
+  endEscape();
+  Y.energy -= EVT.netDmg;
+  game.lastCause = 'kid'; game.shakeT = .4; Y.busyT = .8;
+  netDropYago();
+  sfx('hit');
+  toast('網の中で弱ってしまった…水へ戻された', 3);
+  if (E){ kidSay('よわってる…かえしてあげよ'); evPhase(E, 'show'); }
+}
+function updateKid(E, dt){
+  const R = kidRig, C = E.C;
+  let rad = .52;
+  if (E.phase === 'call') rad += .3*(1 - smooth01(E.pt/1.4));
+  else if (E.phase === 'leave') rad += .3*smooth01((E.pt - .3)/1.2);
+  const walking = (E.phase === 'call' && E.pt < 1.4) || (E.phase === 'leave' && E.pt > .3);
+  R.root.position.set(E.dir.x*rad, .4 + (walking ? Math.abs(Math.sin(E.t*9))*.012 : 0), E.dir.z*rad);
+  R.root.rotation.y = E.yaw;
+  R.root.updateMatrixWorld(true);
+  EV_TMP.copy(C);
+  const prevY = C.y, down = V(0,-1,0);
+  let want = V(-E.dir.z, 0, E.dir.x), look = null;
+  E.warnTxt = ''; E.danger = null;
+  evMarker(null);
+  switch (E.phase){
+    case 'call':
+      C.copy(kidNetRest());
+      if (E.pt >= 1.6) evPhase(E, 'peek');
+      break;
+    case 'peek':
+      C.lerp(kidNetRest(), damp(6, dt));
+      look = V(0, SURF, 0);
+      if (E.pt >= 1) kidNextScoop(E);
+      break;
+    case 'aim':
+      C.copy(E.from).lerp(E.sAir, smooth01(E.pt/.6));
+      want = E.dirH.clone().lerp(down, .4);
+      E.danger = E.sWater; look = E.S;
+      E.warnTxt = '網が来る！ 網の口から離れろ';
+      evMarker(E.S, .05, .07, 0xe8c040, Math.floor(E.pt*8) % 2 === 0);
+      if (E.pt >= 1){ evPhase(E, 'dip'); E.panic = true; E.splashed = false; }
+      break;
+    case 'dip': {
+      const k = smooth01(E.pt/.4);
+      C.copy(E.sAir).lerp(E.sWater, k);
+      want = E.dirH.clone().lerp(down, .4*(1 - k));
+      E.danger = C; look = C;
+      E.warnTxt = '網が来る！ 網の口から離れろ';
+      if (!E.splashed && C.y < SURF){ E.splashed = true; splash(V(C.x, SURF, C.z)); noiseBurst(.3, 2000, 300, .3); }
+      if (E.pt >= .4) evPhase(E, 'sweep');
+      break; }
+    case 'sweep': {
+      // いちばん近いメダカを追って、網の進む向きを少しずつ変える
+      const m = nearestMedaka(C);
+      if (m){
+        const tw = V(m.pos.x - C.x, 0, m.pos.z - C.z);
+        if (tw.lengthSq() > 1e-6){
+          const a0 = Math.atan2(E.dirH.x, E.dirH.z), a1 = Math.atan2(tw.x, tw.z);
+          const a = a0 + clamp(angDiff(a0, a1), -1.1*dt, 1.1*dt);
+          E.dirH.set(Math.sin(a), 0, Math.cos(a));
+        }
+      }
+      C.addScaledVector(E.dirH, .1*dt);
+      kidClampNet(C);
+      want = E.dirH; E.danger = C; look = C;
+      E.warnTxt = '網が来る！ 網の口から離れろ';
+      if (E.pt >= 1.4){ evPhase(E, 'lift'); E.liftY0 = C.y; }
+      break; }
+    case 'lift': {
+      const k = smooth01(E.pt/.6);
+      C.y = E.liftY0 + (SURF + .06 - E.liftY0)*k;
+      C.addScaledVector(E.dirH, .03*dt);
+      kidClampNet(C);
+      want = E.dirH.clone().lerp(V(0,1,0), k);
+      E.danger = C; look = C;
+      if (E.pt >= .6){
+        evPhase(E, 'show'); E.panic = false;
+        kidSay(['あ～、にげた！', 'もういっかい！', 'すばしっこいなぁ'][Math.floor(Math.random()*3)]);
+      }
+      break; }
+    case 'caught':
+      C.y += (SURF + .06 - C.y)*damp(4, dt);
+      want = V(0,1,0); look = C;
+      if (!game.escape && E.pt > .3) evPhase(E, 'show');
+      break;
+    case 'show':
+      want = V(0,1,0); look = C;
+      if (E.pt >= 1.2) kidNextScoop(E);
+      break;
+    case 'leave':
+      C.lerp(kidNetRest(), damp(5, dt));
+      if (E.pt >= 1.6){ clearEvent(); return; }
+      break;
+  }
+  orientNet(C, want);
+  // 網袋に入ったヤゴは網と一緒に運ばれ、そのまま水面より上へ引き上げられたら捕まる
+  if ((E.phase === 'sweep' || E.phase === 'lift') && !game.escape && !Y.molting){
+    const yc = Y.pos.clone().add(V(0, .004*Y.s, 0));
+    if (Y.pos.y < SURF + .02 && netInside(yc)){
+      Y.pos.add(C.clone().sub(EV_TMP).multiplyScalar(.9));
+      if (E.phase === 'lift' && prevY < SURF && C.y >= SURF) kidCatchYago(E);
+    }
+  }
+  if (!look) look = V(0, SURF, 0);
+  E.look.lerp(look, damp(5, dt));
+  R.head.lookAt(E.look);
 }
 
 // 稚魚・稚エビを1齢から狙えるよう、一定数を補充する（繁殖の上限とは別枠）
@@ -5160,7 +5835,8 @@ function startEnding(){
   hideBird();
   clearTagame();
   clearFrog();
-  clearSave();
+  clearEvent();
+  if (!game.debug) clearSave();
   game.flyTier = dragonflyTierFor(computeRank().score);
   zukanMark('fly:' + game.flyTier.id, 2);
   Y.strikeRecord = null; Y.strikeT = -1;
@@ -5214,6 +5890,7 @@ function gameOver(){
   clearTagame();
   game.frogLost = !!game.frog;
   clearFrog();
+  clearEvent();
   Y.strikeRecord = null; Y.strikeT = -1;
   game.guide.clear();
   game.mode = 'over'; setHud(false); showEnd(false);
@@ -5228,14 +5905,14 @@ function showEnd(clear){
   const rankEl = $('#endRank'), det = $('#endDetail');
   if (clear){
     const r = computeRank();
-    const saved = game.short ? {newRecord:false} : saveBest(true, r.rank, game.time);   // 5分チャレンジは自己ベストを更新しない
+    const saved = (game.short || game.debug) ? {newRecord:false} : saveBest(true, r.rank, game.time);   // 5分チャレンジ・イベントテストは自己ベストを更新しない
     rankEl.textContent = r.rank; rankEl.style.display = '';
     det.textContent = `スコア${r.score}（${m}分${s}秒・待ち伏せ${Math.round(r.amb*100)}%・大物${game.bigCatches}・被弾${game.birdHits}・カエル戦 被弾${game.frogHits||0}／待ち伏せ噛みつき${game.frogAmbush||0}）`;
     $('#endMsg').textContent =
       `${(game.flyTier || DRAGONFLY_TIERS[2]).name}になって小鉢を飛び立ちました。${m}分${s}秒で${game.catches}匹を捕まえ、うち${game.ambushCatches}匹は待ち伏せでした。` +
       (saved.newRecord ? ' 自己ベスト更新！' : '');
   } else {
-    saveBest(false);
+    if (!game.debug) saveBest(false);
     rankEl.textContent = ''; rankEl.style.display = 'none'; det.textContent = '';
     $('#endMsg').textContent = timedOut
       ? `制限時間に到達しました。${game.catches}匹を捕食し、${Y.stage+1}齢まで成長しました。次は羽化を目指そう！`
@@ -5336,6 +6013,7 @@ function updateHud(dt){
   if (tagameNear()){ amb.classList.add('on'); $('#ambTxt').textContent = 'タガメが近い…じっとして'; }
   if (game.frog && game.frog.state === 'windup'){ amb.classList.add('on'); $('#ambTxt').textContent = '舌が来る！ 赤い輪から逃げろ'; }
   if (game.tagame && game.tagame.state === 'aim'){ amb.classList.add('on'); $('#ambTxt').textContent = 'タガメが構えた！ 赤い輪から逃げろ'; }
+  if (game.event && game.event.warnTxt){ amb.classList.add('on'); $('#ambTxt').textContent = game.event.warnTxt; }
   const hint = $('#targetHint');
   const canAim = game.mode === 'play' && !Y.molting && Y.busyT <= 0;
   if (!canAim) hint.style.display = 'none';
@@ -5591,6 +6269,23 @@ $('#cineTracks').addEventListener('click', e => {
 $('#bZukan').addEventListener('click', openZukan);
 $('#bZukanClose').addEventListener('click', closeZukan);
 $('#bShare').addEventListener('click', () => { shareResult(); });
+/* ---------- イベントテストは無効化。通常の突発イベントは継続 ---------- */
+function closeDebugMenu(){
+  $('#ovDebug').classList.add('hide');
+  $('#ovTitle').classList.remove('hide', 'fade');
+}
+// 通常ゲームを初期化し、オープニングを飛ばして約2秒後に通常と同じイベント関数で発生させる
+function startEventTest(kind){
+  if (!DEBUG_EVENTS) return;
+  audioInit();
+  $('#ovDebug').classList.add('hide');
+  $('#ovTitle').classList.add('hide');
+  newGame(false);
+  game.debug = true;
+  game.eventForce = {kind, t:2};
+  toast('イベントテスト：約2秒後に' + (kind === 'cat' ? 'ネコ' : '子供') + 'が来ます（セーブ・自己ベストは更新しません）', 3);
+}
+/* イベントテスト用ボタンの操作登録は行わない。 */
 
 $('#bRetry').addEventListener('click', () => { audioInit(); $('#ovEnd').classList.add('hide'); game.endShown = false; newGame(); });
 // カエル戦からやり直す（4齢・成長満タン・体力満タンで再開）
@@ -5689,7 +6384,7 @@ function loop(now){
       school.pos.copy(envPhaseId() === 'night' ? randomInWater(SURF-.02, SURF-.01) : randomInWater(SURF-.1, SURF-.025));
     }
     if (game.mode !== 'ending') updateYago(dt); else updateEnding(dt);
-    if (game.mode === 'play'){ updateTagame(dt); updateFrog(dt); updateWallRescue(dt); }
+    if (game.mode === 'play'){ updateTagame(dt); updateFrog(dt); updateEvent(dt); updateWallRescue(dt); }
     updateGuideLifecycle();
     const head = headPos(), cp = cam.position;
     for (let i = prey.length-1; i >= 0; i--){
