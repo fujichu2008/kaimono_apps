@@ -1283,7 +1283,7 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
 
 <div class="hud" id="stat">
   <div class="row"><span id="stageNum">1</span><span id="stageLbl">齢目（全4齢）</span></div>
-  <div class="bar" id="gBar"><i></i></div><div class="cap"><span>成長</span><span id="gTxt">0/10</span></div>
+  <div class="bar" id="gBar"><i></i></div><div class="cap"><span>成長 <span id="growthGain" aria-hidden="true" style="display:inline-block;min-width:3em;color:#bff0c8;opacity:0"></span></span><span id="gTxt">0/10</span></div>
   <div class="bar" id="eBar"><i></i></div><div class="cap"><span>体力</span><span id="eTxt">100</span></div>
   <div class="cap" id="envHud" style="margin-top:4px"></div>
 </div>
@@ -2305,7 +2305,44 @@ const PREY_AI = {
    ゲーム進行
    ========================================================= */
 const game = {mode:'title', time:0, catches:0, ambushCatches:0, breed:{}, endT:0, fly:null,
-  guide:new Map()};
+  guide:new Map(),
+  feedback:{hitStop:0, stage:-1, growth:0, pulse:0, gain:0}};
+function resetCatchFeedback(){
+  Object.assign(game.feedback, {hitStop:0, stage:-1, growth:0, pulse:0, gain:0});
+  const bar = $('#gBar'), label = $('#growthGain');
+  if (bar) bar.style.boxShadow = '';
+  if (label){ label.textContent = ''; label.style.opacity = '0'; }
+}
+function updateGrowthFeedback(dt){
+  const F = game.feedback, need = NEED[Y.stage];
+  if (!(need > 0)) return;
+  if (F.stage !== Y.stage || Y.growth < F.growth){
+    // 脱皮・ロード・リトライでは、その齢の実値に合わせ直す。
+    F.stage = Y.stage; F.growth = Y.growth; F.pulse = 0; F.gain = 0;
+  } else {
+    F.growth += (Y.growth - F.growth)*damp(12,dt);
+    if (Math.abs(Y.growth - F.growth) < .005) F.growth = Y.growth;
+  }
+  F.pulse = Math.max(0,F.pulse-dt);
+  $('#gBar i').style.width = (clamp(F.growth/need,0,1)*100) + '%';
+  $('#gTxt').textContent = Math.floor(Y.growth) + '/' + need;
+  const k = clamp(F.pulse/.65,0,1);
+  $('#gBar').style.boxShadow = k > 0
+    ? '0 0 6px rgba(160,230,150,' + (.55*k).toFixed(3) + ')' : '';
+  const label = $('#growthGain');
+  label.style.opacity = String(k);
+  label.textContent = k > 0 ? '+' + F.gain.toFixed(1) : '';
+}
+// 既存の28個の水煙プールを共用し、捕食1回につき最大10個まで。
+function catchWaterFx(p, perfect){
+  const c = preyCenter(p), size = clamp(preyR(p)/.006,.5,1.5);
+  const n = Math.min(10, Math.round(5+size*2+(perfect ? 2 : 0)));
+  for (let i=0;i<n;i++){
+    const a = i/n*Math.PI*2 + rand(-.15,.15), speed = .012*size;
+    emitPuff(c, V(Math.cos(a)*speed,rand(.002,.012),Math.sin(a)*speed),
+      rand(.0006,.0012)*size);
+  }
+}
 const input = {jx:0, jy:0, vy:0, keys:{}};
 let camYaw = 0, camPitch = -.35, fpPitch = -.08, view = 'third', lastDrag = 0;
 
@@ -2356,6 +2393,7 @@ function newGame(withIntro){
   game.paused = false; $('#ovPause').classList.add('hide');
   camRigReset();
   game.short = false; game.shortExpired = false; game.perfectCatches = 0;
+  resetCatchFeedback();
   Y.strikePerfect = false;
   toastQueue.length = 0;
   bgmPlay('main');
@@ -2619,8 +2657,7 @@ function ambushK(){
 function ambushHitFx(p){
   game.slowT = .28;
   game.fovKick = 1;
-  const c = preyCenter(p);
-  for (let i=0;i<10;i++) emitPuff(c, V(rand(-1,1),rand(-.5,1),rand(-1,1)).multiplyScalar(.03), rand(.0008,.0018));
+  // 粒子はcatchWaterFxに集約し、待ち伏せ時の二重発生を避ける。
   const fx = $('#fx');
   fx.classList.remove('flash'); void fx.offsetWidth; fx.classList.add('flash');
   sfx('ambush');
@@ -3931,8 +3968,33 @@ evRing.rotation.x = -Math.PI/2; evRing.renderOrder = 19; evRing.visible = false;
 const evCol = new THREE.Mesh(new THREE.CylinderGeometry(1,1,1,24,1,true),
   new THREE.MeshBasicMaterial({color:0xd0654c, transparent:true, opacity:.12, depthWrite:false, side:THREE.DoubleSide}));
 evCol.renderOrder = 18; evCol.visible = false; scene.add(evCol);
+// 前脚が通る区間を囲む輪郭。固定バッファを使い回す。
+const evSweepGeo = new THREE.BufferGeometry();
+evSweepGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(50*3),3));
+const evSweep = new THREE.LineLoop(evSweepGeo,new THREE.LineBasicMaterial({
+  color:0xd0654c,transparent:true,opacity:.8,depthTest:false,depthWrite:false
+}));
+evSweep.frustumCulled = false; evSweep.renderOrder = 19;
+evSweep.visible = false; scene.add(evSweep);
+function catSweepMarker(E,on){
+  const r = .024 + .009*Y.s;
+  const dx = E.tan.x*.06*E.swSign, dz = E.tan.z*.06*E.swSign;
+  const a = Math.atan2(dz,dx), attr = evSweepGeo.attributes.position;
+  for (let i=0;i<50;i++){
+    const end = i < 25, j = end ? i : i-25;
+    const angle = a + (end ? -Math.PI/2 : Math.PI/2) + j/24*Math.PI;
+    attr.setXYZ(i,E.T.x+(end ? dx : 0)+Math.cos(angle)*r,
+      SURF+.0014,E.T.z+(end ? dz : 0)+Math.sin(angle)*r);
+  }
+  attr.needsUpdate = true;
+  evSweep.material.opacity = on ? .85 : .35;
+  evSweep.visible = true;
+  evRing.visible = false;
+}
 function evMarker(pos, r, h, col, on){
+  evSweep.visible = false;
   if (!pos){ evRing.visible = evCol.visible = false; return; }
+  evRing.rotation.set(-Math.PI/2,0,0);
   evRing.material.color.setHex(col); evCol.material.color.setHex(col);
   evRing.position.set(pos.x, SURF + .0012, pos.z); evRing.scale.setScalar(r/.0335); evRing.visible = on;
   evCol.position.set(pos.x, SURF - h/2, pos.z); evCol.scale.set(r, h, r); evCol.visible = true;
@@ -4172,7 +4234,7 @@ function catNextStrike(E){
   sfx('warn');
 }
 // 前脚（球）と水中に入った脚（線分）で判定する。ダメージは1回の攻撃につき1回まで
-function catPawHit(E, P, S){
+function catPawHit(E, P, S, dt){
   if (E.grabRoll && !E.fishTaken && P.y < SURF && count('medaka') > 2){
     const m = prey.find(q => q.kind === 'medaka' && q.state !== 'caught' && q.state !== 'held' && preyCenter(q).distanceTo(P) < .03);
     if (m){ removePrey(m); E.fishTaken = true; toast('ネコがメダカをすくい上げた！', 2); }
@@ -4225,7 +4287,8 @@ function updateCat(E, dt){
       P = E.from.clone().lerp(E.A, kk);
       P.y += Math.sin(E.pt*9)*.003*kk;
       const blink = Math.floor(E.pt*8) % 2 === 0;
-      evMarker(E.T, .036, .065, 0xd0654c, blink);
+      evMarker(E.T, .024 + .009*Y.s, .06, 0xd0654c, blink);
+      catSweepMarker(E,blink);
       $('#fx').classList.toggle('danger', blink);
       E.warnTxt = '前脚が来る！ 赤い輪の下から離れろ';
       E.danger = V(E.T.x, SURF - .03, E.T.z); look = E.T;
@@ -4241,10 +4304,14 @@ function updateCat(E, dt){
       if (t < .18) P = E.A.clone().lerp(W0, smooth01(t/.18));
       else if (t < .55) P = W0.clone().lerp(W1, smooth01((t - .18)/.37));
       else P = W1.clone().lerp(E.A, smooth01((t - .55)/.3));
-      evMarker(E.T, .036, .065, 0xd0654c, t < .55);
+      // 輪郭は予告した軌道を維持し、淡い柱は実際の前脚に追従する。
+      const depth = clamp(SURF-P.y+.024,0,.09);
+      evMarker(P, .024 + .009*Y.s, Math.max(.001,depth), 0xd0654c, t < .55);
+      catSweepMarker(E,t < .55);
+      evCol.visible = depth > 0;
       E.danger = P; look = P;
       if (!E.splashed && P.y < SURF){ E.splashed = true; splash(V(P.x, SURF, P.z)); noiseBurst(.35, 2400, 250, .35); }
-      if (P.y < SURF + .01) catPawHit(E, P, catShoulder(act));
+      if (P.y < SURF + .01) catPawHit(E, P, catShoulder(act), dt);
       if (t >= .85){ E.from = P.clone(); evPhase(E, 'rest'); }
       break; }
     case 'rest':
@@ -4407,7 +4474,7 @@ function updateKid(E, dt){
       want = E.dirH.clone().lerp(down, .4);
       E.danger = E.sWater; look = E.S;
       E.warnTxt = '網が来る！ 網の口から離れろ';
-      evMarker(E.S, .05, .07, 0xe8c040, Math.floor(E.pt*8) % 2 === 0);
+      evMarker(E.S, .05, .045, 0xe8c040, Math.floor(E.pt*8) % 2 === 0);
       if (E.pt >= 1){ evPhase(E, 'dip'); E.panic = true; E.splashed = false; }
       break;
     case 'dip': {
@@ -4463,6 +4530,18 @@ function updateKid(E, dt){
       break;
   }
   orientNet(C, want);
+  // 実際に動く網の口へ警告を重ね、追尾で軌道が変わっても位置を一致させる。
+  // 捕獲判定は従来のnetInsideと水面通過条件をそのまま使う。
+  if (E.phase === 'dip' || E.phase === 'sweep' || E.phase === 'lift'){
+    evRing.visible = true; evCol.visible = false;
+    evRing.position.copy(C);
+    evRing.quaternion.copy(R.net.quaternion);
+    evRing.scale.setScalar(.045/.0335);
+    evRing.material.color.setHex(0xe8c040);
+    evRing.material.opacity = .7;
+  } else {
+    evRing.material.opacity = .8;
+  }
   // 網袋に入ったヤゴは網と一緒に運ばれ、そのまま水面より上へ引き上げられたら捕まる
   if ((E.phase === 'sweep' || E.phase === 'lift') && !game.escape && !Y.molting){
     const yc = Y.pos.clone().add(V(0, .004*Y.s, 0));
@@ -4817,7 +4896,7 @@ function updateAids(){
 function strike(){
   if (game.escape){ escapePress(null); return; }   // 振りほどき中は「光っている側」を押す
   if (game.fight){ fightPress(); return; }   // 組み付き中は「押す」操作
-  if (game.mode !== 'play' || Y.molting || Y.busyT > 0) return;
+  if (game.mode !== 'play' || game.paused || game.feedback.hitStop > 0 || Y.molting || Y.busyT > 0) return;
   if (game.frog && frogTryWeak()) return;   // カエルの急所（喉）に届くなら、急所への攻撃を優先する
   const t = Y.target;
   if (t){
@@ -4884,25 +4963,22 @@ function resolveStrike(){
   disturb(head, first ? .03 : .06);   // 初回の失敗では周りを驚かせすぎない
 }
 function catchPrey(p, fightWin, fd, perfect=false){
+  if (game.mode !== 'play' || !prey.includes(p) || p.state === 'caught') return;
+  // 成功を最初に確定し、同じ個体への再入で加算しない。
+  p.state = 'caught'; p.st = 1.5; p.ch.busy = 0;
   Y.strikeRecord = null;
   game.guide.clear();
   if (fightWin){ perfect = !!Y.strikePerfect; }
   Y.strikePerfect = false;
-  {
-    // 捕食の水中エフェクト（微粒子は既存の emitPuff を少量だけ使う）
-    const c = preyCenter(p);
-    if (perfect){
-      game.perfectCatches = (game.perfectCatches || 0) + 1;
-      game.slowT = Math.max(game.slowT || 0, .2);
-      game.fovKick = 1;
-      sfx('perfect');
-      for (let i=0;i<12;i++) emitPuff(c, V(rand(-.025,.025),rand(-.008,.025),rand(-.025,.025)), rand(.0008,.002)*Y.s);
-      if (navigator.vibrate) navigator.vibrate([15,20,25]);
-    } else {
-      for (let i=0;i<5;i++) emitPuff(c, V(rand(-.015,.015),rand(-.006,.015),rand(-.015,.015)), rand(.0006,.0014));
-    }
+  game.feedback.hitStop = .06;
+  catchWaterFx(p,perfect);
+  if (perfect){
+    game.perfectCatches = (game.perfectCatches || 0) + 1;
+    game.slowT = Math.max(game.slowT || 0, .2);
+    game.fovKick = 1;
+    sfx('perfect');
+    if (navigator.vibrate) navigator.vibrate([15,20,25]);
   }
-  p.state = 'caught'; p.st = 1.5; p.ch.busy = 0;
   if (p.ch.clips.Eaten) setAnim(p.ch,'Eaten'); else setAnim(p.ch,'swim');
   // 大きさの2乗に比例（ミジンコ・ボウフラは従来どおり）
   const sized = !!p.cfg.sizeMax;
@@ -4920,6 +4996,13 @@ function catchPrey(p, fightWin, fd, perfect=false){
   const comboK = 1 + .15*Math.min(game.combo, 4);
   // 1回で得る成長値は、その齢の必要量の45%まで
   const gain = Math.min(p.cfg.value*k*growK*worth*comboK, NEED[Y.stage]*.45);
+  const feedback = game.feedback;
+  if (feedback.stage !== Y.stage){
+    feedback.stage = Y.stage; feedback.growth = Y.growth;
+    feedback.pulse = 0; feedback.gain = 0;
+  }
+  feedback.gain = (feedback.pulse > 0 ? feedback.gain : 0) + gain;
+  feedback.pulse = .65;
   Y.growth += gain; Y.energy = Math.min(100, Y.energy + p.cfg.energy*k*energyK);
   game.catches++; if (Y.strikeAmb){ game.ambushCatches++; ambushHitFx(p); }
   const big = fightWin && d >= .5;
@@ -5112,7 +5195,7 @@ function updateFightUI(dt){
   }
 }
 function jet(){
-  if (game.mode !== 'play' || Y.molting || Y.busyT > 0 || Y.jetCd > 0 || Y.energy < 2) return;
+  if (game.mode !== 'play' || game.paused || game.feedback.hitStop > 0 || Y.molting || Y.busyT > 0 || Y.jetCd > 0 || Y.energy < 2) return;
   const t = Y.target;
   let d;
   if (t){
@@ -5931,6 +6014,7 @@ function showEnd(clear){
   $('#ovEnd').classList.remove('hide');
 }
 function setHud(on){
+  if (!on) resetCatchFeedback();
   for (const id of ['#stat','#prey','#bStrike','#bJet','#bView','#bUp','#bDown','#bSound','#bPause','#bMenu','#zoomCtl','#joyHint']) $(id).style.display = on ? '' : 'none';
   $('#shortTimer').style.display = on && game.short ? 'block' : 'none';
   if (!on){
@@ -5966,6 +6050,7 @@ function toast(msg,priority=1){
 }
 let hudT = 0;
 function updateHud(dt){
+  if (game.mode === 'play') updateGrowthFeedback(dt);
   // 5分チャレンジ：残り時間の表示と、時間切れの判定
   {
     const st = $('#shortTimer');
@@ -6038,9 +6123,7 @@ function updateHud(dt){
     hint.style.color = FROG_AIM.reach ? '#bff0c8' : '#e0f3bd';
   }
   $('#stageNum').textContent = Y.stage+1;
-  const need = NEED[Y.stage];
-  $('#gBar i').style.width = Math.min(100, Y.growth/need*100) + '%';
-  $('#gTxt').textContent = Math.floor(Y.growth) + '/' + need;
+  // 成長の表示はupdateGrowthFeedbackで毎フレーム更新する。
   $('#eBar i').style.width = Y.energy + '%';
   $('#eTxt').textContent = Math.ceil(Y.energy);
   $('#eBar i').style.background = Y.energy < 25 ? 'var(--alarm)' : '';
@@ -6359,6 +6442,15 @@ function loop(now){
   perfTick(realDt, now);
   // 一時停止中は描画だけ続け、ゲームの更新は止める
   if (game.paused){ renderer.render(scene, cam); return; }
+  // 描画とイベント処理は継続する。停止時間は実時間で消費し、
+  // AI・捕食判定・制限時間・アニメーションは同じフレーム境界で止める。
+  if (game.mode !== 'play') game.feedback.hitStop = 0;
+  if (game.feedback.hitStop > 0){
+    game.feedback.hitStop = Math.max(0,game.feedback.hitStop-Math.max(0,realDt));
+    updateGrowthFeedback(rawDt);
+    renderer.render(scene, cam);
+    return;
+  }
   // 待ち伏せ成功時の短いスローモーション
   if (game.slowT > 0) game.slowT -= rawDt;
   const dt = game.slowT > 0 ? rawDt*.35 : rawDt;
