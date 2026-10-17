@@ -2040,6 +2040,7 @@ function spawnPrey(kind, at, size){
   return p;
 }
 function removePrey(p){
+  if (medakaRaid.p === p) clearMedakaRaid();
   game.guide.delete(p);
   if (Y.strikeRecord && Y.strikeRecord.target === p) Y.strikeRecord = null;
   if (Y.target === p){ Y.target = null; Y.targetInReach = false; }
@@ -2121,6 +2122,10 @@ function updateStarterDaphnia(p,dt){
 
 function alarm(p){
   if (p.state === 'caught' || p.state === 'held') return;
+  // プレイヤーが襲撃中の大型メダカを驚かせた場合は、通常の逃走AIへ戻す。
+  if (p.kind === 'medaka' && medakaRaid.p === p){
+    clearMedakaRaid();
+  }
   if (game.mode === 'play') emitPreySignal(preyCenter(p), true);
   // 一度警戒した個体は通常AIへ戻し、逃走後に元の場所へ引き戻さない。
   game.guide.delete(p);
@@ -2170,20 +2175,27 @@ function updatePrey(p, dt, head){
   // 速く動くほど遠くから気づかれる（ゆっくり近づけば忍び寄れる）
   // 大物ほど警戒心が強い（エビ・メダカのみ）
   const sizeK = c.sizeMax ? .5 + .6*(p.size||1) : 1;
-  const th = c.alert * sizeK * (.6+.6*Y.s) * (.5 + .7*(Y.speedRatio||0)) * ambushK() * (Y.shade ? .6 : 1) * envAlertK();
+  // 3齢以降は大型メダカが成長したヤゴをより遠くから警戒する。
+  const grownMedaka = p.kind === 'medaka' && Y.stage >= 2 && (p.size||1) >= .85 ? 1.25 : 1;
+  const th = c.alert * sizeK * grownMedaka * (.6+.6*Y.s) * (.5 + .7*(Y.speedRatio||0)) * ambushK() * (Y.shade ? .6 : 1) * envAlertK();
   const center = preyCenter(p);
   if (game.mode === 'play' && !p.hidden && !Y.molting && (p.state === 'free' || p.state === 'forage' || p.state === 'rise')
       && center.distanceTo(head) < th &&
       !(game.catches === 0 && game.guide.has(p) && center.distanceTo(head) > .012)) alarm(p);   // 初回捕食前の支援ミジンコは、ごく近くまで警戒しない
 
-  if (!updateStarterDaphnia(p,dt)){
+  // 逆襲中のメダカは専用AIを優先し、通常の群泳・採餌処理を一時停止する。
+  if (!medakaRaidAI(p,dt) && !updateStarterDaphnia(p,dt)){
     const B = PREY_AI[p.kind];
     B(p,dt);
   }
 
+  // 高速突進のすり抜けを防ぐため、移動前の位置を保持する。
+  const raidPrev = p.kind === 'medaka' && medakaRaid.p === p && medakaRaid.phase === 'charge'
+    ? p.pos.clone() : null;
   p.pos.addScaledVector(p.vel, dt);
   const minUp = p.kind === 'shrimp' ? 0 : .002*c.scale;
   if (keepInBowl(p.pos, .006 + c.r, minUp)) { p.vel.x *= -.3; p.vel.z *= -.3; if (p.kind === 'shrimp') p.yaw += Math.PI*.6; }
+  if (raidPrev) medakaRaidCollision(p,raidPrev,p.pos);
   const hs = Math.hypot(p.vel.x, p.vel.z);
   if (hs > .002 && p.kind !== 'shrimp') p.yaw = lerpAngle(p.yaw, Math.atan2(p.vel.x,p.vel.z), damp(6,dt));
   if (p.kind === 'medaka') p.pitch = clamp(-Math.atan2(p.vel.y, hs+.001)*.8, -.6, .6);
@@ -2302,6 +2314,376 @@ const PREY_AI = {
 };
 
 /* =========================================================
+   大型メダカ逆襲イベント
+   1〜2齢限定・全体で同時に1匹・既存の群泳AIとは排他的に実行
+   ========================================================= */
+const MEDAKA_RAID = Object.freeze({
+  minSize:.85,
+  firstSafe:40,
+  firstInterval:[40,65],
+  secondInterval:[80,130],
+  firstChance:.75,
+  secondChance:.45,
+  firstWarning:1.8,
+  secondWarning:1.5,
+  threatFirst:.5,
+  threatSecond:.4,
+  chargeSpeed:.18,
+  chargeTime:.48,
+  chargeRadius:.012,
+  approachRange:.085,
+  retreatTime:1.8,
+  invincible:2,
+  firstDamage:8,
+  secondDamage:5
+});
+const medakaRaid = {
+  p:null,
+  phase:'idle',
+  t:0,
+  next:0,
+  invincible:0,
+  target:V(),
+  dir:V(),
+  hit:false,
+  warned:false,
+  chargeFrom:V()
+};
+// 襲撃予告リングと進路ラインは、ゲーム開始時に一度だけ生成して使い回す。
+const medakaRaidRing = new THREE.Mesh(
+  new THREE.RingGeometry(.78,1,40),
+  new THREE.MeshBasicMaterial({
+    color:0xe8c040,transparent:true,opacity:.9,
+    depthTest:false,depthWrite:false,side:THREE.DoubleSide
+  })
+);
+medakaRaidRing.renderOrder = 23;
+medakaRaidRing.visible = false;
+scene.add(medakaRaidRing);
+
+const medakaRaidLineGeo = new THREE.BufferGeometry();
+medakaRaidLineGeo.setAttribute('position',
+  new THREE.BufferAttribute(new Float32Array(6),3));
+const medakaRaidLine = new THREE.Line(
+  medakaRaidLineGeo,
+  new THREE.LineBasicMaterial({
+    color:0xff7560,transparent:true,opacity:.85,
+    depthTest:false,depthWrite:false
+  })
+);
+medakaRaidLine.frustumCulled = false;
+medakaRaidLine.renderOrder = 23;
+medakaRaidLine.visible = false;
+scene.add(medakaRaidLine);
+
+// 画面外の襲撃者を知らせる専用表示。
+// 通常の獲物ロック用矢印は変更せず、独立して管理する。
+const medakaRaidArrow = document.createElement('div');
+medakaRaidArrow.id = 'medakaRaidArrow';
+medakaRaidArrow.setAttribute('aria-hidden','true');
+medakaRaidArrow.textContent = '➤';
+Object.assign(medakaRaidArrow.style,{
+  position:'fixed',
+  left:'0',
+  top:'0',
+  display:'none',
+  color:'#ffb8a0',
+  fontSize:'30px',
+  fontWeight:'900',
+  textShadow:'0 0 7px #65180c,0 2px 5px #000',
+  pointerEvents:'none',
+  zIndex:'24',
+  transformOrigin:'center center'
+});
+document.body.appendChild(medakaRaidArrow);
+
+function medakaRaidInterval(){
+  const r = Y.stage === 0
+    ? MEDAKA_RAID.firstInterval : MEDAKA_RAID.secondInterval;
+  return rand(r[0],r[1]);
+}
+function resetMedakaRaid(){
+  clearMedakaRaid(false);
+  medakaRaid.next = medakaRaidInterval();
+  medakaRaid.invincible = 0;
+}
+function medakaRaidBlocked(){
+  const B = game.bird;
+  return game.mode !== 'play' || game.paused ||
+    Y.stage >= 2 || game.catches === 0 ||
+    game.time < MEDAKA_RAID.firstSafe ||
+    Y.molting || Y.moltReady || Y.pendingMolt > 0 ||
+    Y.busyT > 0 || Y.strikeT > 0 ||
+    !!game.fight || !!game.escape ||
+    !!game.tagame || !!game.tagameBoss ||
+    !!game.frog || !!game.event || !!game.eventForce ||
+    !!(B && B.phase !== 'idle');
+}
+function clearMedakaRaid(schedule=true){
+  const R = medakaRaid, p = R.p;
+  if (p && prey.includes(p) &&
+      ['raidThreat','raidAim','raidCharge','raidRetreat'].includes(p.state)){
+    p.state = 'free';
+    p.t = rand(1,3);
+    p.forageT = rand(8,20);
+    p.vel.multiplyScalar(.35);
+    if (p.ch) setAnim(p.ch,'swim');
+  }
+  R.p = null;
+  R.phase = 'idle';
+  R.t = 0;
+  R.hit = false;
+  R.warned = false;
+  medakaRaidRing.visible = false;
+  medakaRaidLine.visible = false;
+  medakaRaidArrow.style.display = 'none';
+  if (schedule) R.next = medakaRaidInterval();
+}
+function startMedakaRaid(p){
+  const R = medakaRaid;
+  if (R.p || !p || !prey.includes(p) || medakaRaidBlocked()) return false;
+  R.p = p;
+  R.phase = 'threat';
+  R.t = 0;
+  R.hit = false;
+  R.warned = false;
+  R.target.copy(Y.pos);
+  R.dir.set(0,0,0);
+  p.state = 'raidThreat';
+  p.target = null;
+  p.vel.multiplyScalar(.25);
+  setAnim(p.ch,'idle');
+  toast('⚠ 大きなメダカがこちらを見ている！',3);
+  sfx('warn');
+  return true;
+}
+function medakaRaidCandidate(p){
+  if (!p || p.kind !== 'medaka' || !prey.includes(p) ||
+      p.state !== 'free' || (p.size||1) < MEDAKA_RAID.minSize ||
+      p.hidden || inRefuge(p.pos,p.kind)) return false;
+  if (p.panicT > 0 || p.panicTo) return false;
+  const dist = preyCenter(p).distanceTo(Y.pos);
+  return dist >= .022 && dist <= MEDAKA_RAID.approachRange;
+}
+function updateMedakaRaid(dt){
+  const R = medakaRaid;
+  R.invincible = Math.max(0,R.invincible-dt);
+  if (game.mode !== 'play' || game.paused){
+    if (R.p) clearMedakaRaid();
+    return;
+  }
+  if (R.p){
+    const p = R.p;
+    // ボス戦・突発イベント・脱皮・組み付きが始まったら即座に中断する。
+    if (!prey.includes(p) || p.state === 'caught' || p.state === 'held' ||
+        p.kind !== 'medaka' || (p.size||1) < MEDAKA_RAID.minSize ||
+        medakaRaidBlocked()){
+      clearMedakaRaid();
+      return;
+    }
+    R.t += dt;
+    const warning = Y.stage === 0
+      ? MEDAKA_RAID.firstWarning : MEDAKA_RAID.secondWarning;
+    const threat = Y.stage === 0
+      ? MEDAKA_RAID.threatFirst : MEDAKA_RAID.threatSecond;
+
+    if (R.phase === 'threat' && R.t >= threat){
+      R.phase = 'aim';
+      p.state = 'raidAim';
+      toast('⚠ メダカが突進する！ 横へ逃げろ！',3);
+    }
+    if (R.phase === 'aim'){
+      // 突進直前の0.3秒は照準を固定して、回避を成立させる。
+      if (R.t < warning-.3){
+        R.target.copy(Y.pos);
+      }
+      if (R.t >= warning){
+        const from = preyCenter(p);
+        const d = R.target.clone().sub(from);
+        const len = d.length();
+        if (len < 1e-5){
+          d.set(Math.sin(p.yaw),0,Math.cos(p.yaw));
+        }
+        R.dir.copy(d.normalize());
+        R.chargeFrom.copy(from);
+        R.phase = 'charge';
+        R.t = 0;
+        R.hit = false;
+        p.state = 'raidCharge';
+        p.vel.copy(R.dir).multiplyScalar(MEDAKA_RAID.chargeSpeed);
+        p.yaw = Math.atan2(R.dir.x,R.dir.z);
+        setAnim(p.ch,'rapidswim');
+        sfx('jet');
+      }
+    } else if (R.phase === 'charge' && R.t >= MEDAKA_RAID.chargeTime){
+      R.phase = 'retreat';
+      R.t = 0;
+      p.state = 'raidRetreat';
+      const away = preyCenter(p).sub(Y.pos);
+      if (away.lengthSq() < 1e-8) away.copy(R.dir);
+      R.dir.copy(away.normalize());
+      p.vel.copy(R.dir).multiplyScalar(.08);
+      medakaRaidRing.visible = false;
+      medakaRaidLine.visible = false;
+      medakaRaidArrow.style.display = 'none';
+      if (!R.hit) {
+        toast('回避成功！ メダカが逃げていった',2);
+        sfx('good');
+      }
+    } else if (R.phase === 'retreat' && R.t >= MEDAKA_RAID.retreatTime){
+      clearMedakaRaid();
+    }
+    return;
+  }
+
+  if (medakaRaidBlocked()) return;
+  R.next -= dt;
+  if (R.next > 0) return;
+
+  // 抽選間隔と成功確率を分離し、襲撃を連続発生させない。
+  R.next = medakaRaidInterval();
+  const chance = Y.stage === 0
+    ? MEDAKA_RAID.firstChance : MEDAKA_RAID.secondChance;
+  if (Math.random() >= chance) return;
+
+  const candidates = prey.filter(medakaRaidCandidate);
+  if (!candidates.length) return;
+
+  // 対象は近くにいる既存の大型メダカから1匹だけ選ぶ。
+  const p = candidates[Math.floor(Math.random()*candidates.length)];
+  startMedakaRaid(p);
+}
+// 専用ステートでは通常の群泳・採餌・逃走AIを実行しない。
+function medakaRaidAI(p,dt){
+  const R = medakaRaid;
+  if (p.kind !== 'medaka' || R.p !== p) return false;
+  if (R.phase === 'threat' || R.phase === 'aim'){
+    // 狙いをつけている間はほぼ静止し、ヤゴの方へ向き直る。
+    steer(p,V(),10,dt);
+    const d = Y.pos.clone().sub(p.pos);
+    if (Math.hypot(d.x,d.z) > 1e-5){
+      p.yaw = lerpAngle(p.yaw,Math.atan2(d.x,d.z),damp(8,dt));
+    }
+    p.pitch = 0;
+    setAnim(p.ch,'idle');
+  } else if (R.phase === 'charge'){
+    // 突進方向は固定。ヤゴへの再追尾は行わない。
+    p.vel.copy(R.dir).multiplyScalar(MEDAKA_RAID.chargeSpeed);
+    p.yaw = Math.atan2(R.dir.x,R.dir.z);
+    setAnim(p.ch,'rapidswim');
+  } else if (R.phase === 'retreat'){
+    const away = p.pos.clone().sub(Y.pos);
+    if (away.lengthSq() > 1e-8){
+      away.normalize();
+      R.dir.lerp(away,damp(2,dt)).normalize();
+    }
+    steer(p,R.dir.clone().multiplyScalar(.08),4,dt);
+    setAnim(p.ch,'rapidswim');
+  }
+  return true;
+}
+function medakaRaidCollision(p,from,to){
+  const R = medakaRaid;
+  if (R.p !== p || R.phase !== 'charge' || R.hit ||
+      R.invincible > 0 || Y.stage >= 2 ||
+      game.mode !== 'play' || game.paused || Y.molting ||
+      game.escape || game.fight) return;
+
+  // ヤゴの中心と、メダカの移動区間との最短距離。
+  // closestOnSegは既存のネコ襲撃処理と共用する。
+  const a = from.clone().add(V(0,preyCy(p),0));
+  const b = to.clone().add(V(0,preyCy(p),0));
+  const body = Y.pos.clone().add(V(0,.004*Y.s,0));
+  const nearest = closestOnSeg(a,b,body);
+  const radius = MEDAKA_RAID.chargeRadius + .008*Y.s;
+
+  if (nearest.distanceToSquared(body) > radius*radius) return;
+
+  R.hit = true;
+  R.invincible = MEDAKA_RAID.invincible;
+  const damage = Y.stage === 0
+    ? MEDAKA_RAID.firstDamage : MEDAKA_RAID.secondDamage;
+  Y.energy = Math.max(0,Y.energy-damage);
+  game.lastCause = 'medaka';
+  game.shakeT = Math.max(game.shakeT || 0,.23);
+
+  // 軽いノックバック。壁・底の制約は既存のupdateYagoが処理する。
+  const away = body.clone().sub(nearest);
+  if (away.lengthSq() < 1e-8) away.copy(R.dir).negate();
+  away.normalize();
+  away.y = clamp(away.y,-.3,.3);
+  Y.jetVel.addScaledVector(away,.035);
+
+  const hitPos = nearest.clone();
+  for (let i=0;i<6;i++){
+    emitPuff(hitPos,
+      V(rand(-.02,.02),rand(-.005,.018),rand(-.02,.02)),
+      rand(.0008,.0018));
+  }
+  sfx('hit');
+  if (navigator.vibrate) navigator.vibrate([30,20,35]);
+  toast('大型メダカにつつかれた！ 体力 -'+damage,3);
+  if (Y.energy <= 0) gameOver();
+}
+function updateMedakaRaidVisual(){
+  const R = medakaRaid, p = R.p;
+  const active = game.mode === 'play' && !game.paused &&
+    !!p && prey.includes(p) &&
+    (R.phase === 'threat' || R.phase === 'aim' || R.phase === 'charge');
+
+  medakaRaidRing.visible = active;
+  medakaRaidLine.visible = active && R.phase !== 'threat';
+  medakaRaidArrow.style.display = 'none';
+  if (!active) return;
+
+  const c = preyCenter(p);
+  const warning = R.phase !== 'threat';
+  const pulse = 1 + Math.sin(performance.now()*.006)*.12;
+  medakaRaidRing.position.copy(c);
+  medakaRaidRing.quaternion.copy(cam.quaternion);
+  medakaRaidRing.scale.setScalar((preyR(p)*2.4+.005)*pulse);
+  medakaRaidRing.material.color.setHex(warning ? 0xff7560 : 0xe8c040);
+  medakaRaidRing.material.opacity = warning ? .95 : .75;
+
+  if (warning){
+    const end = R.phase === 'charge'
+      ? R.chargeFrom.clone().addScaledVector(
+          R.dir,MEDAKA_RAID.chargeSpeed*MEDAKA_RAID.chargeTime)
+      : R.target;
+    const attr = medakaRaidLineGeo.attributes.position;
+    attr.setXYZ(0,c.x,c.y,c.z);
+    attr.setXYZ(1,end.x,end.y+.004,end.z);
+    attr.needsUpdate = true;
+    medakaRaidLine.material.opacity = .6 +
+      .25*Math.sin(performance.now()*.006);
+  }
+
+  // カメラの外にいる襲撃者の方向だけを画面端へ表示する。
+  cam.updateMatrixWorld();
+  const cs = c.clone().applyMatrix4(cam.matrixWorldInverse);
+  const projected = c.clone().project(cam);
+  const behind = cs.z > 0;
+  let x = behind ? -projected.x : projected.x;
+  let y = behind ? projected.y : -projected.y;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  if (!behind && Math.abs(x) <= .88 && Math.abs(y) <= .88) return;
+  if (Math.hypot(x,y) < 1e-4){ x = 0; y = -1; }
+  const cx = innerWidth*.5, cy = innerHeight*.5;
+  const margin = 42;
+  const factor = Math.min(
+    (cx-margin)/Math.max(Math.abs(x*cx),1e-4),
+    (cy-margin)/Math.max(Math.abs(y*cy),1e-4)
+  );
+  const px = cx+x*cx*factor;
+  const py = cy+y*cy*factor;
+  const degrees = Math.atan2(y*cy,x*cx)*180/Math.PI;
+  medakaRaidArrow.style.display = 'block';
+  medakaRaidArrow.style.color = warning ? '#ff9b83' : '#ffe18b';
+  medakaRaidArrow.style.transform =
+    `translate(${px-15}px,${py-18}px) rotate(${degrees}deg)`;
+}
+
+/* =========================================================
    ゲーム進行
    ========================================================= */
 const game = {mode:'title', time:0, catches:0, ambushCatches:0, breed:{}, endT:0, fly:null,
@@ -2390,6 +2772,7 @@ function newGame(withIntro){
   game.tagameBoss = false;
   clearFrog(); game.frogDone = false; game.frogLost = false;
   clearEvent(); game.eventT = rand(EVT.firstMin, EVT.firstMax); game.eventForce = null; game.debug = false;
+  resetMedakaRaid();
   game.tagameLost = false; game.frogHits = 0; game.frogAmbush = 0; game.frogStrikes = 0;
   game.paused = false; $('#ovPause').classList.add('hide');
   camRigReset();
@@ -3049,6 +3432,7 @@ function updateBird(dt){
 }
 function birdStrike(){
   const B = game.bird;
+  clearMedakaRaid();
   // ついばむ位置（影の下の浅い所。ボウフラやヤゴに当たればその位置）
   B.splashed = false;
   B.peck = V(B.target.x, SURF - .045, B.target.z);
@@ -3259,6 +3643,7 @@ function startTagame(){
 // 2齢の試練：タガメ戦をはじめる
 function startTagameBoss(){
   clearEvent();
+  clearMedakaRaid();
   if (game.fight) clearFight();
   game.tagameBoss = true;
   startTagame();
@@ -3674,6 +4059,7 @@ function frogPickMedaka(){
 }
 function startFrog(){
   clearEvent();
+  clearMedakaRaid();
   if (game.fight) clearFight();
   const a = rand(0, Math.PI*2);
   const pos = V(Y.pos.x + Math.cos(a)*.1, frogSurfY(), Y.pos.z + Math.sin(a)*.1);
@@ -4200,6 +4586,7 @@ function pickEvent(){
 }
 function startEvent(kind){
   if (game.event || game.mode !== 'play') return false;
+  clearMedakaRaid();
   const a = rand(0, Math.PI*2), dir = V(Math.cos(a), 0, Math.sin(a));
   const E = {kind, phase:'call', t:0, pt:0, n:0, dir, yaw:Math.atan2(-dir.x, -dir.z),
     max:kind === 'cat' ? (Math.random() < .5 ? 3 : 4) : (Math.random() < .5 ? 2 : 3),
@@ -5364,6 +5751,7 @@ function jet(){
   sfx('jet');
 }
 function startMolt(){
+  clearMedakaRaid();
   Y.strikeRecord = null; Y.strikeT = -1;
   if (Y.stage >= NEED.length-1){ startEnding(); return; }
   Y.molting = true; Y.moltT = 5; Y.s0 = Y.s; Y.s1 = SIZES[Y.stage+1];
@@ -6070,6 +6458,7 @@ function makeDragonfly(tier){
 }
 function startEnding(){
   clearFight();
+  clearMedakaRaid();
   hideBird();
   clearTagame();
   clearFrog();
@@ -6123,6 +6512,7 @@ function updateEnding(dt){
    ========================================================= */
 function gameOver(){
   clearFight();
+  clearMedakaRaid();
   hideBird();
   game.tagameLost = !!game.tagame;
   clearTagame();
@@ -6258,6 +6648,16 @@ function updateHud(dt){
     $('#ambTxt').textContent = tagameCounterTarget()
       ? '反撃チャンス！ 捕食を押せ！'
       : 'タガメがもがいている！ 接近して反撃！';
+  }
+  if (medakaRaid.p && game.mode === 'play' &&
+      (medakaRaid.phase === 'threat' || medakaRaid.phase === 'aim' ||
+       medakaRaid.phase === 'charge')){
+    amb.classList.add('on');
+    $('#ambTxt').textContent = medakaRaid.phase === 'threat'
+      ? '⚠ 大きなメダカがこちらを見ている！'
+      : medakaRaid.phase === 'aim'
+      ? '⚠ メダカが突進する！ 横へ逃げろ！'
+      : '⚠ メダカが突進中！';
   }
   if (game.event && game.event.warnTxt){ amb.classList.add('on'); $('#ambTxt').textContent = game.event.warnTxt; }
   const hint = $('#targetHint');
@@ -6652,7 +7052,13 @@ function loop(now){
       school.pos.copy(envPhaseId() === 'night' ? randomInWater(SURF-.02, SURF-.01) : randomInWater(SURF-.1, SURF-.025));
     }
     if (game.mode !== 'ending') updateYago(dt); else updateEnding(dt);
-    if (game.mode === 'play'){ updateTagame(dt); updateFrog(dt); updateEvent(dt); updateWallRescue(dt); }
+    if (game.mode === 'play'){
+      updateTagame(dt);
+      updateFrog(dt);
+      updateEvent(dt);
+      updateMedakaRaid(dt);
+      updateWallRescue(dt);
+    }
     updateGuideLifecycle();
     const head = headPos(), cp = cam.position;
     for (let i = prey.length-1; i >= 0; i--){
@@ -6675,6 +7081,7 @@ function loop(now){
     const fov = camRigFov(62 - (REDUCED_MOTION ? 0 : 6*smooth01(game.fovKick || 0)));
     if (Math.abs(cam.fov - fov) > .01){ cam.fov = fov; cam.updateProjectionMatrix(); }
     updateAids();
+    updateMedakaRaidVisual();
     updateHud(dt);
   } else {
     if (opening.on){
@@ -6686,6 +7093,7 @@ function loop(now){
       cam.position.set(Math.sin(a)*R, .82 + Math.sin(tsec*.09)*.05, Math.cos(a)*R); cam.lookAt(0,.1,0);
     }
   }
+  if (game.mode !== 'play') updateMedakaRaidVisual();
   updateRipples(dt);
   // 水中と水上で見え方を切り替える
   const under = cam.position.y < SURF;
