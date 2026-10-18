@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-ひらがな-こくばん-0b3d7870c1082b8da8af";
+const CACHE_NAME = "appstudio-pwa-ひらがな-こくばん-49c62fcc0ce5a7ac3c74";
 const CACHE_PREFIX = "appstudio-pwa-ひらがな-こくばん-";
 const PRECACHE_URLS = [
     "./",
