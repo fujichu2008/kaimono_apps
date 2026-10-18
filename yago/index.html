@@ -3942,6 +3942,7 @@ function tagameBossShake(T){
   if (T.state === 'stuck') a = T.stuckT <= 1.5 ? 2 : 1;
   else if (T.state === 'dazed') a = .5;
   else if (T.state === 'defeat') a = 2.5;
+  else if (T.state === 'angry') a = 1.2;
   if (!a) return;
   if (REDUCED_MOTION) a *= .3;
   const o = T.ch.object;
@@ -3960,30 +3961,42 @@ function tagamePartPos(part){
   return tagPoint('head');
 }
 // 反撃できる状態なら、ヤゴの頭に近い方の部位を返す（距離は問わない）
+// 直接攻撃（通常の間合い取り中に近づいて攻撃）：1ダメージ。受けると怒って、少し間を置いて突進する
+const TAGAME_DIRECT = Object.freeze({reach:.05, dmg:1, angry:1.2, angry2:.9});
+function tagameReach(state){ return state === 'lurk' ? TAGAME_DIRECT.reach : TAGAME_BOSS.reach; }
 function tagameCounterPart(){
   const T = game.tagame;
-  if (!T || !T.ch || !game.tagameBoss || (T.state !== 'stuck' && T.state !== 'dazed')) return null;
-  const limit = T.state === 'stuck' ? TAGAME_BOSS.hitsPerStuck : 1;
-  if ((T.stuckHits || 0) >= limit) return null;
+  if (!T || !T.ch || !game.tagameBoss ||
+      (T.state !== 'stuck' && T.state !== 'dazed' && T.state !== 'lurk')) return null;
+  if (T.state !== 'lurk'){
+    const limit = T.state === 'stuck' ? TAGAME_BOSS.hitsPerStuck : 1;
+    if ((T.stuckHits || 0) >= limit) return null;
+  }
   const h = headPos();
   const head = tagamePartPos('head'), back = tagamePartPos('back');
   const dh = h.distanceTo(head), db = h.distanceTo(back);
-  return dh <= db ? {boss:T, pos:head, part:'head', dist:dh} : {boss:T, pos:back, part:'back', dist:db};
+  const r = dh <= db ? {boss:T, pos:head, part:'head', dist:dh} : {boss:T, pos:back, part:'back', dist:db};
+  // 通常時は、近づいたときだけ輪を出す
+  if (T.state === 'lurk' && r.dist > TAGAME_DIRECT.reach*1.8) return null;
+  return r;
 }
 // カウンター可能な相手と位置を取得する。
 function tagameCounterTarget(){
   if (game.mode !== 'play' || Y.molting || game.escape || game.fight) return null;
   const c = tagameCounterPart();
-  if (!c || c.dist > TAGAME_BOSS.reach) return null;
+  if (!c || c.dist > tagameReach(c.boss.state)) return null;
   return {boss:c.boss, pos:c.pos, part:c.part};
 }
 // カウンター成功時は撃退までの残り時間を削り、タガメをひるませる。
 function tagameCounterHit(T, part){
-  if (!T || T !== game.tagame || !game.tagameBoss || (T.state !== 'stuck' && T.state !== 'dazed')) return false;
-  const K = TAGAME_BOSS, back = part === 'back';
-  const dmg = back ? K.backDmg : K.headDmg;
+  if (!T || T !== game.tagame || !game.tagameBoss ||
+      (T.state !== 'stuck' && T.state !== 'dazed' && T.state !== 'lurk')) return false;
+  const K = TAGAME_BOSS;
+  const direct = T.state === 'lurk';
+  const back = !direct && part === 'back';
+  const dmg = direct ? TAGAME_DIRECT.dmg : (back ? K.backDmg : K.headDmg);
   T.hp = Math.max(0, (T.hp ?? K.hp) - dmg);
-  T.stuckHits = (T.stuckHits || 0) + 1;
+  if (!direct) T.stuckHits = (T.stuckHits || 0) + 1;
   T.counterHits = (T.counterHits || 0) + 1;
 
   const pos = tagamePartPos(back ? 'back' : 'head');
@@ -4012,6 +4025,13 @@ function tagameCounterHit(T, part){
   if (!T.phase2 && T.hp <= 3){
     T.phase2 = true;
     toast('タガメが怒った！ 突進が速くなる', 3);
+  }
+  if (direct){
+    // 直接攻撃されると怒り、少し間を置いて突進してくる
+    T.state = 'angry'; T.t = 0; T.pauseT = 0;
+    T.angryLen = T.phase2 ? TAGAME_DIRECT.angry2 : TAGAME_DIRECT.angry;
+    setAnim(T.ch, 'idle');
+    toast('タガメが怒った！ もうすぐ突進してくる', 3);
   }
   return true;
 }
@@ -4375,6 +4395,17 @@ function updateTagame(dt){
         T.state = 'lurk'; T.t = 0; T.pauseT = .6;
         T.grabT = rand(K.attackEveryMin, K.attackEveryMax);
         toast('タガメが鎌を引き抜いた！', 1);
+      }
+      break; }
+    case 'angry': {
+      // 直接攻撃を受けて怒っている。震えてヤゴを見据え、少し間を置いて突進する
+      faceYago(6);
+      if (T.t >= (T.angryLen || TAGAME_DIRECT.angry)){
+        if (!Y.molting && !game.escape && !game.fight) tagameBossAim(T);
+        else {
+          T.state = 'lurk'; T.t = 0; T.pauseT = 1;
+          T.grabT = rand(TAGAME_BOSS.attackEveryMin, TAGAME_BOSS.attackEveryMax);
+        }
       }
       break; }
     case 'dazed': {
@@ -6055,12 +6086,13 @@ function resolveStrike(){
   Y.tagameCounterPart = null;
   if (counter){
     const K = TAGAME_BOSS;
+    const direct = counter.state === 'lurk';
     const limit = counter.state === 'stuck' ? K.hitsPerStuck : 1;
     const hit = game.mode === 'play' && !Y.molting &&
       counter === game.tagame && game.tagameBoss &&
-      (counter.state === 'stuck' || counter.state === 'dazed') &&
-      (counter.stuckHits || 0) < limit &&
-      headPos().distanceTo(tagamePartPos(counterPart)) <= K.reach + .006;
+      (counter.state === 'stuck' || counter.state === 'dazed' || direct) &&
+      (direct || (counter.stuckHits || 0) < limit) &&
+      headPos().distanceTo(tagamePartPos(counterPart)) <= tagameReach(counter.state) + .006;
     if (hit){
       tagameCounterHit(counter, counterPart);
     } else {
@@ -7319,7 +7351,8 @@ function updateHud(dt){
   const target = counterTarget ? null : canAim ? Y.target : null;
   hint.style.display = target || counterTarget ? 'block' : 'none';
   if (counterTarget){
-    hint.textContent = '◎ タガメに反撃できる！';
+    hint.textContent = (game.tagame && game.tagame.state === 'lurk')
+      ? '◎ タガメを攻撃できる（怒って突進してくる）' : '◎ タガメに反撃できる！';
     hint.style.color = '#bff0c8';
   } else if (target){
     const cls = sizeClass(target);
