@@ -6376,6 +6376,51 @@ function clearFight(){
   if (!E.root) return;
   E.root.classList.remove('on'); E.tgt.classList.remove('hit','miss'); E.msg.textContent = '';
 }
+// 組み付き中：カメラと獲物の間にある障害物（石・根・鉢の壁など）を半透明にする
+const _xr = {rc:new THREE.Raycaster(), ghosts:new Map(), t:0};
+function updateFightXray(dt){
+  const X = _xr;
+  X.t += dt;
+  const F = game.fight;
+  const on = !!F && !!F.p && prey.includes(F.p) && game.mode === 'play' && !game.paused &&
+    (camRig.mode === 'fightIn' || camRig.mode === 'fight');
+  if (on){
+    cam.updateMatrixWorld();
+    const head = headPos(), c = preyCenter(F.p), mid = head.clone().add(c).multiplyScalar(.5);
+    const right = V().setFromMatrixColumn(cam.matrixWorld,0), up = V().setFromMatrixColumn(cam.matrixWorld,1);
+    const r = .012 + preyR(F.p);
+    const pts = [head, c, mid,
+      mid.clone().addScaledVector(right,r), mid.clone().addScaledVector(right,-r),
+      mid.clone().addScaledVector(up,r), mid.clone().addScaledVector(up,-r)];
+    const roots = [pot.object, floating.object, hyacinth.object];
+    for (const p of pts){
+      const dir = p.clone().sub(cam.position), dist = dir.length();
+      if (dist < 1e-5) continue;
+      X.rc.set(cam.position, dir.multiplyScalar(1/dist));
+      X.rc.near = 0; X.rc.far = Math.max(0, dist - .004);   // 獲物の手前だけを対象にする
+      for (const h of X.rc.intersectObjects(roots, true)){
+        const mesh = h.object;
+        if (!mesh.isMesh || !mesh.visible || Array.isArray(mesh.material)) continue;
+        let g = X.ghosts.get(mesh);
+        if (!g){
+          const orig = mesh.material;
+          if (orig.transparent) continue;   // 水面など、もともと半透明のものは対象外
+          const ghost = orig.clone();
+          ghost.userData = {};
+          ghost.transparent = true; ghost.opacity = .18; ghost.depthWrite = false;
+          g = {orig, ghost, on:false, t:0};
+          X.ghosts.set(mesh, g);
+        }
+        g.t = X.t;
+        if (!g.on){ mesh.material = g.ghost; g.on = true; }
+      }
+    }
+  }
+  // 遮らなくなって0.3秒たったら（または組み付きが終わったら）元に戻す
+  for (const [mesh, g] of X.ghosts){
+    if (g.on && (!on || X.t - g.t > .3)){ mesh.material = g.orig; g.on = false; }
+  }
+}
 function updateFight(dt){
   const F = game.fight;
   if (!F) return;
@@ -7821,6 +7866,7 @@ function loop(now){
   }
   if (game.mode !== 'play') updateMedakaRaidVisual();
   updateRipples(dt);
+  updateFightXray(dt);
   // 水中と水上で見え方を切り替える
   const under = cam.position.y < SURF;
   applyEnv(dt, under);
