@@ -1314,6 +1314,7 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
 <div class="hud" id="shortTimer" style="display:none;left:50%;top:max(10px,env(safe-area-inset-top));transform:translateX(-50%);padding:6px 14px;border-radius:12px;background:rgba(12,30,22,.82);color:#e0f3bd;font-size:17px;font-weight:800;letter-spacing:.04em;pointer-events:none;z-index:12">残り 5:00</div>
 <div class="hud" id="ambush"><span class="ring"></span><span id="ambTxt">じっとしている…</span></div>
 <div class="hud" id="toast" role="status" style="top:calc(env(safe-area-inset-top, 0px) + 96px);bottom:auto;max-width:calc(100vw - 32px);box-sizing:border-box;pointer-events:none"></div>
+<div class="hud" id="threatTag" role="status" style="display:none;left:50%;top:calc(env(safe-area-inset-top, 0px) + 134px);transform:translateX(-50%);padding:3px 12px;border-radius:14px;background:rgba(10,20,17,.7);border:1px solid var(--line);font-size:12px;font-weight:800;white-space:nowrap;pointer-events:none"></div>
 <div class="hud" id="bossBar" aria-live="polite"><div class="bbName"></div><div class="bbBar"><i></i></div><div class="bbTxt"></div></div>
 <div class="hud" id="bossBanner" role="status"><div class="bnTitle"></div><div class="bnSub"></div></div>
 <div class="hud" id="tutHint" role="status"></div>
@@ -2639,6 +2640,7 @@ function startMedakaRaid(p){
   R.hit = false;
   R.warned = false;
   R.stats.attacks++;
+  threatStart(10);
   R.target.copy(Y.pos);
   R.dir.set(0,0,0);
   p.state = 'raidThreat';
@@ -2739,7 +2741,7 @@ function updateMedakaRaid(dt){
     return;
   }
 
-  if (medakaRaidBlocked()) return;
+  if (medakaRaidBlocked() || threatBusy()) return;
   R.next -= dt;
   if (R.next > 0) return;
 
@@ -2997,6 +2999,34 @@ function catchWaterFx(p, perfect){
       rand(.0006,.0012)*size);
   }
 }
+/* ---------- 危険の管理役：敵が重なって出るのを防ぐ ---------- */
+// どれかの敵が動いている、または直前に出たばかりなら true
+function threatBusy(){
+  const B = game.bird;
+  return !!(game.fight || game.escape || game.frog || game.tagame || game.tagameBoss ||
+    game.event || game.miniFrog || medakaRaid.p ||
+    (B && B.phase !== 'idle') || Y.molting || Y.pendingMolt > 0 || (game.threatCool || 0) > 0);
+}
+// 敵が出た時点で呼び、しばらく他の敵を出さない
+function threatStart(sec){ game.threatCool = Math.max(game.threatCool || 0, sec); }
+// 画面上部に、いま来ている危険の種類を1行で出す
+let threatTagShown = null;
+function updateThreatTag(){
+  const el = $('#threatTag');
+  if (!el) return;
+  let txt = '';
+  if (game.mode === 'play'){
+    const B = game.bird, E = game.event, R = medakaRaid, A = game.miniFrog;
+    if (E) txt = E.kind === 'cat' ? '🐈 ネコ' : '🧒 網';
+    else if (B && (B.phase === 'warn' || B.phase === 'strike')) txt = '🐦 鳥の影';
+    else if (R.p && (R.phase === 'threat' || R.phase === 'aim' || R.phase === 'charge')) txt = '🐟 メダカの突進';
+    else if (A && A.state !== 'leave') txt = '🐸 アマガエル';
+  }
+  if (txt === threatTagShown) return;
+  threatTagShown = txt;
+  el.textContent = txt;
+  el.style.display = txt ? 'block' : 'none';
+}
 const input = {jx:0, jy:0, vy:0, keys:{}};
 let camYaw = 0, camPitch = -.35, fpPitch = -.08, view = 'third', lastDrag = 0;
 
@@ -3044,11 +3074,13 @@ function newGame(withIntro){
   game.tagameEscapes = 0; game.tagameDone = false; game.tagameAt = null;
   game.tagameBoss = false;
   clearFrog(); game.frogDone = false; game.frogLost = false;
+  clearMiniFrog(); game.miniFrogT = 0;
   clearEvent(); game.eventT = rand(EVT.firstMin, EVT.firstMax); game.eventForce = null; game.debug = false;
   resetMedakaRaid();
   game.tagameLost = false; game.frogHits = 0; game.frogAmbush = 0; game.frogStrikes = 0;
   game.tagameHolds = 0; game.frogCatches = 0;
   game.catHits = 0; game.kidHits = 0; game.medakaHits = 0;
+  game.threatCool = 0;
   game.endCardShown = false; hideEndCard();
   game.paused = false; $('#ovPause').classList.add('hide');
   camRigReset();
@@ -3699,6 +3731,8 @@ function updateBird(dt){
     // 水面近く（危険な深さ）にいる間は、鳥が来るまでの時間が速く進む
     B.next -= dt*envBirdK()*(Y.pos.y > SURF - BIRD.depth ? 1.4 : 1);
     if (B.next <= 0){
+      if (threatBusy()){ B.next = 3; return; }   // 他の敵が動いているときは先送り
+      threatStart(12);
       B.phase = 'warn'; B.t = 0;
       const a = rand(0, Math.PI*2);
       B.dir.set(Math.cos(a), 0, Math.sin(a));
@@ -5104,7 +5138,8 @@ function kidSay(text){
 function eventBlocked(){
   const B = game.bird;
   return game.mode !== 'play' || !!game.tagame || !!game.frog || !!game.tagameBoss ||
-    Y.molting || Y.pendingMolt > 0 || !!game.fight || !!game.escape || !!(B && B.phase !== 'idle');
+    Y.molting || Y.pendingMolt > 0 || !!game.fight || !!game.escape || !!(B && B.phase !== 'idle') ||
+    threatBusy();
 }
 function pickEvent(){
   const ph = envPhaseId(), rain = isRaining(), list = [];
@@ -5123,6 +5158,7 @@ function startEvent(kind){
     max:kind === 'cat' ? (Math.random() < .5 ? 3 : 4) : (Math.random() < .5 ? 2 : 3),
     panic:false, danger:null, warnTxt:'', look:V(0, SURF, 0), bubbleT:0};
   game.event = E;
+  threatStart(12);
   if (kind === 'cat') setupCat(E); else setupKid(E);
   return true;
 }
@@ -6267,6 +6303,178 @@ function catchPrey(p, fightWin, fd, perfect=false){
   if (Y.growth >= NEED[Y.stage]) requestMolt();
 }
 
+/* ---------- 3齢以降：通常プレイ中に現れる小さなアマガエル ---------- */
+const MINIFROG = Object.freeze({minStage:2, first:[25,40], interval:[35,60], speed:.045, chase:4,
+  near:.05, windup:.8, lockAt:.6, bite:.45, hitAt:.2, rest:.8, tries:2, dmg:6, scale:.45});
+// 舌の狙い点に出す赤い輪
+const amaRing = new THREE.Mesh(new THREE.RingGeometry(.013,.018,32),
+  new THREE.MeshBasicMaterial({color:0xd0654c, transparent:true, opacity:.8, depthTest:false, depthWrite:false, side:THREE.DoubleSide}));
+amaRing.rotation.x = -Math.PI/2; amaRing.renderOrder = 19; amaRing.visible = false; scene.add(amaRing);
+// ボスのトノサマガエルのモデルを、緑のかわいらしいアマガエルに塗り替える
+function makeTreeFrog(){
+  const ch = makeChar('kaeru'), M = MODELS.kaeru;
+  if (ch.real && M){
+    const mats = ch.object.userData.materials || {};
+    const skin = {
+      m_skin_back:{color:'#5cc04a', color2:'#45a83a'}, m_skin_leg:{color:'#78cc58', color2:'#5cb848'},
+      m_ridge:{color:'#e9f3c4'}, m_spot:{color:'#2f6a28'}, m_belly:{color:'#f7f4e8', color2:'#ece6d2'},
+      m_throat:{color:'#f2eed6', color2:'#e8e2c4'}, m_tympanum:{color:'#5f8a3a'}, m_iris:{color:'#d8b04a', color2:'#a07a24'}
+    };
+    for (const [id, e] of Object.entries(skin)){
+      const mat = mats[id], base = M.D.materials[id];
+      if (!mat || !base) continue;
+      const d = JSON.parse(JSON.stringify(base));
+      d.color = e.color;
+      if (d.surface && d.surface.color2) d.surface.color2 = e.color2 || e.color;
+      M.R.updateMaterial(mat, d);
+    }
+    const P = ch.object.userData.parts || {};
+    for (const id of ['eyeball_L','eyeball_R','eye_mound_L','eye_mound_R']) if (P[id]) P[id].scale.multiplyScalar(1.25);
+    for (const id in P) if (/^(spot_|wart_)/.test(id)) P[id].visible = false;
+  } else {
+    ch.object.traverse(o => { if (o.isMesh && o.material && o.material.color) o.material.color.set('#5cc04a'); });
+  }
+  ch.object.scale.setScalar(MINIFROG.scale);
+  return ch;
+}
+function miniFrogBlocked(){
+  const B = game.bird;
+  return game.mode !== 'play' || game.paused || Y.stage < MINIFROG.minStage ||
+    !!game.fight || !!game.escape || !!game.frog || !!game.tagame || !!game.tagameBoss ||
+    !!game.event || !!medakaRaid.p || Y.molting || Y.pendingMolt > 0 || !!Y.moltReady ||
+    !!(B && B.phase !== 'idle');
+}
+function clearMiniFrog(){
+  const A = game.miniFrog;
+  if (A && A.ch) A.ch.dispose();
+  game.miniFrog = null;
+  amaRing.visible = false;
+  if (A && !game.frog && !(game.tagame && game.tagame.state === 'aim')) $('#fx').classList.remove('danger');
+}
+function miniFrogMouth(A){
+  A.ch.object.position.copy(A.pos); A.ch.object.rotation.y = A.yaw;
+  A.ch.object.updateMatrixWorld(true);
+  const fb = A.pos.clone().add(V(Math.sin(A.yaw)*.012, .03, Math.cos(A.yaw)*.012));
+  return anchorPos(A.ch, 'a_mouth', fb);
+}
+// 口先が target へ向かうように本体を泳がせる
+function miniFrogMove(A, target, speed, dt){
+  const mouth = miniFrogMouth(A);
+  const d = target.clone().sub(mouth), l = d.length();
+  if (l > 1e-5) A.pos.addScaledVector(d, Math.min(l, speed*dt)/l);
+  A.pos.y = clamp(A.pos.y, groundY(A.pos.x,A.pos.z), SURF - .01);
+  const R = wallR(A.pos.y) - .02, h = Math.hypot(A.pos.x, A.pos.z);
+  if (h > R){ A.pos.x *= R/h; A.pos.z *= R/h; }
+}
+function miniFrogFace(A, p, k, dt){
+  A.yaw = lerpAngle(A.yaw, Math.atan2(p.x - A.pos.x, p.z - A.pos.z), damp(k,dt));
+}
+function spawnMiniFrog(){
+  cam.updateMatrixWorld();
+  const right = V().setFromMatrixColumn(cam.matrixWorld, 0); right.y = 0;
+  if (right.lengthSq() < 1e-6) right.set(1,0,0);
+  right.normalize();
+  const pos = Y.pos.clone().addScaledVector(right, (Math.random() < .5 ? -1 : 1)*.12).add(V(0,.02,0));
+  keepInBowl(pos, .03);
+  const ch = makeTreeFrog(); scene.add(ch.object);
+  game.miniFrog = {ch, pos, yaw:Math.atan2(Y.pos.x - pos.x, Y.pos.z - pos.z), state:'approach', t:0,
+    tries:0, hit:false, aim:V(), away:V()};
+  setAnim(ch, 'Swim');
+  for (let i=0;i<5;i++) emitPuff(pos, V(rand(-.01,.01), rand(0,.01), rand(-.01,.01)), rand(.0008,.0015));
+  threatStart(12);
+  toast('小さなアマガエルが近づいてくる！ 舌に注意', 2);
+  sfx('warn');
+}
+function miniFrogLeave(A, msg){
+  A.state = 'leave'; A.t = 0;
+  amaRing.visible = false;
+  const d = A.pos.clone().sub(Y.pos); d.y = 0;
+  if (d.lengthSq() < 1e-8) d.set(Math.sin(A.yaw + Math.PI), 0, Math.cos(A.yaw + Math.PI));
+  A.away.copy(d.normalize());
+  A.yaw = Math.atan2(A.away.x, A.away.z);
+  A.ch.busy = 0; A.ch.pending = null; A.ch.cur = null;
+  setAnim(A.ch, 'Swim');
+  if (!game.frog && !(game.tagame && game.tagame.state === 'aim')) $('#fx').classList.remove('danger');
+  if (msg) toast(msg, 0);
+}
+function updateMiniFrog(dt){
+  const A = game.miniFrog;
+  if (!A){
+    // 出現のタイマーは、出現できる状況のときだけ進める
+    if (miniFrogBlocked() || threatBusy()) return;
+    if (!(game.miniFrogT > 0)) game.miniFrogT = rand(MINIFROG.first[0], MINIFROG.first[1]);
+    game.miniFrogT -= dt;
+    if (game.miniFrogT <= 0){ game.miniFrogT = rand(MINIFROG.interval[0], MINIFROG.interval[1]); spawnMiniFrog(); }
+    return;
+  }
+  if (game.mode !== 'play'){ clearMiniFrog(); return; }
+  A.t += dt;
+  if (A.state !== 'leave' && miniFrogBlocked()) miniFrogLeave(A, null);
+  const head = headPos();
+  switch (A.state){
+    case 'approach': {
+      miniFrogFace(A, Y.pos, 5, dt);
+      const away = A.pos.clone().sub(head); away.y = 0;
+      if (away.lengthSq() < 1e-8) away.set(1,0,0);
+      away.normalize();
+      miniFrogMove(A, head.clone().addScaledVector(away, .03), MINIFROG.speed, dt);
+      setAnim(A.ch, 'Swim');
+      if (miniFrogMouth(A).distanceTo(head) < MINIFROG.near){
+        A.state = 'windup'; A.t = 0;
+        doAction(A.ch, 'Yokoku', MINIFROG.windup);
+        A.aim.copy(Y.pos);
+      } else if (A.t >= MINIFROG.chase){
+        miniFrogLeave(A, 'アマガエルはあきらめた');
+      }
+      break; }
+    case 'windup': {
+      // 予兆の前半はヤゴを追って狙い、後半は狙いを固定する
+      if (A.t < MINIFROG.windup*MINIFROG.lockAt){ miniFrogFace(A, Y.pos, 8, dt); A.aim.copy(Y.pos); }
+      const blink = Math.floor(A.t*10) % 2 === 0;
+      amaRing.visible = blink;
+      amaRing.position.copy(A.aim);
+      $('#fx').classList.toggle('danger', blink);
+      if (A.t >= MINIFROG.windup){
+        amaRing.visible = false; $('#fx').classList.remove('danger');
+        A.state = 'bite'; A.t = 0; A.hit = false; A.tries++;
+        doAction(A.ch, 'Shita', MINIFROG.bite);
+        sfx('strike');
+      }
+      break; }
+    case 'bite':
+      if (!A.hit && A.t >= MINIFROG.hitAt){
+        A.hit = true;
+        if (!Y.molting && !game.escape && Y.pos.distanceTo(A.aim) < .022 + .006*Y.s){
+          Y.energy -= MINIFROG.dmg;
+          game.lastCause = 'amagaeru'; game.shakeT = Math.max(game.shakeT || 0, .25);
+          sfx('hit');
+          if (navigator.vibrate) navigator.vibrate([30,20,30]);
+          toast('アマガエルにかじられた！ 体力 -' + MINIFROG.dmg, 2);
+          if (Y.energy <= 0){ Y.energy = 0; gameOver(); return; }
+        } else {
+          toast('かわした！', 1);
+        }
+      }
+      if (A.t >= MINIFROG.bite){ A.state = 'rest'; A.t = 0; setAnim(A.ch, 'idle'); }
+      break;
+    case 'rest':
+      miniFrogFace(A, Y.pos, 3, dt);
+      if (A.t >= MINIFROG.rest){
+        if (A.tries >= MINIFROG.tries) miniFrogLeave(A, 'アマガエルは泳ぎ去った');
+        else { A.state = 'approach'; A.t = 0; }
+      }
+      break;
+    case 'leave':
+      A.pos.addScaledVector(A.away, .08*dt);
+      A.pos.y = Math.min(SURF - .01, A.pos.y + .03*dt);
+      keepInBowl(A.pos, .02);
+      if (A.t >= 1.4){ clearMiniFrog(); return; }
+      break;
+  }
+  A.ch.object.position.copy(A.pos);
+  A.ch.object.rotation.y = A.yaw;
+  tickChar(A.ch, dt);
+}
 /* ---------- 組み付き戦闘（タイミングよく円を押す） ---------- */
 const FIGHT = Object.freeze({target:80, start:280, perfect:10, good:22, maxMiss:3, limit:8,
   ready:.9, gap:.35, earlyLock:.3});
@@ -7453,6 +7661,7 @@ function updateHud(dt){
   updatePreySignals(dt);
   updateBossBar();
   updateAlertFx();
+  updateThreatTag();
   tutorialTick();
   zukanTick();
   bgmPrefetchTick();
@@ -7895,7 +8104,8 @@ function loop(now){
   updateAudio(dt);
 
   if (game.mode === 'play' || game.mode === 'intro' || game.mode === 'over' || game.mode === 'ending'){
-    if (game.mode === 'play'){ game.time += dt; breedTick(dt); seasonTick(dt); juvenileTick(dt); updateEnv(dt); }
+    if (game.mode === 'play'){ game.time += dt; breedTick(dt); seasonTick(dt); juvenileTick(dt); updateEnv(dt);
+      if (game.threatCool > 0) game.threatCool -= dt; }
     school.t -= dt;
     if (school.t <= 0){
       school.t = rand(4,8);
@@ -7921,6 +8131,7 @@ function loop(now){
       if (vis) tickChar(p.ch, dt);
     }
     updateFight(dt);
+    updateMiniFrog(dt);
     updateBird(dt);
     updateCamera(dt);
     if (game.shakeT > 0){

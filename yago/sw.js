@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-yago-5467484ed8915a03a81b";
+const CACHE_NAME = "appstudio-pwa-yago-d35aa6575dc2a8167606";
 const CACHE_PREFIX = "appstudio-pwa-yago-";
 const PRECACHE_URLS = [
     "./",
