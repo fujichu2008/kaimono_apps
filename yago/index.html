@@ -1566,11 +1566,13 @@ function makeChar(kind){
     c.object.rotation.order = 'YXZ';
     return {kind, real:true, object:c.object, clips:m.D.animations||{}, busy:0, cur:null, pending:null,
       play:id=>c.play(id), action:id=>c.action(id), update:dt=>c.update(dt),
-      anchor:id=>m.R.getAnchor(c.object,id), dispose:()=>c.dispose(), R:m.R};
+      anchor:id=>m.R.getAnchor(c.object,id), dispose:()=>c.dispose(), R:m.R,
+      pose:(id,t)=>c.animator.seek(id,t), reset:()=>c.reset()};
   }
   const o = makeFallback(kind); o.rotation.order = 'YXZ';
   return {kind, real:false, object:o, clips:{}, busy:0, cur:null, pending:null,
-    play(){}, action(){}, update(){}, anchor:()=>null, dispose(){ if(o.parent) o.parent.remove(o); }};
+    play(){}, action(){}, update(){}, anchor:()=>null, dispose(){ if(o.parent) o.parent.remove(o); },
+    pose(){}, reset(){}};
 }
 function setAnim(ch,id){
   if (!ch.clips[id]) return;
@@ -2388,12 +2390,8 @@ scene.add(tagameCounterRing);
 
 function updateTagameCounterVisual(){
   const T = game.tagame;
-  const active = game.mode === 'play' &&
-    !game.paused &&
-    !!T &&
-    !!T.ch &&
-    !!game.tagameBoss &&
-    T.state === 'stuck';
+  const part = game.mode === 'play' && !game.paused ? tagameCounterPart() : null;
+  const active = !!part && !!T && !!T.ch;
 
   const button = $('#bStrike');
   const ready = active && !!tagameCounterTarget();
@@ -2401,15 +2399,17 @@ function updateTagameCounterVisual(){
   tagameCounterRing.visible = active;
 
   if (active){
-    // 命中判定と同じ頭部アンカーを使用する。
-    const pos = tagPoint('head');
+    // 命中判定と同じ部位（頭の先端／背中）に表示する。
+    const pos = part.pos;
     const pulse = 1 + Math.sin(performance.now()*.005)*.08;
+    const warn = T.state === 'stuck' && T.stuckT <= 1.5;
 
     tagameCounterRing.position.copy(pos);
     tagameCounterRing.quaternion.copy(cam.quaternion);
     tagameCounterRing.scale.setScalar(
       (ready ? .012 : .01)*pulse
     );
+    tagameCounterRing.material.color.setHex(warn ? 0xffd54a : 0x55e89a);
     tagameCounterRing.material.opacity = ready ? 1 : .55;
   }
 
@@ -3324,8 +3324,8 @@ function updateBossBar(){
     name = 'トノサマガエル'; ratio = hp/FROG.hp;
     txt = '体力 ' + hp + '/' + FROG.hp + '\nヤゴ ' + '❤'.repeat(lives) + '♡'.repeat(FROG.lives - lives);
   } else if (game.mode === 'play' && T && game.tagameBoss){
-    const max = T.lurkMax || 0, left = Math.max(0, max - (T.lurkT || 0));
-    name = 'タガメ'; ratio = max ? left/max : 1; txt = 'しのげ 残り' + Math.ceil(left) + '秒';
+    const max = T.maxHp || TAGAME_BOSS.hp, hp = Math.max(0, T.hp ?? max);
+    name = T.phase2 ? 'タガメ（怒り）' : 'タガメ'; ratio = hp/max; txt = '体力 ' + hp + '/' + max;
   }
   document.body.classList.toggle('bossOn', !!name);
   if (!name){ if (el.style.display !== 'none') el.style.display = 'none'; return; }
@@ -3778,6 +3778,18 @@ tagRing.rotation.x = -Math.PI/2; tagRing.renderOrder = 19; tagRing.visible = fal
 const TAGAME = Object.freeze({scale:.58, minTime:90, chance:.7, warn:2, enter:2, lurk:50,
   detect:.07, detectJet:.1, holdReach:.03, dash:.12, medakaReach:.04,
   stuckTime:5.0, counterReach:.055, counterReduction:16, staggerTime:1.1});
+// 2齢ボスのタガメ戦（体力制）。第2段階は hp ≤ 3
+const TAGAME_BOSS = Object.freeze({hp:6, aim:1.0, aim2:.8, lockBefore:.4, lunge:.32,
+  maxReach:.16, overshoot:.03, stuck:6.5, stuck2:5.0, fatigueAt:75, fatigueBonus:2,
+  hitsPerStuck:2, headDmg:1, backDmg:2, reach:.06, dazed:3.0, keepMin:.05, keepMax:.09,
+  attackEveryMin:5, attackEveryMax:7});
+// 突進の予告線（起動時に1回だけ作って使い回す）
+const tagLungeGeo = new THREE.BufferGeometry();
+tagLungeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6),3));
+const tagLungeLine = new THREE.Line(tagLungeGeo, new THREE.LineBasicMaterial({
+  color:0xff5040, transparent:true, opacity:.9, depthTest:false, depthWrite:false}));
+tagLungeLine.frustumCulled = false; tagLungeLine.renderOrder = 19; tagLungeLine.visible = false;
+scene.add(tagLungeLine);
 // 頭の先・獲物を抱える位置（モデルが無いときは本体の前方で代用）
 function tagPoint(kind){
   const T = game.tagame, f = V(Math.sin(T.yaw), 0, Math.cos(T.yaw));
@@ -3792,40 +3804,148 @@ function tagameNear(){
   if (!T || T.state !== 'lurk' || game.mode !== 'play') return false;
   return tagPoint('head').distanceTo(Y.pos) < tagameRange()*1.5;
 }
-// 突進を外したタガメの鎌が底に引っかかり、短時間無防備になる。
-function tagameStuck(){
+/* ---------- タガメ戦（ボス）：構え→突進→突き刺さり→もがき→脱出 ---------- */
+// 構えを始める
+function tagameBossAim(T){
+  const K = TAGAME_BOSS;
+  T.state = 'aim'; T.t = 0; T.aim = Y.pos.clone(); T.locked = false; T.pitch = 0;
+  T.aimLen = T.phase2 ? K.aim2 : K.aim;
+  doAction(T.ch,'Catch',T.aimLen + K.lunge);
+  sfx('warn');
+  toast('タガメが構えた！ 赤い輪から逃げろ', 3);
+}
+// 狙いを固定した時点で、地面か壁に当たる突進の軌道を求める
+function tagameBossPath(T){
+  const K = TAGAME_BOSS;
+  const start = tagPoint('head');
+  const dir = T.aim.clone().sub(start);
+  const aimDist = dir.length();
+  if (aimDist < 1e-6) dir.set(Math.sin(T.yaw),0,Math.cos(T.yaw));
+  else dir.multiplyScalar(1/aimDist);
+  const hit = p => {
+    if (p.y < groundY(p.x,p.z) + .003) return 'ground';
+    if (Math.hypot(p.x,p.z) > wallR(p.y) - .008) return 'wall';
+    return null;
+  };
+  const p = start.clone();
+  let type = null;
+  const len1 = Math.min(K.maxReach, aimDist + K.overshoot);
+  for (let s=0; s<len1 && !type; s+=.002){
+    p.addScaledVector(dir,.002); p.y = Math.min(p.y, SURF-.004); type = hit(p);
+  }
+  if (!type){
+    // 届かなければ下向きに曲げて、地面に当たるまで延ばす
+    const d2 = dir.clone().add(V(0,-.5,0)).normalize();
+    for (let s=len1; s<.25 && !type; s+=.002){
+      p.addScaledVector(d2,.002); p.y = Math.min(p.y, SURF-.004); type = hit(p);
+    }
+    if (!type){ p.y = groundY(p.x,p.z); type = 'ground'; }
+  }
+  if (type === 'ground') p.y = Math.max(p.y, groundY(p.x,p.z));
+  if (type === 'wall'){
+    const R = wallR(p.y) - .004, h = Math.hypot(p.x,p.z);
+    if (h > R){ p.x *= R/h; p.z *= R/h; }
+  }
+  T.impact = p; T.impactType = type;
+  if (Math.hypot(dir.x,dir.z) > 1e-4) T.yaw = Math.atan2(dir.x,dir.z);
+}
+// 地面や壁に突き刺さった瞬間
+function tagameBossImpact(T){
+  const K = TAGAME_BOSS, P = T.impact;
+  let n;
+  if (T.impactType === 'wall'){
+    const h = Math.hypot(P.x,P.z) || 1;
+    T.yaw = Math.atan2(P.x/h, P.z/h); T.pitch = .15;
+    n = V(-P.x/h, .3, -P.z/h).normalize();
+  } else {
+    T.pitch = .35; n = V(0,1,0);
+  }
+  placeTagame();
+  const fwd = V(Math.sin(T.yaw)*Math.cos(T.pitch), -Math.sin(T.pitch), Math.cos(T.yaw)*Math.cos(T.pitch));
+  const want = P.clone().addScaledVector(fwd,.006);
+  T.pos.add(want.sub(tagPoint('head')));
+  placeTagame();
+  T.state = 'stuck'; T.t = 0; T.stuckHits = 0; T.dustT = .4; T.warned = false; T.impactN = n;
+  T.stuckT = (T.phase2 ? K.stuck2 : K.stuck) + ((T.bossT || 0) >= K.fatigueAt ? K.fatigueBonus : 0);
+  game.feedback.hitStop = .07;
+  game.shakeT = Math.max(game.shakeT || 0,.35);
+  for (let i=0;i<14;i++){
+    const v = n.clone().multiplyScalar(rand(.01,.03)).add(V(rand(-.025,.025),rand(0,.01),rand(-.025,.025)));
+    emitPuff(P, v, rand(.0012,.003));
+  }
+  try { noiseBurst(.4,900,120,.45); tone(70,.35,'sine',.25,0,40); } catch(e){}
+  if (navigator.vibrate) navigator.vibrate([40,30,40]);
+  toast('鎌が突き刺さった！ 今だ、反撃！', 3);
+}
+// 固定していた姿勢を解き、通常の動きへ戻す
+function tagameBossUnpose(T, anim){
+  if (!T || !T.ch) return;
+  T.ch.reset();
+  T.ch.busy = 0; T.ch.pending = null; T.ch.cur = null;
+  setAnim(T.ch, anim);
+}
+// 体力0：大きく揺れながら後退し、去っていく
+function tagameBossDefeat(T){
+  T.state = 'defeat'; T.t = 0; T.pitch = 0; T.dustT = 0;
+  const d = T.pos.clone().sub(Y.pos); d.y = 0;
+  if (d.lengthSq() < 1e-8) d.set(-Math.sin(T.yaw),0,-Math.cos(T.yaw));
+  T.retreat = d.normalize();
+  T.pos.y = Math.max(T.pos.y, groundY(T.pos.x,T.pos.z) + .002);
+  tagameBossUnpose(T,'Swim');
+  game.slowT = Math.max(game.slowT || 0,.4);
+}
+// もがき・ふらつき・退散中の小刻みな揺れ（placeTagame の後に加算する）
+function tagameBossShake(T){
+  if (!T || !T.ch || !game.tagameBoss) return;
+  let a = 0;
+  if (T.state === 'stuck') a = T.stuckT <= 1.5 ? 2 : 1;
+  else if (T.state === 'dazed') a = .5;
+  else if (T.state === 'defeat') a = 2.5;
+  if (!a) return;
+  if (REDUCED_MOTION) a *= .3;
+  const o = T.ch.object;
+  o.rotation.z += .08*a*Math.sin(T.t*88);
+  o.rotation.y += .04*a*Math.sin(T.t*61);
+}
+// 反撃できる部位の位置（頭の先端／背中）
+function tagamePartPos(part){
   const T = game.tagame;
-  if (!T || !game.tagameBoss) return;
-  T.state = 'stuck';
-  T.t = 0;
-  T.stuckT = TAGAME.stuckTime;
-  T.pauseT = 0;
-  T.grabT = rand(6,9);
-  setAnim(T.ch,'Hurt');
-  toast('タガメの鎌が突き刺さった！ 5秒以内に反撃！', 3);
-  sfx('good');
+  if (part === 'back'){
+    const fb = T.pos.clone().add(V(0,.005,0));
+    if (!T.ch) return fb;
+    T.ch.object.updateMatrixWorld(true);
+    return anchorPos(T.ch,'a_back_top',fb);
+  }
+  return tagPoint('head');
+}
+// 反撃できる状態なら、ヤゴの頭に近い方の部位を返す（距離は問わない）
+function tagameCounterPart(){
+  const T = game.tagame;
+  if (!T || !T.ch || !game.tagameBoss || (T.state !== 'stuck' && T.state !== 'dazed')) return null;
+  const limit = T.state === 'stuck' ? TAGAME_BOSS.hitsPerStuck : 1;
+  if ((T.stuckHits || 0) >= limit) return null;
+  const h = headPos();
+  const head = tagamePartPos('head'), back = tagamePartPos('back');
+  const dh = h.distanceTo(head), db = h.distanceTo(back);
+  return dh <= db ? {boss:T, pos:head, part:'head', dist:dh} : {boss:T, pos:back, part:'back', dist:db};
 }
 // カウンター可能な相手と位置を取得する。
 function tagameCounterTarget(){
-  const T = game.tagame;
-  if (!T || !T.ch || !game.tagameBoss || T.state !== 'stuck' ||
-      game.mode !== 'play' || Y.molting || game.escape || game.fight) return null;
-  const pos = tagPoint('head');
-  if (headPos().distanceTo(pos) > TAGAME.counterReach) return null;
-  return {boss:T, pos};
+  if (game.mode !== 'play' || Y.molting || game.escape || game.fight) return null;
+  const c = tagameCounterPart();
+  if (!c || c.dist > TAGAME_BOSS.reach) return null;
+  return {boss:c.boss, pos:c.pos, part:c.part};
 }
 // カウンター成功時は撃退までの残り時間を削り、タガメをひるませる。
-function tagameCounterHit(T){
-  if (!T || T !== game.tagame || !game.tagameBoss || T.state !== 'stuck') return false;
-  T.lurkT = Math.min(T.lurkMax, T.lurkT + TAGAME.counterReduction);
+function tagameCounterHit(T, part){
+  if (!T || T !== game.tagame || !game.tagameBoss || (T.state !== 'stuck' && T.state !== 'dazed')) return false;
+  const K = TAGAME_BOSS, back = part === 'back';
+  const dmg = back ? K.backDmg : K.headDmg;
+  T.hp = Math.max(0, (T.hp ?? K.hp) - dmg);
+  T.stuckHits = (T.stuckHits || 0) + 1;
   T.counterHits = (T.counterHits || 0) + 1;
-  T.state = 'stagger';
-  T.t = 0;
-  T.stuckT = 0;
-  T.pauseT = 0;
-  doAction(T.ch,'Hurt',TAGAME.staggerTime);
 
-  const pos = tagPoint('head');
+  const pos = tagamePartPos(back ? 'back' : 'head');
   for (let i=0;i<10;i++){
     emitPuff(pos, V(rand(-.025,.025),rand(-.005,.025),rand(-.025,.025)),rand(.001,.0025));
   }
@@ -3834,16 +3954,6 @@ function tagameCounterHit(T){
   void fx.offsetWidth;
   fx.classList.add('flash');
 
-  // 反撃の成功が分かるよう、一瞬だけ後退させる。
-  // ボスのステート管理や残り時間短縮処理には介入しない。
-  const recoil = T.pos.clone().sub(Y.pos);
-  recoil.y = 0;
-  if (recoil.lengthSq() > 1e-8){
-    recoil.normalize().multiplyScalar(.008);
-    T.pos.add(recoil);
-    keepInBowl(T.pos,.01,.001);
-  }
-
   game.shakeT = Math.max(game.shakeT || 0,.22);
   game.slowT = Math.max(game.slowT || 0,.2);
   game.fovKick = 1;
@@ -3851,12 +3961,16 @@ function tagameCounterHit(T){
   sfx('hit');
   if (navigator.vibrate) navigator.vibrate([25,35,45]);
 
-  const remaining = Math.max(0,Math.ceil(T.lurkMax - T.lurkT));
-  if (remaining <= 0){
-    toast('カウンター成功！ タガメを撃退した！', 3);
-    startLeave();
-  } else {
-    toast('カウンター成功！ 残り時間を16秒短縮！ あと' + remaining + '秒', 3);
+  if (T.hp <= 0){
+    toast('とどめの一撃！ タガメが崩れ落ちる', 3);
+    tagameBossDefeat(T);
+    return true;
+  }
+  toast((back ? '背中に命中！ ' + dmg + 'ダメージ　' : '命中！ ') +
+    'タガメの体力 ' + T.hp + '/' + (T.maxHp || K.hp), 3);
+  if (!T.phase2 && T.hp <= 3){
+    T.phase2 = true;
+    toast('タガメが怒った！ 突進が速くなる', 3);
   }
   return true;
 }
@@ -3865,11 +3979,15 @@ function placeTagame(){
   if (!T || !T.ch) return;
   T.ch.object.position.copy(T.pos);
   T.ch.object.rotation.y = T.yaw;
+  T.ch.object.rotation.x = T.pitch || 0;
+  T.ch.object.rotation.z = 0;
 }
 function clearTagame(){
   const T = game.tagame;
   if (T && T.ch) T.ch.dispose();
   tagRing.visible = false;
+  tagRing.scale.setScalar(1);
+  tagLungeLine.visible = false;
   if (!game.frog) $('#fx').classList.remove('danger');
   game.tagame = null;
   if (game.escape) endEscape();
@@ -3896,17 +4014,19 @@ function startTagameBoss(){
   if (game.fight) clearFight();
   game.tagameBoss = true;
   startTagame();
-  game.tagame.lurkMax = 40;
+  // 時間による勝利は使わない（体力0で撃退）
+  Object.assign(game.tagame, {lurkMax:Infinity, hp:TAGAME_BOSS.hp, maxHp:TAGAME_BOSS.hp,
+    phase2:false, bossT:0, stuckHits:0, pitch:0});
   bgmPlay('boss');
-  toast('2齢の試練：タガメが来る！ 振りほどくか40秒しのげ', 3);
-  showBossBanner('2齢の試練 タガメ', '捕まったら光った側をタップして振りほどけ<br>40秒しのげば去っていく<br>じっとしていれば見つかりにくい');
+  toast('2齢の試練：タガメが来る！ 突進を避け、鎌が突き刺さった隙に反撃して撃退しろ', 3);
+  showBossBanner('2齢の試練 タガメ', '突進を避け、鎌が突き刺さった隙に反撃して撃退しろ<br>背中を狙うと大ダメージ<br>捕まったら光った側をタップして振りほどけ');
 }
 // タガメ戦を終えて、元のBGMと脱皮へ戻す
 function endTagameBoss(){
   if (!game.tagameBoss) return;
   game.tagameBoss = false;
   bgmPlay('main');
-  toast('タガメの試練を乗り越えた！ 根の陰で脱皮しよう', 3);
+  toast('タガメを撃退した！ 根の陰で脱皮しよう', 3);
   if (Y.growth >= NEED[Y.stage]) requestMolt();
 }
 function startLeave(){
@@ -3918,6 +4038,10 @@ function startHold(){
   const T = game.tagame;
   if (game.fight) clearFight();
   T.state = 'hold'; T.t = 0;
+  T.pitch = 0;
+  tagRing.visible = false; tagLungeLine.visible = false;
+  $('#fx').classList.remove('danger');
+  if (game.tagameBoss) T.grabT = rand(TAGAME_BOSS.attackEveryMin, TAGAME_BOSS.attackEveryMax);
   setAnim(T.ch, 'Kakaeri');
   const s3 = Y.stage >= 2;
   game.escape = {side:Math.random() < .5 ? 'L' : 'R', pos:.5, dir:1,
@@ -4008,7 +4132,12 @@ function winEscape(){
   toast('振りほどいた！', 3);
   sfx('perfect');
   if (T){
-    if (game.tagameBoss){ toast('タガメを撃退した！', 3); startLeave(); }
+    if (game.tagameBoss){
+      // 振りほどいても勝利ではない。ふらついている間に1回だけ反撃できる
+      T.state = 'dazed'; T.t = 0; T.stuckHits = 0; T.pitch = 0;
+      setAnim(T.ch, 'idle');
+      toast('振りほどいた！ タガメがふらついている、反撃！', 3);
+    }
     else { T.state = 'lurk'; T.cool = 10; T.t = 0; setAnim(T.ch, 'idle'); }
   }
 }
@@ -4061,9 +4190,9 @@ function updateTagame(dt){
   if (!T) return;
   T.t += dt;
   if (T.cool > 0) T.cool -= dt;
-  // ボスの耐久時間は、突進・もがき・ひるみの間も進める。
+  // ボス戦の経過時間（疲れによる突き刺さり延長に使う）
   if (game.tagameBoss && !['warn','enter','rise','fly'].includes(T.state)){
-    T.lurkT += dt;
+    T.bossT = (T.bossT || 0) + dt;
   }
   placeTagame();
   const faceYago = k => { T.yaw = lerpAngle(T.yaw, Math.atan2(Y.pos.x - T.pos.x, Y.pos.z - T.pos.z), damp(k, dt)); };
@@ -4087,26 +4216,27 @@ function updateTagame(dt){
     case 'lurk': {
       if (!game.tagameBoss) T.lurkT += dt;
       faceYago(1.5);
-      if (T.lurkT >= T.lurkMax || (!game.tagameBoss && envPhaseId() === 'morning')){
-        if (game.tagameBoss) toast('しのぎきった！ タガメが去っていく', 3);
+      if (!game.tagameBoss && (T.lurkT >= T.lurkMax || envPhaseId() === 'morning')){
         startLeave(); break;
       }
       if (game.tagameBoss){
-        // ボス戦：ヤゴに忍び寄り、6〜9秒ごとに必ず捕獲を試みる
-        if (T.grabT === undefined) T.grabT = rand(6,9);
+        // ボス戦：ヤゴとの間合いを保ち、5〜7秒ごとに必ず突進する
+        const K = TAGAME_BOSS;
+        if (T.grabT === undefined) T.grabT = rand(K.attackEveryMin, K.attackEveryMax);
         if (T.pauseT > 0){ T.pauseT -= dt; setAnim(T.ch,'idle'); break; }
         T.grabT -= dt;
-        const hd = tagPoint('head'), gap = hd.distanceTo(Y.pos);
-        if (gap > .04){
-          T.pos.addScaledVector(Y.pos.clone().sub(hd).normalize(), .03*dt);
+        const hd = tagPoint('head'), toY = Y.pos.clone().sub(hd), gap = toY.length();
+        if (gap > K.keepMax && gap > 1e-6){
+          T.pos.addScaledVector(toY.multiplyScalar(1/gap), .035*dt);
+          keepInBowl(T.pos, .02);
+          setAnim(T.ch,'Swim');
+        } else if (gap < K.keepMin && gap > 1e-6){
+          T.pos.addScaledVector(toY.multiplyScalar(1/gap), -.03*dt);
           keepInBowl(T.pos, .02);
           setAnim(T.ch,'Swim');
         } else setAnim(T.ch,'idle');
         if (T.grabT <= 0 && !Y.molting && !game.escape && !game.fight){
-          T.state = 'aim'; T.t = 0; T.aim = Y.pos.clone();
-          doAction(T.ch,'Catch',1.3);
-          sfx('warn');
-          toast('タガメが構えた！ 赤い輪から逃げろ', 3);
+          tagameBossAim(T);
           break;
         }
       }
@@ -4133,59 +4263,95 @@ function updateTagame(dt){
       }
       break; }
     case 'aim': {
-      // 0.8秒の構え。70%まではヤゴを追って狙い、その後は固定する
-      const len = .8;
-      if (T.t < len*.7){ faceYago(6); T.aim.copy(Y.pos); }
+      // 構え。最後の lockBefore 秒は狙いを固定し、突進の軌道を予告する
+      const K = TAGAME_BOSS, len = T.aimLen || K.aim;
+      if (T.t < len - K.lockBefore){ faceYago(6); T.aim.copy(Y.pos); }
+      else if (!T.locked){ T.locked = true; tagameBossPath(T); }
       const blink = Math.floor(T.t*10) % 2 === 0;
       tagRing.visible = blink; tagRing.position.copy(T.aim);
+      tagRing.scale.setScalar((.012 + .008*Y.s)/.025);
+      if (T.locked && T.impact){
+        placeTagame();
+        const hd = tagPoint('head'), a = tagLungeGeo.attributes.position;
+        a.setXYZ(0, hd.x, hd.y, hd.z);
+        a.setXYZ(1, T.impact.x, T.impact.y, T.impact.z);
+        a.needsUpdate = true;
+        tagLungeLine.visible = blink;
+      }
       $('#fx').classList.toggle('danger', blink);
       if (T.t >= len){
-        tagRing.visible = false; $('#fx').classList.remove('danger');
-        T.grabT = rand(6,9);
-        if (!Y.molting && !game.escape && Y.pos.distanceTo(T.aim) < .025){
-          startHold();
-        } else if (game.tagameBoss){
-          tagameStuck();
-        } else {
-          toast('かわした！', 2);
-          T.state = 'lurk'; T.t = 0; T.pauseT = 2;
-          setAnim(T.ch,'idle');
-        }
+        if (!T.impact || !T.locked){ T.locked = true; tagameBossPath(T); }
+        tagRing.visible = false; tagLungeLine.visible = false;
+        $('#fx').classList.remove('danger');
+        placeTagame();
+        T.state = 'lunge'; T.t = 0;
+        T.lungeFrom = T.pos.clone();
+        T.prevHead = tagPoint('head');
+        T.lungeTo = T.pos.clone().add(T.impact.clone().sub(T.prevHead));
+        sfx('jet');
       }
       break; }
-    case 'stuck': {
-      // 鎌が底に刺さって身動きが取れない。
-      // プレイヤーはこの間に接近し、捕食でカウンターできる。
-      if (T.lurkT >= T.lurkMax){
-        toast('タガメが力尽きて退散する！', 3);
-        startLeave();
+    case 'lunge': {
+      // 等加速で突進。頭の先端の通り道でヤゴを捕らえる
+      const K = TAGAME_BOSS, k = Math.min(1, T.t/K.lunge), e = k*k;
+      T.pos.copy(T.lungeFrom).lerp(T.lungeTo, e);
+      T.pitch = (T.impactType === 'wall' ? .15 : .35)*e;
+      placeTagame();
+      const head = tagPoint('head');
+      const yc = Y.pos.clone().add(V(0,.004*Y.s,0));
+      const q = closestOnSeg(T.prevHead, head, yc);
+      T.prevHead.copy(head);
+      if (!Y.molting && !game.escape && !game.fight && q.distanceTo(yc) < .012 + .008*Y.s){
+        T.pitch = 0; placeTagame();
+        startHold();
         break;
       }
-      T.stuckT -= dt;
-      if (T.stuckT <= 0){
-        T.state = 'lurk';
-        T.t = 0;
-        T.pauseT = 1;
-        T.grabT = rand(5,8);
-        setAnim(T.ch,'idle');
-        toast('タガメが鎌を引き抜いた！', 1);
-      } else if (T.ch.busy <= 0){
-        setAnim(T.ch,'Hurt');
-      }
+      if (k >= 1) tagameBossImpact(T);
       break; }
-    case 'stagger': {
-      // カウンターを受けた後は短時間ひるみ、続けて攻撃しない。
-      if (T.t >= TAGAME.staggerTime){
-        if (T.lurkT >= T.lurkMax){
-          startLeave();
-        } else {
-          T.state = 'lurk';
-          T.t = 0;
-          T.pauseT = 1.5;
-          T.grabT = rand(5,8);
-          setAnim(T.ch,'idle');
+    case 'stuck': {
+      // 鎌が地面や壁に刺さって身動きが取れない。この間に反撃できる。
+      const K = TAGAME_BOSS;
+      T.stuckT -= dt;
+      T.dustT = (T.dustT || 0) - dt;
+      if (T.dustT <= 0 && T.impact){
+        T.dustT = .4;
+        const n = T.impactN || V(0,1,0);
+        for (let i=0;i<2;i++){
+          emitPuff(T.impact, n.clone().multiplyScalar(rand(.004,.012)).add(V(rand(-.008,.008),0,rand(-.008,.008))), rand(.0008,.0016));
         }
       }
+      if (!T.warned && T.stuckT <= 1.5){ T.warned = true; toast('抜けそう！', 2); }
+      if (T.stuckT <= 0){
+        const back = V(-Math.sin(T.yaw),0,-Math.cos(T.yaw));
+        T.pitch = 0;
+        T.pos.addScaledVector(back,.02);
+        T.pos.y = Math.max(T.pos.y, groundY(T.pos.x,T.pos.z) + .002);
+        keepInBowl(T.pos, .02);
+        tagameBossUnpose(T,'Swim');
+        T.state = 'lurk'; T.t = 0; T.pauseT = .6;
+        T.grabT = rand(K.attackEveryMin, K.attackEveryMax);
+        toast('タガメが鎌を引き抜いた！', 1);
+      }
+      break; }
+    case 'dazed': {
+      // 振りほどかれてふらついている（反撃は1回まで）
+      const K = TAGAME_BOSS;
+      if (T.t >= K.dazed){
+        T.state = 'lurk'; T.t = 0; T.pauseT = .5;
+        T.grabT = rand(K.attackEveryMin, K.attackEveryMax);
+        setAnim(T.ch,'idle');
+      }
+      break; }
+    case 'defeat': {
+      // 体力0：大きく揺れながら後退し、去っていく
+      if (T.retreat) T.pos.addScaledVector(T.retreat, .04*dt);
+      keepInBowl(T.pos, .02);
+      T.dustT = (T.dustT || 0) - dt;
+      if (T.dustT <= 0){
+        T.dustT = .2;
+        for (let i=0;i<2;i++) emitPuff(T.pos, V(rand(-.015,.015),rand(.004,.015),rand(-.015,.015)), rand(.001,.002));
+      }
+      if (T.t >= 1.2) startLeave();
       break; }
     case 'ready': {
       faceYago(4);
@@ -4246,7 +4412,12 @@ function updateTagame(dt){
       break; }
   }
   placeTagame();
-  if (T.ch) tickChar(T.ch, dt);
+  tagameBossShake(T);
+  if (T.ch){
+    // もがき中は鎌を伸ばした姿勢（Catch の命中付近）に固定する
+    if (T.state === 'stuck') T.ch.pose('Catch', .98 + .07*(.5 + .5*Math.sin(T.t*9)));
+    else tickChar(T.ch, dt);
+  }
   if (T.state === 'hold') updateEscape(dt);
 }
 
@@ -5652,6 +5823,7 @@ function strike(){
     Y.ch.object.rotation.set(Y.pitch,Y.yaw,0);
     Y.ch.object.updateMatrixWorld(true);
     Y.tagameCounter = counter.boss;
+    Y.tagameCounterPart = counter.part;
     Y.strikeRecord = null;
     sfx('strike');
     doAction(Y.ch,'attack',STRIKE.duration);
@@ -5687,14 +5859,19 @@ function resolveStrike(){
 
   // 捕食アニメーションの命中時刻にタガメのカウンターを判定する。
   const counter = Y.tagameCounter;
+  const counterPart = Y.tagameCounterPart || 'head';
   Y.tagameCounter = null;
+  Y.tagameCounterPart = null;
   if (counter){
+    const K = TAGAME_BOSS;
+    const limit = counter.state === 'stuck' ? K.hitsPerStuck : 1;
     const hit = game.mode === 'play' && !Y.molting &&
       counter === game.tagame && game.tagameBoss &&
-      counter.state === 'stuck' &&
-      headPos().distanceTo(tagPoint('head')) <= TAGAME.counterReach + .006;
+      (counter.state === 'stuck' || counter.state === 'dazed') &&
+      (counter.stuckHits || 0) < limit &&
+      headPos().distanceTo(tagamePartPos(counterPart)) <= K.reach + .006;
     if (hit){
-      tagameCounterHit(counter);
+      tagameCounterHit(counter, counterPart);
     } else {
       toast('カウンター失敗！', 1);
       sfx('miss');
@@ -6904,6 +7081,10 @@ function updateHud(dt){
     $('#ambTxt').textContent = tagameCounterTarget()
       ? '反撃チャンス！ 捕食を押せ！'
       : 'タガメがもがいている！ 接近して反撃！';
+  }
+  if (game.tagame && game.tagame.state === 'dazed'){
+    amb.classList.add('on');
+    $('#ambTxt').textContent = 'タガメがふらついている！ 反撃！';
   }
   if (medakaRaid.p && game.mode === 'play' &&
       (medakaRaid.phase === 'threat' || medakaRaid.phase === 'aim' ||
