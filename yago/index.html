@@ -3027,6 +3027,7 @@ function newGame(withIntro){
   game.lastCause = null; game.birdHitT = -99;
   game.slowT = 0; game.fovKick = 0; game.wideLockUntil = 0;
   resetEnv();
+  resetSeason();
   clearTagame();
   game.tagameEscapes = 0; game.tagameDone = false; game.tagameAt = null;
   game.tagameBoss = false;
@@ -3672,7 +3673,8 @@ function updateBird(dt){
   if (B.phase === 'idle'){
     if (game.tagame || game.frog || game.event) return;   // タガメ戦・カエル戦・突発イベントの間は鳥は来ない
     // 夜と雨は来ない。昼は早め、くもりは遅め
-    B.next -= dt*envBirdK();
+    // 水面近く（危険な深さ）にいる間は、鳥が来るまでの時間が速く進む
+    B.next -= dt*envBirdK()*(Y.pos.y > SURF - BIRD.depth ? 1.4 : 1);
     if (B.next <= 0){
       B.phase = 'warn'; B.t = 0;
       const a = rand(0, Math.PI*2);
@@ -5529,13 +5531,41 @@ function juvenileTick(dt){
   }
 }
 
+// 獲物の「旬」（大発生）：90〜120秒ごとに、ミジンコ・ボウフラ・エビのどれかが60秒間増える
+const SEASON = Object.freeze({kinds:['daphnia','bowfura','shrimp'], first:[90,120], gap:[90,120], dur:60, burst:3});
+function resetSeason(){
+  game.season = {kind:null, t:0, next:rand(SEASON.first[0], SEASON.first[1]), last:null};
+}
+const seasonOn = k => !!(game.season && game.season.kind === k);
+function seasonMax(k){ return seasonOn(k) ? Math.ceil(CFG[k].max*1.5) : CFG[k].max; }
+function seasonTick(dt){
+  const S = game.season;
+  if (!S) return;
+  if (S.kind){
+    S.t -= dt;
+    if (S.t <= 0){ S.kind = null; S.next = rand(SEASON.gap[0], SEASON.gap[1]); toast('大発生が収まった', 0); }
+    return;
+  }
+  S.next -= dt;
+  if (S.next > 0) return;
+  const B = game.bird;
+  if (game.tagame || game.frog || game.event || game.tagameBoss || game.fight || game.escape ||
+      Y.molting || Y.pendingMolt > 0 || (B && B.phase !== 'idle')){ S.next = 5; return; }
+  const list = SEASON.kinds.filter(k => k !== S.last);
+  const k = list[Math.floor(Math.random()*list.length)];
+  S.kind = k; S.last = k; S.t = SEASON.dur;
+  // 発動の瞬間にも少し増やす（上限まで）
+  const room = Math.max(0, seasonMax(k) - count(k));
+  for (let i=0;i<Math.min(SEASON.burst, room);i++) spawnPrey(k);
+  toast(CFG[k].label + 'が大発生！' + (k === 'bowfura' ? ' 水面は危険だが実入りが大きい' : ''), 2);
+}
 function breedTick(dt){
   for (const k in CFG){
-    game.breed[k] -= dt;
+    game.breed[k] -= dt*(seasonOn(k) ? 2 : 1);
     if (game.breed[k] > 0) continue;
     game.breed[k] = CFG[k].breed * rand(.8,1.25);
     const n = count(k);
-    if (n >= CFG[k].max) continue;
+    if (n >= seasonMax(k)) continue;
     const parents = prey.filter(p => p.kind === k && p.state !== 'caught');
     if (k === 'bowfura'){ spawnPrey(k); continue; }       // 蚊が外から卵を産みにくる
     if (parents.length < (k === 'daphnia' ? 1 : 2)) continue;
@@ -6125,7 +6155,9 @@ function catchPrey(p, fightWin, fd, perfect=false){
   } else game.smallChain = 0;
   const comboK = 1 + .15*Math.min(game.combo, 4);
   // 1回で得る成長値は、その齢の必要量の45%まで
-  const gain = Math.min(p.cfg.value*k*growK*worth*comboK, NEED[Y.stage]*.45);
+  // 水面近くのボウフラは危険と引き換えに、成長値が1.5倍
+  const surfaceK = (p.kind === 'bowfura' && p.pos.y > SURF - .015) ? 1.5 : 1;
+  const gain = Math.min(p.cfg.value*k*growK*worth*comboK*surfaceK, NEED[Y.stage]*.45);
   const feedback = game.feedback;
   if (feedback.stage !== Y.stage){
     feedback.stage = Y.stage; feedback.growth = Y.growth;
@@ -7312,7 +7344,7 @@ function updateHud(dt){
   $('#eTxt').textContent = Math.ceil(Y.energy);
   $('#eBar i').style.background = Y.energy < 25 ? 'var(--alarm)' : '';
   $('#prey').innerHTML = Object.keys(CFG).map(k =>
-    `<div class="${anyTargetable(k) ? '' : 'lock'}">${CFG[k].label} <b>${count(k)}</b></div>`).join('');
+    `<div class="${anyTargetable(k) ? '' : 'lock'}">${CFG[k].label}${seasonOn(k) ? '★' : ''} <b>${count(k)}</b></div>`).join('');
 }
 
 /* =========================================================
@@ -7664,7 +7696,7 @@ function loop(now){
   updateAudio(dt);
 
   if (game.mode === 'play' || game.mode === 'intro' || game.mode === 'over' || game.mode === 'ending'){
-    if (game.mode === 'play'){ game.time += dt; breedTick(dt); juvenileTick(dt); updateEnv(dt); }
+    if (game.mode === 'play'){ game.time += dt; breedTick(dt); seasonTick(dt); juvenileTick(dt); updateEnv(dt); }
     school.t -= dt;
     if (school.t <= 0){
       school.t = rand(4,8);
