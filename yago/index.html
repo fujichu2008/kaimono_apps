@@ -7253,7 +7253,30 @@ function startOpening(){
   scene.add(O.yago.object); setAnim(O.yago,'idle');
   O.med = makeChar('medaka');
   O.med.object.scale.setScalar(.9);
+  O.med.object.position.copy(O.base).addScaledVector(O.fwd,.17).addScaledVector(O.side,.06).add(V(0,.035,0));
   scene.add(O.med.object); setAnim(O.med,'swim');
+  // 命中の瞬間に下唇の先端が届く位置を、見えない複製で前もって測る
+  O.tipHit = openingTipHit(O);
+  O.eatT = 0; O.puffT = 0;
+  // まわりの生き物（エビ・ミジンコ）
+  O.extras = [];
+  const addX = (kind, pos, scale, anim) => {
+    keepInBowl(pos, .02);
+    if (kind === 'shrimp') pos.y = groundY(pos.x, pos.z);
+    const ch = makeChar(kind);
+    ch.object.scale.setScalar(scale);
+    ch.object.position.copy(pos);
+    ch.object.rotation.y = rand(0, Math.PI*2);
+    scene.add(ch.object); setAnim(ch, anim);
+    O.extras.push({kind, ch, pos:pos.clone(), base:pos.clone(), ph:rand(0,6.28), vel:V(), fled:false});
+  };
+  addX('shrimp', O.base.clone().addScaledVector(O.side,-.06).addScaledVector(O.fwd,.09), .8, 'Esa');
+  addX('shrimp', O.base.clone().addScaledVector(O.side,.09).addScaledVector(O.fwd,.15), .7, 'Walk');
+  for (let i=0;i<5;i++){
+    const p = O.base.clone().addScaledVector(O.fwd, rand(.05,.16)).addScaledVector(O.side, rand(-.09,.09));
+    p.y = groundY(p.x, p.z) + rand(.025,.07);
+    addX('daphnia', p, CFG.daphnia.scale, 'idle');
+  }
   if (Y.ch){ O.yVis = Y.ch.object.visible; Y.ch.object.visible = false; }
   $('#opTitle').classList.remove('on');
   $('#opLayer').classList.add('on');
@@ -7265,11 +7288,38 @@ function endOpening(){
   if (O.yago) O.yago.dispose();
   if (O.med) O.med.dispose();
   O.yago = O.med = null;
+  if (O.extras){ for (const x of O.extras) x.ch.dispose(); O.extras = null; }
   if (Y.ch) Y.ch.object.visible = O.yVis;
   $('#opLayer').classList.remove('on');
   $('#opTitle').classList.remove('on');
   try { localStorage.setItem(OPENING_KEY, '1'); } catch(e){}
   $('#ovTitle').classList.remove('hide', 'fade');
+}
+// 攻撃の命中の瞬間に、下唇の先端が届く位置（見えない複製で測る）
+function openingTipHit(O){
+  const fb = O.base.clone().addScaledVector(O.fwd,.045).add(V(0,.012,0));
+  if (!MODELS.yago) return fb;
+  let probe = null;
+  try {
+    probe = makeChar('yago');
+    probe.object.position.copy(O.base); probe.object.rotation.y = O.yaw;
+    probe.action('attack');
+    for (let s=0; s<STRIKE.hitTime-1e-8; s+=.01) probe.update(Math.min(.01, STRIKE.hitTime - s));
+    probe.object.updateMatrixWorld(true);
+    const a = probe.anchor('a_labium_tip');
+    return a ? a.getWorldPosition(V()) : fb;
+  } catch(e){
+    return fb;
+  } finally {
+    if (probe) probe.dispose();
+  }
+}
+// メダカの原点から体の中心へのずれ（体の中心を下唇の先端に合わせるため）
+function openingMedOffset(O){
+  const o = O.med.object;
+  o.updateMatrixWorld(true);
+  const bc = anchorPos(O.med, 'bodyCenter', null);
+  return bc ? o.position.clone().sub(bc) : V(0,-.005,0);
 }
 function updateOpening(dt){
   const O = opening;
@@ -7279,24 +7329,30 @@ function updateOpening(dt){
   const sm = t < 2.3 ? 1 : t < 4.3 ? .3 : Math.min(1, .3 + (t - 4.3)*.8);
   const head = O.base.clone().addScaledVector(O.fwd,.03).add(V(0,.012,0));
   const mouth = O.base.clone().addScaledVector(O.fwd,.04).add(V(0,.013,0));
-  const strikeAt = O.base.clone().addScaledVector(O.fwd,.062).add(V(0,.013,0));
-  // メダカがヤゴの前へ泳いでくる
+  // 下唇の先端が届く位置（ここでメダカをはさむ）
+  const strikeAt = O.tipHit ? O.tipHit.clone() : O.base.clone().addScaledVector(O.fwd,.045).add(V(0,.012,0));
+  // メダカがヤゴの目の前（下唇が届く位置）へ泳いでくる
   if (!O.caught){
     const u = smooth01(Math.min(1, t/2.7));
     const start = O.base.clone().addScaledVector(O.fwd,.17).addScaledVector(O.side,.06).add(V(0,.035,0));
-    const p = start.lerp(strikeAt, u);
+    const want = strikeAt.clone().add(openingMedOffset(O));
+    const p = start.lerp(want, u);
     p.y += Math.sin(t*3)*.003*(1 - u);
     const d = p.clone().sub(O.med.object.position);
     O.med.object.position.copy(p);
-    if (d.lengthSq() > 1e-10) O.med.object.rotation.y = Math.atan2(d.x, d.z);
-  } else {
-    O.med.object.position.lerp(mouth, damp(10,dt));
-    O.med.object.rotation.y = O.yaw + Math.PI/2;
+    if (u < 1){
+      if (d.lengthSq() > 1e-10) O.med.object.rotation.y = Math.atan2(d.x, d.z);
+    } else {
+      // 着いたら、ヤゴの方を向いて小さく揺れながら止まる
+      O.med.object.rotation.y = lerpAngle(O.med.object.rotation.y, Math.atan2(-O.fwd.x, -O.fwd.z), damp(4,dt));
+      O.med.object.position.y += Math.sin(t*4)*.0006;
+    }
   }
   // 下唇を伸ばして捕らえる
   if (!O.struck && t >= 2.45){ O.struck = true; doAction(O.yago,'attack',STRIKE.duration); sfx('strike'); }
   if (!O.caught && t >= 2.45 + STRIKE.hitTime/.3){
     O.caught = true;
+    O.eatT = 0; O.puffT = 0;
     setAnim(O.med,'Eaten');
     const fx = $('#fx'); fx.classList.remove('flash'); void fx.offsetWidth; fx.classList.add('flash');
     sfx('perfect');
@@ -7319,7 +7375,46 @@ function updateOpening(dt){
   cam.position.copy(pos); cam.lookAt(look);
   if (t >= 6 && !O.titled){ O.titled = true; $('#opTitle').classList.add('on'); }
   if (t >= 9.6) $('#opTitle').classList.remove('on');
-  tickChar(O.yago, dt*sm); tickChar(O.med, dt*sm);
+  tickChar(O.yago, dt*sm);
+  if (O.caught){
+    // 下唇の先端にはさんだまま口元へ引き寄せ、もがきながら食べられていく
+    O.eatT += dt;
+    O.yago.object.updateMatrixWorld(true);
+    const tip = anchorPos(O.yago, 'a_labium_tip', mouth.clone());
+    const wig = Math.max(0, 1 - O.eatT/3);
+    O.med.object.rotation.set(Math.sin(t*22)*.18*wig, O.yaw + Math.PI/2 + Math.sin(t*17)*.15*wig, 0);
+    O.med.object.scale.setScalar(.9*Math.max(.55, 1 - O.eatT*.07));
+    O.med.object.position.copy(tip).add(openingMedOffset(O));
+    O.puffT -= dt;
+    if (O.puffT <= 0){
+      O.puffT = .35;
+      emitPuff(tip, V(rand(-.006,.006), rand(.002,.01), rand(-.006,.006)), rand(.0005,.001));
+    }
+  }
+  tickChar(O.med, dt*sm);
+  // まわりの生き物：ふだんは漂い・エサを食べ、捕食の瞬間に逃げる
+  if (O.extras){
+    for (const x of O.extras){
+      if (O.caught && !x.fled){
+        x.fled = true;
+        const away = x.pos.clone().sub(strikeAt); away.y = Math.max(away.y, 0);
+        if (away.lengthSq() < 1e-8) away.set(rand(-1,1), .3, rand(-1,1));
+        away.normalize();
+        if (x.kind === 'daphnia'){ x.vel.copy(away).multiplyScalar(.035); setAnim(x.ch, 'swim'); }
+        else { x.vel.copy(away).multiplyScalar(.05); x.vel.y = .02; doAction(x.ch, 'jump', .85); x.ch.object.rotation.y = Math.atan2(-away.x, -away.z); }
+      }
+      if (x.fled){
+        x.pos.addScaledVector(x.vel, dt*sm);
+        x.vel.multiplyScalar(Math.exp(-1.6*dt*sm));
+        if (x.kind === 'shrimp'){ x.vel.y -= .03*dt*sm; x.pos.y = Math.max(groundY(x.pos.x, x.pos.z), x.pos.y); }
+        keepInBowl(x.pos, .02);
+      } else if (x.kind === 'daphnia'){
+        x.pos.copy(x.base).add(V(Math.sin(t*.7 + x.ph)*.004, Math.sin(t*1.6 + x.ph)*.004, Math.cos(t*.6 + x.ph)*.004));
+      }
+      x.ch.object.position.copy(x.pos);
+      tickChar(x.ch, dt*sm);
+    }
+  }
   if (t >= 10.3) endOpening();
 }
 /* ---------- シネマボックス ---------- */
