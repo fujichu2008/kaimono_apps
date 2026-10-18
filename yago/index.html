@@ -1305,6 +1305,7 @@ const MODEL_DATA = {"format":"MODEL_SPEC_V1","meta":{"name":"トノサマガエ�
 <div class="hud" id="stat">
   <div class="row"><span id="stageNum">1</span><span id="stageLbl">齢目（全4齢）</span></div>
   <div class="bar" id="gBar"><i></i></div><div class="cap"><span>成長 <span id="growthGain" aria-hidden="true" style="display:inline-block;min-width:3em;color:#bff0c8;opacity:0"></span></span><span id="gTxt">0/10</span></div>
+  <div id="comboHud" style="display:none;margin-top:4px;font-size:11px;font-weight:800;color:#ffe9a0"><span id="comboTxt"></span><div style="height:3px;border-radius:2px;background:rgba(230,223,196,.15);margin-top:2px;overflow:hidden"><i id="comboBar" style="display:block;height:100%;width:100%;background:#ffd54a"></i></div></div>
   <div class="bar" id="eBar"><i></i></div><div class="cap"><span>体力</span><span id="eTxt">100</span></div>
   <div class="cap" id="envHud" style="margin-top:4px"></div>
 </div>
@@ -3292,10 +3293,18 @@ function onAmbushReady(){
   sfx('ready');
 }
 // 静止時間に応じて、気づかれる距離の係数を段階的に下げる
+// 夜の度合い（0=昼・朝、1=夜。applyEnv が毎フレーム更新する）
+function nightK(){ return ENV_CUR.night || 0; }
+// 待ち伏せの成立時間：夜は短く、3齢以降はさらに短い
+function ambushTime(){
+  return Math.max(.4, AMBUSH_TIME - .3*nightK() - (Y.stage >= 2 ? .1 : 0));
+}
+// 噴射のクールダウン：2齢以降は短い
+function jetCooldown(){ return Y.stage >= 1 ? .55 : JET_CD; }
 function ambushK(){
-  const s = Y.still || 0;
-  if (s < AMBUSH_TIME) return 1;
-  const k = clamp((s - AMBUSH_TIME)/(AMBUSH_DEEP - AMBUSH_TIME), 0, 1);
+  const s = Y.still || 0, at = ambushTime();
+  if (s < at) return 1;
+  const k = clamp((s - at)/(AMBUSH_DEEP - at), 0, 1);
   return .7 - .2*k;
 }
 function ambushHitFx(p){
@@ -3412,9 +3421,9 @@ const ENV_PHASES = [
   {id:'day',     name:'昼', icon:'🌞', start:60,  end:180, sun:1.35, sunCol:0xfff4dc, hemi:.75,
    wfog:0x2a4a3c, wden:6.2, afog:0xdfe8e4, aden:.05,  caus:.16, shaft:1,   sky:0xffffff, alert:1.15},
   {id:'evening', name:'夕', icon:'🌇', start:180, end:240, sun:.8,  sunCol:0xffb070, hemi:.55,
-   wfog:0x2a3a30, wden:7,   afog:0xe8c8a8, aden:.06,  caus:.1,  shaft:1.6, sky:0xffc49a, alert:.9},
+   wfog:0x2a3a30, dk:.3, wden:6.2,   afog:0xe8c8a8, aden:.06,  caus:.1,  shaft:1.6, sky:0xffc49a, alert:.9},
   {id:'night',   name:'夜', icon:'🌙', start:240, end:360, sun:.4,  sunCol:0x9fb4ff, hemi:.5,
-   wfog:0x183040, wden:7,   afog:0x3a4560, aden:.07,  caus:.06, shaft:.3,  sky:0x2a3550, alert:.6}
+   wfog:0x183040, dk:1, wden:5.5,   afog:0x3a4560, aden:.07,  caus:.06, shaft:.6,  sky:0x2a3550, alert:.6}
 ];
 const WEATHERS = {
   sun:  {name:'晴れ',   icon:'☀', sun:1,  caus:1,  fog:1,    alert:1,   rain:0},
@@ -3452,7 +3461,7 @@ function envBlend(tt){
   const k = 1 - w;
   const L = (a, b) => a + (b - a)*k;
   return {phase:P, sun:L(P.sun,Q.sun), hemi:L(P.hemi,Q.hemi), wden:L(P.wden,Q.wden), aden:L(P.aden,Q.aden),
-    caus:L(P.caus,Q.caus), shaft:L(P.shaft,Q.shaft), alert:L(P.alert,Q.alert),
+    caus:L(P.caus,Q.caus), shaft:L(P.shaft,Q.shaft), alert:L(P.alert,Q.alert), dk:L(P.dk||0,Q.dk||0),
     sunCol:lerpHex(_ec.sun,P.sunCol,Q.sunCol,k), wfog:lerpHex(_ec.wfog,P.wfog,Q.wfog,k),
     afog:lerpHex(_ec.afog,P.afog,Q.afog,k), sky:lerpHex(_ec.sky,P.sky,Q.sky,k)};
 }
@@ -3475,7 +3484,7 @@ function envBirdK(){
 function envForageK(){ const ph = envPhaseId(); return ph === 'morning' || ph === 'evening' ? 1.8 : 1; }
 function envMedakaSpeed(){ return envPhaseId() === 'night' ? .5 : 1; }
 function envDaphniaBias(){ const ph = envPhaseId(); return ph === 'night' ? .6 : ph === 'day' ? -.3 : 0; }
-function lockRange(){ return envPhaseId() === 'night' ? .09 : LOCK.range; }
+function lockRange(){ return (envPhaseId() === 'night' ? .09 : LOCK.range) + (Y.stage >= 3 ? .015 : 0); }
 
 // 雨の演出：水面の小さな波紋（入水用とは別）と雨粒
 const envRipples = [];
@@ -3530,6 +3539,7 @@ function applyEnv(dt, under){
   const W = active ? weatherBlend() : WEATHERS.sun;
   ENV_CUR.alert = Math.max(.5, P.alert*W.alert);
   ENV_CUR.rain = active ? W.rain : 0;
+  ENV_CUR.night = active ? (P.dk || 0) : 0;
   // 日差し（夜でも最低限の見通しを保つ下限つき）
   // タガメ戦・カエル戦の間は、昼夜・天気に関係なく明るくする（約1.5秒で切り替え）
   const bossOn = game.mode === 'play' && (!!game.frog || (!!game.tagame && !!game.tagameBoss));
@@ -3561,7 +3571,10 @@ function applyEnv(dt, under){
   const causBase = P.caus*W.caus;
   const caus = causBase + (Math.max(.12, causBase) - causBase)*bk;
   for (const m of caustics) m.material.opacity = caus;
-  for (const m of shafts) m.material.opacity = .045*P.shaft*(.4 + .6*W.sun);
+  for (const m of shafts){
+    m.material.opacity = .045*P.shaft*(.4 + .6*W.sun);
+    m.material.color.setHex(0xfff8e0).lerp(SHAFT_NIGHT, ENV_CUR.night || 0);
+  }
   // 空
   if (skyMesh) skyMesh.material.color.copy(P.sky).lerp(_ec.a.setHex(0x9aa2a8), W.rain*.5);
   // 雨粒（水上でのみ見える）
@@ -5778,6 +5791,122 @@ const yagoShadow = new THREE.Mesh(new THREE.CircleGeometry(1,24), new THREE.Mesh
     g.fillStyle = rg; g.fillRect(0,0,64,64);
   }), transparent:true, opacity:.5, depthWrite:false}));
 yagoShadow.rotation.x = -Math.PI/2; yagoShadow.visible = false; scene.add(yagoShadow);
+
+/* ---------- 夜の見やすさ・夜光虫・連続捕食の表示 ---------- */
+const SHAFT_NIGHT = new THREE.Color(0xcfe0ff);
+// 足元の影：夜は淡く光る輪（加算合成）に切り替える
+const yagoShadowDay = yagoShadow.material;
+const yagoShadowNight = new THREE.MeshBasicMaterial({
+  map:canvasTex(64,64,(g) => {
+    const rg = g.createRadialGradient(32,32,10,32,32,31);
+    rg.addColorStop(0,'rgba(255,255,255,0)'); rg.addColorStop(.6,'rgba(200,255,225,.75)'); rg.addColorStop(1,'rgba(200,255,225,0)');
+    g.fillStyle = rg; g.fillRect(0,0,64,64);
+  }), transparent:true, opacity:.7, blending:THREE.AdditiveBlending, depthWrite:false, fog:false});
+// ヤゴ専用の弱い光
+const yagoGlow = new THREE.PointLight(0xcfe8d0, 0, .12, 2); scene.add(yagoGlow);
+// ヤゴの真上の目印（夜のみ）
+const yagoMark = new THREE.Mesh(new THREE.ConeGeometry(.0028,.007,3),
+  new THREE.MeshBasicMaterial({color:0xbff0c8, transparent:true, opacity:0, depthTest:false, depthWrite:false, fog:false}));
+yagoMark.rotation.x = Math.PI; yagoMark.renderOrder = 22; yagoMark.visible = false; scene.add(yagoMark);
+// ヤゴの外皮の自己発光（度合いが変わったときだけ素材を更新する）
+function applyYagoGlow(nk){
+  Y.glowApplied = nk;
+  const M = MODELS.yago;
+  if (!M || !Y.ch || !Y.ch.real) return;
+  const mats = Y.ch.object.userData.materials || {};
+  for (const id of ['m_cuticle','m_wingpad']){
+    const mat = mats[id], base = M.D.materials[id];
+    if (!mat || !base) continue;
+    const d = JSON.parse(JSON.stringify(base));
+    d.emissive = '#3a4a2a'; d.emissiveIntensity = .18*nk;
+    M.R.updateMaterial(mat, d);
+  }
+}
+// 夜光虫（prey とは別に管理。獲物の数・図鑑・成長には影響しない）
+const noctis = [];
+const noctGeo = new THREE.SphereGeometry(.0015, 8, 6);
+let noctT = 0;
+function removeNoct(i){
+  const n = noctis[i];
+  scene.remove(n.m); n.m.material.dispose();
+  noctis.splice(i,1);
+}
+function clearNoctiluca(){ while (noctis.length) removeNoct(noctis.length-1); }
+function collectNoctiluca(head, reach){
+  if (game.mode !== 'play') return;
+  for (let i=noctis.length-1;i>=0;i--){
+    const n = noctis[i];
+    if (n.pos.distanceTo(head) > reach) continue;
+    emitPuff(n.pos, V(rand(-.01,.01), rand(0,.012), rand(-.01,.01)), rand(.0008,.0014));
+    removeNoct(i);
+    Y.energy = Math.min(100, Y.energy + 3);
+    toast('夜光虫で体力回復', 0);
+    sfx('good');
+  }
+}
+function updateNoctiluca(dt, nk){
+  if (game.mode !== 'play'){ if (noctis.length) clearNoctiluca(); return; }
+  const target = nk >= .3 ? 1 : 0, t = performance.now()/1000;
+  if (nk > .6 && noctis.length < 6){
+    noctT -= dt;
+    if (noctT <= 0){
+      noctT = rand(.8,2);
+      const m = new THREE.Mesh(noctGeo, new THREE.MeshBasicMaterial({color:0xbfffd8, transparent:true, opacity:0,
+        blending:THREE.AdditiveBlending, depthWrite:false, fog:false}));
+      const pos = randomInWater(SOIL+.02, SURF-.025);
+      m.position.copy(pos); scene.add(m);
+      noctis.push({m, pos, vel:V(), f:0, ph:rand(0,6.28)});
+    }
+  }
+  for (let i=noctis.length-1;i>=0;i--){
+    const n = noctis[i];
+    n.f += (target - n.f)*damp(2,dt);
+    if (target === 0 && n.f < .03){ removeNoct(i); continue; }
+    n.vel.addScaledVector(V(rand(-1,1), rand(-.6,.6), rand(-1,1)), .02*dt);
+    n.vel.multiplyScalar(Math.exp(-1.5*dt));
+    n.pos.addScaledVector(n.vel, dt);
+    keepInBowl(n.pos, .012, .015, .01);
+    n.m.position.copy(n.pos);
+    n.m.material.opacity = n.f*(.45 + .35*Math.sin(t*2 + n.ph));
+  }
+  collectNoctiluca(headPos(), .012);
+}
+function updateNightAids(dt){
+  const nk = nightK(), playing = game.mode === 'play';
+  // ヤゴに追従する光
+  if (Y.ch){
+    yagoGlow.position.set(Y.pos.x, Y.pos.y + .012*Y.s, Y.pos.z);
+    yagoGlow.intensity = .5*nk;
+    if (Y.glowCh !== Y.ch){ Y.glowCh = Y.ch; Y.glowApplied = 0; }
+    if (Math.abs(nk - (Y.glowApplied || 0)) >= .05 || (nk === 0 && Y.glowApplied !== 0)) applyYagoGlow(nk);
+  } else yagoGlow.intensity = 0;
+  // 真上の目印
+  const showM = playing && nk > .5 && !!Y.ch && !Y.molting && !game.escape && !game.fight;
+  yagoMark.visible = showM;
+  if (showM){
+    const t = performance.now()/1000;
+    yagoMark.position.set(Y.pos.x, Y.pos.y + .022*Y.s + .004 + Math.sin(t*3)*.0008, Y.pos.z);
+    yagoMark.scale.setScalar(Math.max(.7, Y.s));
+    yagoMark.material.opacity = nk*(.55 + .35*Math.sin(t*Math.PI*2*1.2));
+  }
+  updateNoctiluca(dt, nk);
+}
+// 連続捕食の表示（成長バーの下）
+let comboShown = '';
+function updateComboHud(){
+  const el = $('#comboHud');
+  if (!el) return;
+  const rem = 6 - (game.time - game.lastCatchT);
+  const on = game.mode === 'play' && game.combo >= 1 && rem > 0;
+  if (!on){
+    if (comboShown !== ''){ comboShown = ''; el.style.display = 'none'; }
+    return;
+  }
+  const txt = '連続 ' + (game.combo + 1) + '！' +
+    (game.time - (game.smallBonusT ?? -99) < 2 ? '　小物連続 体力+2' : '');
+  if (txt !== comboShown){ comboShown = txt; $('#comboTxt').textContent = txt; el.style.display = 'block'; }
+  $('#comboBar').style.width = (clamp(rem/6, 0, 1)*100) + '%';
+}
 function updateAids(){
   updateLock();
   const t = Y.target, on = !!t && game.mode === 'play';
@@ -5830,7 +5959,9 @@ function updateAids(){
     const k = clamp(h/.17,0,1);
     yagoShadow.position.set(Y.pos.x, g+.0008, Y.pos.z);
     yagoShadow.scale.setScalar(.03*Y.s*(1-.45*k));
-    yagoShadow.material.opacity = .5*(1-.75*k);
+    const nightShadow = nightK() > .5;
+    yagoShadow.material = nightShadow ? yagoShadowNight : yagoShadowDay;
+    yagoShadow.material.opacity = (nightShadow ? .7 : .5)*(1-.75*k);
   }
 }
 
@@ -5911,6 +6042,7 @@ function resolveStrike(){
 
   if (game.mode !== 'play' || Y.molting) return;
   const head = headPos();
+  collectNoctiluca(head, .045*Y.s + .0015);   // 届く範囲の夜光虫も取れる
   const first = game.catches === 0;   // 初回捕食までは判定にゆとりを持たせる
   let best = null, bd = Infinity, blocked = null, tooBig = null;
   const consider = (p, k) => {
@@ -5981,6 +6113,16 @@ function catchPrey(p, fightWin, fd, perfect=false){
   // 連続捕食ボーナス
   game.combo = (game.time - game.lastCatchT <= 6) ? game.combo + 1 : 0;
   game.lastCatchT = game.time;
+  // 小物（ミジンコ・ボウフラ）を連続で5匹食べたら体力を少し回復する
+  if (game.combo === 0) game.smallChain = 0;
+  if (p.kind === 'daphnia' || p.kind === 'bowfura'){
+    game.smallChain = (game.smallChain || 0) + 1;
+    if (game.smallChain >= 5){
+      game.smallChain = 0;
+      Y.energy = Math.min(100, Y.energy + 2);
+      game.smallBonusT = game.time;
+    }
+  } else game.smallChain = 0;
   const comboK = 1 + .15*Math.min(game.combo, 4);
   // 1回で得る成長値は、その齢の必要量の45%まで
   const gain = Math.min(p.cfg.value*k*growK*worth*comboK, NEED[Y.stage]*.45);
@@ -6200,7 +6342,7 @@ function jet(){
     d = dirFrom(Y.yaw, inputVy()*.6);
   }
   Y.jetVel.addScaledVector(d,.17*Y.s + .03);
-  Y.jetT = MOTION.jetDuration; Y.jetCd = JET_CD; Y.energy -= 1.5; Y.still = 0;
+  Y.jetT = MOTION.jetDuration; Y.jetCd = jetCooldown(); Y.energy -= 1.5; Y.still = 0;
   const tail = anchorPos(Y.ch,'a_tail', Y.pos.clone().addScaledVector(yagoFwd(), -.024*Y.s));
   for (let i=0;i<6;i++) emitPuff(tail, d.clone().multiplyScalar(-rand(.02,.05)).add(V(rand(-.006,.006),rand(-.004,.006),rand(-.006,.006))), rand(.0012,.003)*Y.s);
   disturb(Y.pos, .04, t);
@@ -6219,7 +6361,8 @@ function startMolt(){
 function finishMolt(){
   Y.molting = false; Y.growth -= NEED[Y.stage]; Y.stage++; Y.s = Y.s1;
   Y.ch.object.scale.setScalar(Y.s);
-  toast((Y.stage+1) + '齢になった。もっと大きな獲物も狙える');
+  toast((Y.stage+1) + '齢になった。もっと大きな獲物も狙える' +
+    (['', '／噴射の間隔が短くなった', '／待ち伏せがすばやく成立するようになった', '／ロックできる範囲が広がった'][Y.stage] || ''));
   if (Y.growth >= NEED[Y.stage]) requestMolt();
   saveProgress();
 }
@@ -6370,7 +6513,7 @@ function updateYago(dt){
   Y.moving = want || wantV || hspeed > .003 || Y.jetT > 0 || Math.abs(actualVelocity.y) > .015;
   if (!Y.moving && !Y.molting && Y.busyT <= 0 && game.mode === 'play') Y.still += dt; else if (Y.moving) Y.still = 0;
   const wasAmbush = Y.ambush;
-  Y.ambush = Y.still > AMBUSH_TIME;
+  Y.ambush = Y.still > ambushTime();
   if (Y.ambush && !wasAmbush && game.mode === 'play') onAmbushReady();
 
   // 姿勢
@@ -7087,6 +7230,7 @@ function updateHud(dt){
   tutorialTick();
   zukanTick();
   bgmPrefetchTick();
+  updateComboHud();
   if (toastTimer > 0){
     toastTimer -= dt;
     if (toastTimer <= 0){
@@ -7094,15 +7238,16 @@ function updateHud(dt){
       else $('#toast').classList.remove('on');
     }
   }
-  $('#bJet').style.setProperty('--cd', Y.jetCd > 0 ? (1 - Y.jetCd/JET_CD) : 1);
+  $('#bJet').style.setProperty('--cd', Y.jetCd > 0 ? (1 - Y.jetCd/jetCooldown()) : 1);
   const amb = $('#ambush');
   amb.classList.toggle('ready', game.mode === 'play' && Y.ambush);
   $('#fx').classList.toggle('focus', game.mode === 'play' && Y.ambush && !game.fight);
   if (game.mode === 'play' && Y.still > .4){
     // 1段目：待ち伏せ成立まで／2段目：完全に気配を消すまで
     const deep = Y.still >= AMBUSH_DEEP;
-    const pr = Y.still < AMBUSH_TIME ? Y.still/AMBUSH_TIME
-      : Math.min(1, (Y.still - AMBUSH_TIME)/(AMBUSH_DEEP - AMBUSH_TIME));
+    const at = ambushTime();
+    const pr = Y.still < at ? Y.still/at
+      : Math.min(1, (Y.still - at)/(AMBUSH_DEEP - at));
     if (deep && !amb.classList.contains('deep')) sfx('ready');
     amb.classList.toggle('deep', deep);
     amb.classList.add('on'); amb.querySelector('.ring').style.setProperty('--p', pr);
@@ -7556,6 +7701,7 @@ function loop(now){
     const fov = camRigFov(62 - (REDUCED_MOTION ? 0 : 6*smooth01(game.fovKick || 0)));
     if (Math.abs(cam.fov - fov) > .01){ cam.fov = fov; cam.updateProjectionMatrix(); }
     updateAids();
+    updateNightAids(dt);
     updateMedakaRaidVisual();
     updateHud(dt);
   } else {
