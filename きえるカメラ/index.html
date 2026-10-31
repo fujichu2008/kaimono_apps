@@ -1,0 +1,601 @@
+<!--
+================================================================
+ きえるカメラ（単一HTML）
+----------------------------------------------------------------
+【作成内容】
+ ・シャッター2つ（7日／30日）。撮影時に期限(expiresAt)を記録し、起動時・復帰時・1分ごとに期限切れを自動削除
+ ・IndexedDBに本画像Blob＋サムネイルBlobを保存（ストアは1つ、expiresAtにインデックス）
+ ・iPhone写真風アルバム：4列グリッド（新しい写真が下）、7日/30日フィルタ、選択モードで一括操作
+ ・ビューア：横スワイプ（scroll-snap）、タップで全画面、残り日数表示
+ ・カメラロール移行：Web Share API（iOSは「画像を保存」）→ アプリからは削除。非対応環境はダウンロード
+ ・削除・移行は確認ダイアログではなく「取り消す」付きトーストで手数を削減
+【制約条件】
+ ・カメラ利用にはHTTPS（またはlocalhost）が必要。iOSはホーム画面追加でも動作
+ ・共有シートで「画像を保存」以外を選んでも移行扱いになる（Web側で保存先を判別できないため）。直後なら取り消し可
+ ・Safariは長期間アプリを開かないとサイトデータを消すことがある（navigator.storage.persistで軽減を要求）
+ ・ブラウザを閉じている間は削除できないため、期限切れ写真は次回起動時に消える
+【改善提案】
+ ・ビューアのピンチズーム／ダブルタップ拡大
+ ・期限の延長（7日→30日への付け替え）ボタン
+ ・期限が近い写真のハイライト表示
+================================================================
+-->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<!-- APPSTUDIO_PWA_HEAD_START -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<!-- APPSTUDIO_PWA_HEAD_END -->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>きえるカメラ</title>
+<style>
+/* ===== THEME ===== */
+:root{
+  --c7:#FF9F43; --c30:#6FB6FF; --onTag:#1a1a1a;
+  --camBg:#000; --camFg:#fff; --camSub:rgba(255,255,255,.55);
+  --bg:#fff; --fg:#000; --sub:#8a8a8e; --bar:rgba(248,248,248,.92); --line:rgba(0,0,0,.12);
+  --accent:#007AFF; --danger:#FF3B30; --seg:#e6e6ea; --segOn:#fff; --toastBg:rgba(40,40,42,.96); --toastFg:#fff;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#000; --fg:#fff; --sub:#98989f; --bar:rgba(22,22,24,.92); --line:rgba(255,255,255,.14);
+  --accent:#0A84FF; --danger:#FF453A; --seg:#2c2c2e; --segOn:#5b5b60; --toastBg:rgba(58,58,60,.96);
+  color-scheme:dark;
+}}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:var(--camBg);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg{display:block}
+[hidden]{display:none!important}
+
+/* ===== CAMERA ===== */
+#camera{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--camBg);color:var(--camFg);padding-top:env(safe-area-inset-top)}
+#finder{flex:1;position:relative;overflow:hidden}
+#video{width:100%;height:100%;object-fit:contain;background:var(--camBg)}
+#video.mirror{transform:scaleX(-1)}
+#flash{position:absolute;inset:0;background:var(--camFg);opacity:0;pointer-events:none}
+#flash.on{animation:flash .28s ease-out}
+@keyframes flash{0%{opacity:.85}100%{opacity:0}}
+#camErr{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px;text-align:center;color:var(--camSub);font-size:15px;line-height:1.6}
+#camErr button{color:var(--camFg);border:1px solid var(--camSub);border-radius:20px;padding:8px 18px}
+#controls{display:grid;grid-template-columns:56px 1fr 1fr 56px;align-items:center;justify-items:center;padding:20px 16px calc(22px + env(safe-area-inset-bottom))}
+#last{width:50px;height:50px;border-radius:9px;overflow:hidden;border:1.5px solid var(--camSub)}
+#last img{width:100%;height:100%;object-fit:cover}
+#last.pop{animation:pop .35s ease-out}
+@keyframes pop{40%{transform:scale(1.15)}}
+.shutter{position:relative;width:76px;height:76px;border-radius:50%;border:4px solid var(--c);display:grid;place-items:center;transition:transform .1s}
+.shutter::before{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--camFg)}
+.shutter:active{transform:scale(.9)}
+.shutter b{position:relative;color:var(--onTag);font-size:26px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1}
+.shutter b small{font-size:12px;font-weight:600;margin-left:1px}
+#flip{width:46px;height:46px;border-radius:50%;background:rgba(255,255,255,.14);display:grid;place-items:center;color:var(--camFg)}
+
+/* ===== ALBUM ===== */
+#album{position:fixed;inset:0;background:var(--bg);color:var(--fg);display:flex;flex-direction:column;transform:translateY(100%);transition:transform .32s cubic-bezier(.2,.8,.2,1);z-index:10}
+#album.open{transform:none}
+.bar{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bar);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+#albumHead{padding-top:calc(10px + env(safe-area-inset-top));border-bottom:.5px solid var(--line)}
+#albumHead h1{font-size:17px;font-weight:600}
+#albumHead h1 span{color:var(--sub);font-weight:400;font-size:14px;margin-left:6px}
+.tbtn{color:var(--accent);font-size:17px;min-width:72px;padding:4px 0}
+.tbtn.r{text-align:right}
+#gridWrap{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+#grid{display:grid;grid-template-columns:repeat(4,1fr);gap:2px}
+@media (min-width:700px){#grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}
+.cell{position:relative;aspect-ratio:1;overflow:hidden;background:var(--seg)}
+.cell img{width:100%;height:100%;object-fit:cover;display:block}
+.ttl{position:absolute;left:4px;bottom:4px;background:var(--c);color:var(--onTag);font-size:11px;font-weight:600;padding:1px 6px;border-radius:8px;font-variant-numeric:tabular-nums}
+.chk{position:absolute;right:5px;bottom:5px;width:22px;height:22px;border-radius:50%;border:1.5px solid #fff;background:rgba(0,0,0,.2);display:none}
+#album.selecting .chk{display:block}
+.cell.sel img{opacity:.6}
+.cell.sel .chk{background:var(--accent);display:grid;place-items:center}
+.cell.sel .chk::after{content:"";width:9px;height:5px;border:2px solid #fff;border-top:0;border-right:0;transform:translateY(-1px) rotate(-45deg)}
+#empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--sub);font-size:15px}
+#empty button{color:var(--accent);font-size:16px}
+#albumFoot{border-top:.5px solid var(--line);padding-bottom:calc(10px + env(safe-area-inset-bottom));justify-content:center}
+#seg{display:flex;background:var(--seg);border-radius:9px;padding:2px;width:min(100%,320px)}
+#seg button{flex:1;padding:6px 0;border-radius:7px;font-size:14px;font-weight:500}
+#seg button.on{background:var(--segOn);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+#selBar{display:flex;align-items:center;justify-content:space-between;width:100%}
+#selBar span{font-size:14px;font-weight:600}
+.ibtn{width:44px;height:44px;display:grid;place-items:center;color:var(--accent)}
+.ibtn.del{color:var(--danger)}
+.ibtn:disabled{opacity:.3}
+
+/* ===== VIEWER ===== */
+#viewer{position:fixed;inset:0;background:var(--bg);color:var(--fg);z-index:20;display:flex;flex-direction:column;transition:background .2s}
+#viewer.imm{background:var(--camBg)}
+#viewer.imm .vbar{opacity:0;pointer-events:none}
+.vbar{position:absolute;left:0;right:0;z-index:2;transition:opacity .2s}
+#vHead{top:0;padding-top:calc(8px + env(safe-area-inset-top));border-bottom:.5px solid var(--line)}
+#vHead .meta{text-align:center;font-size:14px;font-weight:600;line-height:1.3}
+#vHead .meta small{display:block;font-weight:400;color:var(--sub);font-size:12px}
+#vFoot{bottom:0;padding-bottom:calc(8px + env(safe-area-inset-bottom));border-top:.5px solid var(--line)}
+#vRemain{background:var(--c);color:var(--onTag);font-size:13px;font-weight:600;padding:4px 12px;border-radius:12px;font-variant-numeric:tabular-nums}
+#track{flex:1;display:flex;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;scrollbar-width:none}
+#track::-webkit-scrollbar{display:none}
+.slide{flex:0 0 100%;height:100%;scroll-snap-align:center;scroll-snap-stop:always;display:grid;place-items:center}
+.slide img{max-width:100%;max-height:100%;object-fit:contain}
+
+/* ===== TOAST ===== */
+#toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translate(-50%,20px);opacity:0;pointer-events:none;z-index:40;background:var(--toastBg);color:var(--toastFg);border-radius:14px;padding:11px 16px;display:flex;gap:16px;align-items:center;font-size:14px;white-space:nowrap;transition:opacity .2s,transform .2s}
+#toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+#toastUndo{color:var(--c30);font-weight:600}
+
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<section id="camera">
+  <div id="finder">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="flash"></div>
+    <div id="camErr" hidden><p id="camErrMsg"></p><button id="camRetry">もう一度試す</button></div>
+  </div>
+  <div id="controls">
+    <button id="last" aria-label="アルバム"></button>
+    <!-- シャッターは CONFIG.shutters から生成 -->
+    <button id="flip" aria-label="カメラ切り替え">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-3H9L7 7H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M9 13a3 3 0 0 1 5.2-2M15 13a3 3 0 0 1-5.2 2M14 9v2h-2M10 17v-2h2"/></svg>
+    </button>
+  </div>
+</section>
+
+<section id="album" aria-hidden="true">
+  <header id="albumHead" class="bar">
+    <button class="tbtn" id="albumClose">カメラ</button>
+    <h1>アルバム<span id="albumCount"></span></h1>
+    <button class="tbtn r" id="selToggle">選択</button>
+  </header>
+  <div id="gridWrap"><div id="grid"></div></div>
+  <div id="empty" hidden><p id="emptyMsg"></p><button id="emptyShoot">撮影する</button></div>
+  <footer id="albumFoot" class="bar">
+    <div id="seg"></div>
+    <div id="selBar" hidden>
+      <button class="ibtn" id="selSave" aria-label="カメラロールへ移す"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></button>
+      <span id="selCount"></span>
+      <button class="ibtn del" id="selDel" aria-label="削除"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4h6v3"/></svg></button>
+    </div>
+  </footer>
+</section>
+
+<section id="viewer" hidden>
+  <header id="vHead" class="bar vbar">
+    <button class="ibtn" id="vClose" aria-label="閉じる"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <div class="meta"><span id="vDate"></span><small id="vTime"></small></div>
+    <span style="width:44px"></span>
+  </header>
+  <div id="track"></div>
+  <footer id="vFoot" class="bar vbar">
+    <button class="ibtn" id="vSave" aria-label="カメラロールへ移す"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></button>
+    <span id="vRemain"></span>
+    <button class="ibtn del" id="vDel" aria-label="削除"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4h6v3"/></svg></button>
+  </footer>
+</section>
+
+<div id="toast" role="status"><span id="toastMsg"></span><button id="toastUndo">取り消す</button></div>
+
+<script>
+'use strict';
+/* =========================================================
+   DATA / CONFIG — シャッター追加は shutters に1行足すだけ
+   ========================================================= */
+const DAY = 86400000;
+const CONFIG = {
+  shutters: [
+    { days: 7,  color: 'var(--c7)'  },
+    { days: 30, color: 'var(--c30)' },
+  ],
+  jpegQuality: 0.9,
+  thumbSize: 240,
+  purgeIntervalMs: 60000,
+  undoMs: 5000,
+  video: { width: { ideal: 1920 }, height: { ideal: 1440 } },
+  schema: 1,
+};
+const FILTERS = [{ key: 'all', label: 'すべて' },
+  ...CONFIG.shutters.map(s => ({ key: String(s.days), label: s.days + '日' }))];
+const colorOf = days => (CONFIG.shutters.find(s => s.days === days) || CONFIG.shutters[0]).color;
+
+/* =========================================================
+   STORAGE — IndexedDB（正本）
+   record: {v,id,createdAt,expiresAt,days,w,h,blob,thumb}
+   ========================================================= */
+const Store = (() => {
+  const NAME = 'kieru-camera', VER = 1, ST = 'photos';
+  let dbp;
+  const open = () => dbp ??= new Promise((res, rej) => {
+    const r = indexedDB.open(NAME, VER);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains(ST)) db.createObjectStore(ST, { keyPath: 'id' }).createIndex('expiresAt', 'expiresAt');
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  async function run(mode, fn) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction(ST, mode);
+      const out = fn(t.objectStore(ST));
+      t.oncomplete = () => res(out && 'result' in out ? out.result : out);
+      t.onerror = t.onabort = () => rej(t.error);
+    });
+  }
+  return {
+    all: () => run('readonly', s => s.getAll()),
+    put: ps => run('readwrite', s => ps.forEach(p => s.put(p))),
+    del: ids => run('readwrite', s => ids.forEach(id => s.delete(id))),
+    purge: now => run('readwrite', s => {
+      const gone = [];
+      s.index('expiresAt').openCursor(IDBKeyRange.upperBound(now)).onsuccess = e => {
+        const c = e.target.result;
+        if (c) { gone.push(c.primaryKey); c.delete(); c.continue(); }
+      };
+      return gone;
+    }),
+  };
+})();
+
+/* =========================================================
+   STATE — 写真一覧はメモリ上のミラー（Storeと同期）、UI状態はstateに集約
+   ========================================================= */
+const Photos = {
+  list: [], thumbs: new Map(),
+  set(ps) { this.list = ps; this.sort(); },
+  add(ps) { this.list.push(...ps); this.sort(); },
+  remove(ids) {
+    const s = new Set(ids);
+    this.list = this.list.filter(p => !s.has(p.id));
+    ids.forEach(id => { const u = this.thumbs.get(id); if (u) { URL.revokeObjectURL(u); this.thumbs.delete(id); } });
+  },
+  get(id) { return this.list.find(p => p.id === id); },
+  sort() { this.list.sort((a, b) => a.createdAt - b.createdAt); },
+  thumbUrl(p) {
+    if (!this.thumbs.has(p.id)) this.thumbs.set(p.id, URL.createObjectURL(p.thumb));
+    return this.thumbs.get(p.id);
+  },
+};
+const state = { facing: 'environment', albumOpen: false, filter: 'all', selecting: false, selected: new Set(), viewerId: null, imm: false };
+const visible = () => state.filter === 'all' ? Photos.list : Photos.list.filter(p => String(p.days) === state.filter);
+
+/* =========================================================
+   LOGIC — 時間表示・画像処理
+   ========================================================= */
+function remain(p, now = Date.now(), long = true) {
+  const ms = p.expiresAt - now;
+  if (ms <= 0) return '期限切れ';
+  const s = ms >= DAY ? Math.ceil(ms / DAY) + '日' : Math.ceil(ms / 3600000) + '時間';
+  return long ? 'あと' + s : s;
+}
+const fmtDate = new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' });
+const fmtTime = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' });
+const toBlob = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
+function makeThumb(src) {
+  const n = CONFIG.thumbSize, w = src.width, h = src.height, m = Math.min(w, h);
+  const c = document.createElement('canvas'); c.width = c.height = n;
+  c.getContext('2d').drawImage(src, (w - m) / 2, (h - m) / 2, m, m, 0, 0, n, n);
+  return toBlob(c, 0.8);
+}
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+const fileName = p => 'IMG_' + new Date(p.createdAt).toISOString().replace(/[-:T]/g, '').slice(0, 14) + '.jpg';
+
+/* =========================================================
+   CAMERA
+   ========================================================= */
+const $ = id => document.getElementById(id);
+const Camera = {
+  stream: null,
+  async start() {
+    this.stop();
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: state.facing }, ...CONFIG.video } });
+    const v = $('video');
+    v.srcObject = this.stream;
+    v.classList.toggle('mirror', state.facing === 'user');
+    await v.play().catch(() => {});
+  },
+  stop() { this.stream?.getTracks().forEach(t => t.stop()); this.stream = null; },
+  grab() {
+    const v = $('video');
+    if (!this.stream || !v.videoWidth) return null;
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    return c;
+  },
+};
+async function startCamera() {
+  try { await Camera.start(); $('camErr').hidden = true; }
+  catch (e) {
+    $('camErrMsg').textContent = !window.isSecureContext
+      ? 'カメラはHTTPSで開いたときだけ使えます。'
+      : 'カメラを使えません。ブラウザの設定でカメラへのアクセスを許可してください。';
+    $('camErr').hidden = false;
+  }
+}
+
+/* =========================================================
+   ACTIONS — 撮影・削除・移行・期限切れ処理（保存とUI更新の仲介）
+   ========================================================= */
+async function takePhoto(days) {
+  const c = Camera.grab();
+  if (!c) return;
+  const f = $('flash'); f.classList.remove('on'); void f.offsetWidth; f.classList.add('on');
+  const [blob, thumb] = await Promise.all([toBlob(c, CONFIG.jpegQuality), makeThumb(c)]);
+  const now = Date.now();
+  const p = { v: CONFIG.schema, id: uid(), createdAt: now, expiresAt: now + days * DAY, days, w: c.width, h: c.height, blob, thumb };
+  try { await Store.put([p]); } catch { toast('保存できませんでした。空き容量を確認してください'); return; }
+  Photos.add([p]);
+  refresh();
+  const l = $('last'); l.classList.remove('pop'); void l.offsetWidth; l.classList.add('pop');
+}
+
+async function removePhotos(ids, msg) {
+  const ps = ids.map(id => Photos.get(id)).filter(Boolean);
+  if (!ps.length) return;
+  await Store.del(ids);
+  Photos.remove(ids);
+  ids.forEach(id => state.selected.delete(id));
+  refresh();
+  toast(msg, async () => { await Store.put(ps); Photos.add(ps); refresh(); });
+}
+
+// share() はユーザー操作直後に呼ぶ必要があるため、await より前に同期で組み立てる
+async function moveToRoll(ids) {
+  const ps = ids.map(id => Photos.get(id)).filter(Boolean);
+  if (!ps.length) return;
+  const files = ps.map(p => new File([p.blob], fileName(p), { type: 'image/jpeg' }));
+  if (navigator.canShare?.({ files })) {
+    try { await navigator.share({ files }); }
+    catch (e) { if (e.name !== 'AbortError') toast('書き出せませんでした'); return; }
+    await removePhotos(ids, ps.length > 1 ? ps.length + '枚をカメラロールへ移しました' : 'カメラロールへ移しました');
+  } else {
+    files.forEach(f => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(f); a.download = f.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    });
+    await removePhotos(ids, 'ダウンロードへ移しました');
+  }
+}
+
+async function purgeExpired() {
+  try {
+    const gone = await Store.purge(Date.now());
+    if (gone.length) { Photos.remove(gone); refresh(); }
+  } catch {}
+}
+
+/* =========================================================
+   UI — 描画（refresh が唯一の再描画入口）
+   ========================================================= */
+function refresh() {
+  renderLast();
+  if (state.albumOpen) renderAlbum();
+  if (state.viewerId) renderViewer();
+}
+
+function renderLast() {
+  const p = Photos.list[Photos.list.length - 1];
+  $('last').innerHTML = p ? `<img src="${Photos.thumbUrl(p)}" alt="">` : '';
+}
+
+function renderAlbum() {
+  const list = visible(), now = Date.now();
+  $('albumCount').textContent = list.length ? list.length + '枚' : '';
+  $('empty').hidden = !!list.length;
+  $('gridWrap').hidden = !list.length;
+  $('selToggle').hidden = !Photos.list.length;
+  if (!Photos.list.length && state.selecting) setSelecting(false);
+  if (!list.length) {
+    const f = FILTERS.find(x => x.key === state.filter);
+    $('emptyMsg').textContent = state.filter === 'all' ? '写真はまだありません' : f.label + 'で消える写真はありません';
+  }
+  $('grid').innerHTML = list.map(p =>
+    `<button class="cell${state.selected.has(p.id) ? ' sel' : ''}" data-id="${p.id}" aria-label="${remain(p, now)}">
+      <img src="${Photos.thumbUrl(p)}" alt="" loading="lazy">
+      <span class="ttl" style="--c:${colorOf(p.days)}">${remain(p, now, false)}</span><span class="chk"></span>
+    </button>`).join('');
+  $('seg').innerHTML = FILTERS.map(f => `<button data-f="${f.key}" class="${f.key === state.filter ? 'on' : ''}">${f.label}</button>`).join('');
+  renderSelBar();
+}
+
+function renderSelBar() {
+  const n = state.selected.size;
+  $('selCount').textContent = n ? n + '枚を選択中' : '写真を選択';
+  $('selSave').disabled = $('selDel').disabled = !n;
+}
+
+function setSelecting(on) {
+  state.selecting = on;
+  state.selected.clear();
+  $('album').classList.toggle('selecting', on);
+  $('selToggle').textContent = on ? 'キャンセル' : '選択';
+  $('seg').hidden = on;
+  $('selBar').hidden = !on;
+  document.querySelectorAll('.cell.sel').forEach(c => c.classList.remove('sel'));
+  renderSelBar();
+}
+
+function openAlbum() {
+  state.albumOpen = true;
+  renderAlbum();
+  $('album').classList.add('open');
+  $('album').setAttribute('aria-hidden', 'false');
+  const w = $('gridWrap'); w.scrollTop = w.scrollHeight;
+}
+function closeAlbum() {
+  state.albumOpen = false;
+  setSelecting(false);
+  $('album').classList.remove('open');
+  $('album').setAttribute('aria-hidden', 'true');
+}
+
+/* ----- Viewer ----- */
+const viewer = { sig: '', idx: 0, urls: new Map() };
+function fullUrl(p) {
+  if (!viewer.urls.has(p.id)) viewer.urls.set(p.id, URL.createObjectURL(p.blob));
+  return viewer.urls.get(p.id);
+}
+function openViewer(id) {
+  state.viewerId = id;
+  $('viewer').hidden = false;
+  setImm(false);
+  renderViewer(true);
+}
+function closeViewer() {
+  state.viewerId = null;
+  $('viewer').hidden = true;
+  $('track').innerHTML = ''; viewer.sig = '';
+  viewer.urls.forEach(u => URL.revokeObjectURL(u)); viewer.urls.clear();
+}
+function setImm(on) { state.imm = on; $('viewer').classList.toggle('imm', on); }
+
+function renderViewer(jump) {
+  const list = visible();
+  if (!list.length) return closeViewer();
+  let i = list.findIndex(p => p.id === state.viewerId);
+  if (i < 0) { i = Math.min(viewer.idx, list.length - 1); jump = true; }
+  const sig = list.map(p => p.id).join();
+  if (sig !== viewer.sig) {
+    const keep = new Set(list.map(p => p.id));
+    viewer.urls.forEach((u, id) => { if (!keep.has(id)) { URL.revokeObjectURL(u); viewer.urls.delete(id); } });
+    $('track').innerHTML = list.map(p => `<div class="slide" data-id="${p.id}"><img alt=""></div>`).join('');
+    viewer.sig = sig; jump = true;
+  }
+  showIndex(i, list);
+  if (jump) requestAnimationFrame(() => { const t = $('track'); t.scrollLeft = i * t.clientWidth; });
+}
+function showIndex(i, list = visible()) {
+  const p = list[i]; if (!p) return;
+  viewer.idx = i; state.viewerId = p.id;
+  const d = new Date(p.createdAt);
+  $('vDate').textContent = fmtDate.format(d);
+  $('vTime').textContent = fmtTime.format(d);
+  $('vRemain').textContent = remain(p);
+  $('vRemain').style.setProperty('--c', colorOf(p.days));
+  const slides = $('track').children;
+  for (let k = Math.max(0, i - 1); k <= Math.min(list.length - 1, i + 1); k++) {
+    const img = slides[k]?.firstElementChild;
+    if (img && !img.src) img.src = fullUrl(list[k]);
+  }
+}
+
+/* ----- Toast ----- */
+let toastTimer;
+function toast(msg, undo) {
+  $('toastMsg').textContent = msg;
+  $('toastUndo').hidden = !undo;
+  $('toastUndo').onclick = undo ? () => { hideToast(); undo(); } : null;
+  $('toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, CONFIG.undoMs);
+}
+function hideToast() { $('toast').classList.remove('show'); }
+
+/* =========================================================
+   INPUT — イベント配線
+   ========================================================= */
+function bind() {
+  // シャッター生成（CONFIG駆動）
+  const flip = $('flip');
+  CONFIG.shutters.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'shutter';
+    b.style.setProperty('--c', s.color);
+    b.setAttribute('aria-label', s.days + '日で消える写真を撮る');
+    b.innerHTML = `<b>${s.days}<small>日</small></b>`;
+    b.addEventListener('click', () => takePhoto(s.days));
+    flip.before(b);
+  });
+  flip.addEventListener('click', () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; startCamera(); });
+  $('camRetry').addEventListener('click', startCamera);
+  $('last').addEventListener('click', () => {
+    state.filter = 'all'; openAlbum();
+    const p = Photos.list[Photos.list.length - 1];
+    if (p) openViewer(p.id);
+  });
+
+  $('albumClose').addEventListener('click', closeAlbum);
+  $('emptyShoot').addEventListener('click', closeAlbum);
+  $('selToggle').addEventListener('click', () => setSelecting(!state.selecting));
+  $('seg').addEventListener('click', e => {
+    const b = e.target.closest('[data-f]'); if (!b) return;
+    state.filter = b.dataset.f; renderAlbum();
+    const w = $('gridWrap'); w.scrollTop = w.scrollHeight;
+  });
+  $('grid').addEventListener('click', e => {
+    const c = e.target.closest('.cell'); if (!c) return;
+    const id = c.dataset.id;
+    if (!state.selecting) return openViewer(id);
+    state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+    c.classList.toggle('sel', state.selected.has(id));
+    renderSelBar();
+  });
+  $('selSave').addEventListener('click', () => moveToRoll([...state.selected]));
+  $('selDel').addEventListener('click', () => {
+    const n = state.selected.size;
+    removePhotos([...state.selected], n + '枚を削除しました');
+  });
+
+  $('vClose').addEventListener('click', closeViewer);
+  $('vSave').addEventListener('click', () => state.viewerId && moveToRoll([state.viewerId]));
+  $('vDel').addEventListener('click', () => state.viewerId && removePhotos([state.viewerId], '削除しました'));
+  $('track').addEventListener('click', () => setImm(!state.imm));
+  let raf = 0;
+  $('track').addEventListener('scroll', () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      const t = $('track'), i = Math.round(t.scrollLeft / t.clientWidth);
+      if (i !== viewer.idx) showIndex(i);
+    });
+  }, { passive: true });
+  addEventListener('resize', () => { if (state.viewerId) { const t = $('track'); t.scrollLeft = viewer.idx * t.clientWidth; } });
+  addEventListener('keydown', e => {
+    if (e.key === 'Escape') state.viewerId ? closeViewer() : state.albumOpen && closeAlbum();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) Camera.stop();
+    else { purgeExpired(); startCamera(); }
+  });
+}
+
+/* =========================================================
+   BOOT
+   ========================================================= */
+(async function init() {
+  bind();
+  startCamera();
+  navigator.storage?.persist?.().catch(() => {});
+  try {
+    await Store.purge(Date.now());
+    Photos.set(await Store.all());
+  } catch { toast('写真を読み込めませんでした'); }
+  refresh();
+  setInterval(purgeExpired, CONFIG.purgeIntervalMs);
+})();
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_START -->
+<script>
+window.addEventListener("load", function () {
+    if (location.protocol !== "file:" && location.protocol !== "about:" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(function (error) {
+            console.warn("Service Worker registration failed:", error);
+        });
+    }
+});
+</script>
+<!-- APPSTUDIO_PWA_SCRIPT_END -->
+</body>
+</html>
