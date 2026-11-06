@@ -1,4 +1,4 @@
-const CACHE_NAME = "appstudio-pwa-omnivoyager-6fdd894fd69a30c723ba";
+const CACHE_NAME = "appstudio-pwa-omnivoyager-78c75782e098f644cf05";
 const CACHE_PREFIX = "appstudio-pwa-omnivoyager-";
 const PRECACHE_URLS = [
     "./",
