@@ -112,10 +112,30 @@
     }
     html.pwa .view { padding-bottom: calc(var(--tab-height) + var(--pwa-bottom)); }
     html.pwa body.keyboard-open .view { padding-bottom: 8px; }
-    /* ツアー再生中は下部タブを自動で隠し、3D表示を広く使う */
+    /* ツアー再生中はアプリの操作UIを隠し、3D表示領域を最大化する */
     .tabs { transition: transform .3s ease, opacity .3s ease; }
-    body.tour-playing .tabs { transform: translateY(calc(100% + 24px)); opacity: 0; pointer-events: none; }
-    body.tour-playing #view-run { padding-bottom: 0; }
+    body.tour-playing .tabs {
+        transform: translateY(calc(100% + 24px));
+        opacity: 0;
+        pointer-events: none;
+        visibility: hidden;
+    }
+    body.tour-playing #view-run {
+        padding-bottom: 0 !important;
+    }
+    body.tour-playing #view-run .run-controls {
+        display: none;
+    }
+    body.tour-playing #run-frame-wrap {
+        flex: 1;
+        min-height: 0;
+    }
+    body.tour-playing #verify-status,
+    body.tour-playing #guide-toast,
+    body.tour-playing #notification,
+    body.tour-playing #run-menu {
+        display: none !important;
+    }
 
     /* --- Editor --- */
     .toolbar, .file-bar {
@@ -1096,6 +1116,15 @@
     '#s-capText{margin-top:4px;font-size:12px;line-height:1.6;color:#d3dbe6;overflow-y:auto;min-height:0;}',
     '#s-cap.flash #s-capTitle,#s-cap.flash #s-capText{animation:capIn .45s ease both;}',
     '@keyframes capIn{from{opacity:0;transform:translateY(5px);}to{opacity:1;transform:none;}}',
+    'body.tour-cinematic #s-tools,body.tour-cinematic #s-title,body.tour-cinematic #s-pill,body.tour-cinematic #s-labels,body.tour-cinematic #s-info{display:none!important;}',
+    'body.tour-cinematic #s-cap{left:max(8px,env(safe-area-inset-left));right:max(8px,env(safe-area-inset-right));bottom:max(8px,env(safe-area-inset-bottom));width:auto;max-height:38%;padding:12px 14px;background:rgba(12,18,29,.78);border-color:rgba(143,214,255,.25);}',
+    'body.tour-cinematic #s-cap .card-head button,body.tour-cinematic #s-cap .cap-btns{display:none!important;}',
+    'body.tour-cinematic #s-cap .card-head{min-height:18px;}',
+    'body.tour-cinematic #s-capStep{font-size:10px;}',
+    'body.tour-cinematic #s-capTitle{font-size:15px;}',
+    'body.tour-cinematic #s-capText{font-size:12px;line-height:1.65;}',
+    'body.tour-cinematic #s-capBar{transition:width .1s linear;}',
+    'body.tour-cinematic #s-cap{touch-action:pan-y;}',
     '.cap-bar{margin-top:8px;height:3px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden;flex-shrink:0;}',
     '#s-capBar{height:100%;width:0;background:linear-gradient(90deg,#007acc,#7fd0ff);}',
     '.cap-btns{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:6px;margin-top:6px;flex-shrink:0;}',
@@ -2055,8 +2084,64 @@
     postTourUi();
     if (speech.enabled) speak(stepSpeechText(s)); else cancelSpeech();
   }
-  // ツアー再生中かどうかを親画面へ知らせる（親画面が下部タブの表示・非表示を切り替える）。
-  function postTourUi() { post('tour_ui', { active: !!(tour.active && !tour.done) }); }
+  // ツアー中の表示状態をiframe内と親画面で同期する。
+  // ツアー完了時・終了時には通常の操作UIを復元する。
+  function postTourUi() {
+    var cinematic = !!(tour.active && !tour.done);
+    document.body.classList.toggle('tour-cinematic', cinematic);
+    post('tour_ui', { active: cinematic });
+  }
+
+  // 操作ボタンを隠したツアー中も終了できるようにする。
+  // 解説パネルのダブルタップ、またはEscapeキーで終了する。
+  function setupTourExitGesture() {
+    if (!els.cap) return;
+    var lastTap = 0;
+    var lastX = 0;
+    var lastY = 0;
+    var pointerStart = null;
+
+    els.cap.addEventListener('pointerdown', function (e) {
+      if (!tour.active || tour.done || !e.isPrimary) return;
+      if (e.target.closest && e.target.closest('button')) return;
+      pointerStart = {
+        x: e.clientX,
+        y: e.clientY,
+        time: performance.now()
+      };
+    });
+
+    els.cap.addEventListener('pointercancel', function () {
+      pointerStart = null;
+    });
+
+    els.cap.addEventListener('pointerup', function (e) {
+      if (!tour.active || tour.done || !pointerStart) return;
+      var start = pointerStart;
+      pointerStart = null;
+      var now = performance.now();
+      if (now - start.time > 350) return;
+      if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 12) return;
+
+      if (now - lastTap < 350 &&
+          Math.hypot(e.clientX - lastX, e.clientY - lastY) < 50) {
+        lastTap = 0;
+        stopTour();
+        return;
+      }
+
+      lastTap = now;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && tour.active) {
+        e.preventDefault();
+        stopTour();
+      }
+    });
+  }
   function finishTour() {
     tour.done = true; tour.playing = false;
     postTourUi();
@@ -2088,7 +2173,8 @@
       els.capBar.style.width = '100%';
     } else {
       var s = tour.steps[tour.index] || {};
-      els.capStep.textContent = (kidsMode ? '' : 'STEP ') + (tour.index + 1) + ' / ' + tour.steps.length;
+      els.capStep.textContent = (kidsMode ? '' : 'STEP ') + (tour.index + 1) + ' / ' + tour.steps.length
+        + (tour.active && !tour.done ? (kidsMode ? '  ・2かい タップで おわる' : '  ・説明欄を2回タップで終了') : '');
       els.capTitle.textContent = String(s.title || '');
       els.capText.textContent = String(s.text || '');
       els.capText.scrollTop = 0;
@@ -2495,6 +2581,7 @@
     initBgm();
     initKidsAndSpeech();
     setupTools();
+    setupTourExitGesture();
     resize();
     window.addEventListener('resize', resize);
     renderCaption(false);
