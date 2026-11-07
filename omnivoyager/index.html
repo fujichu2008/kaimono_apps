@@ -2464,9 +2464,8 @@
     if (bgm.gain) {
       var t = actx.currentTime;
       try {
-        bgm.gain.gain.cancelScheduledValues(t);
-        bgm.gain.gain.setValueAtTime(bgm.gain.gain.value, t);
-        bgm.gain.gain.linearRampToValueAtTime(on ? BGM_DUCK_LEVEL : 1, t + (on ? 0.25 : 0.6));
+        // 現在値の読み取りに頼らず、なめらかに目標値へ近づける（段差による「ぷつ」を防ぐ）。
+        bgm.gain.gain.setTargetAtTime(on ? BGM_DUCK_LEVEL : 1, t, on ? 0.08 : 0.2);
       } catch (e) {
         bgm.gain.gain.value = on ? BGM_DUCK_LEVEL : 1;
       }
@@ -2494,7 +2493,20 @@
       var actx = new AC();
       var dest = actx.destination;
       audioCore.master = actx.createGain();
-      audioCore.master.connect(dest);
+      // 複数の音が重なって音割れ（ぷつぷつ・ザラつき）しないよう、出口にリミッターを置く。
+      try {
+        var limiter = actx.createDynamicsCompressor();
+        limiter.threshold.value = -6;
+        limiter.knee.value = 6;
+        limiter.ratio.value = 12;
+        limiter.attack.value = 0.003;
+        limiter.release.value = 0.25;
+        audioCore.master.connect(limiter);
+        limiter.connect(dest);
+      } catch (e) {
+        audioCore.master.connect(dest);
+      }
+      audioCore.master.gain.value = 0.85;
       audioCore.bgmBus = actx.createGain();
       audioCore.bgmBus.connect(audioCore.master);
       audioCore.sfxBus = actx.createGain();
@@ -2588,10 +2600,11 @@
     if (sfx.noise[type]) return sfx.noise[type];
     var actx = audioCore.ctx;
     var len = Math.floor(actx.sampleRate * 2);
+    var fade = Math.floor(actx.sampleRate * 0.12);
     var buf = actx.createBuffer(1, len, actx.sampleRate);
-    var d = buf.getChannelData(0);
+    var d = new Float32Array(len + fade);
     var b0 = 0, b1 = 0, b2 = 0, last = 0;
-    for (var i = 0; i < len; i++) {
+    for (var i = 0; i < len + fade; i++) {
       var w = Math.random() * 2 - 1;
       if (type === 'pink') {
         b0 = 0.99765 * b0 + w * 0.0990460;
@@ -2604,6 +2617,19 @@
       } else {
         d[i] = w;
       }
+    }
+    // ループのつなぎ目で波形が飛ぶと「ぷつ」と鳴るため、末尾の続きを先頭へクロスフェードして継ぎ目をなくす。
+    // あわせて直流成分（偏り）を取り除く。
+    var out = buf.getChannelData(0), mean = 0, j;
+    for (j = 0; j < len + fade; j++) mean += d[j];
+    mean /= (len + fade);
+    for (j = 0; j < len; j++) {
+      var v = d[j] - mean;
+      if (j < fade) {
+        var k = j / fade;
+        v = v * k + (d[len + j] - mean) * (1 - k);
+      }
+      out[j] = v;
     }
     sfx.noise[type] = buf;
     return buf;
@@ -2653,10 +2679,10 @@
       g.connect(out);
       var level = clamp(L.gain == null ? 0.5 : Number(L.gain) || 0, 0, 1);
       var env = L.envelope || {};
-      var a = Math.max(0.001, Number(env.attack) || (oneShot ? 0.004 : 0.08));
+      var a = Math.max(oneShot ? 0.006 : 0.03, Number(env.attack) || (oneShot ? 0.006 : 0.08));
       var d = Math.max(0, env.decay == null ? (oneShot ? dur - a : 0) : Number(env.decay) || 0);
       var s = env.sustain == null ? (oneShot ? 0 : 1) : clamp(Number(env.sustain) || 0, 0, 1);
-      var r = Math.max(0.005, Number(env.release) || 0.04);
+      var r = Math.max(0.03, Number(env.release) || 0.05);
       g.gain.setValueAtTime(0.0001, t0);
       g.gain.linearRampToValueAtTime(level, t0 + a);
       g.gain.linearRampToValueAtTime(Math.max(0.0001, level * s), t0 + a + d);
@@ -2718,11 +2744,17 @@
     if (sfx.playTimes.length > sfx.peakRate) sfx.peakRate = sfx.playTimes.length;
     var actx = audioCore.ctx;
     if (!actx || !sfx.unlocked || !sfx.enabled || !state.playing || document.hidden) return;
-    if (nowS - (sfx.lastPlay[name] || -1) < SFX_MIN_INTERVAL) return;
+    // 同じ音は、その音の長さの半分（最大0.25秒）までは鳴らし直さない。短い音の連打で「ぷつぷつ」と鳴り続けるのを防ぐ。
+    var minGap = Math.max(SFX_MIN_INTERVAL, Math.min(0.25, recipe.duration * 0.5));
+    if (nowS - (sfx.lastPlay[name] || -1) < minGap) return;
+    // 全体でも1秒に20回までに抑える。
+    sfx.recentStarts = (sfx.recentStarts || []).filter(function (time) { return nowS - time < 1; });
+    if (sfx.recentStarts.length >= 20) return;
+    sfx.recentStarts.push(nowS);
     if (sfx.voices >= SFX_MAX_VOICES) return;
     sfx.lastPlay[name] = nowS;
     var pitch = (Number(opts.pitch) > 0 ? Number(opts.pitch) : 1) * speedPitch();
-    var voice = buildVoice(recipe, { volume: opts.volume == null ? 0.5 : opts.volume, pitch: pitch, pan: opts.at ? panOf(opts.at) : null }, true, actx.currentTime + 0.005, audioCore.sfxBus);
+    var voice = buildVoice(recipe, { volume: opts.volume == null ? 0.5 : opts.volume, pitch: pitch, pan: opts.at ? panOf(opts.at) : null }, true, actx.currentTime + 0.03, audioCore.sfxBus);
     sfx.voices++;
     var released = false;
     var release = function () {
@@ -2731,7 +2763,11 @@
       sfx.voices = Math.max(0, sfx.voices - 1);
       try { voice.out.disconnect(); } catch (e) {}
     };
-    if (voice.sources[0]) voice.sources[0].onended = release;
+    // 全ての層が鳴り終わってから片付ける（途中で出口を外すと音が切れて「ぷつ」となる）。
+    var pending = voice.sources.length;
+    voice.sources.forEach(function (s) {
+      s.onended = function () { if (--pending <= 0) release(); };
+    });
     setTimeout(release, (voice.length + 0.5) * 1000);
   }
   function scheduleLoopPattern(h) {
@@ -2764,7 +2800,7 @@
         h.timer = setInterval(function () { scheduleLoopPattern(h); }, 100);
         scheduleLoopPattern(h);
       } else {
-        h.voice = buildVoice(h.recipe, { volume: 1, pitch: h.pitch * speedPitch() }, false, actx.currentTime + 0.01, h.gain);
+        h.voice = buildVoice(h.recipe, { volume: 1, pitch: h.pitch * speedPitch() }, false, actx.currentTime + 0.03, h.gain);
       }
     } catch (e) {
       h.stopped = true;
@@ -2859,12 +2895,12 @@
   }
   // 読み上げ中は効果音を0.6倍に下げる（BGMのダッキングから呼ばれる）。
   function duckSfx(on) {
+    if (sfx.duckState === !!on) return;
+    sfx.duckState = !!on;
     if (!audioCore.sfxBus || !audioCore.ctx) return;
     var t = audioCore.ctx.currentTime, p = audioCore.sfxBus.gain;
     try {
-      p.cancelScheduledValues(t);
-      p.setValueAtTime(p.value, t);
-      p.linearRampToValueAtTime(on ? 0.6 : 1, t + (on ? 0.25 : 0.6));
+      p.setTargetAtTime(on ? 0.6 : 1, t, on ? 0.08 : 0.2);
     } catch (e) {
       p.value = on ? 0.6 : 1;
     }
