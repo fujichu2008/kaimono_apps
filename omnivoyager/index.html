@@ -468,6 +468,10 @@
     }
     .btn-load { background: var(--accent-color); color: #fff; }
     .btn-del { background: var(--danger-color); color: #fff; font-weight: 700; }
+    .lib-check-wrap { display: flex; align-items: center; justify-content: center; flex: 0 0 44px; width: 44px; height: 44px; cursor: pointer; touch-action: manipulation; }
+    .lib-check { width: 24px; height: 24px; margin: 0; accent-color: var(--danger-color); cursor: pointer; }
+    .lib-item.selected { border-color: var(--danger-color); background: rgba(244,67,54,0.08); }
+    #lib-delete-selected:disabled { opacity: .4; cursor: default; }
     .btn-action { background: #333; border: 1px solid #555 !important; color: #ddd; }
     .lib-empty { margin-top: 50px; color: #777; text-align: center; line-height: 1.8; }
     .lib-backup-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
@@ -3706,6 +3710,7 @@ defineModel({
   summary: "羽根車の回転で水に勢いを与え、渦巻状のケーシングで勢いを圧力に変えて送り出すポンプです。",
   camera: { position: [2.75, 1.5, 2.5], target: [0, 0, -0.8] },
   section: { normal: [0, 0, -1], constant: -0.149 },
+  sounds: true,
   exposure: 1.0,
 
   build(ctx) {
@@ -3953,6 +3958,14 @@ defineModel({
     ctx.part("gaugeS", { object: gS.group, name: "連成計（吸込み圧）", desc: "大気圧より低い負圧も測れる計器。吸込み側の圧力を監視します。" });
     ctx.part("gaugeD", { object: gD.group, name: "圧力計（吐出し圧）", desc: "吐出し側の圧力を示し、ポンプが水に与えたエネルギーの目安になります。" });
     ctx.part("base", { object: base, name: "共通ベース", desc: "ポンプと電動機を同じ台に固定し、軸心のずれを防ぎます。", labelAt: [0.5, -0.92, 0.35] });
+
+    // ===== 効果音（合成。最初に画面へ触れたあとで鳴り始める） =====
+    d.sfx = {
+      motor: ctx.sound.loop("motor", { volume: 0.2 }),
+      hum: ctx.sound.loop("hum", { volume: 0.1 }),
+      water: ctx.sound.loop("water", { volume: 0.16 }),
+      waterBoost: 1
+    };
   },
 
   update(ctx, time, dt) {
@@ -3970,6 +3983,22 @@ defineModel({
     const jitter = Math.sin(time * 41) * 0.008 + Math.sin(time * 27) * 0.006;
     d.gauges.s.rotation.z = 2.36 - 4.72 * d.gauges.vs + jitter;
     d.gauges.d.rotation.z = 2.36 - 4.72 * d.gauges.vd + jitter;
+    // 吐出し圧が高いほど水音を強くする（細かい変化で音量を頻繁に変えないよう丸める）。
+    if (d.sfx) d.sfx.water.setVolume(Math.round((0.1 + 0.1 * d.gauges.vd) * d.sfx.waterBoost * 50) / 50);
+  },
+
+  onStep(ctx, step, index) {
+    const s = ctx.data.sfx;
+    if (!s) return;
+    const id = step ? step.id : "";
+    // 注目している部分の音を強める（水の流れの段階は水音、電動機の段階は回転音とうなり）。
+    s.waterBoost = ["suction", "impeller", "volute", "discharge"].includes(id) ? 1.8 : 1;
+    s.motor.setVolume(id === "motor" ? 0.34 : 0.2);
+    s.hum.setVolume(id === "motor" ? 0.2 : 0.1);
+    if (!step) return;
+    if (id === "summary") ctx.sound.play("ding", { volume: 0.3 });
+    else if (id === "seal") ctx.sound.play("hiss", { volume: 0.25 });
+    else ctx.sound.play("whoosh", { volume: 0.22 });
   },
 
   tour: [
@@ -5887,6 +5916,63 @@ function instructionPreview(record) {
     }).join('\n');
 }
 
+// ライブラリの削除は「チェックして、上部の削除ボタンで実行」に統一する（個別の削除ボタンは置かない）。
+const librarySelection = new Set();
+let libraryViewKey = '';
+
+function setLibraryDeleteButtonState(button) {
+    const count = librarySelection.size;
+    button.disabled = count === 0;
+    button.textContent = count ? `🗑 選択を削除（${count}）` : '🗑 削除';
+}
+
+function updateLibraryDeleteButton() {
+    const button = $('lib-delete-selected');
+    if (button) setLibraryDeleteButtonState(button);
+}
+
+function createLibraryDeleteButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = 'lib-delete-selected';
+    button.className = 'tool-btn danger';
+    button.onclick = () => deleteSelectedLibraryItems();
+    setLibraryDeleteButtonState(button);
+    return button;
+}
+
+function createLibraryCheck(ids, card, label) {
+    const wrap = document.createElement('label');
+    wrap.className = 'lib-check-wrap';
+    wrap.setAttribute('aria-label', label);
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'lib-check';
+    input.checked = ids.length > 0 && ids.every(id => librarySelection.has(id));
+    card.classList.toggle('selected', input.checked);
+    input.onchange = () => {
+        ids.forEach(id => { if (input.checked) librarySelection.add(id); else librarySelection.delete(id); });
+        card.classList.toggle('selected', input.checked);
+        updateLibraryDeleteButton();
+    };
+    wrap.appendChild(input);
+    return wrap;
+}
+
+async function deleteSelectedLibraryItems() {
+    const ids = Array.from(librarySelection);
+    if (!ids.length) { showToast('削除するモデルをチェックしてください'); return; }
+    if (!confirm(`チェックした${ids.length}版をライブラリから削除しますか？\nこの操作は元に戻せません。\n編集中のコードは変更されません。`)) return;
+    try {
+        await DB.run('readwrite', store => ids.forEach(id => store.delete(id)));
+        librarySelection.clear();
+        showToast(`${ids.length}版を削除しました`);
+    } catch (error) {
+        showToast('削除に失敗しました');
+    }
+    renderLibrary(libraryViewKey.startsWith('p:') ? libraryViewKey.slice(2) : null);
+}
+
 let libraryRenderId = 0;
 async function renderLibrary(selectedProject = null) {
     const requestId = ++libraryRenderId;
@@ -5934,6 +6020,10 @@ async function renderLibrary(selectedProject = null) {
         projects.get(key).push(record);
     });
     if (selectedProject && !projects.has(selectedProject)) selectedProject = null;
+    const viewKey = selectedProject === null ? '' : 'p:' + selectedProject;
+    if (viewKey !== libraryViewKey) { librarySelection.clear(); libraryViewKey = viewKey; }
+    const liveIds = new Set(records.map(record => record.id));
+    Array.from(librarySelection).forEach(id => { if (!liveIds.has(id)) librarySelection.delete(id); });
 
     if (!selectedProject) {
         const head = document.createElement('div');
@@ -5942,6 +6032,7 @@ async function renderLibrary(selectedProject = null) {
         title.className = 'lib-heading';
         title.textContent = `📚 モデル ${projects.size}件`;
         head.appendChild(title);
+        head.appendChild(createLibraryDeleteButton());
         container.appendChild(head);
         projects.forEach((versions, projectName) => container.appendChild(createProjectCard(projectName, versions)));
         return;
@@ -5956,6 +6047,7 @@ async function renderLibrary(selectedProject = null) {
     back.textContent = '← モデル一覧に戻る';
     back.onclick = () => renderLibrary();
     head.appendChild(back);
+    head.appendChild(createLibraryDeleteButton());
     container.appendChild(head);
     const heading = document.createElement('div');
     heading.className = 'lib-heading';
@@ -5983,12 +6075,6 @@ function createProjectCard(projectName, versions) {
     load.className = 'btn-load';
     load.textContent = '最新を開く';
     load.onclick = () => loadModel(latest.id);
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'btn-del';
-    del.textContent = '🗑';
-    del.setAttribute('aria-label', `${projectName}を削除`);
-    del.onclick = () => deleteProject(projectName, versions.map(v => v.id));
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'btn-action';
@@ -5996,8 +6082,9 @@ function createProjectCard(projectName, versions) {
     rename.setAttribute('aria-label', `${projectName}の名前を変更`);
     rename.onclick = () => renameProject(projectName, versions.map(v => v.id));
     actions.prepend(rename);
-    actions.append(load, del);
+    actions.append(load);
     header.append(title, actions);
+    header.prepend(createLibraryCheck(versions.map(v => v.id), card, `${projectName}を選択`));
     const meta = document.createElement('div');
     meta.className = 'lib-meta';
     meta.textContent = `最新保存: ${formatDate(latest.savedAt)}${latest.title ? ` ｜ ${latest.title}` : ''}`;
@@ -6029,18 +6116,9 @@ function createVersionCard(record, projectName) {
     load.className = 'btn-load';
     load.textContent = '読込';
     load.onclick = () => loadModel(record.id);
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'btn-del';
-    del.textContent = '🗑';
-    del.setAttribute('aria-label', 'この版を削除');
-    del.onclick = async () => {
-        if (!confirm('この版をライブラリから削除しますか？\n編集中のコードは変更されません。')) return;
-        try { await DB.del(record.id); showToast('削除しました'); } catch (error) { showToast('削除に失敗しました'); }
-        renderLibrary(projectName);
-    };
-    actions.append(load, del);
+    actions.append(load);
     header.append(title, actions);
+    header.prepend(createLibraryCheck([record.id], card, 'この版を選択'));
     const meta = document.createElement('div');
     meta.className = 'lib-meta';
     meta.textContent = `${record.name} ｜ ${String(record.code || '').length.toLocaleString()}文字${normalizeBgm(record.bgm) ? ' ｜ 🎵 BGMあり' : ''}`;
