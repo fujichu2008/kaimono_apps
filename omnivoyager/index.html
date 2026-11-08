@@ -1104,7 +1104,10 @@
     try { origConsoleError.apply(console, arguments); } catch (e) {}
     var parts = [];
     for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
-    post('sim_error', { message: ('console.error: ' + parts.join(' ')).slice(0, 1800) });
+    var text = ('console.error: ' + parts.join(' ')).slice(0, 1800);
+    // BGMの準備中に出る音源の読み込み失敗は、音源の切り替えで回復できるため報告しない（最終的に失敗したときだけ報告する）。
+    if (bgm && bgm.loading && /Didn't load note|Can't load sound|status=40\d/i.test(text)) return;
+    post('sim_error', { message: text });
   };
 
   // ----- モデル定義の受け口 -----
@@ -2361,9 +2364,47 @@
   // ----- BGM（abcjs）: 音声処理はこの区画に集約し、モデルの動作・ツアーとは結合しない -----
   var bgm = { abc: '', title: '', playing: false, loading: false, audioContext: null, synth: null, loopTimer: null, resumeOnShow: false, session: 0 };
   function hasBgm() { return !!bgm.abc; }
+  // 音源（サウンドフォント）の取得先の候補。標準の取得先には一部の楽器で音が欠けているため、失敗したら順に切り替える。
+  // 空文字は abcjs の標準の取得先を使う。
+  var BGM_SOUNDFONTS = [
+    '',
+    'https://paulrosen.github.io/midi-js-soundfonts/abcjs/',
+    'https://paulrosen.github.io/midi-js-soundfonts/MusyngKite/'
+  ];
+  var BGM_MAX_REMAPS = 8;
+  var BGM_PROGRAM_RE = /^([ \t]*%%MIDI[ \t]+program[ \t]+(?:\d+[ \t]+)?)(\d+)/gm;
+  // URLエンコードされた楽曲（%0A で改行を表したもの）を元の楽譜に戻す。
+  function decodeBgmAbc(text) {
+    var s = String(text || '');
+    if (s.indexOf('\n') < 0 && /%0A|%0D/i.test(s)) {
+      try { s = decodeURIComponent(s); } catch (e) {}
+    }
+    return s.replace(/\r\n?/g, '\n').replace(/^(\s*)x:/, '$1X:');
+  }
+  // 読み込みに失敗した楽器の番号を、エラー内の音源URLから調べる（分からなければ -1）。
+  function bgmFailedProgram(e) {
+    var m = String((e && e.message) || e || '').match(/\/([A-Za-z0-9_]+)-(?:mp3|ogg)\//);
+    var names = window.ABCJS && window.ABCJS.synth && window.ABCJS.synth.instrumentIndexToName;
+    if (!m || !Array.isArray(names)) return -1;
+    return names.indexOf(m[1]);
+  }
+  // 読めない楽器を、同じ系統の代表楽器（8番ごとの先頭。先頭自体が読めなければピアノ）へ置き換える。
+  // 再生用の楽譜だけを書き換え、保存された楽曲データは変えない。置き換える対象がなければ空文字を返す。
+  function remapBgmProgram(abc, program) {
+    var changed = false;
+    var out = abc.replace(BGM_PROGRAM_RE, function (all, head, num) {
+      var n = Number(num);
+      if (program >= 0 && n !== program) return all;
+      var safe = n % 8 ? n - n % 8 : 0;
+      if (safe === n) return all;
+      changed = true;
+      return head + safe;
+    });
+    return changed ? out : '';
+  }
   function initBgm() {
     var data = window.__SIM_BGM__;
-    bgm.abc = data && typeof data.abc === 'string' ? data.abc : '';
+    bgm.abc = data && typeof data.abc === 'string' ? decodeBgmAbc(data.abc) : '';
     bgm.title = data && data.title ? String(data.title) : '';
     if (!hasBgm()) return;
     // 画面が隠れたら止め、戻ったら再開する（再開できない環境では何もしない）。
@@ -2411,14 +2452,51 @@
     catch (e) { fail('BGMの楽譜を読み取れません: ' + errText(e)); return; }
     if (!tune) { fail('BGMの楽譜を読み取れません。'); return; }
     var session = ++bgm.session;
-    var synth = new window.ABCJS.synth.CreateSynth();
+    var abcText = bgm.abc;
+    var fontIndex = 0;
+    var remaps = 0;
     bgm.loading = true;
-    resumed.then(function () {
-      return synth.init({ audioContext: actx, visualObj: tune });
-    }).then(function () {
-      return synth.prime();
-    }).then(function (result) {
+    // 音源の読み込みに失敗したら、取得先の切り替え → 楽器の置き換えの順に再試行する。
+    var attempt = function () {
+      if (session !== bgm.session) return Promise.resolve(null);
+      var tuneTry;
+      try { tuneTry = window.ABCJS.renderAbc('*', abcText)[0]; }
+      catch (e) { return Promise.reject(e); }
+      if (!tuneTry) return Promise.reject(new Error('BGMの楽譜を読み取れません。'));
+      var trySynth = new window.ABCJS.synth.CreateSynth();
+      var initOpts = { audioContext: actx, visualObj: tuneTry };
+      if (BGM_SOUNDFONTS[fontIndex]) initOpts.options = { soundFontUrl: BGM_SOUNDFONTS[fontIndex] };
+      return trySynth.init(initOpts).then(function () {
+        return trySynth.prime();
+      }).then(function (primed) {
+        return { synth: trySynth, result: primed };
+      }, function (e) {
+        try { trySynth.stop(); } catch (x) {}
+        if (session !== bgm.session) return null;
+        if (fontIndex < BGM_SOUNDFONTS.length - 1) {
+          fontIndex++;
+          return attempt();
+        }
+        if (remaps < BGM_MAX_REMAPS) {
+          var next = remapBgmProgram(abcText, bgmFailedProgram(e));
+          if (next) {
+            remaps++;
+            abcText = next;
+            fontIndex = 0;
+            return attempt();
+          }
+        }
+        throw e;
+      });
+    };
+    resumed.then(attempt).then(function (res) {
+      if (!res) return;
+      var synth = res.synth;
+      var result = res.result;
       if (session !== bgm.session) { try { synth.stop(); } catch (e) {} return; }
+      if (fontIndex || remaps) {
+        console.warn('BGM: 一部の楽器の音源を読み込めなかったため、' + (remaps ? '近い楽器に置き換えて' : '別の音源で') + '再生します。');
+      }
       bgm.synth = synth;
       bgm.loading = false;
       bgm.playing = true;
@@ -6231,8 +6309,17 @@ function normalizeBgm(value) {
 }
 
 // ABC記譜法の本文と曲名を取り出す。SonicForgeのJSON出力・コードブロック付きの回答にも対応する。
+// URLエンコードされた楽曲（%0A などで改行を表したもの）を元の文字列に戻す。
+function decodeBgmText(text) {
+    let value = String(text || '').trim();
+    if (!value.includes('\n') && /%0A|%0D/i.test(value)) {
+        try { value = decodeURIComponent(value); } catch (error) {}
+    }
+    return value.replace(/\r\n?/g, '\n');
+}
+
 function parseBgmInput(text) {
-    const source = String(text || '').replace(/\r\n?/g, '\n').trim();
+    const source = decodeBgmText(text).trim();
     let title = '';
     let abc = '';
     try {
@@ -6247,12 +6334,12 @@ function parseBgmInput(text) {
     } catch (error) {}
     if (!abc) {
         const fenced = source.match(/\x60{3}[^\n]*\n([\s\S]*?)\x60{3}/);
-        abc = fenced && /^\s*X:/m.test(fenced[1]) ? fenced[1] : source;
+        abc = fenced && /^\s*X:/im.test(fenced[1]) ? fenced[1] : source;
     }
-    abc = String(abc).replace(/\r\n?/g, '\n');
-    const start = abc.search(/^X:/m);
+    abc = decodeBgmText(abc);
+    const start = abc.search(/^X:/im);
     if (start > 0) abc = abc.slice(start);
-    abc = abc.trim();
+    abc = abc.trim().replace(/^x:/, 'X:');
     if (!title) {
         const match = abc.match(/^T:\s*(.+)$/m);
         title = match ? match[1].trim() : '';
