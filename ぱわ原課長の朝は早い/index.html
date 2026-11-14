@@ -8587,25 +8587,232 @@ const UI = {
   init() {
     ['hpFill', 'rageFill', 'battFill', 'clockTxt', 'routeDot', 'bossBar', 'bossFill', 'bossName', 'stamp', 'flash', 'aiTint', 'btnUse', 'btnAI', 'btnShout', 'btnThrow', 'barrierHint', 'barrierTitle', 'barrierGuide', 'barrierRage', 'barrierHPFill', 'barrierHPText', 'ovBig', 'ovSub', 'ovBtn', 'ovBtn2', 'best'].forEach(k => { this.el[k] = $(k); });
     $('btnStart').addEventListener('click', () => Game.begin());
-    // 試験用・後で削除：ステージ2を読み込んで開始する
-    $('btnStage2Test').addEventListener('click', () => { Game.loadStage(1); setPhase('play'); fireEvent('stageStart'); });
-    // 試験用・後で削除：ステージ3をゴルフクラブ所持で開始する
-    $('btnStage3Test').addEventListener('click', () => {
-      // iPhoneのユーザー操作中に共用AudioContextを有効化。
+
+    // 旧試験用ボタンを撤去。
+    // ステージ直接開始の操作は、以下の共通メニューへ統合する。
+    for (const id of [
+      'btnStage2Test',
+      'btnStage3Test',
+      'btnStage4Test'
+    ]) {
+      const oldButton = $(id);
+      if (oldButton) oldButton.remove();
+    }
+
+    // 一時的な全ステージ解放設定。
+    // 正式運用時はfalseにすることで、
+    // セーブデータのクリア履歴に基づく選択制限が有効になる。
+    const TEMP_UNLOCK_ALL_STAGES = true;
+
+    // タイトル画面専用のステージ選択UI。
+    // ゲームの進行状態や保存データは新設しない。
+    const stageSelector = document.createElement('div');
+    stageSelector.id = 'stageSelector';
+    stageSelector.innerHTML = `
+      <button id="btnStageSelect"
+              type="button"
+              aria-expanded="false"
+              aria-controls="stageSelectMenu">
+        途中ステージから
+      </button>
+      <div id="stageSelectMenu"
+           class="hidden"
+           aria-label="開始ステージを選択"></div>
+    `;
+
+    document.body.appendChild(stageSelector);
+
+    const stageSelectButton =
+      stageSelector.querySelector('#btnStageSelect');
+
+    const stageSelectMenu =
+      stageSelector.querySelector('#stageSelectMenu');
+
+    // 既存CSSへの影響を防ぐため、
+    // ステージ選択UIの装飾だけを独立して定義する。
+    const stageSelectorStyle = document.createElement('style');
+    stageSelectorStyle.textContent = `
+      #stageSelector {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: max(12px, env(safe-area-inset-left));
+        z-index: 200;
+        display: none;
+        width: min(260px, calc(100vw - 24px));
+        font-family: inherit;
+      }
+
+      body[data-phase="title"] #stageSelector {
+        display: block;
+      }
+
+      #btnStageSelect {
+        min-height: 44px;
+        padding: 10px 15px;
+        border: 1px solid rgba(220, 230, 240, .45);
+        border-radius: 10px;
+        color: #f1f5fa;
+        background: rgba(15, 24, 37, .88);
+        font: inherit;
+        font-size: 13px;
+        font-weight: bold;
+        cursor: pointer;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      #stageSelectMenu {
+        margin-top: 8px;
+        padding: 8px;
+        max-height: min(60vh, 360px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        border: 1px solid rgba(220, 230, 240, .25);
+        border-radius: 12px;
+        background: rgba(12, 19, 31, .96);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
+      }
+
+      #stageSelectMenu.hidden {
+        display: none;
+      }
+
+      #stageSelectMenu button {
+        display: block;
+        width: 100%;
+        min-height: 48px;
+        margin: 0;
+        padding: 10px 12px;
+        border: 0;
+        border-bottom: 1px solid rgba(220, 230, 240, .12);
+        border-radius: 5px;
+        color: #f1f5fa;
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      #stageSelectMenu button:last-child {
+        border-bottom: 0;
+      }
+
+      #stageSelectMenu button:active {
+        background: rgba(100, 160, 210, .25);
+      }
+
+      #stageSelectMenu button:disabled {
+        color: rgba(210, 220, 230, .4);
+        cursor: default;
+      }
+
+      @media (max-height: 500px) and (orientation: landscape) {
+        #stageSelectMenu {
+          max-height: 55vh;
+        }
+      }
+    `;
+
+    document.head.appendChild(stageSelectorStyle);
+
+    const closeStageSelectMenu = () => {
+      stageSelectMenu.classList.add('hidden');
+      stageSelectButton.setAttribute('aria-expanded', 'false');
+    };
+
+    // 開始処理を一元化し、旧試験用ボタンと同じ
+    // 初期武器・ステージ開始イベントを維持する。
+    const startSelectedStage = index => {
+      if (G.phase !== 'title') return;
+
+      const stage = STAGES[index];
+      if (!stage) return;
+
+      const cleared =
+        Save.data && Array.isArray(Save.data.cleared)
+          ? Save.data.cleared
+          : [];
+
+      const unlocked =
+        TEMP_UNLOCK_ALL_STAGES ||
+        index === 0 ||
+        cleared.includes(stage.id);
+
+      if (!unlocked) return;
+
+      closeStageSelectMenu();
+
+      // iPhoneのユーザー操作中に共用AudioContextを有効化する。
       Stage1BGM_0430.unlockAudio();
-      Game.loadStage(2);
-      Player.setWeapon('golf');
+
+      Game.loadStage(index);
+
+      if (index === 2) {
+        Player.setWeapon('golf');
+      } else if (index === 3) {
+        Player.setWeapon('hammer');
+      }
+
       setPhase('play');
       fireEvent('stageStart');
-    });
-    // 試験用・後で削除：ステージ4を決裁鎚所持で開始する
-    $('btnStage4Test').addEventListener('click', () => {
-      // iPhoneのユーザー操作中に共用AudioContextを有効化。
-      Stage1BGM_0430.unlockAudio();
-      Game.loadStage(3);
-      Player.setWeapon('hammer');
-      setPhase('play');
-      fireEvent('stageStart');
+
+      // ステージ1を直接選んだ場合も、
+      // 通常開始と同様に世界観の導入台詞を表示する。
+      if (stage.id === 1) {
+        Pawahara.request('blackoutIntro', 3);
+      }
+    };
+
+    // メニューを開くたびに最新のクリア履歴を参照。
+    // セーブデータの形式や更新処理は変更しない。
+    const buildStageSelectMenu = () => {
+      stageSelectMenu.replaceChildren();
+
+      const cleared =
+        Save.data && Array.isArray(Save.data.cleared)
+          ? Save.data.cleared
+          : [];
+
+      STAGES.forEach((stage, index) => {
+        const unlocked =
+          TEMP_UNLOCK_ALL_STAGES ||
+          index === 0 ||
+          cleared.includes(stage.id);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+
+        const stageName =
+          stage.title || stage.name || '';
+
+        button.textContent =
+          'ステージ' + stage.id +
+          (stageName ? '　' + stageName : '') +
+          (unlocked ? '' : '　🔒');
+
+        button.disabled = !unlocked;
+
+        button.addEventListener('click', () => {
+          startSelectedStage(index);
+        });
+
+        stageSelectMenu.appendChild(button);
+      });
+    };
+
+    stageSelectButton.addEventListener('click', () => {
+      if (G.phase !== 'title') return;
+
+      if (!stageSelectMenu.classList.contains('hidden')) {
+        closeStageSelectMenu();
+        return;
+      }
+
+      buildStageSelectMenu();
+      stageSelectMenu.classList.remove('hidden');
+      stageSelectButton.setAttribute('aria-expanded', 'true');
     });
     // エンディング：タップで会話を送る／最後にタイトルへ
     $('ending').addEventListener('pointerdown', () => Ending.tap());
@@ -9044,9 +9251,25 @@ const STAGE_CHATTER_EXTRA = {
   }
 };
 
+// 課長の仕事観：DXには懐疑的だが、相見積もりと値引き交渉には異様に厳格。
+// 通常のぼやき候補として全ステージに追加する。
+// 台詞の抽選間隔や既存データは変更しない。
+const PAWAHARA_WORKSTYLE_LINES = [
+  'DXだと？ まず紙の稟議書をちゃんと回せ！',
+  '何でもデジタル化すればいいってもんじゃない。判子の重みが違う！',
+  'AIが見積もりを比較する？ 俺の長年の勘をなめるなよ。',
+  '電子承認は信用ならん。やっぱり赤い判子が一番だ。',
+  '相見積もりは最低3社！ 世界が滅んでも、そこは譲れん。',
+  '2社見積もり？ 甘い！ 3社目に本当の相場が隠れてるんだ！',
+  '値引き交渉は最低3回！ 1回目で決める奴はまだ青い！',
+  '3回値切ってからが本番だ。……相手が電話に出ればな。',
+  '見積もりが安いだけじゃ駄目だ！ 3回値切ったという実績が大事なんだ！',
+  '業務改革だと？ まず会議で説明しろ。資料は紙で30部な。'
+];
+
 // 発言候補をステージ別に拡張。
-// 元の配列は変更せず、ステージ1では元データをそのまま返す。
-// ステージ2以降では、既存の発言キーに応じて候補を追加する。
+// 元の配列は変更せず、全ステージの通常ぼやきに仕事観を追加する。
+// ステージ2以降では、従来どおりステージ固有の候補も追加する。
 if (LINES.pawahara && typeof LINES.pawahara === 'object') {
   const originalPawaharaLines = LINES.pawahara;
 
@@ -9057,21 +9280,38 @@ if (LINES.pawahara && typeof LINES.pawahara === 'object') {
       if (!Array.isArray(original)) return original;
 
       const stageId = G.stage ? G.stage.id : 1;
-      if (stageId < 2) return original;
-
       const extra = STAGE_CHATTER_EXTRA[stageId];
-      if (!extra) return original;
 
-      const specific = extra.events[key];
+      // イベント専用台詞には仕事観の台詞を混ぜない。
+      // 既存イベントの優先順位と抽選候補を維持する。
+      if (extra) {
+        const specific = extra.events[key];
 
-      if (Array.isArray(specific) && specific.length) {
-        return original.concat(specific);
+        if (Array.isArray(specific) && specific.length) {
+          return original.concat(specific);
+        }
       }
 
-      const stageGrumble = G.stage.lineKeys && G.stage.lineKeys.grumble;
-      return key === 'grumble' || key === stageGrumble
-        ? original.concat(extra.common)
-        : original;
+      const stageGrumble =
+        G.stage && G.stage.lineKeys
+          ? G.stage.lineKeys.grumble
+          : null;
+
+      if (key !== 'grumble' && key !== stageGrumble) {
+        return original;
+      }
+
+      // 通常のぼやきにだけ仕事観を加える。
+      // ステージ固有台詞も従来どおり維持する。
+      const stageLines =
+        extra && Array.isArray(extra.common)
+          ? extra.common
+          : [];
+
+      return original.concat(
+        stageLines,
+        PAWAHARA_WORKSTYLE_LINES
+      );
     }
   });
 }
