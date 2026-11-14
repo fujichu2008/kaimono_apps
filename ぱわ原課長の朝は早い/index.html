@@ -1781,7 +1781,7 @@ const LINES = {
   // 初回だけの操作ガイド（種類ごとに1回）
   tips: {
     basic: '攻撃ボタンで殴る！ 喝ボタンで一喝（長押しで強化）',
-    reveal: '攻撃が効かない相手は、喝（長押しで強化）で暴け！',
+    reveal: '短押しの喝か、長押しして離した音波を当てて弱点を暴け！',
     heat: '攻撃ボタンが光った！ 今押すと管理職アクション',
     throw: '拾った物は、投げるボタンで投げられる',
     hammer: '決裁鎚：3回目の一撃は周りを止める「一括承認」',
@@ -2779,10 +2779,15 @@ const Barks = (function () {
   const host = $('barks'), pool = [];
   for (let i = 0; i < 6; i++) { const el = document.createElement('div'); el.className = 'bark'; host.appendChild(el); pool.push({ el, t: 0, obj: null, v: new THREE.Vector3() }); }
   return {
-    say(obj, text, cls, dur) {
+    say(obj, text, cls, dur, priority = false) {
       if (!obj) return;
       if (Player.drunk > 0 && Player.hero && obj === Player.hero.anchor('head_top')) text = slur(text);
-      const b = pool.find(q => q.obj === obj && q.t > 0) || pool.find(q => q.t <= 0) || pool[0];
+      const current = pool.find(q => q.obj === obj && q.t > 0);
+      // 露出通知を表示している間も、Talkの字幕帯は通常どおり進む。
+      if (current && current.priority && !priority) return;
+      const b = current || pool.find(q => q.t <= 0) || pool.find(q => !q.priority);
+      if (!b) return;
+      b.priority = priority;
       b.obj = obj; b.t = dur || 1.4; b.el.textContent = text; b.el.className = 'bark ' + (cls || ''); b.el.style.display = 'block';
     },
     clear() { pool.forEach(b => { b.t = 0; b.el.style.display = 'none'; }); },
@@ -4988,10 +4993,26 @@ const ENEMY_AI = {
       e.move = 0; e.tx = e.x; e.tz = e.z;
       e.clearMines = () => { e.mines.forEach(m => scene.remove(m.s)); e.mines.length = 0; };
       e.onRemove = () => e.clearMines();
+      e.updateExposure = dt => {
+        if (e.st !== 'recover') return;
+        const before = e.reveal;
+        e.reveal = Math.max(0, before - dt);
+        if (before > 1 && e.reveal <= 1 && e.reveal > 0) {
+          FX.emit(e.x, 0.6, e.z, { n: 14, color: '#c8d0d8', speed: 1.4, life: 0.8, size: 0.6, spread: 2, g: -1 });
+        }
+        if (e.reveal > 0) return;
+        // 再び霧に紛れて、別の場所へ。
+        e.hidden = true; e.dmgMul = 0; e.st = 'idle'; e.t = 0; e.cd = 1.2;
+        e.x = (Math.random() - 0.5) * 10;
+        if (G.lock) e.z = lerp(G.lock.z0 + 4, G.lock.z1 - 4, Math.random());
+        FX.emit(e.x, 1, e.z, { n: 30, color: '#c8d0d8', speed: 3, life: 1, size: 0.6, spread: 3, g: -1 });
+        Barks.say(e.headTop, pick(LINES.damemuraHide), 'tout', 1.4);
+      };
       e.onShout = () => { // 「誰が！？」と問い詰めると、主語（本人）が姿を現す
-        if (!e.hidden || e.st === 'wait' || e.st === 'intro') return;
+        if (e.dead || !e.hidden || e.st === 'wait' || e.st === 'intro') return;
         e.hidden = false; e.reveal = c.revealTime; e.st = 'recover'; e.t = 0; e.dmgMul = c.dmgRevealed;
         FX.emit(e.x, 1.2, e.z, { n: 30, color: '#e8f4ff', speed: 6, life: 0.7, size: 0.35, spread: 2 });
+        Barks.say(e.headTop, '姿を現した！ 今だ', 'hint', 1.6, true);
         Talk.play(LINES.damemuraTalk.reveal, e.headTop);
       };
       e.onDeath = () => {
@@ -5030,14 +5051,8 @@ const ENEMY_AI = {
           if (e.t > c.introTime) { e.st = 'idle'; e.t = 0; e.cd = 1; }
           break;
         case 'recover': // 正体が見えている（気絶・管理職アクションが通る）
-          ch.setSpeed(0); e.reveal -= dt;
-          if (e.reveal <= 0) { // 再び霧に紛れて、別の場所へ
-            e.hidden = true; e.dmgMul = 0; e.st = 'idle'; e.t = 0; e.cd = 1.2;
-            e.x = (Math.random() - 0.5) * 10;
-            if (G.lock) e.z = lerp(G.lock.z0 + 4, G.lock.z1 - 4, Math.random());
-            FX.emit(e.x, 1, e.z, { n: 30, color: '#c8d0d8', speed: 3, life: 1, size: 0.6, spread: 3, g: -1 });
-            Barks.say(head, pick(LINES.damemuraHide), 'tout', 1.4);
-          }
+          ch.setSpeed(0);
+          e.updateExposure(dt);
           break;
         case 'wind': // 予兆 → 攻撃
           ch.setSpeed(0);
@@ -5091,13 +5106,26 @@ const ENEMY_AI = {
       e.st = 'wait'; e.cd = 1.5; e.shield = true; e.expose = 0; e.lock = false; e.said = {}; e.mines = []; e.strafe = 1; e.dmgMul = 0;
       e.clearMines = () => { e.mines.forEach(m => scene.remove(m.s)); e.mines.length = 0; };
       e.onRemove = () => e.clearMines();
+      e.updateExposure = dt => {
+        if (e.st !== 'recover') return;
+        const before = e.expose;
+        e.expose = Math.max(0, before - dt);
+        if (before > 1 && e.expose <= 1 && e.expose > 0) {
+          FX.emit(e.x, 1.5, e.z, { n: 14, color: '#ffffff', speed: 2, life: 0.65, size: 0.3, spread: 1.5, g: -2 });
+        }
+        if (e.expose > 0) return;
+        e.shield = true; e.dmgMul = c.dmgShield; e.setSlides(true); e.st = 'idle'; e.t = 0; e.cd = 1;
+        Barks.say(e.char.anchor('head_top'), '再提出します！', 'tout', 1.4);
+      };
       e.onShout = () => { // 喝で結論スライドを暴く → 要塞崩壊
-        if (!e.shield || e.st === 'wait' || e.st === 'intro') return;
+        if (e.dead || !e.shield || e.st === 'wait' || e.st === 'intro') return;
         e.shield = false; e.expose = c.exposeTime; e.st = 'recover'; e.t = 0; e.dmgMul = c.dmgExposed;
         e.setSlides(false);
         FX.emit(e.x, 1.6, e.z, { n: 40, color: '#ffffff', speed: 7, life: 0.8, size: 0.3, spread: 1.5 });
         G.shake = Math.max(G.shake, 0.4);
-        Talk.play(LINES.uchikiTalk.expose, e.char.anchor('head_top'));
+        const head = e.char.anchor('head_top');
+        Barks.say(head, '要塞崩壊！ 今だ', 'hint', 1.6, true);
+        Talk.play(LINES.uchikiTalk.expose, head);
       };
       e.onDeath = () => {
         if (e.lock) { G.lock = null; e.lock = false; }
@@ -5137,11 +5165,7 @@ const ENEMY_AI = {
           if (e.t > c.introTime) { e.st = 'idle'; e.t = 0; e.dmgMul = c.dmgShield; e.cd = 1; }
           break;
         case 'recover': // 要塞が崩れて丸見え（気絶・管理職アクションが通る）
-          e.expose -= dt;
-          if (e.expose <= 0) {
-            e.shield = true; e.dmgMul = c.dmgShield; e.setSlides(true); e.st = 'idle'; e.t = 0; e.cd = 1;
-            Barks.say(head, '再提出します！', 'tout', 1.4);
-          }
+          e.updateExposure(dt);
           break;
         case 'wind': // 予兆（スライドが速く回る）→ 攻撃
           if (e.t > c.wind) {
@@ -5465,11 +5489,17 @@ const Enemies = {
         e.buffT -= dt; e.cd -= edt * CONFIG.host.buffCd;
         if (Math.random() < 0.15) FX.emit(e.x, (e.y || 0) + 1.6, e.z, { n: 1, color: '#ffd23a', speed: 1, life: 0.5, size: 0.2, g: -1 });
       }
-      if (e.stunT > 0) { // 気絶中: AIを止めてノックバックだけ処理する
+      if (e.stunT > 0) { // 気絶中も内木・駄目村の露出時間は進む
         e.stunT -= edt; e.moving = false;
         if (e.def.fly) e.y = lerp(e.y, 0.5, Math.min(1, dt * 8)); else if (e.y > 0) e.y = lerp(e.y, 0, Math.min(1, dt * 8));
         if (e.char) e.char.setSpeed(0);
-        if (e.stunT <= 0) { e.stunT = 0; e.t = 0; e.st = e.def.fly ? 'rise' : (e.def.ai === 'mimic' ? 'crouch' : 'idle'); }
+        if (e.updateExposure) e.updateExposure(edt);
+        if (e.stunT <= 0) {
+          e.stunT = 0; e.t = 0;
+          if (!(e.updateExposure && e.st === 'recover')) {
+            e.st = e.def.fly ? 'rise' : (e.def.ai === 'mimic' ? 'crouch' : 'idle');
+          }
+        }
       } else ENEMY_AI[e.def.ai].update(e, edt);
       const k = Math.exp(-7 * dt); e.x += e.kx * dt; e.z += e.kz * dt; e.kx *= k; e.kz *= k;
       if (e.def.fly) { // 飛ぶ敵もビルの壁の向こうへ回り込まない
@@ -7484,6 +7514,7 @@ const Combat = {
 
         w.hit.add(t.owner);
         t.hit(s.dmg, w.dx, w.dz, s.push);
+        if (t.onShout) t.onShout();
 
         if (t.def && s.stun) Enemies.stun(t, s.stun);
 
@@ -7694,6 +7725,7 @@ const Player = {
   },
   reset(x, z) {
     const c = CONFIG.player;
+    Input.clearAttack();
     this.x = x; this.z = z; this.y = 0; this.vy = 0; this.face = 0; this.kx = this.kz = 0;
     this.hp = c.hp; this.rage = CONFIG.rage.start; this.state = 'free'; this.st = 0; this.throwCD = 0; this.throwStock = []; this.shoutT = 0; this.shoutLv = 0; this.shoutLock = false; this.tapCD = 0;
     this.inv = 1.2; this.slow = 0; this.boost = 0; this.dead = false; this.falling = false; this.safe = { x, z }; this.bike = null;
@@ -8005,6 +8037,7 @@ const Player = {
     if (P.dead || P.inv > 0 || G.phase !== 'play') return;
     if (P.truck && P.truck.kind === 'bus') return;   // バスの車内はほぼ無敵
     if (P.floorY > 2.2) return;                      // 高所には地上の攻撃が届かない
+    Input.clearAttack();
     if (P.ai) n *= CONFIG.phone.guard;
     P.hp -= n; P.inv = CONFIG.player.invuln; P.rage = Math.min(CONFIG.player.rageMax, P.rage + CONFIG.rage.onHurt); G.shake = Math.max(G.shake, 0.35); fireEvent('hurt');
     if (fx != null) { const dx = P.x - fx, dz = P.z - fz, l = Math.hypot(dx, dz) || 1; P.kx = dx / l * (push || 5); P.kz = dz / l * (push || 5); }
@@ -8031,6 +8064,11 @@ const Player = {
   },
   update(dt) {
     const P = this, c = CONFIG.player, h = P.hero;
+    // 予約を持ち越せるのは徒歩の通常状態と対象の硬直だけ。
+    if (G.phase !== 'play' || P.dead || P.falling || P.truck || P.bike ||
+        (P.state !== 'free' && P.state !== 'attack' && P.state !== 'shoutRecover')) {
+      Input.clearAttack();
+    }
     // 強化効果は攻撃回数制。時間経過では減らさない。
     if (P.truck) {
       if (P.inv > 0) P.inv -= dt;
@@ -8104,10 +8142,17 @@ const Player = {
       }
     }
 
-    // 鞄
-    if (Input.take('attack') && P.state === 'free') {
-      P.state = 'attack'; P.st = 0.62; h.action('attack');
-      if (!moveIn) { const t = Combat.nearest(P.x, P.z, 4.5); if (t) P.face = Math.atan2(t.x - P.x, t.z - P.z); }
+    // 通常入力と予約入力は同じ攻撃開始処理へ渡す。
+    // 予約は１件だけ消費し、硬直やアニメーションは短縮しない。
+    const attackRequested = Input.take('attack') || Input.attackQueued;
+    if (P.state === 'free') {
+      Input.attackQueued = false;
+      if (attackRequested) {
+        P.state = 'attack'; P.st = 0.62; h.action('attack');
+        if (!moveIn) { const t = Combat.nearest(P.x, P.z, 4.5); if (t) P.face = Math.atan2(t.x - P.x, t.z - P.z); }
+      }
+    } else if (P.state !== 'attack' && P.state !== 'shoutRecover') {
+      Input.clearAttack();
     }
 
     const ox = P.x, oz = P.z;
@@ -8157,6 +8202,7 @@ const Player = {
     }
     if (P.grounded && !floor) {
       if (P.state === 'shout') P.endShout();
+      Input.clearAttack();
       P.state = 'free';
       P.falling = true;
     } else if (P.grounded && World.onGround(P.x - 0.9, P.z) && World.onGround(P.x + 0.9, P.z) &&
@@ -8175,7 +8221,26 @@ const Player = {
 const Input = {
   mx: 0, mz: 0, shout: false, tShout: false, stickId: null, keys: {}, _p: {},
   orbit: 0, zoom: 1, pitch: 0, pedalId: null, pedalDelta: 0,
+  attackQueued: false,
+  clearAttack() {
+    this.attackQueued = false;
+    this._p.attack = false;
+  },
+  requestAttack() {
+    const P = Player;
+    if (G.phase !== 'play' || P.dead || P.falling || P.truck || P.bike) return;
+
+    if (P.state === 'free') {
+      this._p.attack = true;
+    } else if ((P.state === 'attack' || P.state === 'shoutRecover') &&
+               P.st > 0 && P.st <= 0.15) {
+      // 入力イベント時点の残り硬直で受付を判定する。
+      // 真偽値１件なので、連打しても予約数は増えない。
+      this.attackQueued = true;
+    }
+  },
   clear() {
+    this.clearAttack();
     this.releasePointers();
     this.keys = {};
     this._p = {};
@@ -8312,7 +8377,8 @@ const Input = {
     };
     const tap = (id, name) => $(id).addEventListener('pointerdown', e => {
       if (G.phase !== 'play' || Player.bike) return;
-      this._p[name] = true;
+      if (name === 'attack') this.requestAttack();
+      else this._p[name] = true;
       e.preventDefault();
     });
     const cancelShout = hold('btnShout', 'tShout');
@@ -8501,7 +8567,7 @@ const Input = {
         if (!e.repeat || this.keys[action]) this.keys[action] = true;
         if (!e.repeat && key === 'e' && !Player.bike) this._p.use = true;
         e.preventDefault();
-      } else if (!e.repeat && (key === 'j' || key === ' ')) { this._p.attack = true; e.preventDefault(); }
+      } else if (!e.repeat && (key === 'j' || key === ' ')) { this.requestAttack(); e.preventDefault(); }
       else if (!e.repeat && key === 'l') this._p.ai = true;
       else if (!e.repeat && key === 'i') { this._p.throw = true; e.preventDefault(); }
       else if (!e.repeat && key === 'u') { this._p.jump = true; e.preventDefault(); }
@@ -8533,7 +8599,14 @@ const UI = {
       fireEvent('stageStart');
     });
     // 試験用・後で削除：ステージ4を決裁鎚所持で開始する
-    $('btnStage4Test').addEventListener('click', () => { Game.loadStage(3); Player.setWeapon('hammer'); setPhase('play'); fireEvent('stageStart'); });
+    $('btnStage4Test').addEventListener('click', () => {
+      // iPhoneのユーザー操作中に共用AudioContextを有効化。
+      Stage1BGM_0430.unlockAudio();
+      Game.loadStage(3);
+      Player.setWeapon('hammer');
+      setPhase('play');
+      fireEvent('stageStart');
+    });
     // エンディング：タップで会話を送る／最後にタイトルへ
     $('ending').addEventListener('pointerdown', () => Ending.tap());
     $('endBtn').addEventListener('click', () => Game.toTitle());
@@ -8668,7 +8741,7 @@ const UI = {
 
     // 鞄・喝は最下段の固定位置で表示。
     // 長押し中の喝は、充電段階が変わっても消さない。
-    const attackVisible = free;
+    const attackVisible = operational && !P.truck;
     const shoutVisible = free &&
       P.rage >= CONFIG.shout.tap.cost ||
       (operational && !P.truck && P.state === 'shout');
@@ -8678,12 +8751,16 @@ const UI = {
     set('attackVisible', attackVisible, v => {
       $('btnAtk').classList.toggle('hidden', !v);
     });
+    set('attackReady', free, v => {
+      // 薄く表示してもタッチ領域は維持し、硬直末尾の予約を受け付ける。
+      $('btnAtk').style.opacity = v ? '' : '0.4';
+    });
     set('weaponLabel', P.weapon === 'hammer' ? '印' : P.weapon ? '打' : '鞄', v => {
       $('btnAtk').textContent = v;
       $('btnAtk').setAttribute('aria-label', v === '印' ? '決裁鎚で印を押す' : v === '打' ? 'ゴルフクラブで打つ' : '鞄');
     });
     // 強敵の隙に近くの物があれば、管理職アクションの合図として攻撃ボタンを光らせる
-    set('heat', attackVisible && (Heat.ready() || Allies.unanimousReady()), v => { $('btnAtk').classList.toggle('heat', v); });
+    set('heat', free && (Heat.ready() || Allies.unanimousReady()), v => { $('btnAtk').classList.toggle('heat', v); });
     set('shoutVisible', shoutVisible, v => {
       e.btnShout.classList.toggle('hidden', !v);
     });
@@ -8987,13 +9064,14 @@ if (LINES.pawahara && typeof LINES.pawahara === 'object') {
 
       const specific = extra.events[key];
 
-      // 発言場面に固有の追加台詞があればそちらを優先。
-      // それ以外はステージ固有の一般的なぼやきを追加する。
-      const additions = Array.isArray(specific) && specific.length
-        ? specific
-        : extra.common;
+      if (Array.isArray(specific) && specific.length) {
+        return original.concat(specific);
+      }
 
-      return original.concat(additions);
+      const stageGrumble = G.stage.lineKeys && G.stage.lineKeys.grumble;
+      return key === 'grumble' || key === stageGrumble
+        ? original.concat(extra.common)
+        : original;
     }
   });
 }
@@ -9524,12 +9602,20 @@ E,,4 z4 | z8 | B,,,4 z4 | E,,4 z4
     return header.concat(voices).join('\n');
   }
 
+  // abcjsの読み込みPromiseを共用する。
+  // 複数のBGMが同時に準備を要求してもscriptを重複追加しない。
+  let abcjsLoadPromise = null;
+
   function loadAbcjs() {
     if (window.ABCJS && window.ABCJS.synth) {
       return Promise.resolve(window.ABCJS);
     }
 
-    return new Promise((resolve, reject) => {
+    if (abcjsLoadPromise) {
+      return abcjsLoadPromise;
+    }
+
+    abcjsLoadPromise = new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = ABCJS_URL;
       script.async = true;
@@ -9547,7 +9633,14 @@ E,,4 z4 | z8 | B,,,4 z4 | E,,4 z4
       };
 
       document.head.appendChild(script);
+    }).catch(error => {
+      // 読み込み失敗時にはPromiseを解放する。
+      // 次回の呼び出しで再試行できるようにする。
+      abcjsLoadPromise = null;
+      throw error;
     });
+
+    return abcjsLoadPromise;
   }
 
   function ensureAudio() {
@@ -9783,6 +9876,7 @@ E,,4 z4 | z8 | B,,,4 z4 | E,,4 z4
     stop,
     loadLibrary: loadAbcjs,
     getAudioContext: () => context,
+    getAbc: buildAbc,
     unlockAudio: () => {
       if (!ensureAudio()) return;
       if (context.state !== 'running') {
@@ -10160,7 +10254,8 @@ D,,2 z2 _E,,2 z2 | F,,2 z2 G,,2 z2 | A,,2 A,,,2 A,,,2 A,,,2 | D,,2 D,,2 D,,2 z2
 
   return {
     update,
-    stop
+    stop,
+    getAbc: buildAbc
   };
 })();
 
@@ -10550,7 +10645,8 @@ C,,2 z2 G,,,2 z2 | C,,2 z2 G,,,2 z2 | C,,2 z2 z4 | z8
 
   return {
     update,
-    stop
+    stop,
+    getAbc: buildAbc
   };
 })();
 
@@ -10936,7 +11032,8 @@ G,,2 z2 _A,,2 z2 | _B,,2 z2 C,,2 z2 | D,,2 D,,2 D,,2 D,,2 | G,,2 G,,2 G,,2 z2
 
   return {
     update,
-    stop
+    stop,
+    getAbc: buildAbc
   };
 })();
 
@@ -11335,6 +11432,2137 @@ C,,2 z2 _D,,2 z2 | _E,,2 z2 F,,2 z2 | G,,2 G,,2 G,,2 G,,2 | C,,2 G,,2 C,,2 z2
 
   return {
     update,
+    stop,
+    getAbc: buildAbc
+  };
+})();
+
+/* ============================================================
+ * ステージ3 ボス専用BGM
+ * JTC_HQ_Gate_Bucho_Kito
+ *
+ * A minor / 162 BPM / 4/4 / 32 measures
+ * abcjs SoundFont / 8 voices
+ *
+ * 既存のabcjs・AudioContextを共用。
+ * ステージ3の鬼頭部長戦のみ再生する。
+ * ============================================================ */
+const Stage3BossBGM = (() => {
+  'use strict';
+
+  const TITLE = 'JTC_HQ_Gate_Bucho_Kito';
+  const TEMPO = 162;
+  const FALLBACK_DURATION = 32 * 4 * 60 / TEMPO;
+
+  const SCORE = [
+    {
+      name: 'Trumpet',
+      program: 56,
+      clef: 'treble',
+      notes: `
+z4 z2 E2 | A2 B2 c2 A2 | _B4 A2 ^G2 | A6 z2 |
+z8 | z8 | z8 | z8 |
+A3 B c2 A2 | d3 c B2 A2 | ^G2 E2 B2 d2 | c6 B2 |
+A2 G2 F2 E2 | D2 F2 A2 d2 | c2 A2 B2 ^G2 | A6 E2 |
+c3 d e2 c2 | d3 e f2 d2 | e2 c2 a2 g2 | f6 e2 |
+d2 f2 B2 d2 | c2 e2 A2 c2 | B2 A2 ^G2 ^F2 | E6 z2 |
+A2 E2 c2 A2 | _B2 ^F2 d2 _B2 | c2 A2 _e2 d2 | c4 ^G4 |
+A2 c2 _B2 d2 | c2 e2 d2 f2 | e2 c2 B2 ^G2 | A6 z2
+`
+    },
+    {
+      name: 'Violin',
+      program: 40,
+      clef: 'treble',
+      notes: `
+a2 z2 c'2 z2 | _e'4 d'2 c'2 | b2 a2 ^g2 b2 | a2 e2 c2 A2 |
+a^gae fe dc | Bcde fe dc | dcBe ^cd e^g | a^gab c'2 ^g2 |
+a3 b c'2 a2 | f'3 e' d'2 c'2 | b2 ^g2 e2 g2 | a2 b2 c'2 d'2 |
+e'2 c'2 a2 g2 | f2 a2 d'2 f'2 | e'2 c'2 d'2 b2 | c'6 z2 |
+a'e'c'a e'c'ae | f'd'af d'afd | e'c'ae c'aec | d'bgd bgdB |
+c'2 a2 ^f2 a2 | b2 ^g2 e2 g2 | a2 f2 d2 f2 | e2 ^g2 b2 d'2 |
+c'2 a2 e'2 c'2 | d'2 _b2 f'2 d'2 | _e'2 c'2 ^f'2 _e'2 | e'2 ^g2 b2 d'2 |
+c'2 a2 d'2 _b2 | e'2 c'2 f'2 d'2 | c'2 a2 ^g2 b2 | a6 z2
+`
+    },
+    {
+      name: 'OverdrivenGuitar',
+      program: 29,
+      clef: 'treble',
+      notes: `
+[A,2E2A2] z2 [C2G2c2] z2 | [_E4_B4_e4] [D2A2d2] [C2G2c2] | [_B,4F4_B4] [E,4B,4E4] | [A,6E6A6] z2 |
+A,EAc A,EAc | A,FAc A,FAc | A,EGc A,EGc | A,EAc E,B,^GB |
+[A,4E4A4] [C4G4c4] | [D4A4d4] [A,4E4A4] | [E,8B,8E8] | [A,4E4A4] [D4A4d4] |
+[C4G4c4] [G,4D4G4] | [D4A4d4] [_B,4F4_B4] | [A,4E4A4] [E,4B,4E4] | [A,6E6A6] z2 |
+[C4G4c4] [A,4E4A4] | [D4A4d4] [_B,4F4_B4] | [C4G4c4] [A,4E4A4] | [_B,4F4_B4] [G,4D4G4] |
+[A,4E4A4] [^F,4^C4^F4] | [B,4^F4B4] [E,4B,4E4] | [F,4C4F4] [D,4A,4D4] | [E,6B,6E6] z2 |
+[A,4E4A4] [C4G4c4] | [_B,4F4_B4] [D4_B4d4] | [C4^F4c4] [_E4c4_e4] | [E4B4e4] [E,4B,4E4] |
+[A,4E4A4] [_B,4F4_B4] | [C4G4c4] [D4A4d4] | [E4B4e4] [E,4B,4E4] | [A,6E6A6] z2
+`
+    },
+    {
+      name: 'ChurchOrgan',
+      program: 19,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+[A8c8e8] | [A8c8f8] | [G8c8e8] | [A4c4e4] [^G4B4e4] |
+[A8c8e8] | [F8A8d8] | [E8^G8B8] | [A4c4e4] [F4A4d4] |
+[E4A4c4] [G4B4e4] | [F4A4d4] [F4_B4d4] | [E4A4c4] [E4^G4B4] | [E6A6c6] z2 |
+[A8c8e8] | [F8_B8d8] | [A8c8e8] | [G8_B8d8] |
+[E4A4c4] [^F4A4c4] | [B,4^F4B4] [E4^G4B4] | [D4F4A4] [B,4D4F4] | [B,6E6^G6] z2 |
+[C4E4A4] [E4A4c4] | [D4F4_B4] [F4_B4d4] | [_E4^F4c4] [^F4c4_e4] | [E4^G4B4] [^G4B4e4] |
+[E4A4c4] [F4_B4d4] | [E4A4c4] [F4A4d4] | [E4A4c4] [E4^G4B4] | [C6E6A6] z2
+`
+    },
+    {
+      name: 'TubularBells',
+      program: 14,
+      clef: 'treble',
+      notes: `
+A2 z2 c2 z2 | _e4 z4 | B2 z2 E2 z2 | A6 z2 |
+z8 | z8 | z8 | z4 E4 |
+A4 z4 | d4 z4 | E4 z4 | A4 z4 |
+z8 | d4 _B4 | A4 E4 | A6 z2 |
+c4 z4 | d4 z4 | e4 z4 | _B4 G4 |
+A4 ^F4 | B4 E4 | F4 D4 | E6 z2 |
+A4 c4 | _B4 d4 | c4 _e4 | e4 E4 |
+A2 z2 _B2 z2 | c2 z2 d2 z2 | e2 z2 E2 z2 | A6 z2
+`
+    },
+    {
+      name: 'Trombone',
+      program: 57,
+      clef: 'bass',
+      notes: `
+A,2 z2 C2 z2 | _E4 D2 C2 | _B,4 E,4 | A,2 E,2 A,2 z2 |
+A,4 z4 | G,4 z4 | F,4 z4 | E,4 E,2 ^G,2 |
+A,4 G,4 | F,4 D,4 | E,4 E,4 | A,4 G,4 |
+F,4 E,4 | D,4 _B,4 | E,4 E,4 | A,2 E,2 A,2 B,2 |
+C4 A,4 | D4 _B,4 | C4 A,4 | _B,4 A,4 |
+G,4 ^F,4 | B,4 E,4 | F,4 D,4 | E,2 ^F,2 ^G,2 E,2 |
+A,2 z2 A,2 z2 | _B,2 z2 _B,2 z2 | C2 z2 C2 z2 | E,4 E,4 |
+A,4 _B,4 | C4 D4 | E4 E,4 | A,2 E,2 A,2 z2
+`
+    },
+    {
+      name: 'SynthBass1',
+      program: 38,
+      clef: 'bass',
+      notes: `
+A,,2 A,,2 C,,2 C,,2 | _E,,2 E,,2 D,,2 C,,2 | _B,,,2 B,,,2 E,,,2 E,,,2 | A,,,2 E,,,2 A,,,2 G,,,2 |
+A,,,2 A,,,2 E,,2 E,,2 | A,,,2 A,,,2 F,,2 F,,2 | G,,,2 G,,,2 C,,2 C,,2 | A,,,2 A,,,2 E,,,2 E,,,2 |
+A,,,2 A,,,2 G,,,2 G,,,2 | F,,,2 F,,,2 D,,2 D,,2 | E,,,2 E,,,2 B,,,2 B,,,2 | A,,,2 A,,,2 G,,,2 G,,,2 |
+F,,,2 F,,,2 E,,,2 E,,,2 | D,,2 D,,2 _B,,,2 B,,,2 | E,,,2 E,,,2 E,,,2 E,,,2 | A,,,2 E,,,2 A,,,2 B,,,2 |
+C,,2 C,,2 A,,,2 A,,,2 | D,,2 D,,2 _B,,,2 B,,,2 | C,,2 C,,2 A,,,2 A,,,2 | _B,,,2 B,,,2 A,,,2 A,,,2 |
+G,,,2 G,,,2 ^F,,,2 F,,,2 | B,,,2 B,,,2 E,,,2 E,,,2 | F,,,2 F,,,2 D,,2 D,,2 | E,,,2 ^F,,,2 ^G,,,2 E,,,2 |
+A,,,2 A,,,2 G,,,2 G,,,2 | F,,,2 F,,,2 _B,,,2 B,,,2 | _E,,2 E,,2 C,,2 C,,2 | E,,,2 E,,,2 B,,,2 E,,,2 |
+A,,,2 A,,,2 _B,,,2 B,,,2 | C,,2 C,,2 D,,2 D,,2 | E,,2 C,,2 B,,,2 E,,,2 | A,,,2 E,,,2 A,,,2 z2
+`
+    },
+    {
+      name: 'Timpani',
+      program: 47,
+      clef: 'bass',
+      notes: `
+A,,,2 z2 A,,,2 z2 | _E,,4 D,,2 C,,2 | _B,,,2 z2 E,,,2 z2 | A,,,2 A,,,2 A,,,2 z2 |
+A,,,2 z2 z4 | z8 | G,,,2 z2 z4 | A,,,2 z2 E,,,2 E,,,2 |
+A,,,2 z2 z4 | F,,,2 z2 D,,2 z2 | E,,,2 z2 E,,,2 z2 | A,,,2 z2 z4 |
+F,,,2 z2 z4 | D,,2 z2 _B,,,2 z2 | E,,,2 E,,,2 E,,,2 E,,,2 | A,,,2 A,,,2 A,,,2 z2 |
+A,,,2 z2 z4 | D,,2 z2 z4 | C,,2 z2 z4 | _B,,,2 z2 A,,,2 z2 |
+G,,,2 z2 z4 | B,,,2 z2 E,,,2 z2 | F,,,2 z2 D,,2 z2 | E,,,2 E,,,2 E,,,2 z2 |
+A,,,2 z2 A,,,2 z2 | _B,,,2 z2 _B,,,2 z2 | C,,2 z2 C,,2 z2 | E,,,2 E,,,2 E,,,2 E,,,2 |
+A,,,2 z2 _B,,,2 z2 | C,,2 z2 D,,2 z2 | E,,2 E,,,2 E,,,2 E,,,2 | A,,,2 A,,,2 A,,,2 z2
+`
+    }
+  ];
+
+  const getContext = () =>
+    Stage1BGM_0430.getAudioContext();
+
+  let synth = null;
+  let ready = false;
+  let loading = false;
+  let playing = false;
+  let paused = false;
+  let failed = false;
+
+  let duration = FALLBACK_DURATION;
+  let startedAt = 0;
+  let position = 0;
+
+  // ボス戦状態の正本は既存のGおよびBoss。
+  // 新たな戦闘フラグは追加しない。
+  function isAllowed() {
+    return (
+      G.phase === 'play' &&
+      G.stage &&
+      G.stage.id === 3 &&
+      G.bossTriggered &&
+      !G.bossDown &&
+      Boss.active
+    );
+  }
+
+  function shouldReset() {
+    return (
+      !G.stage ||
+      G.stage.id !== 3 ||
+      !G.bossTriggered ||
+      G.bossDown ||
+      G.phase === 'title' ||
+      G.phase === 'over' ||
+      G.phase === 'clear' ||
+      G.phase === 'ending'
+    );
+  }
+
+  // abcjsに渡すABC楽譜を生成。
+  // 楽譜データはSCOREに集約する。
+  function buildAbc() {
+    const lines = [
+      'X:1',
+      'T:' + TITLE,
+      'M:4/4',
+      'L:1/8',
+      'Q:1/4=' + TEMPO,
+      'K:Am'
+    ];
+
+    SCORE.forEach((voice, index) => {
+      lines.push(
+        'V:' + (index + 1) +
+        ' name="' + voice.name + '"' +
+        ' clef=' + voice.clef
+      );
+
+      lines.push(
+        '%%MIDI program ' + voice.program
+      );
+
+      // 反復記号はJavaScript側のループ処理へ集約。
+      lines.push(voice.notes.trim());
+    });
+
+    return lines.join('\n');
+  }
+
+  // ボス戦に入ったときだけ音源を準備する。
+  // 既存のabcjsとAudioContextを再利用。
+  function prepare() {
+    if (ready || loading || failed) return;
+
+    const ac = getContext();
+    if (!ac) return;
+
+    loading = true;
+
+    Stage1BGM_0430.loadLibrary()
+      .then(ABCJS => {
+        if (!ABCJS.synth.supportsAudio()) {
+          throw new Error(
+            'abcjsの音声再生に非対応'
+          );
+        }
+
+        const visualObjects =
+          ABCJS.renderAbc('*', buildAbc());
+
+        if (!visualObjects || !visualObjects[0]) {
+          throw new Error(
+            'ステージ3ボス楽譜の解析に失敗しました'
+          );
+        }
+
+        const nextSynth =
+          new ABCJS.synth.CreateSynth();
+
+        return nextSynth.init({
+          audioContext: ac,
+          visualObj: visualObjects[0],
+          options: {
+            soundFontVolumeMultiplier: 0.65,
+            chordsOff: true
+          }
+        })
+        .then(() => nextSynth.prime())
+        .then(result => ({
+          nextSynth,
+          result
+        }));
+      })
+      .then(({ nextSynth, result }) => {
+        synth = nextSynth;
+
+        duration =
+          result.duration || FALLBACK_DURATION;
+
+        ready = true;
+        playing = false;
+        paused = false;
+        position = 0;
+
+        console.info(
+          'Stage3BossBGM: 音源準備完了',
+          duration
+        );
+      })
+      .catch(error => {
+        failed = true;
+
+        console.warn(
+          'Stage3BossBGM: 音源準備失敗',
+          error
+        );
+      })
+      .finally(() => {
+        loading = false;
+      });
+  }
+
+  function start() {
+    if (!ready || !synth || playing) return;
+
+    const ac = getContext();
+
+    if (!ac || ac.state !== 'running') return;
+
+    try {
+      if (paused) {
+        synth.resume();
+
+        startedAt =
+          ac.currentTime - position;
+      } else {
+        synth.start();
+
+        startedAt = ac.currentTime;
+        position = 0;
+      }
+
+      playing = true;
+      paused = false;
+    } catch (error) {
+      console.warn(
+        'Stage3BossBGM: 再生開始失敗',
+        error
+      );
+    }
+  }
+
+  function stop(reset = false) {
+    if (!synth || !ready) {
+      playing = false;
+      paused = false;
+
+      if (reset) position = 0;
+
+      return;
+    }
+
+    try {
+      if (reset) {
+        synth.stop();
+
+        position = 0;
+        paused = false;
+      } else if (playing) {
+        const ac = getContext();
+
+        position = ac
+          ? Math.max(
+              0,
+              ac.currentTime - startedAt
+            )
+          : 0;
+
+        synth.pause();
+        paused = true;
+      }
+    } catch (error) {
+      console.warn(
+        'Stage3BossBGM: 停止失敗',
+        error
+      );
+    }
+
+    playing = false;
+  }
+
+  function update() {
+    if (!isAllowed()) {
+      const reset = shouldReset();
+
+      if (playing || (paused && reset)) {
+        stop(reset);
+      }
+
+      return;
+    }
+
+    if (!ready) {
+      prepare();
+      return;
+    }
+
+    if (!playing) {
+      start();
+      return;
+    }
+
+    const ac = getContext();
+
+    if (!ac || ac.state !== 'running') {
+      return;
+    }
+
+    // 32小節・約47.4秒をループ再生。
+    // 時間の基準は共用AudioContext。
+    if (
+      duration > 0 &&
+      ac.currentTime - startedAt >= duration
+    ) {
+      try {
+        synth.stop();
+        synth.start();
+
+        startedAt = ac.currentTime;
+        position = 0;
+        paused = false;
+      } catch (error) {
+        console.warn(
+          'Stage3BossBGM: ループ再生失敗',
+          error
+        );
+
+        playing = false;
+      }
+    }
+  }
+
+  return {
+    update,
+    stop,
+    getAbc: buildAbc
+  };
+})();
+
+/* ============================================================
+ * ステージ4 最終ボス専用BGM
+ * 0850_JTC_HQ_14F_Contradiction
+ *
+ * B minor / 112 BPM / 4/4 / 32 measures
+ * abcjs SoundFont / 8 voices
+ *
+ * abcjsとAudioContextは既存BGMから共用。
+ * 最終ボスの段階変化では再生をリセットしない。
+ * ============================================================ */
+const Stage4BossBGM = (() => {
+  'use strict';
+
+  const TITLE = '0850_JTC_HQ_14F_Contradiction';
+  const TEMPO = 112;
+  const FALLBACK_DURATION = 32 * 4 * 60 / TEMPO;
+
+  const SCORE = [
+    {
+      name: 'EnglishHorn',
+      program: 69,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+f4 d3 c | B2 ^A2 B2 d2 | G6 F2 | ^E6 z2 |
+f4 g3 f | e2 d2 c2 B2 | c6 ^A2 | B6 z2 |
+z8 | z8 | z8 | z8 |
+b4 a3 g | f2 e2 d2 c2 | d6 B2 | ^e6 z2 |
+f3 g a2 f2 | g3 f e2 d2 | c4 ^d3 e | ^A6 z2 |
+B3 c d2 f2 | g3 f e2 d2 | c2 B2 ^A2 G2 | F6 z2 |
+d4 B3 A | G4 e3 d | c4 ^A4 | B6 z2
+`
+    },
+    {
+      name: 'Viola',
+      program: 41,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+z8 | z8 | z2 B2 e2 d2 | c6 B2 |
+^A4 B3 d | G4 e3 d | c4 ^A4 | B6 F2 |
+B3 c d2 B2 | e3 d c2 B2 | A2 F2 B2 d2 | c6 ^A2 |
+d6 c2 | B6 A2 | G6 F2 | ^E6 G2 |
+A4 d4 | B4 e4 | c4 ^d4 | c6 F2 |
+B4 d4 | e4 B4 | G4 e4 | c6 ^A2 |
+B4 F4 | G4 B4 | ^A4 F4 | B6 z2
+`
+    },
+    {
+      name: 'Harpsichord',
+      program: 6,
+      clef: 'treble',
+      notes: `
+B,FdF B,F^dF | G,D=BD ^E,C^GC | F,C^AC G,DBD | F,C^EC F,C^AC |
+B,FdF B,F^dF | B,FdF B,FdF | G,DBD G,DBD | ^E,C^GC E,CGC |
+F,C^AC B,FdF | G,DBD E,B,GB, | F,C^EC F,C^AC | B,FdF B,F^dF |
+B,FdF B,FdF | E,B,GB, E,B,GB, | A,Ece D,A,FA, | C,^G,^EG, F,C^AC |
+B,FdF A,Ece | G,DBD F,CAc | G,DBD G,DBD | ^E,C^GC E,CGC |
+F,CAc D,A,FA, | E,B,GB, G,DBD | F,C^AC ^D,B,^FB, | F,C^EC F,C^AC |
+B,FdF B,FdF | E,B,GB, E,B,GB, | G,DBD G,DBD | F,C^EC F,C^AC |
+B,FdF B,F^dF | G,DBD E,B,GB, | F,C^EC F,C^AC | B,FdF B,4
+`
+    },
+    {
+      name: 'Celesta',
+      program: 8,
+      clef: 'treble',
+      notes: `
+f2 z2 ^f2 z2 | g2 z2 ^e2 z2 | f2 z2 g2 z2 | ^e4 c4 |
+z8 | z8 | b4 g4 | ^g4 ^e4 |
+f4 z4 | g4 e4 | ^e4 f4 | d'2 f2 d2 B2 |
+d'2 z2 b2 z2 | g2 z2 e'2 z2 | c'2 z2 a2 z2 | ^e'4 c'4 |
+f'4 e'4 | d'4 c'4 | b4 g4 | ^g6 z2 |
+a2 f2 d'2 a2 | b2 g2 e'2 b2 | ^a2 f2 ^d'2 b2 | c'2 ^g2 ^e2 c2 |
+d'2 b2 f2 d2 | e'2 b2 g2 e2 | b2 g2 e2 d2 | c'2 ^g2 f2 ^a2 |
+f2 z2 ^f2 z2 | g2 z2 e2 z2 | ^e4 c4 | B6 z2
+`
+    },
+    {
+      name: 'TremoloStrings',
+      program: 44,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+[B,8D8F8] | [B,8D8F8] | [B,8D8G8] | [B,8^E8^G8] |
+[C4F4^A4] [B,4D4F4] | [B,4D4G4] [B,4E4G4] | [C4^E4^G4] [C4F4^A4] | [B,8D8F8] |
+[B,8D8F8] | [B,8E8G8] | [C4E4A4] [A,4D4F4] | [B,4^E4^G4] [C4F4^A4] |
+[B,4D4F4] [C4E4A4] | [B,4D4G4] [C4F4A4] | [B,8D8G8] | [B,8^E8^G8] |
+[C4F4A4] [A,4D4F4] | [B,4E4G4] [B,4D4G4] | [C4F4^A4] [B,4^D4^F4] | [C8^E8^G8] |
+[B,8D8F8] | [B,8E8G8] | [B,8D8G8] | [C4^E4^G4] [C4F4^A4] |
+[B,8D8F8] | [B,4D4G4] [B,4E4G4] | [C4^E4^G4] [C4F4^A4] | [B,8D8F8]
+`
+    },
+    {
+      name: 'BassClarinet',
+      program: 71,
+      clef: 'bass',
+      notes: `
+B,,4 B,,4 | G,,4 ^E,,4 | F,,4 G,,4 | C,4 F,,4 |
+z8 | z8 | G,4 E,4 | C,4 ^E,4 |
+F,4 D,4 | E,4 G,4 | C,4 F,4 | B,,6 z2 |
+B,4 F,4 | G,4 E,4 | A,4 D,4 | ^E,4 F,4 |
+B,4 A,4 | G,4 F,4 | E,4 D,4 | C,6 z2 |
+F,4 D,4 | E,4 B,,4 | F,4 B,,4 | C,4 F,,4 |
+B,,4 B,4 | G,4 E,4 | E,4 B,,4 | C,4 F,,4 |
+B,,4 D,4 | E,4 G,4 | F,4 F,,4 | B,,6 z2
+`
+    },
+    {
+      name: 'Contrabass',
+      program: 43,
+      clef: 'bass',
+      notes: `
+B,,,2 z2 F,,2 z2 | G,,,2 z2 ^E,,,2 z2 | F,,,2 z2 G,,,2 z2 | C,,2 z2 F,,,2 z2 |
+B,,,4 F,,4 | B,,,4 A,,,4 | G,,,4 E,,,4 | ^E,,,4 C,,4 |
+F,,,4 B,,,4 | E,,,4 G,,,4 | C,,4 F,,,4 | B,,,4 F,,,4 |
+B,,,3 B,,, F,,2 B,,,2 | E,,,3 E,,, B,,,2 E,,2 | A,,,3 A,,, D,,2 A,,,2 | C,,3 C,, F,,,2 ^A,,,2 |
+B,,,3 B,,, A,,,2 A,,,2 | G,,,3 G,,, F,,,2 F,,,2 | E,,,3 E,,, D,,2 D,,2 | C,,3 C,, ^E,,,2 G,,,2 |
+F,,,2 F,,,2 D,,2 D,,2 | E,,,2 E,,,2 B,,,2 B,,,2 | F,,,2 F,,,2 B,,,2 B,,,2 | C,,2 C,,2 F,,,2 F,,,2 |
+B,,,2 B,,,2 A,,,2 A,,,2 | G,,,2 G,,,2 E,,,2 E,,,2 | G,,,2 G,,,2 E,,,2 E,,,2 | C,,2 C,,2 F,,,2 F,,,2 |
+B,,,4 z2 F,,2 | G,,,4 z2 E,,,2 | F,,,4 z2 F,,,2 | B,,,4 F,,,4
+`
+    },
+    {
+      name: 'Woodblock',
+      program: 115,
+      clef: 'bass',
+      notes: `
+C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 C,2 |
+C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 C,2 |
+C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 C,2 |
+C,2 C,2 z2 C,2 | C,2 C,2 z2 C,2 | C,2 C,2 z2 C,2 | C,2 C,2 C,2 C,2 |
+C,2 z C, C,2 z2 | C,2 z C, C,2 z2 | C,2 z C, C,2 z2 | C,2 z C, C,2 C,2 |
+C,2 z C, C,2 z2 | C,2 z C, C,2 z2 | C,2 z C, C,2 z2 | C,2 C,2 C,2 z2 |
+C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 C,2 |
+C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 z4
+`
+    }
+  ];
+
+  const getContext = () =>
+    Stage1BGM_0430.getAudioContext();
+
+  let synth = null;
+  let ready = false;
+  let loading = false;
+  let playing = false;
+  let paused = false;
+  let failed = false;
+
+  let duration = FALLBACK_DURATION;
+  let startedAt = 0;
+  let position = 0;
+
+  // 既存のボス戦状態を参照し、新しい戦闘フラグは追加しない。
+  // 社長の複数段階を通して同じ曲を継続する。
+  function isAllowed() {
+    return (
+      G.phase === 'play' &&
+      G.stage &&
+      G.stage.id === 4 &&
+      G.bossTriggered &&
+      !G.bossDown &&
+      Boss.active
+    );
+  }
+
+  function shouldReset() {
+    return (
+      !G.stage ||
+      G.stage.id !== 4 ||
+      !G.bossTriggered ||
+      G.bossDown ||
+      G.phase === 'title' ||
+      G.phase === 'over' ||
+      G.phase === 'clear' ||
+      G.phase === 'ending'
+    );
+  }
+
+  function buildAbc() {
+    const lines = [
+      'X:1',
+      'T:' + TITLE,
+      'M:4/4',
+      'L:1/8',
+      'Q:1/4=' + TEMPO,
+      'K:Bm'
+    ];
+
+    SCORE.forEach((voice, index) => {
+      lines.push(
+        'V:' + (index + 1) +
+        ' name="' + voice.name + '"' +
+        ' clef=' + voice.clef
+      );
+
+      lines.push(
+        '%%MIDI program ' + voice.program
+      );
+
+      // 反復は再生制御側に集約する。
+      lines.push(voice.notes.trim());
+    });
+
+    return lines.join('\n');
+  }
+
+  function prepare() {
+    if (ready || loading || failed) return;
+
+    const ac = getContext();
+    if (!ac) return;
+
+    loading = true;
+
+    Stage1BGM_0430.loadLibrary()
+      .then(ABCJS => {
+        if (!ABCJS.synth.supportsAudio()) {
+          throw new Error(
+            'abcjsの音声再生に非対応'
+          );
+        }
+
+        const visualObjects =
+          ABCJS.renderAbc('*', buildAbc());
+
+        if (!visualObjects || !visualObjects[0]) {
+          throw new Error(
+            'ステージ4ボス楽譜の解析に失敗しました'
+          );
+        }
+
+        const nextSynth =
+          new ABCJS.synth.CreateSynth();
+
+        return nextSynth.init({
+          audioContext: ac,
+          visualObj: visualObjects[0],
+          options: {
+            soundFontVolumeMultiplier: 0.65,
+            chordsOff: true
+          }
+        })
+        .then(() => nextSynth.prime())
+        .then(result => ({
+          nextSynth,
+          result
+        }));
+      })
+      .then(({ nextSynth, result }) => {
+        synth = nextSynth;
+
+        duration =
+          result.duration || FALLBACK_DURATION;
+
+        ready = true;
+        playing = false;
+        paused = false;
+        position = 0;
+
+        console.info(
+          'Stage4BossBGM: 音源準備完了',
+          duration
+        );
+      })
+      .catch(error => {
+        failed = true;
+
+        console.warn(
+          'Stage4BossBGM: 音源準備失敗',
+          error
+        );
+      })
+      .finally(() => {
+        loading = false;
+      });
+  }
+
+  function start() {
+    if (!ready || !synth || playing) return;
+
+    const ac = getContext();
+    if (!ac || ac.state !== 'running') return;
+
+    try {
+      if (paused) {
+        synth.resume();
+        startedAt = ac.currentTime - position;
+      } else {
+        synth.start();
+        startedAt = ac.currentTime;
+        position = 0;
+      }
+
+      playing = true;
+      paused = false;
+    } catch (error) {
+      console.warn(
+        'Stage4BossBGM: 再生開始失敗',
+        error
+      );
+    }
+  }
+
+  function stop(reset = false) {
+    if (!synth || !ready) {
+      playing = false;
+      paused = false;
+
+      if (reset) position = 0;
+      return;
+    }
+
+    try {
+      if (reset) {
+        synth.stop();
+        position = 0;
+        paused = false;
+      } else if (playing) {
+        const ac = getContext();
+
+        position = ac
+          ? Math.max(0, ac.currentTime - startedAt)
+          : 0;
+
+        synth.pause();
+        paused = true;
+      }
+    } catch (error) {
+      console.warn(
+        'Stage4BossBGM: 停止失敗',
+        error
+      );
+    }
+
+    playing = false;
+  }
+
+  function update() {
+    if (!isAllowed()) {
+      const reset = shouldReset();
+
+      if (playing || (paused && reset)) {
+        stop(reset);
+      }
+
+      return;
+    }
+
+    if (!ready) {
+      prepare();
+      return;
+    }
+
+    if (!playing) {
+      start();
+      return;
+    }
+
+    const ac = getContext();
+    if (!ac || ac.state !== 'running') return;
+
+    // 楽曲終端でループする。
+    // ボスの段階変化による再起動は行わない。
+    if (
+      duration > 0 &&
+      ac.currentTime - startedAt >= duration
+    ) {
+      try {
+        synth.stop();
+        synth.start();
+
+        startedAt = ac.currentTime;
+        position = 0;
+        paused = false;
+      } catch (error) {
+        console.warn(
+          'Stage4BossBGM: ループ再生失敗',
+          error
+        );
+
+        playing = false;
+      }
+    }
+  }
+
+  return {
+    update,
+    stop,
+    getAbc: buildAbc
+  };
+})();
+
+/* ============================================================
+ * エンディング専用BGM
+ * 0900_Opening_Bell_Still_We_Work_at_JTC
+ *
+ * G major / 104 BPM / 4/4 / 32 measures
+ * abcjs SoundFont / 8 voices
+ *
+ * 既存のabcjs・AudioContextを共用する。
+ * エンディング中だけ再生し、タイトル復帰で停止する。
+ * ============================================================ */
+const EndingBGM = (() => {
+  'use strict';
+
+  const TITLE = '0900_Opening_Bell_Still_We_Work_at_JTC';
+  const TEMPO = 104;
+  const FALLBACK_DURATION = 32 * 4 * 60 / TEMPO;
+
+  const SCORE = [
+    {
+      name: 'Flute',
+      program: 73,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z4 z2 D2 |
+G4 A3 B | d2 B2 G2 E2 | c4 B3 A | B6 D2 |
+E3 F G2 B2 | A3 G F2 D2 | E2 G2 B2 A2 | G6 B2 |
+c4 d3 e | d2 B2 G2 B2 | A3 B c2 A2 | B6 g2 |
+e3 d c2 B2 | d3 B G2 B2 | c2 A2 F2 D2 | E6 F2 |
+G3 A B2 d2 | e3 d c2 B2 | A2 d2 g2 f2 | g6 d2 |
+e2 c2 G2 e2 | d2 B2 G2 d2 | c2 A2 F2 A2 | B6 D2 |
+E2 G2 c2 B2 | A2 G2 F2 D2 | E2 G2 F2 A2 | G6 z2
+`
+    },
+    {
+      name: 'Oboe',
+      program: 68,
+      clef: 'treble',
+      notes: `
+B4 d3 e | d2 B2 G2 A2 | B4 A3 G | A6 z2 |
+z8 | z8 | E4 G3 F | G6 z2 |
+z8 | z8 | C2 E2 G2 F2 | D6 G2 |
+E4 F3 G | G4 D4 | F3 G A2 F2 | ^D6 B2 |
+G3 F E2 G2 | F3 D B,2 D2 | E2 C2 A,2 D2 | B,6 ^D2 |
+E3 F G2 B2 | c3 B A2 G2 | F2 A2 d2 c2 | B6 B2 |
+c2 G2 E2 c2 | B2 G2 D2 B2 | A2 F2 D2 F2 | G6 z2 |
+C2 E2 G2 G2 | F2 E2 D2 B,2 | C2 E2 D2 F2 | G6 z2
+`
+    },
+    {
+      name: 'FrenchHorn',
+      program: 60,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+D4 F4 | G4 B,4 | E4 D4 | D6 z2 |
+C4 D4 | F4 B,4 | C4 D4 | B,6 D2 |
+E4 A4 | B4 G4 | F4 D4 | ^D6 F2 |
+G4 E4 | F4 D4 | E4 F4 | G6 F2 |
+E4 G4 | G4 E4 | F4 A4 | B6 G2 |
+G4c4 | G4 B4 | F4 A4 | ^D6 B,2 |
+C4 E4 | D4 B,4 | C4 D4 | [_B,6D6G6] z2
+`
+    },
+    {
+      name: 'AcousticGrandPiano',
+      program: 0,
+      clef: 'treble',
+      notes: `
+G,DGB DGBd | E,B,EG B,EGB | C,G,CE G,CEG | D,A,DF A,DFA |
+G,DGB D,A,DF | E,B,EG B,,F,D2 | C,G,CE D,A,DF | G,DGB DGBd |
+C,G,CE D,A,DF | B,,F,B,D E,B,EG | C,G,CE D,A,DF | G,DGB G,D=FA |
+C,G,CE D,A,DF | G,DGB E,B,EG | A,EAc D,A,DF | B,,F,B,^D F,B,DF |
+C,G,CE A,EAc | B,,F,B,D G,DGB | A,EAc D,A,DF | E,B,EG B,,F,B,^D |
+E,B,EG D,B,GB | C,G,CE A,EAc | D,A,DF DFAd | G,DGB G,D=FA |
+C,G,CE G,CEG | G,DGB D,G,B,D | A,EAc D,A,DF | B,,F,B,^D E,B,EG |
+C,G,CE A,EAc | D,A,DF B,,F,B,D | C,G,CE D,A,DF | G,DGB G,4
+`
+    },
+    {
+      name: 'AcousticGuitarSteel',
+      program: 25,
+      clef: 'treble',
+      notes: `
+z8 | z8 | z8 | z8 |
+z2 B2 z2 A2 | z2 G2 z2 F2 | z2 G2 z2 F2 | z2 G2 B2 d2 |
+z2 G2 z2 A2 | z2 F2 z2 G2 | z2 G2 z2 F2 | z2 G2 B2 =f2 |
+e2 G2 f2 A2 | g2 B2 e2 G2 | e2 A2 f2 A2 | ^d2 F2 B2 A2 |
+g2 c2 e2 A2 | f2 B2 d2 G2 | e2 A2 f2 A2 | g2 B2 ^d2 B2 |
+e2 B2 g2 d2 | g2 c2 e2 A2 | f2 A2 a2 d2 | g2 d2 =f2 d2 |
+e2 G2 c2 G2 | d2 G2 B2 G2 | c2 E2 A2 D2 | ^d2 F2 B2 G2 |
+z2 G2 z2 E2 | z2 F2 z2 G2 | z2 G2 z2 F2 | G2 D2 G,2 z2
+`
+    },
+    {
+      name: 'WarmPad',
+      program: 89,
+      clef: 'treble',
+      notes: `
+[G8B8d8] | [E8G8B8] | [C8E8G8] | [D8F8A8] |
+[G4B4d4] [F4A4d4] | [E4G4B4] [D4F4B4] | [C4E4G4] [D4F4A4] | [G8B8d8] |
+[C4E4G4] [D4F4A4] | [D4F4B4] [E4G4B4] | [C4E4G4] [D4F4A4] | [G4B4d4] [G4B4=f4] |
+[C4E4G4] [D4F4A4] | [G4B4d4] [E4G4B4] | [C4E4A4] [D4F4A4] | [B,8^D8F8] |
+[C4E4G4] [C4E4A4] | [B,4D4F4] [B,4D4G4] | [C4E4A4] [D4F4A4] | [E4G4B4] [B,4^D4F4] |
+[E4G4B4] [D4G4B4] | [C4E4G4] [C4E4A4] | [D8F8A8] | [G4B4d4] [G4B4=f4] |
+[C8E8G8] | [B,8D8G8] | [C4E4A4] [D4F4A4] | [B,4^D4F4] [E4G4B4] |
+[C4E4G4] [C4E4A4] | [D4F4A4] [B,4D4G4] | [C4E4G4] [D4F4A4] | [B,8D8G8]
+`
+    },
+    {
+      name: 'FretlessBass',
+      program: 35,
+      clef: 'bass',
+      notes: `
+G,,6 D,,2 | E,,6 B,,,2 | C,,6 G,,,2 | D,,6 A,,,2 |
+G,,4 F,,4 | E,,4 D,,4 | C,,4 D,,4 | G,,4 D,,2 G,,2 |
+C,,4 D,,4 | B,,,4 E,,4 | A,,,4 D,,4 | G,,4 =F,,4 |
+E,,4 D,,4 | G,,4 E,,4 | A,,,4 D,,4 | B,,,4 F,,2 B,,,2 |
+C,,4 A,,,4 | B,,,4 G,,,4 | A,,,4 D,,4 | E,,4 B,,,4 |
+E,,4 D,,4 | C,,4 A,,,4 | D,,4 C,,4 | B,,,4 G,,,4 |
+C,,4 E,,4 | G,,4 B,,,4 | A,,,4 D,,4 | B,,,4 E,,4 |
+C,,4 A,,,4 | D,,4 E,,4 | C,,4 D,,4 | G,,4 D,,4
+`
+    },
+    {
+      name: 'Vibraphone',
+      program: 11,
+      clef: 'treble',
+      notes: `
+d'4 b4 | g4 e4 | g4 e4 | f6 z2 |
+z8 | z8 | g4 a4 | b6 z2 |
+g4 a4 | f4 g4 | e4 f4 | g2 d2 g2 =f2 |
+e4 f4 | g4 b4 | c'4 a4 | b6 z2 |
+c'4 a4 | b4 g4 | a4 f4 | g4 f4 |
+e4 g4 | c'4 e'4 | d'4 c'4 | b2 d'2 g'2 =f'2 |
+e'4 c'4 | d'4 b4 | c'4 a4 | b6 z2 |
+g4 e4 | f4 g4 | e4 f4 | g6 z2
+`
+    }
+  ];
+
+  const getContext = () =>
+    Stage1BGM_0430.getAudioContext();
+
+  let synth = null;
+  let ready = false;
+  let loading = false;
+  let playing = false;
+  let paused = false;
+  let failed = false;
+
+  let duration = FALLBACK_DURATION;
+  let startedAt = 0;
+  let position = 0;
+  let generation = 0;
+
+  function isAllowed() {
+    return G.phase === 'ending';
+  }
+
+  function buildAbc() {
+    const lines = [
+      'X:1',
+      'T:' + TITLE,
+      'M:4/4',
+      'L:1/8',
+      'Q:1/4=' + TEMPO,
+      'K:G'
+    ];
+
+    SCORE.forEach((voice, index) => {
+      lines.push(
+        'V:' + (index + 1) +
+        ' name="' + voice.name + '"' +
+        ' clef=' + voice.clef
+      );
+
+      lines.push(
+        '%%MIDI program ' + voice.program
+      );
+
+      // ABC側の反復記号は使用せず、
+      // 再生管理側で楽曲全体をループする。
+      lines.push(voice.notes.trim());
+    });
+
+    return lines.join('\n');
+  }
+
+  function prepare() {
+    if (ready || loading || failed) return;
+
+    const ac = getContext();
+    if (!ac) return;
+
+    loading = true;
+    const token = ++generation;
+
+    Stage1BGM_0430.loadLibrary()
+      .then(ABCJS => {
+        if (!ABCJS.synth.supportsAudio()) {
+          throw new Error(
+            'abcjsの音声再生に非対応'
+          );
+        }
+
+        const visualObjects =
+          ABCJS.renderAbc('*', buildAbc());
+
+        if (!visualObjects || !visualObjects[0]) {
+          throw new Error(
+            'エンディング楽譜の解析に失敗しました'
+          );
+        }
+
+        const nextSynth =
+          new ABCJS.synth.CreateSynth();
+
+        return nextSynth.init({
+          audioContext: ac,
+          visualObj: visualObjects[0],
+          options: {
+            soundFontVolumeMultiplier: 0.65,
+            chordsOff: true
+          }
+        })
+        .then(() => nextSynth.prime())
+        .then(result => ({
+          nextSynth,
+          result
+        }));
+      })
+      .then(({ nextSynth, result }) => {
+        if (generation !== token) {
+          try { nextSynth.stop(); } catch (_) {}
+          return;
+        }
+
+        synth = nextSynth;
+        duration =
+          result.duration || FALLBACK_DURATION;
+
+        ready = true;
+        playing = false;
+        paused = false;
+        position = 0;
+
+        console.info(
+          'EndingBGM: 音源準備完了',
+          duration
+        );
+      })
+      .catch(error => {
+        if (generation !== token) return;
+
+        failed = true;
+
+        console.warn(
+          'EndingBGM: 音源準備失敗',
+          error
+        );
+      })
+      .finally(() => {
+        if (generation === token) {
+          loading = false;
+        }
+      });
+  }
+
+  function start() {
+    if (!ready || !synth || playing) return;
+
+    const ac = getContext();
+    if (!ac || ac.state !== 'running') return;
+
+    try {
+      if (paused) {
+        synth.resume();
+        startedAt = ac.currentTime - position;
+      } else {
+        synth.start();
+        startedAt = ac.currentTime;
+        position = 0;
+      }
+
+      playing = true;
+      paused = false;
+    } catch (error) {
+      console.warn(
+        'EndingBGM: 再生開始失敗',
+        error
+      );
+    }
+  }
+
+  function stop(reset = false) {
+    if (!synth || !ready) {
+      playing = false;
+      paused = false;
+
+      if (reset) position = 0;
+      return;
+    }
+
+    try {
+      if (reset) {
+        synth.stop();
+        position = 0;
+        paused = false;
+      } else if (playing) {
+        const ac = getContext();
+
+        position = ac
+          ? Math.max(
+              0,
+              ac.currentTime - startedAt
+            )
+          : 0;
+
+        synth.pause();
+        paused = true;
+      }
+    } catch (error) {
+      console.warn(
+        'EndingBGM: 停止失敗',
+        error
+      );
+    }
+
+    playing = false;
+  }
+
+  function update() {
+    if (!isAllowed()) {
+      if (playing || paused) {
+        stop(true);
+      }
+      return;
+    }
+
+    if (!ready) {
+      prepare();
+      return;
+    }
+
+    if (!playing) {
+      start();
+      return;
+    }
+
+    const ac = getContext();
+    if (!ac || ac.state !== 'running') return;
+
+    // 32小節の演奏完了後にループする。
+    // エンディング会話・演出の進行とは独立。
+    if (
+      duration > 0 &&
+      ac.currentTime - startedAt >= duration
+    ) {
+      try {
+        synth.stop();
+        synth.start();
+
+        startedAt = ac.currentTime;
+        position = 0;
+        paused = false;
+      } catch (error) {
+        console.warn(
+          'EndingBGM: ループ再生失敗',
+          error
+        );
+
+        playing = false;
+      }
+    }
+  }
+
+  return {
+    update,
+    stop,
+    getAbc: buildAbc
+  };
+})();
+
+/* ============================================================
+ * BGMDirector
+ *
+ * BGM選択・切替の唯一の管理者。
+ *
+ * 第1フェーズ：
+ * ・再生対象を一元判定
+ * ・通常曲とボス曲の排他制御
+ * ・一時停止・再開時の演奏状態維持
+ * ・ステージ移行・死亡・エンディングへの対応
+ *
+ * 各楽曲のABCデータと音声合成処理は変更しない。
+ * ============================================================ */
+/* ============================================================
+ * SharedBGMPlayer
+ *
+ * 8曲共通のabcjs再生エンジン。
+ *
+ * 責務：
+ * ・ABC楽譜からの音源生成
+ * ・非同期読み込みの競合防止
+ * ・シンセサイザーの一元管理
+ * ・再生、一時停止、再開、停止
+ * ・楽曲終端でのループ
+ *
+ * 楽曲選択はBGMDirectorが担当する。
+ * ============================================================ */
+const SharedBGMPlayer = (() => {
+  'use strict';
+
+  const TRACKS = Object.freeze({
+    stage1: Stage1BGM_0430,
+    boss1: Stage1BossBGM,
+    stage2: Stage2BGM,
+    boss2: Stage2BossBGM,
+    stage3: Stage3BGM,
+    boss3: Stage3BossBGM,
+    boss4: Stage4BossBGM,
+    ending: EndingBGM
+  });
+
+  const AUDIO_OPTIONS = Object.freeze({
+    soundFontVolumeMultiplier: 0.65,
+    chordsOff: true
+  });
+
+  let currentKey = null;
+  let synth = null;
+
+  let ready = false;
+  let loading = false;
+  let playing = false;
+  let paused = false;
+
+  let duration = 0;
+  let startedAt = 0;
+  let position = 0;
+
+  // 非同期処理の世代番号。
+  // 曲が切り替わるたびに更新する。
+  let generation = 0;
+
+  // 初期化失敗後の再試行管理。
+  // 毎フレームの無制限な再試行は行わない。
+  let failedKey = null;
+  let failedAt = 0;
+  const RETRY_INTERVAL_MS = 10000;
+
+  // 音源生成の失敗とは独立して、再生中のエラーを管理する。
+  // 状態はSharedBGMPlayer内に閉じ込める。
+  const MAX_PLAYBACK_FAILURES = 3;
+  const PLAYBACK_RETRY_INTERVAL_MS = 3000;
+
+  let playbackFailures = 0;
+  let nextPlaybackRetryAt = 0;
+  let playbackBlocked = false;
+
+  function resetPlaybackFailures() {
+    playbackFailures = 0;
+    nextPlaybackRetryAt = 0;
+    playbackBlocked = false;
+  }
+
+  function canAttemptPlayback() {
+    if (playbackBlocked) return false;
+
+    return performance.now() >= nextPlaybackRetryAt;
+  }
+
+  function recordPlaybackFailure(operation, error) {
+    playing = false;
+
+    playbackFailures++;
+
+    const attempts = playbackFailures;
+
+    console.warn(
+      'SharedBGMPlayer: 再生処理失敗',
+      {
+        track: currentKey,
+        operation: operation,
+        attempt: attempts,
+        maxAttempts: MAX_PLAYBACK_FAILURES,
+        error: error
+      }
+    );
+
+    if (attempts >= MAX_PLAYBACK_FAILURES) {
+      playbackBlocked = true;
+      nextPlaybackRetryAt = Infinity;
+
+      console.warn(
+        'SharedBGMPlayer: この再生セッションの再試行を停止',
+        {
+          track: currentKey,
+          failures: attempts
+        }
+      );
+
+      return;
+    }
+
+    const delay =
+      PLAYBACK_RETRY_INTERVAL_MS * attempts;
+
+    nextPlaybackRetryAt =
+      performance.now() + delay;
+
+    console.info(
+      'SharedBGMPlayer: 再生再試行を予約',
+      {
+        track: currentKey,
+        retryAfterMs: delay,
+        nextAttempt: attempts + 1
+      }
+    );
+  }
+
+  function canRetry(key) {
+    if (failedKey !== key) return true;
+
+    const elapsed = performance.now() - failedAt;
+
+    if (elapsed < RETRY_INTERVAL_MS) {
+      return false;
+    }
+
+    failedKey = null;
+    failedAt = 0;
+
+    console.info(
+      'SharedBGMPlayer: 音源準備を再試行',
+      key
+    );
+
+    return true;
+  }
+
+  function getContext() {
+    return Stage1BGM_0430.getAudioContext();
+  }
+
+  // iPhone SafariではAudioContextが中断されることがある。
+  // 画面操作を契機に、既存Contextの再開だけを試みる。
+  // 音源の再生成や楽曲変更は行わない。
+  let resumePending = false;
+
+  function resumeAudioOnGesture() {
+    if (!currentKey) return;
+
+    const ac = getContext();
+
+    if (
+      !ac ||
+      ac.state === 'running' ||
+      ac.state === 'closed' ||
+      resumePending
+    ) {
+      return;
+    }
+
+    resumePending = true;
+
+    // Safariのユーザー操作制限に対応するため、
+    // Promiseのコールバックを経由せず、
+    // イベントハンドラ内で直接resume()を呼ぶ。
+    let result;
+
+    try {
+      result = ac.resume();
+    } catch (error) {
+      resumePending = false;
+
+      console.warn(
+        'SharedBGMPlayer: AudioContext再開失敗',
+        error
+      );
+
+      return;
+    }
+
+    Promise.resolve(result)
+      .then(() => {
+        if (ac.state === 'running') {
+          console.info(
+            'SharedBGMPlayer: AudioContext再開'
+          );
+        } else {
+          console.info(
+            'SharedBGMPlayer: AudioContext再開待機',
+            ac.state
+          );
+        }
+      })
+      .catch(error => {
+        console.warn(
+          'SharedBGMPlayer: AudioContext再開失敗',
+          error
+        );
+      })
+      .finally(() => {
+        resumePending = false;
+      });
+  }
+
+  // イベント登録はこの共通モジュール内で一度だけ行う。
+  window.addEventListener(
+    'pointerdown',
+    resumeAudioOnGesture,
+    { passive: true }
+  );
+
+  window.addEventListener(
+    'touchstart',
+    resumeAudioOnGesture,
+    { passive: true }
+  );
+
+  window.addEventListener(
+    'keydown',
+    resumeAudioOnGesture
+  );
+
+  function reportError(message, error) {
+    console.warn(
+      'SharedBGMPlayer: ' + message,
+      error
+    );
+  }
+
+  function disposeSynth(target) {
+    if (!target) return;
+
+    try {
+      target.stop();
+    } catch (error) {
+      reportError('音源停止失敗', error);
+    }
+  }
+
+  /*
+   * 楽曲データを取得する。
+   *
+   * 既存のABC楽譜は一切変更しない。
+   * ステージ1の旧反復記号のみ、
+   * 共通ループ管理と重複しないよう除去する。
+   */
+  function getAbc(key) {
+    const track = TRACKS[key];
+
+    if (
+      !track ||
+      typeof track.getAbc !== 'function'
+    ) {
+      throw new Error(
+        'ABC楽譜を取得できません: ' + key
+      );
+    }
+
+    const abc = track.getAbc();
+
+    if (typeof abc !== 'string' || !abc.trim()) {
+      throw new Error(
+        'ABC楽譜が空です: ' + key
+      );
+    }
+
+    if (key === 'stage1') {
+      return abc
+        .replace(/\|:/g, '|')
+        .replace(/:\|/g, '|');
+    }
+
+    return abc;
+  }
+
+  /*
+   * 曲変更時の完全リセット。
+   *
+   * 非同期準備中の処理も世代番号で無効化する。
+   */
+  function reset() {
+    generation++;
+
+    disposeSynth(synth);
+
+    synth = null;
+    currentKey = null;
+
+    ready = false;
+    loading = false;
+    playing = false;
+    paused = false;
+
+    duration = 0;
+    startedAt = 0;
+    position = 0;
+
+    // ステージ移行・曲変更・再挑戦などによる
+    // 新しい再生セッションでは過去の再生失敗を引き継がない。
+    resetPlaybackFailures();
+  }
+
+  /*
+   * abcjsの音源準備。
+   *
+   * 同時に複数の楽曲を読み込まない。
+   * 読み込み完了時に世代番号を確認する。
+   */
+  function prepare(key) {
+    if (loading || ready || !key) return;
+    if (!canRetry(key)) return;
+
+    const ac = getContext();
+
+    if (!ac) return;
+
+    loading = true;
+
+    const token = ++generation;
+
+    let nextSynth = null;
+
+    Promise.resolve()
+      .then(() => Stage1BGM_0430.loadLibrary())
+      .then(ABCJS => {
+        if (generation !== token) return null;
+
+        if (!ABCJS.synth.supportsAudio()) {
+          throw new Error(
+            'abcjsの音声再生に非対応'
+          );
+        }
+
+        const abc = getAbc(key);
+
+        // ABC楽譜の基本構造を確認。
+        // 楽曲データや音符は変更しない。
+        const voiceMatches =
+          abc.match(/^V:\s*\S+/gm) || [];
+
+        const midiMatches =
+          abc.match(/^%%MIDI program\s+\d+/gm) || [];
+
+        // 声部定義の書式には複数の形式があるため、
+        // 正規表現による確認だけで演奏を禁止しない。
+        // 実際の解析可否はabcjsへ委ねる。
+        if (
+          voiceMatches.length !== 8 ||
+          midiMatches.length !== 8
+        ) {
+          console.warn(
+            'SharedBGMPlayer: ABC声部構成を確認してください',
+            {
+              track: key,
+              voices: voiceMatches.length,
+              midiPrograms: midiMatches.length
+            }
+          );
+        }
+
+        const voiceIds = voiceMatches.map(
+          line => line.replace(/^V:\s*/, '').trim()
+            .split(/\s+/)[0]
+        );
+
+        if (
+          new Set(voiceIds).size !== voiceIds.length
+        ) {
+          console.warn(
+            'SharedBGMPlayer: ABC声部IDに重複があります',
+            key
+          );
+        }
+
+        const visuals =
+          ABCJS.renderAbc('*', abc);
+
+        if (!visuals || !visuals[0]) {
+          throw new Error(
+            'ABC楽譜の解析に失敗: ' + key
+          );
+        }
+
+        const visualObj = visuals[0];
+
+        // 実際の音声生成前に楽譜の情報を記録する。
+        // 演奏品質の判定は実機で行う。
+        console.info(
+          'SharedBGMPlayer: ABC解析完了',
+          {
+            track: key,
+            voices: voiceIds,
+            midiPrograms: midiMatches.map(
+              line => Number(
+                line.replace(
+                  /^%%MIDI program\s+/,
+                  ''
+                )
+              )
+            ),
+            bpm:
+              typeof visualObj.getBpm === 'function'
+                ? visualObj.getBpm()
+                : null
+          }
+        );
+
+        nextSynth =
+          new ABCJS.synth.CreateSynth();
+
+        return nextSynth.init({
+          audioContext: ac,
+          visualObj: visuals[0],
+          options: AUDIO_OPTIONS
+        }).then(() => {
+          if (generation !== token) {
+            return null;
+          }
+
+          return nextSynth.prime();
+        });
+      })
+      .then(result => {
+        if (generation !== token) {
+          disposeSynth(nextSynth);
+          return;
+        }
+
+        if (!result || !nextSynth) {
+          throw new Error(
+            '音源の生成結果がありません'
+          );
+        }
+
+        const actualDuration =
+          Number(result.duration);
+
+        if (
+          !Number.isFinite(actualDuration) ||
+          actualDuration <= 0
+        ) {
+          throw new Error(
+            '演奏時間を取得できません: ' + key
+          );
+        }
+
+        synth = nextSynth;
+        duration = actualDuration;
+
+        ready = true;
+        loading = false;
+        playing = false;
+        paused = false;
+
+        position = 0;
+        startedAt = 0;
+
+        console.info(
+          'SharedBGMPlayer: 準備完了',
+          key,
+          duration
+        );
+      })
+      .catch(error => {
+        if (generation !== token) {
+          disposeSynth(nextSynth);
+          return;
+        }
+
+        disposeSynth(nextSynth);
+
+        synth = null;
+        ready = false;
+        loading = false;
+        playing = false;
+        paused = false;
+
+        failedKey = key;
+        failedAt = performance.now();
+
+        reportError(
+          '音源準備失敗: ' + key,
+          error
+        );
+
+        console.info(
+          'SharedBGMPlayer: 再試行待機',
+          {
+            track: key,
+            retryAfterMs: RETRY_INTERVAL_MS
+          }
+        );
+      });
+  }
+
+  /*
+   * 新しい曲へ切り替える。
+   *
+   * 現在の音源を完全停止してから
+   * 次の曲の準備を開始する。
+   */
+  function select(key) {
+    if (currentKey === key) return;
+
+    reset();
+
+    currentKey = key;
+
+    if (failedKey !== key) {
+      failedKey = null;
+    }
+  }
+
+  /*
+   * 再生開始・再開。
+   *
+   * 一時停止からの復帰ではresumeを使用し、
+   * 曲の先頭へ戻さない。
+   */
+  function start() {
+    if (!ready || !synth || playing) return;
+
+    // 同一セッション内の再生失敗回数を制限する。
+    // 待機期間中は何もせず、ログも出力しない。
+    if (!canAttemptPlayback()) return;
+
+    const ac = getContext();
+
+    if (!ac) return;
+
+    if (ac.state !== 'running') {
+      // suspended / interrupted は再生失敗として数えない。
+      // AudioContextの復旧は既存のユーザー操作処理に任せる。
+      return;
+    }
+
+    try {
+      const wasPaused = paused;
+
+      if (wasPaused) {
+        synth.resume();
+
+        startedAt =
+          ac.currentTime - position;
+      } else {
+        synth.start();
+
+        startedAt = ac.currentTime;
+        position = 0;
+      }
+
+      playing = true;
+      paused = false;
+
+      console.info(
+        'SharedBGMPlayer: 再生開始',
+        {
+          track: currentKey,
+          resumed: wasPaused,
+          duration: duration
+        }
+      );
+    } catch (error) {
+      // 同じエラーを毎フレーム報告しない。
+      // 次回の試行可否と待機時間は共通処理で管理する。
+      recordPlaybackFailure(
+        'start',
+        error
+      );
+    }
+  }
+
+  /*
+   * 一時停止。
+   *
+   * 再生位置を保持する。
+   */
+  function pause() {
+    if (!playing || !synth || !ready) {
+      return;
+    }
+
+    const ac = getContext();
+
+    try {
+      position = ac
+        ? Math.max(
+            0,
+            Math.min(
+              duration,
+              ac.currentTime - startedAt
+            )
+          )
+        : 0;
+
+      synth.pause();
+
+      playing = false;
+      paused = true;
+    } catch (error) {
+      reportError('一時停止失敗', error);
+    }
+  }
+
+  /*
+   * 楽曲終端でのループ。
+   *
+   * ABC記譜の32小節を固定時間で推測せず、
+   * abcjsが生成した音源の実時間を使用する。
+   */
+  function updateLoop() {
+    if (!playing || !ready || !synth) {
+      return;
+    }
+
+    const ac = getContext();
+
+    if (!ac || ac.state !== 'running') {
+      return;
+    }
+
+    if (
+      duration <= 0 ||
+      ac.currentTime - startedAt < duration
+    ) {
+      return;
+    }
+
+    // ループ処理でも、再生開始と同じ失敗回数制限を使う。
+    if (!canAttemptPlayback()) return;
+
+    try {
+      synth.stop();
+      synth.start();
+
+      startedAt = ac.currentTime;
+      position = 0;
+      paused = false;
+      playing = true;
+
+      // 1周の再生と次周の開始に成功したため、
+      // 過去の一時的な再生失敗を解消する。
+      resetPlaybackFailures();
+    } catch (error) {
+      // ループ開始失敗時は、次のフレームでの
+      // 無制限な再実行を防止する。
+      recordPlaybackFailure(
+        'loop',
+        error
+      );
+    }
+  }
+
+  /*
+   * BGMDirectorから呼び出される更新処理。
+   *
+   * 毎フレームの楽曲判定は行わない。
+   * 引数で指定された曲だけを管理する。
+   */
+  function update(key) {
+    if (!key) {
+      stop(true);
+      return;
+    }
+
+    if (currentKey !== key) {
+      select(key);
+    }
+
+    if (!canRetry(key)) return;
+
+    if (!ready) {
+      prepare(key);
+      return;
+    }
+
+    if (!playing) {
+      start();
+      return;
+    }
+
+    updateLoop();
+  }
+
+  /*
+   * 停止インターフェース。
+   *
+   * reset=true:
+   *   曲の切替・タイトル復帰など。
+   *
+   * reset=false:
+   *   ゲームの一時停止。
+   */
+  function stop(resetPosition = false) {
+    if (resetPosition) {
+      reset();
+      return;
+    }
+
+    pause();
+  }
+
+  return {
+    update,
+    stop
+  };
+})();
+
+/* ============================================================
+ * BGMDirector
+ * 楽曲選択と切替の一元管理。
+ * 音声再生はSharedBGMPlayerへ委譲する。
+ * ============================================================ */
+const BGMDirector = (() => {
+  'use strict';
+
+  const TRACKS = Object.freeze({
+    stage1: Stage1BGM_0430,
+    boss1: Stage1BossBGM,
+    stage2: Stage2BGM,
+    boss2: Stage2BossBGM,
+    stage3: Stage3BGM,
+    boss3: Stage3BossBGM,
+    boss4: Stage4BossBGM,
+    ending: EndingBGM
+  });
+
+  // 現在選択中のBGM。
+  // 楽曲ごとの独立した選択状態は持たない。
+  let current = null;
+  let paused = false;
+
+  // BGM管理処理に例外が発生した場合、
+  // 同じ例外を毎フレーム繰り返さない。
+  const faults = new Set();
+
+  /*
+   * 現在のゲーム状態から再生曲を決定する。
+   *
+   * 優先順位：
+   * 1. エンディング
+   * 2. ボス戦
+   * 3. 通常ステージ
+   *
+   * ボス撃破後は通常曲へ戻さない。
+   * ステージ4の通常区間にはBGMを指定しない。
+   */
+  function selectTrack() {
+    if (G.phase === 'ending') {
+      return 'ending';
+    }
+
+    if (G.phase !== 'play' || !G.stage) {
+      return null;
+    }
+
+    const stageId = G.stage.id;
+
+    if (G.bossDown) {
+      return null;
+    }
+
+    const inBoss =
+      G.bossTriggered &&
+      !!Boss.active;
+
+    if (inBoss) {
+      switch (stageId) {
+        case 1: return 'boss1';
+        case 2: return 'boss2';
+        case 3: return 'boss3';
+        case 4: return 'boss4';
+        default: return null;
+      }
+    }
+
+    // ボス戦が開始した後は、撃破・死亡・演出移行に
+    // よってBoss.activeが変化しても通常曲を再開しない。
+    if (G.bossTriggered || Boss.active) {
+      return null;
+    }
+
+    switch (stageId) {
+      case 1: return 'stage1';
+      case 2: return 'stage2';
+      case 3: return 'stage3';
+      default: return null;
+    }
+  }
+
+  /*
+   * 現在の曲を停止する。
+   *
+   * reset=true：
+   *   曲の選択が変わる場合。
+   *   次回は先頭から再生する。
+   *
+   * reset=false：
+   *   ポーズの場合。
+   *   再開位置を保持する。
+   */
+  function stopCurrent(reset) {
+    if (!current) return;
+
+    try {
+      SharedBGMPlayer.stop(reset);
+    } catch (error) {
+      console.warn(
+        'BGMDirector: 停止失敗',
+        current,
+        error
+      );
+    }
+  }
+
+  /*
+   * BGMの選択を変更する。
+   *
+   * 旧曲を停止してから新曲を更新することで、
+   * 複数のBGM管理処理が同時に再生を開始する
+   * 状態を防ぐ。
+   */
+  function changeTrack(next) {
+    if (current === next) return;
+
+    if (current) {
+      stopCurrent(true);
+    }
+
+    // 新しい再生セッションでは、過去の更新エラーを
+    // 引き継がない。
+    // 同一セッション内の連続エラー防止は維持する。
+    if (next) {
+      faults.delete(next);
+    }
+
+    current = next;
+    paused = false;
+  }
+
+  /*
+   * 一時停止中は、選択中の曲のみ停止する。
+   * 曲の選択自体は維持する。
+   */
+  function pauseCurrent() {
+    if (paused) return;
+
+    if (current) {
+      stopCurrent(false);
+    }
+
+    paused = true;
+  }
+
+  /*
+   * ゲームのメインループから1回だけ呼び出す。
+   *
+   * 各曲のupdate()を個別に呼ばず、
+   * 選択された1曲だけを更新する。
+   */
+  function update() {
+    // 一時停止中は選択中の楽曲を保持する。
+    // phaseの表記揺れに対応するが、
+    // ゲーム状態の正本は変更しない。
+    if (
+      G.phase === 'pause' ||
+      G.phase === 'paused'
+    ) {
+      pauseCurrent();
+      return;
+    }
+
+    const next = selectTrack();
+
+    if (next !== current) {
+      changeTrack(next);
+    }
+
+    // ポーズから復帰したときは、
+    // 既存BGM側のresume処理に再開を任せる。
+    if (paused) {
+      paused = false;
+    }
+
+    if (!current) return;
+
+    if (faults.has(current)) return;
+
+    if (!TRACKS[current]) return;
+
+    try {
+      SharedBGMPlayer.update(current);
+    } catch (error) {
+      console.error(
+        'BGMDirector: BGM更新失敗',
+        current,
+        error
+      );
+
+      faults.add(current);
+      stopCurrent(true);
+    }
+  }
+
+  /*
+   * タイトル復帰等で明示的に全停止したい場合の
+   * インターフェース。
+   *
+   * 現段階ではゲーム側に新たな呼び出しを追加せず、
+   * 既存のG.phaseによる自動判定を使用する。
+   */
+  function stop() {
+    changeTrack(null);
+    paused = false;
+  }
+
+  return {
+    update,
     stop
   };
 })();
@@ -11383,7 +13611,10 @@ const Game = {
 
     // ユーザーの開始操作からBGMの音声再生を有効化。
     // 実際の演奏可否はBGM管理側でステージ・ボス状態から判定。
-    Stage1BGM_0430.activate();
+    // 共通BGMプレイヤーを使用するため、
+    // 旧ステージ1シンセサイザーは起動しない。
+    // ユーザー操作中にAudioContextのみ有効化する。
+    Stage1BGM_0430.unlockAudio();
 
     // ステージ1の通常開始時だけ世界観を導入する。
     // 発言候補は既存の台詞管理に登録済み。
@@ -11502,11 +13733,7 @@ function step(raw) {
   } else if (G.phase === 'title') { Player.hero.setSpeed(0); Player.hero.update(dt); Player.sync(); }
   if (G.phase === 'ending') Ending.update(raw);
   Sfx.watch();
-  Stage1BGM_0430.update();
-  Stage1BossBGM.update();
-  Stage2BGM.update();
-  Stage2BossBGM.update();
-  Stage3BGM.update();
+  BGMDirector.update();
   Sky.update(raw, G.phase === 'title' ? 0 : clamp(G.maxZ / G.stage.goalZ, 0, 1));
   updateCamera(raw);
   if (G.phase !== 'pause' && !pedaling) { FX.update(dt); Barks.update(dt); }
