@@ -2782,6 +2782,8 @@ const Barks = (function () {
     say(obj, text, cls, dur, priority = false) {
       if (!obj) return;
       if (Player.drunk > 0 && Player.hero && obj === Player.hero.anchor('head_top')) text = slur(text);
+      // 別の吹き出しが同じ文言を表示中なら、重複して出さない（同じ対象の置き換えは従来どおり）
+      if (pool.some(q => q.t > 0 && q.obj !== obj && q.el.textContent === text)) return;
       const current = pool.find(q => q.obj === obj && q.t > 0);
       // 露出通知を表示している間も、Talkの字幕帯は通常どおり進む。
       if (current && current.priority && !priority) return;
@@ -4604,10 +4606,25 @@ const ENEMY_BUILD = {
     const top = ch.anchor('nameplate');   // 吹き出しの位置（名前表示位置）
     if (!MAT.asapBomb) MAT.asapBomb = new THREE.SpriteMaterial({ map: TEX.glow, color: 0xffd23a, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
     e.char = ch; e.headTop = top;
+    // 明滅をやめ、透明度でゆらぐ表現にする。材質はこの個体専用に複製する（他のキャラへ影響させない）
+    const fadeMats = [];
+    ch.object.traverse(o => {
+      if (!o.isMesh || !o.material) return;
+      const dup = m => { const c = m.clone(); fadeMats.push({ m: c, o: c.opacity, dw: c.depthWrite }); c.transparent = true; return c; };
+      o.material = Array.isArray(o.material) ? o.material.map(dup) : dup(o.material);
+    });
+    e.fadeMats = fadeMats; e.fadeA = 1;
+    e.disposeFade = () => fadeMats.forEach(f => f.m.dispose());
     e.onHit = () => { if (e.st === 'recover') ch.action('hurt'); };
     return { obj: ch.object, own: true, anim(e2, dt) {
       ch.update(dt);
-      ch.object.visible = !e2.hidden || Math.sin(G.time * 23 + e2.ph) > 0.2;
+      ch.object.visible = true;
+      if (e2.fadeMats) { // 霧に紛れている間だけ半透明でゆっくりゆらぐ。名乗り中・撃破後は不透明
+        const target = (e2.hidden && !e2.dead && e2.st !== 'wait' && e2.st !== 'intro') ? 0.24 + 0.06 * Math.sin(G.time * 2 + e2.ph) : 1;
+        e2.fadeA += (target - e2.fadeA) * Math.min(1, dt * 8);
+        const solid = e2.fadeA > 0.97;
+        e2.fadeMats.forEach(f => { f.m.opacity = f.o * e2.fadeA; f.m.depthWrite = solid ? f.dw : false; });
+      }
     } };
   },
   okuboLady(e) { // 大久保公園の女性（きらきらOLの色替え）。立ち尽くし、近づくと不敵に微笑む
@@ -5457,7 +5474,8 @@ const Enemies = {
     else if (e.def.ai !== 'mimic') e.st = 'stun';
   },
   remove(e) {
-    if (e.onRemove) e.onRemove();   // 敵が置いた物（地雷など）の後始末
+    if (e.onRemove) e.onRemove();
+    if (e.disposeFade) e.disposeFade();   // 駄目村の複製材質の解放   // 敵が置いた物（地雷など）の後始末
     scene.remove(e.obj);
     if (e.vis.own) { const shared = Object.values(GEO); e.obj.traverse(o => { if (o.geometry && shared.indexOf(o.geometry) < 0) o.geometry.dispose(); }); }
     const i = this.list.indexOf(e); if (i >= 0) this.list.splice(i, 1);
@@ -5677,12 +5695,13 @@ const Ending = {
     Barks.clear(); Talk.clear();
     $('endRoll').classList.remove('run'); $('endStamp').classList.remove('on'); $('endBtn').classList.add('hidden');
     $('endBox').classList.add('hidden'); $('endCaption').textContent = '';
-    setPhase('ending');
+    EndingScene.start(); setPhase('ending');
     this.next();
   },
   next() {
     this.i++;
     const s = this.steps[this.i], box = $('endBox');
+    if (s) EndingScene.step(s);   // 3D演出の場面・話し手を合わせる
     if (!s) return;
     if (s.mode) { // 背景の切り替え
       $('ending').className = s.mode; box.classList.add('hidden');
@@ -5704,10 +5723,123 @@ const Ending = {
     }
   },
   tap() { const s = this.steps[this.i]; if (s && s.say) this.next(); },
-  update(dt) { if (this.wait === Infinity) return; this.wait -= dt; if (this.wait <= 0) this.next(); },
+  update(dt) { EndingScene.update(dt); if (this.wait === Infinity) return; this.wait -= dt; if (this.wait <= 0) this.next(); },
   credits() {
     return LINES.endingCredits.map(r => '<b>' + r[0] + '</b>' + r[1]).join('<br><br>') +
       '<br><br><br><b>部下との絆</b>' + Flags.count() + ' / 8';
+  }
+};
+
+/* ---- エンディングの3D演出
+   会話劇：本社14階で課長・内木・駄目村が話す（話し手が弾み、カメラがゆっくり回り込む）
+   字幕ロール：カメラが天井のないフロアから上昇し、窓の外の都心を見下ろす
+   翌朝：暗転中にステージ1を読み込み、ぱわ原家の前で電話を受ける課長 →「完」で会社へ走り出す ---- */
+const EndingScene = {
+  actors: [], mode: '', t: 0, speaker: null, run: false, runT: 0,
+  c: { x: 0, z: 0 }, home: { x: 0, z: 0 }, far: new THREE.Vector3(),
+  clear() {
+    const shared = Object.values(GEO);
+    for (const a of this.actors) {
+      scene.remove(a.obj);
+      a.obj.traverse(m => { if (m.geometry && shared.indexOf(m.geometry) < 0) m.geometry.dispose(); });
+    }
+    this.actors.length = 0; this.mode = ''; this.speaker = null; this.run = false; this.runT = 0;
+  },
+  add(kind, data, x, z) {
+    const ch = ModelRenderer.createCharacter(data);
+    ch.object.position.set(x, 0, z); scene.add(ch.object);
+    const a = { kind, ch, obj: ch.object, x, z, face: Math.PI };
+    this.actors.push(a); return a;
+  },
+  posOf(k) {
+    if (k === 'kacho') return { x: Player.x, z: Player.z };
+    const a = this.actors.find(q => q.kind === k);
+    return a ? { x: a.x, z: a.z } : null;
+  },
+  start() {
+    this.clear();
+    Allies.clear(); Enemies.clear(); Shots.clear(); Combat.clear(); Seal.clear(); Barks.clear();
+    const P = Player, hw = World.halfWidthAt(P.z);
+    P.x = clamp(P.x, -hw + 3, hw - 3); P.face = Math.PI; P.inv = 0; P.state = 'free';
+    P.hero.setSpeed(0); P.hero.stop();
+    this.c = { x: P.x, z: P.z - 0.6 };
+    this.add('uchiki', MODEL_DATA_TIMID_SALARYMAN, P.x + 2.2, P.z - 1.1);
+    this.add('damemura', MODEL_DATA_SPARKLY_OFFICE_LADY, P.x - 2.2, P.z - 1.1);
+    this.mode = 'talk'; this.t = 0;
+    ['#ffd23a', '#ff6a8a', '#7df0ff', '#ffffff'].forEach(col =>
+      FX.emit(this.c.x, 3.2, this.c.z, { n: 30, color: col, speed: 4, life: 1.8, size: 0.22, g: 2.5, spread: 5 }));
+  },
+  // 暗転中にぱわ原家の前へ移る（画面は暗幕で隠れている）
+  toHome() {
+    this.clear();
+    Game.loadStage(0);
+    const P = Player;
+    P.inv = 0; P.face = 0; P.hero.setSpeed(0);
+    this.home = { x: P.x, z: P.z };
+    this.mode = 'home'; this.t = 0;
+    this.cam(camPos, camLook);
+    camera.position.copy(camPos); camera.lookAt(camLook);
+  },
+  step(s) {
+    if (s.mode === 'dark') { this.toHome(); return; }
+    if (s.mode) { this.mode = s.mode; this.t = 0; this.speaker = null; return; }
+    if (s.say) {
+      const n = String(s.say[0] || '');
+      this.speaker = n.indexOf('課長') >= 0 ? 'kacho' : n.indexOf('内木') >= 0 ? 'uchiki' : n.indexOf('駄目村') >= 0 ? 'damemura' : null;
+      if (this.mode === 'home') { // 翌朝の会話が始まったら暗幕を外し、スマホを光らせる
+        const el = $('ending');
+        if (el.classList.contains('dark')) el.className = 'home';
+        Player.phoneMat.color.setHex(0x7df0ff);
+      }
+      return;
+    }
+    if (s.stamp && this.mode === 'home') { this.run = true; this.runT = 0; }
+  },
+  update(dt) {
+    if (!this.mode) return;
+    this.t += dt;
+    const P = Player, sp = this.posOf(this.speaker), camX = camera.position.x, camZ = camera.position.z;
+    const faceTo = (x, z, self) => (sp && self !== this.speaker) ? Math.atan2(sp.x - x, sp.z - z) : Math.atan2(camX - x, camZ - z);
+    P.inv = 0;
+    if (this.mode === 'home' && this.run) { // 「完」と同時に会社へ走り出す
+      this.runT += dt;
+      const go = this.runT > 0.4 && this.runT < 4.5;
+      P.face = angLerp(P.face, 0, Math.min(1, dt * 8));
+      if (go) P.z += CONFIG.player.run * dt;
+      P.hero.setSpeed(go ? CONFIG.player.run : 0);
+    } else {
+      P.hero.setSpeed(0);
+      P.face = angLerp(P.face, faceTo(P.x, P.z, 'kacho'), Math.min(1, dt * 4));
+    }
+    P.hero.update(dt); P.sync();
+    if (this.speaker === 'kacho' && !this.run) P.obj.position.y += Math.abs(Math.sin(this.t * 7)) * 0.03;
+    for (const a of this.actors) {
+      a.face = angLerp(a.face, faceTo(a.x, a.z, a.kind), Math.min(1, dt * 4));
+      const talking = this.speaker === a.kind;
+      a.obj.position.set(a.x, talking ? Math.abs(Math.sin(this.t * 7)) * 0.04 : 0, a.z);
+      a.obj.rotation.y = a.face;
+      a.obj.rotation.z = Math.sin(this.t * 1.3 + (a.kind === 'uchiki' ? 0 : 2)) * 0.03;
+      a.ch.setSpeed(0); a.ch.update(dt);
+    }
+  },
+  // updateCamera から呼ぶ演出カメラ。担当しない時は false
+  cam(pos, look) {
+    if (!this.mode) return false;
+    if (this.mode === 'home') {
+      const h = this.home, P = Player;
+      pos.set(h.x - 3.2 + Math.sin(this.t * 0.4) * 0.15, 1.7, h.z + 3.6);
+      look.set(P.x + 0.4, 1.25, Math.min(P.z, h.z + 8));
+      return true;
+    }
+    const c = this.c, r = this.mode === 'roll' ? clamp(this.t / 15, 0, 1) : 0, k = r * r * (3 - 2 * r);
+    const a = Math.PI + 0.45 * Math.sin(this.t * 0.15) + k * 0.7, R = lerp(6.5, 34, k);
+    const hw = lerp(World.halfWidthAt(c.z) - 0.5, 999, k);
+    pos.set(clamp(c.x + Math.sin(a) * R, -hw, hw), lerp(2.4, 28, k), c.z + Math.cos(a) * R);
+    look.set(c.x, 1.3, c.z);
+    const sp = this.mode === 'talk' ? this.posOf(this.speaker) : null;
+    if (sp) { look.x = lerp(look.x, sp.x, 0.5); look.z = lerp(look.z, sp.z, 0.5); look.y = 1.45; }
+    if (k > 0) look.lerp(this.far.set(c.x, -12, c.z + 80), k);
+    return true;
   }
 };
 
@@ -5813,6 +5945,7 @@ const Sfx = {
 window.addEventListener('pointerdown', () => Sfx.unlock());
 window.addEventListener('keydown', () => Sfx.unlock());
 
+if (LINES.tips && !LINES.tips.weak) LINES.tips.weak = '駄目村が弱点を指摘中！ 赤い輪の中でCEOを殴ると大ダメージ＆硬直';
 /* ---- 初回だけの操作ガイド（種類ごとに1回。表示済みは Save.data.tips に記録） ---- */
 const Tips = {
   q: [], t: 0,
@@ -5853,6 +5986,7 @@ const Allies = {
     }
     this.list.length = 0; this.uniCD = 0;
     if (this.mark) this.mark.visible = false;
+    if (this.weakRing) this.weakRing.visible = false;
   },
   spawn(kind) {
     const P = Player, a = { kind, x: P.x + (kind === 'uchiki' ? 3 : -3), z: P.z - 7, face: 0, cd: 2, active: 0 };
@@ -5913,9 +6047,12 @@ const Allies = {
           Shots.refute(P.x, P.z, 1.0);
         }
       } else if (a.cd <= 0) { // 主語のある報告：CEOの弱点に印をつける
+        if (!ctrl.vulnerable()) { a.cd = 0.5; continue; }   // 無敵中は印を付けず、すぐ再試行
         a.cd = cfg.weakEvery;
         ctrl.markWeak(cfg.weakBase + cfg.weakPer * (Flags.of('damemuraReport') + Flags.of('damemuraBadge')));
         Barks.say(a.head, pick(LINES.allyReport), 'tout', 1.6);
+        Barks.say(P.hero.anchor('head_top'), '弱点が見えた！ 叩き込め！', 'hint', 1.6);
+        Tips.show('weak');
       }
     }
     // 弱点の印（CEOの胸の制御核の位置で点滅）
@@ -5925,7 +6062,19 @@ const Allies = {
     }
     const w = ctrl && ctrl.weakLeft ? ctrl.weakLeft() : 0;
     this.mark.visible = w > 0;
-    if (w > 0) { const bp = ctrl.pos(); this.mark.position.set(bp.x, 4.2, bp.z); this.mark.scale.setScalar(1.6 + Math.sin(G.time * 10) * 0.4); }
+    if (!this.weakRing) { // CEOの足元の赤い円（この中で殴ると弱点直撃）
+      this.weakRing = new THREE.Mesh(GEO.disc, new THREE.MeshBasicMaterial({ color: 0xff3a20, transparent: true, opacity: 0.4, depthWrite: false, side: THREE.DoubleSide }));
+      this.weakRing.rotation.x = -Math.PI / 2; this.weakRing.visible = false; scene.add(this.weakRing);
+    }
+    this.weakRing.visible = w > 0;
+    if (w > 0) {
+      const bp = ctrl.pos(), f = bp.face || 0;
+      this.mark.position.set(bp.x + Math.sin(f) * 1.32 * 1.3, 4.2, bp.z + Math.cos(f) * 1.32 * 1.3);   // 胸の制御核の位置
+      this.mark.scale.setScalar((1.6 + Math.sin(G.time * 10) * 0.4) * 0.7);
+      this.weakRing.position.set(bp.x, 0.1 + P.floorY, bp.z);
+      this.weakRing.scale.setScalar(CONFIG.ceo.weakReach || 4.5);
+      this.weakRing.material.opacity = 0.4 + 0.1 * Math.sin(G.time * 12);
+    }
   },
   // 全会一致決裁：絆8つ・2人がそろい・CEOが硬直している時だけ
   unanimousReady() {
@@ -6785,6 +6934,9 @@ function createBuchoBoss(def) {
    加勢（内木・駄目村）用に、段階・第二形態の経過秒数・弱点の印・硬直中かどうかを外から使えるようにする */
 function createCeoBoss(def) {
   const c = CONFIG.ceo, A = def.arena, HW = def.halfWidth, T = LINES.ceoTalk;
+  // 弱点直撃の設定（CONFIG側に未定義の場合だけ既定値を補う）
+  const WEAK_DEFAULTS = { weakMinHit: 8, weakBurst: 60, weakStun: 2.6, weakReach: 4.5 };
+  for (const k in WEAK_DEFAULTS) if (c[k] == null) c[k] = WEAK_DEFAULTS[k];
   const man = (colors, scale) => {
     const ch = ModelRenderer.createCharacter(MODEL_DATA_SALARYMAN_GLASSES_SUIT, { colors, hide: ['briefcase'] });
     ch.object.scale.setScalar(scale); scene.add(ch.object); return ch;
@@ -6836,7 +6988,8 @@ function createCeoBoss(def) {
     marks.forEach(q => { q.on = false; q.m.visible = false; });
     ring.visible = false; ice.visible = false; B.focusT = 0;
   }
-  function damage(d) {
+  function damage(d, raw) {
+    let burst = false;   // 弱点直撃（raw=true の全会一致などは対象外）
     if (INV[B.st]) return;
     if (B.phase === 'B') {
       B.ahp -= d;
@@ -6844,9 +6997,11 @@ function createCeoBoss(def) {
       return;
     }
     if (B.phase === 'C') {
+      burst = !raw && B.weakT > 0 && d >= c.weakMinHit;   // 防御補正の前の値で判定
       d *= c.armorC;
       if (B.shields.some(e => !e.dead)) d *= 0.25;   // 人的資本（社員の盾）が残っている間は硬い
-      if (B.weakT > 0) d *= c.weakMul;               // 駄目村が弱点に印をつけている間は大ダメージ
+      if (B.weakT > 0) d *= c.weakMul;
+      if (burst) d += c.weakBurst;               // 駄目村が弱点に印をつけている間は大ダメージ
     }
     B.hp -= d;
     if (B.phase === 'A' && B.hp <= def.hp * c.retreatAt) {
@@ -6856,6 +7011,12 @@ function createCeoBoss(def) {
       B.hp = 0; clearHazards(); set('dying'); G.shake = 1; G.hitstop = 0.3;
       for (const e of B.shields) if (!e.dead) Enemies.damage(e, 999, 0, 0, 0);
       Talk.play(T.down, ceoHead);
+    } else if (burst) { // 弱点直撃：印を消費して長めの硬直（全会一致の条件も満たす）
+      B.weakT = 0; clearHazards(); toTired(c.weakStun);
+      G.hitstop = Math.max(G.hitstop, 0.2); G.shake = Math.max(G.shake, 0.7);
+      FX.emit(B.x + Math.sin(B.face) * 1.32 * 1.3, 4.2, B.z + Math.cos(B.face) * 1.32 * 1.3, { n: 50, color: '#ff7a30', speed: 9, life: 0.7, size: 0.4, spread: 1 });
+      Barks.say(Player.hero.anchor('head_top'), '弱点直撃ッ！', 'rage', 1.4);
+      Sfx.play('stamp');
     }
   }
   function choose(d) {
@@ -6881,10 +7042,11 @@ function createCeoBoss(def) {
     phase() { return B.phase; },
     phaseTime() { return B.phaseT; },
     isTired() { return B.phase === 'C' && B.st === 'tired'; },
-    markWeak(sec) { B.weakT = Math.max(B.weakT, sec); },
+    vulnerable() { return !INV[B.st] && B.phase === 'C'; },
+    markWeak(sec) { if (!(!INV[B.st] && B.phase === 'C')) return; B.weakT = Math.max(B.weakT, sec); },
     weakLeft() { return B.weakT; },
-    pos() { return { x: B.x, z: B.z }; },
-    hitRaw(d) { damage(d); },
+    pos() { return { x: B.x, z: B.z, face: B.face }; },
+    hitRaw(d) { damage(d, true); },
     dispose() {
       clearHazards();
       const shared = Object.values(GEO);
@@ -8967,7 +9129,9 @@ const UI = {
       $('btnAtk').setAttribute('aria-label', v === '印' ? '決裁鎚で印を押す' : v === '打' ? 'ゴルフクラブで打つ' : '鞄');
     });
     // 強敵の隙に近くの物があれば、管理職アクションの合図として攻撃ボタンを光らせる
-    set('heat', free && (Heat.ready() || Allies.unanimousReady()), v => { $('btnAtk').classList.toggle('heat', v); });
+    set('heat', free && (Heat.ready() || Allies.unanimousReady() ||
+      !!(Boss.active && Boss.ctrl && Boss.ctrl.weakLeft && Boss.ctrl.weakLeft() > 0 &&
+         Math.hypot(Boss.ctrl.pos().x - P.x, Boss.ctrl.pos().z - P.z) < (CONFIG.ceo.weakReach || 4.5))), v => { $('btnAtk').classList.toggle('heat', v); });
     set('shoutVisible', shoutVisible, v => {
       e.btnShout.classList.toggle('hidden', !v);
     });
@@ -9272,6 +9436,16 @@ const PAWAHARA_WORKSTYLE_LINES = [
 // ステージ2以降では、従来どおりステージ固有の候補も追加する。
 if (LINES.pawahara && typeof LINES.pawahara === 'object') {
   const originalPawaharaLines = LINES.pawahara;
+
+  // 課長の通常のぼやきに、パワハラ気質を示す台詞を追加。
+  // 元データに登録し、全ステージで共通の候補として扱う。
+  if (Array.isArray(originalPawaharaLines.grumble)) {
+    originalPawaharaLines.grumble.push(
+      'こんなこともわからないお前、人間か？',
+      '地頭が悪いんだよ、地頭が。',
+      'さすがの俺もセクハラはやらんぞ。'
+    );
+  }
 
   LINES.pawahara = new Proxy(originalPawaharaLines, {
     get(target, key, receiver) {
@@ -13885,7 +14059,7 @@ const Game = {
       setPhase('play'); fireEvent('stageStart');
     } else this.toTitle();
   },
-  toTitle() { if (G.stageIndex !== 0) this.loadStage(0); else this.reset(true); setPhase('title'); UI.showBest(); fireEvent('title'); },
+  toTitle() { EndingScene.clear(); if (G.stageIndex !== 0) this.loadStage(0); else this.reset(true); setPhase('title'); UI.showBest(); fireEvent('title'); },
   // 出現・打刻・ボス戦・ゴールの判定
   progress(dt) {
     const st = G.stage, P = Player, b = st.boss;
@@ -13920,6 +14094,7 @@ function titleCam(pos, look) { pos.set(Player.x - 3.5 + Math.sin(G.time * 0.13) 
 function updateCamera(dt) {
   const P = Player, port = window.innerHeight > window.innerWidth;
   if (G.phase === 'title') titleCam(_ct, _cl);
+  else if (G.phase === 'ending' && EndingScene.cam(_ct, _cl)) { /* エンディングの演出カメラ */ }
   else if (P.bike) {
     const b = P.bike, side = -Math.sign(b.x * Math.cos(b.ry) || 1);
     _ct.set(side * (port ? 3.2 : 2.6), 1.45, 0.9);
@@ -13993,6 +14168,24 @@ function boot() {
 boot();
 </script>
 <style>
+/* エンディング3D：会話劇・翌朝の場面は背後の3Dを見せ、字幕ロールは半透明にする */
+#ending.talk,
+#ending.home {
+  background: radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 50%, rgba(0,0,0,.5) 100%) !important;
+}
+#ending.roll {
+  background: linear-gradient(rgba(6,10,18,.2), rgba(6,10,18,.6)) !important;
+}
+#ending.home #endCaption {
+  position: absolute !important;
+  top: max(18px, env(safe-area-inset-top)) !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  font-size: 14px !important;
+  opacity: .85;
+  white-space: nowrap;
+}
+
 /* スマホ対応：長いコメントを吹き出し内で自動改行 */
 .bark {
   white-space: normal !important;
