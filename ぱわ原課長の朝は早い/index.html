@@ -8278,6 +8278,7 @@ const Player = {
     P.rage = Math.max(0, P.rage - (lv === 1 ? S.tap.cost : S[lv].cost));
     P.tapCD = S.tap.cd; P.shoutLv = lv; P.state = 'shoutRecover'; P.st = 0.35;
     Live.shout(lv);   // 近くで配信中なら、怒鳴るほど同接が増える
+    ActionAudio.shout(lv); // 声帯振動・共鳴・息の破裂音による罵声系効果音
     if (lv === 1) { P.hero.action('Batou1'); Combat.kaatsu(); }
     else { P.hero.action(S[lv].anim); Combat.wave(lv); if (lv === 3) Combat.blast(); }
   },
@@ -9601,10 +9602,12 @@ const PAWAHARA_WORKSTYLE_LINES = [
   'これが議事録？ 魂がこもってない！ 全部やり直しだ！'
 ];
 
-// ステージ4限定：課長が自分の管理職人生を振り返るぼやき。
+// ステージ4限定：課長の管理職人生、家庭、仕事観に関するぼやき。
 if (STAGE_CHATTER_EXTRA[4] && Array.isArray(STAGE_CHATTER_EXTRA[4].common)) {
   STAGE_CHATTER_EXTRA[4].common.push(
-    '俺みたいな上司は、今の時代じゃ生き残れんのかもしれんな。'
+    '俺みたいな上司は、今の時代じゃ生き残れんのかもしれんな。',
+    '娘にLINEしてみるか……。あれ、ブロックされてる。',
+    '英語学習だと？ 相手に日本語を話させろ！'
   );
 }
 
@@ -14314,7 +14317,7 @@ const Help = {
       </ol>
       <div class="hp-jtc">
         <b>それでも――</b>
-        <p><strong>JTC</strong>（Japanese Traditional Company）とその気風は、生き残っていた。<span>稟議も、判子も、朝礼も。</span></p>
+        <p><strong>JTC</strong>（Japanese Traditional Company）とその気風は、生き残っていた。<span>稟議も、判子も、パワハラも。</span></p>
       </div>
       <div class="hp-who">
         <div class="hp-face"><span>課</span></div>
@@ -14514,6 +14517,487 @@ body[data-phase="title"] #btnHelp{display:flex}
   }
 };
 
+/* ============================================================
+ * ActionAudio
+ * 喝の罵声系効果音・車両の走行音
+ *
+ * ・既存AudioContextを共用
+ * ・ゲーム状態を変更しない
+ * ・車両の位置・速度を読み取り専用で参照
+ * ・走行中のみ持続音を発生
+ * ・BGM、Sfx、セーブデータとは独立
+ * ============================================================ */
+const ActionAudio = (() => {
+  'use strict';
+
+  const getContext = () =>
+    Stage1BGM_0430.getAudioContext();
+
+  const VEHICLES = Object.freeze({
+    kei: {
+      base: 68,
+      range: 105,
+      volume: 0.105,
+      cutoff: 850,
+      resonance: 1.6,
+      roughness: 0.18
+    },
+    bus: {
+      base: 38,
+      range: 62,
+      volume: 0.15,
+      cutoff: 520,
+      resonance: 1.1,
+      roughness: 0.28
+    },
+    train: {
+      base: 95,
+      range: 260,
+      volume: 0.105,
+      cutoff: 1900,
+      resonance: 0.7,
+      roughness: 0.04
+    }
+  });
+
+  let noiseBuffer = null;
+
+  const engine = {
+    context: null,
+    oscillator: null,
+    harmonic: null,
+    noise: null,
+    filter: null,
+    gain: null,
+    vehicle: null,
+    type: null,
+    x: 0,
+    z: 0,
+    activity: 0
+  };
+
+  function contextReady() {
+    const ac = getContext();
+    return ac && ac.state === 'running' ? ac : null;
+  }
+
+  function getNoise(ac) {
+    if (noiseBuffer &&
+        noiseBuffer.sampleRate === ac.sampleRate) {
+      return noiseBuffer;
+    }
+
+    const length = Math.ceil(ac.sampleRate * 1.2);
+    const buffer = ac.createBuffer(1, length, ac.sampleRate);
+    const data = buffer.getChannelData(0);
+
+    // 単純なホワイトノイズではなく、
+    // 直前の値を混ぜて低域の密度を高める。
+    let previous = 0;
+
+    for (let i = 0; i < length; i++) {
+      const white = Math.random() * 2 - 1;
+      previous = previous * 0.82 + white * 0.18;
+      data[i] = previous * 0.7 + white * 0.3;
+    }
+
+    noiseBuffer = buffer;
+    return buffer;
+  }
+
+  function makeFilter(ac, type, frequency, q) {
+    const filter = ac.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.value = frequency;
+    filter.Q.value = q;
+    return filter;
+  }
+
+  function envelope(param, now, attack, hold, release, peak) {
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(0.0001, now);
+    param.linearRampToValueAtTime(
+      peak,
+      now + attack
+    );
+    param.setValueAtTime(
+      peak,
+      now + attack + hold
+    );
+    param.exponentialRampToValueAtTime(
+      0.0001,
+      now + attack + hold + release
+    );
+  }
+
+  /*
+   * 罵声系の合成効果音。
+   *
+   * 録音やSpeechSynthesisは使わず、
+   * 声帯振動に相当する周期音と、
+   * 口腔共鳴・息の摩擦音を合成する。
+   *
+   * レベル1：短い鋭い喝
+   * レベル2：低く荒い怒鳴り声
+   * レベル3：長く響く激昂
+   */
+  function shout(level) {
+    const ac = contextReady();
+    if (!ac) return;
+
+    const lv = Math.max(1, Math.min(3, level | 0));
+    const now = ac.currentTime + 0.005;
+
+    const settings = [
+      null,
+      {
+        pitch: 145,
+        duration: 0.26,
+        peak: 0.17,
+        formant1: 640,
+        formant2: 1280
+      },
+      {
+        pitch: 122,
+        duration: 0.42,
+        peak: 0.19,
+        formant1: 570,
+        formant2: 1120
+      },
+      {
+        pitch: 104,
+        duration: 0.65,
+        peak: 0.21,
+        formant1: 510,
+        formant2: 1040
+      }
+    ][lv];
+
+    const total = settings.duration;
+    const end = now + total;
+
+    const voice = ac.createOscillator();
+    voice.type = 'sawtooth';
+
+    const pitch = settings.pitch;
+
+    // 怒鳴る際の声の立ち上がりと、
+    // 後半に向けたピッチの落ち込みを再現。
+    voice.frequency.setValueAtTime(
+      pitch * 1.3,
+      now
+    );
+    voice.frequency.exponentialRampToValueAtTime(
+      pitch,
+      now + 0.055
+    );
+    voice.frequency.exponentialRampToValueAtTime(
+      pitch * 0.72,
+      end
+    );
+
+    // 口腔の共鳴を2段のフィルタで表現。
+    const formant1 = makeFilter(
+      ac,
+      'peaking',
+      settings.formant1,
+      1.7
+    );
+    formant1.gain.value = 11;
+
+    const formant2 = makeFilter(
+      ac,
+      'peaking',
+      settings.formant2,
+      2.2
+    );
+    formant2.gain.value = 8;
+
+    const throat = makeFilter(
+      ac,
+      'lowpass',
+      lv === 1 ? 2900 : 2300,
+      0.8
+    );
+
+    const voiceGain = ac.createGain();
+
+    const attack = 0.018;
+    const release = lv === 3 ? 0.17 : 0.105;
+    const hold = Math.max(
+      0.025,
+      total - attack - release
+    );
+
+    envelope(
+      voiceGain.gain,
+      now,
+      attack,
+      hold,
+      release,
+      settings.peak
+    );
+
+    voice.connect(formant1);
+    formant1.connect(formant2);
+    formant2.connect(throat);
+    throat.connect(voiceGain);
+    voiceGain.connect(ac.destination);
+
+    // 怒鳴り始めの破裂音と息のざらつき。
+    const breath = ac.createBufferSource();
+    breath.buffer = getNoise(ac);
+
+    const breathFilter = makeFilter(
+      ac,
+      'bandpass',
+      lv === 3 ? 1150 : 1750,
+      0.65
+    );
+
+    const breathGain = ac.createGain();
+
+    envelope(
+      breathGain.gain,
+      now,
+      0.006,
+      Math.max(0.01, total - 0.11),
+      0.095,
+      lv === 3 ? 0.13 : 0.105
+    );
+
+    breath.connect(breathFilter);
+    breathFilter.connect(breathGain);
+    breathGain.connect(ac.destination);
+
+    voice.start(now);
+    voice.stop(end + 0.025);
+
+    breath.start(now);
+    breath.stop(end + 0.025);
+
+    voice.onended = () => {
+      voice.disconnect();
+      formant1.disconnect();
+      formant2.disconnect();
+      throat.disconnect();
+      voiceGain.disconnect();
+
+      breath.disconnect();
+      breathFilter.disconnect();
+      breathGain.disconnect();
+    };
+  }
+
+  function vehicleType(vehicle) {
+    if (!vehicle) return null;
+
+    if (vehicle.train) return 'train';
+    if (vehicle.kind === 'bus') return 'bus';
+
+    return 'kei';
+  }
+
+  function createEngine(ac) {
+    engine.context = ac;
+
+    // 主振動：内燃機関の回転音／電車の駆動音。
+    engine.oscillator = ac.createOscillator();
+    engine.oscillator.type = 'sawtooth';
+
+    // 倍音：エンジンの機械的な唸り。
+    // 電車では高いモーター音に利用する。
+    engine.harmonic = ac.createOscillator();
+    engine.harmonic.type = 'triangle';
+
+    const mainGain = ac.createGain();
+    const harmonicGain = ac.createGain();
+
+    mainGain.gain.value = 0.58;
+    harmonicGain.gain.value = 0.42;
+
+    engine.filter = makeFilter(
+      ac,
+      'lowpass',
+      900,
+      0.9
+    );
+
+    engine.gain = ac.createGain();
+    engine.gain.gain.value = 0;
+
+    engine.oscillator.connect(mainGain);
+    engine.harmonic.connect(harmonicGain);
+
+    mainGain.connect(engine.filter);
+    harmonicGain.connect(engine.filter);
+
+    engine.filter.connect(engine.gain);
+    engine.gain.connect(ac.destination);
+
+    engine.oscillator.start();
+    engine.harmonic.start();
+  }
+
+  function stopEngine() {
+    if (!engine.gain) return;
+
+    const ac = engine.context;
+
+    if (ac && ac.state !== 'closed') {
+      const now = ac.currentTime;
+      engine.gain.gain.cancelScheduledValues(now);
+      engine.gain.gain.setTargetAtTime(
+        0,
+        now,
+        0.045
+      );
+    }
+
+    engine.vehicle = null;
+    engine.type = null;
+    engine.activity = 0;
+  }
+
+  /*
+   * 毎フレーム、既存車両の移動結果を読み取る。
+   *
+   * 車両の操作・物理・衝突判定には干渉しない。
+   * 位置の差分と既存の速度を使い、実際に走行している
+   * ときにだけ音が立ち上がる。
+   */
+  function vehicle(vehicle, dt) {
+    if (!vehicle) {
+      stopEngine();
+      return;
+    }
+
+    const ac = contextReady();
+    if (!ac) return;
+
+    const type = vehicleType(vehicle);
+    const cfg = VEHICLES[type];
+
+    if (!cfg) return;
+
+    if (!engine.oscillator) {
+      createEngine(ac);
+    }
+
+    // 新しい車両へ乗り換えた場合、
+    // 前の車両の位置を引き継がない。
+    if (engine.vehicle !== vehicle) {
+      engine.vehicle = vehicle;
+      engine.type = type;
+      engine.x = vehicle.x;
+      engine.z = vehicle.z;
+      engine.activity = 0;
+    }
+
+    const dx = vehicle.x - engine.x;
+    const dz = vehicle.z - engine.z;
+
+    engine.x = vehicle.x;
+    engine.z = vehicle.z;
+
+    const elapsed = Math.max(0.001, dt);
+
+    const displacementSpeed =
+      Math.hypot(dx, dz) / elapsed;
+
+    const reportedSpeed =
+      Number.isFinite(vehicle.speed)
+        ? Math.abs(vehicle.speed)
+        : 0;
+
+    // 実際の移動がなければ無音にする。
+    // 速度値が残っていても停止中に鳴り続けない。
+    const moving = displacementSpeed > 0.08;
+
+    const normalizedSpeed = moving
+      ? Math.min(
+          1,
+          Math.max(
+            displacementSpeed / 14,
+            reportedSpeed / 20
+          )
+        )
+      : 0;
+
+    const now = ac.currentTime;
+
+    const targetActivity = moving ? 1 : 0;
+
+    engine.activity +=
+      (targetActivity - engine.activity) *
+      Math.min(1, elapsed * 9);
+
+    const activity = engine.activity;
+
+    // 速度による回転数上昇。
+    const rpmFactor =
+      0.12 + normalizedSpeed * 0.88;
+
+    let frequency =
+      cfg.base + cfg.range * rpmFactor;
+
+    // エンジンは不規則な燃焼振動を含む。
+    // 電車のモーター音は滑らかに上昇する。
+    if (type !== 'train') {
+      frequency *=
+        1 +
+        Math.sin(now * 36) *
+        cfg.roughness * 0.055;
+    }
+
+    const harmonicFrequency =
+      type === 'train'
+        ? frequency * 2.05
+        : frequency * 1.95;
+
+    engine.oscillator.frequency.setTargetAtTime(
+      frequency,
+      now,
+      0.075
+    );
+
+    engine.harmonic.frequency.setTargetAtTime(
+      harmonicFrequency,
+      now,
+      0.07
+    );
+
+    engine.filter.frequency.setTargetAtTime(
+      cfg.cutoff * (0.72 + normalizedSpeed * 0.6),
+      now,
+      0.08
+    );
+
+    engine.filter.Q.setTargetAtTime(
+      cfg.resonance,
+      now,
+      0.08
+    );
+
+    const volume =
+      cfg.volume *
+      activity *
+      (0.45 + normalizedSpeed * 0.55);
+
+    engine.gain.gain.setTargetAtTime(
+      volume,
+      now,
+      0.06
+    );
+  }
+
+  return Object.freeze({
+    shout,
+    vehicle,
+    stopVehicle: stopEngine
+  });
+})();
+
 const Game = {
   loadStage(i) {
     G.stageIndex = i; G.stage = STAGES[i];
@@ -14680,6 +15164,16 @@ function step(raw) {
     Pawahara.update(dt);
   } else if (G.phase === 'title') { Player.hero.setSpeed(0); Player.hero.update(dt); Player.sync(); }
   if (G.phase === 'ending') Ending.update(raw);
+
+  // 車両の移動結果を参照して、走行音だけを更新する。
+  // ポーズ・死亡・タイトル・降車時には走行音を停止する。
+  ActionAudio.vehicle(
+    G.phase === 'play' && !Player.dead
+      ? Player.truck
+      : null,
+    raw
+  );
+
   Sfx.watch();
   BGMDirector.update();
   Sky.update(raw, G.phase === 'title' ? 0 : clamp(G.maxZ / G.stage.goalZ, 0, 1));
@@ -14692,17 +15186,6 @@ function frame(ts) { requestAnimationFrame(frame); const raw = Math.min(0.05, Ma
 
 function boot() {
   initColors(); initAssets(); Sky.init(); Combat.init(); Player.init(); UI.init(); Input.init(); Save.load(); Help.init();
-
-  // 視点ジョグは既存HUDに追加する。二重生成はしない。
-  const hud = document.getElementById('hud');
-  if (hud && !document.getElementById('cameraJogWrap')) {
-    const jogWrap = document.createElement('div');
-    jogWrap.id = 'cameraJogWrap';
-    jogWrap.innerHTML =
-      '<div id="cameraJog" title="ドラッグで視点回転／ダブルタップで正面へ戻す" aria-label="視点操作">' +
-      '<i id="cameraJogThumb"></i></div>';
-    hud.appendChild(jogWrap);
-  }
 
   // 音声再生は開始せず、abcjsライブラリだけ先行取得する。
   Stage1BGM_0430.loadLibrary().catch(error => {
@@ -14782,254 +15265,10 @@ body:has(#talkBar.on) .bark.rage {
   }
 }
 
-/* 視点ジョグ：画面右上に独立配置し、移動スティックと干渉させない */
-/* 視点ジョグはプレイ中のみ表示。待機時は背景に溶け込ませる。 */
-#cameraJogWrap{
-  position:fixed;
-  top:max(96px,calc(env(safe-area-inset-top) + 70px));
-  right:max(16px,env(safe-area-inset-right));
-  width:112px;
-  height:112px;
-  z-index:80;
-  display:none;
-  pointer-events:none;
-  user-select:none;
-  -webkit-user-select:none;
-}
-body[data-phase="play"] #cameraJogWrap{
-  display:block;
-}
-body[data-pedaling="true"] #cameraJogWrap{
-  display:none;
-}
-#cameraJogLabel{
-  display:none;
-}
-#cameraJog{
-  position:relative;
-  width:112px;
-  height:112px;
-  margin:auto;
-  border-radius:50%;
-  border:1px solid rgba(236,231,216,.14);
-  background:rgba(8,13,23,.08);
-  box-shadow:none;
-  pointer-events:auto;
-  touch-action:none;
-  overflow:visible;
-}
-#cameraJog::before,
-#cameraJog::after{
-  content:"";
-  position:absolute;
-  pointer-events:none;
-  background:rgba(255,255,255,.07);
-}
-#cameraJog::before{
-  width:1px;
-  height:68px;
-  left:50%;
-  top:22px;
-}
-#cameraJog::after{
-  height:1px;
-  width:68px;
-  top:50%;
-  left:22px;
-}
-#cameraJogThumb{
-  position:absolute;
-  left:50%;
-  top:50%;
-  width:36px;
-  height:36px;
-  margin:-18px 0 0 -18px;
-  border-radius:50%;
-  border:1px solid rgba(210,235,245,.36);
-  background:rgba(65,130,170,.28);
-  box-shadow:none;
-  transform:translate(0,0);
-  pointer-events:none;
-  will-change:transform;
-}
-#cameraJog.active{
-  border-color:rgba(236,231,216,.35);
-  background:rgba(8,13,23,.2);
-}
-#cameraJog.active #cameraJogThumb{
-  border-color:rgba(210,240,255,.75);
-  background:rgba(65,155,205,.65);
-  box-shadow:0 0 9px rgba(80,175,220,.2);
-}
-@media(max-height:600px) and (orientation:landscape){
-  #cameraJogWrap{
-    top:max(44px,calc(env(safe-area-inset-top) + 12px));
-    transform:scale(.86);
-    transform-origin:top right;
-  }
-}
 </style>
 
 
 
-<script>
-/* 視点ジョグ：既存の移動・アクション入力とは独立 */
-(function(){
-  'use strict';
-
-  const jog = document.getElementById('cameraJog');
-  const thumb = document.getElementById('cameraJogThumb');
-  if(!jog || !thumb) return;
-
-  const state = {
-    pointerId:null,
-    x:0,
-    y:0,
-    yaw:0,
-    pitch:0,
-    maxRadius:30,
-    yawSpeed:1.85,
-    pitchSpeed:1.15,
-    minPitch:-0.65,
-    maxPitch:0.65
-  };
-
-  function setJogPosition(clientX,clientY){
-    const r=jog.getBoundingClientRect();
-    const cx=r.left+r.width/2;
-    const cy=r.top+r.height/2;
-    const dx=clientX-cx;
-    const dy=clientY-cy;
-    const length=Math.hypot(dx,dy);
-    const factor=length>state.maxRadius?state.maxRadius/length:1;
-
-    const px=dx*factor;
-    const py=dy*factor;
-
-    state.x=px/state.maxRadius;
-    state.y=py/state.maxRadius;
-
-    thumb.style.transform='translate('+px+'px,'+py+'px)';
-  }
-
-  function resetJog(){
-    state.pointerId=null;
-    state.x=0;
-    state.y=0;
-    thumb.style.transform='translate(0,0)';
-    jog.classList.remove('active');
-  }
-
-  jog.addEventListener('pointerdown',function(e){
-    if(state.pointerId!==null) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    state.pointerId=e.pointerId;
-    jog.classList.add('active');
-
-    try{jog.setPointerCapture(e.pointerId);}catch(_){}
-
-    setJogPosition(e.clientX,e.clientY);
-  });
-
-  jog.addEventListener('pointermove',function(e){
-    if(e.pointerId!==state.pointerId) return;
-    e.preventDefault();
-    e.stopPropagation();
-    setJogPosition(e.clientX,e.clientY);
-  });
-
-  let lastTapAt=0;
-  let tapStart=null;
-
-  function endJog(e){
-    if(e.pointerId!==state.pointerId) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    const now=performance.now();
-    const isTap=tapStart &&
-      now-tapStart.time<350 &&
-      Math.hypot(e.clientX-tapStart.x,e.clientY-tapStart.y)<15;
-
-    if(isTap){
-      if(now-lastTapAt<350){
-        Input.orbit=0;
-        Input.pitch=0;
-        Input.zoom=1;
-        lastTapAt=0;
-      }else{
-        lastTapAt=now;
-      }
-    }else{
-      lastTapAt=0;
-    }
-
-    tapStart=null;
-    resetJog();
-  }
-
-  jog.addEventListener('pointerup',endJog);
-  jog.addEventListener('pointercancel',function(e){
-    if(e.pointerId===state.pointerId){
-      tapStart=null;
-      resetJog();
-    }
-  });
-  jog.addEventListener('lostpointercapture',function(e){
-    if(e.pointerId===state.pointerId){
-      tapStart=null;
-      resetJog();
-    }
-  });
-
-  // カメラ位置を直接変更せず、既存の入力状態だけを更新する。
-  // updateCameraの元の定義は維持する。
-  let previousFrame=0;
-
-  function updateJogInput(now){
-    requestAnimationFrame(updateJogInput);
-
-    const dt=previousFrame
-      ? Math.min(0.05,Math.max(0,(now-previousFrame)/1000))
-      : 0;
-    previousFrame=now;
-
-    if(G.phase!=='play' || Player.bike || Player.dead){
-      if(state.pointerId!==null) resetJog();
-      return;
-    }
-
-    if(state.pointerId===null) return;
-
-    if(Math.abs(state.x)>.08){
-      Input.orbit=angDiff(
-        Input.orbit+state.x*state.yawSpeed*dt,
-        0
-      );
-    }
-
-    if(Math.abs(state.y)>.08){
-      Input.pitch=clamp(
-        Input.pitch-state.y*state.pitchSpeed*dt,
-        CONFIG.orbit.pitchMin,
-        CONFIG.orbit.pitchMax
-      );
-    }
-  }
-
-  jog.addEventListener('pointerdown',function(e){
-    tapStart={
-      time:performance.now(),
-      x:e.clientX,
-      y:e.clientY
-    };
-  });
-
-  requestAnimationFrame(updateJogInput);
-})();
-</script>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
 <script>
 window.addEventListener("load", function () {
