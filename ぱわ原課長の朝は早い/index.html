@@ -9189,7 +9189,18 @@ const UI = {
   overlay(kind) {
     const e = this.el, home = () => Game.toTitle();
     e.ovBtn2.classList.remove('hidden'); e.ovBtn2.textContent = '退勤'; this.ovAction2 = home;
-    if (kind === 'pause') { e.ovBig.textContent = '休憩'; e.ovSub.textContent = ''; e.ovBtn.textContent = '再開'; this.ovAction = () => Game.resume(); }
+    if (kind === 'pause') {
+      e.ovBig.textContent = '休憩';
+      const weaponName =
+        Player.weapon === 'hammer' ? '決裁鎚' :
+        Player.weapon === 'golf' ? '七番アイアン' :
+        'ビジネスバッグ';
+      const showFlags = G.stage && (G.stage.id >= 2 || Flags.count() > 0);
+      e.ovSub.textContent = '装備：' + weaponName +
+        (showFlags ? ' ／ 部下との絆 ' + Flags.count() + '/8' : '');
+      e.ovBtn.textContent = '再開';
+      this.ovAction = () => Game.resume();
+    }
     else if (kind === 'over') { e.ovBig.textContent = '欠勤'; e.ovSub.textContent = clockText(G.clockSec); e.ovBtn.textContent = '再出社'; this.ovAction = () => Game.retry(); }
     else { e.ovBig.textContent = G.stage.clearText; e.ovSub.textContent = clockText(G.clockSec); e.ovBtn.textContent = 'つづく'; this.ovAction = () => Game.next(); e.ovBtn2.classList.add('hidden'); }
   },
@@ -9584,7 +9595,10 @@ const PAWAHARA_WORKSTYLE_LINES = [
   '値引き交渉は最低3回！ 1回目で決める奴はまだ青い！',
   '3回値切ってからが本番だ。……相手が電話に出ればな。',
   '見積もりが安いだけじゃ駄目だ！ 3回値切ったという実績が大事なんだ！',
-  '業務改革だと？ まず会議で説明しろ。資料は紙で30部な。'
+  '業務改革だと？ まず会議で説明しろ。資料は紙で30部な。',
+  'eラーニング？ ああ、左クリックの反復訓練のことか？',
+  'ダイバーシティだと？ 俺の存在はインクルードされないのか！',
+  'これが議事録？ 魂がこもってない！ 全部やり直しだ！'
 ];
 
 // 発言候補をステージ別に拡張。
@@ -14650,6 +14664,23 @@ function frame(ts) { requestAnimationFrame(frame); const raw = Math.min(0.05, Ma
 
 function boot() {
   initColors(); initAssets(); Sky.init(); Combat.init(); Player.init(); UI.init(); Input.init(); Save.load(); Help.init();
+
+  // 視点ジョグは既存HUDに追加する。二重生成はしない。
+  const hud = document.getElementById('hud');
+  if (hud && !document.getElementById('cameraJogWrap')) {
+    const jogWrap = document.createElement('div');
+    jogWrap.id = 'cameraJogWrap';
+    jogWrap.innerHTML =
+      '<div id="cameraJog" title="ドラッグで視点回転／ダブルタップで正面へ戻す" aria-label="視点操作">' +
+      '<i id="cameraJogThumb"></i></div>';
+    hud.appendChild(jogWrap);
+  }
+
+  // 音声再生は開始せず、abcjsライブラリだけ先行取得する。
+  Stage1BGM_0430.loadLibrary().catch(error => {
+    console.warn('BGM: abcjs事前読み込み失敗', error);
+  });
+
   Game.loadStage(0); setPhase('title'); UI.showBest(); fireEvent('title');
   resize(); titleCam(camPos, camLook);
   window.addEventListener('resize', resize);
@@ -14685,6 +14716,13 @@ body[data-silence="true"] canvas {
 body[data-silence="true"] #btnShout {
   opacity: .35 !important;
   filter: grayscale(1);
+}
+
+/* 重要イベントの黒背景ナレーションを優先する。
+   黒背景の会話欄が表示中は赤系の課長の吹き出しを隠す。
+   会話終了後は自動的に元の表示へ戻す。 */
+body:has(#talkBar.on) .bark.rage {
+  display: none !important;
 }
 
 /* スマホ対応：長いコメントを吹き出し内で自動改行 */
@@ -14874,67 +14912,94 @@ body[data-pedaling="true"] #cameraJogWrap{
     setJogPosition(e.clientX,e.clientY);
   });
 
+  let lastTapAt=0;
+  let tapStart=null;
+
   function endJog(e){
     if(e.pointerId!==state.pointerId) return;
     e.preventDefault();
     e.stopPropagation();
+
+    const now=performance.now();
+    const isTap=tapStart &&
+      now-tapStart.time<350 &&
+      Math.hypot(e.clientX-tapStart.x,e.clientY-tapStart.y)<15;
+
+    if(isTap){
+      if(now-lastTapAt<350){
+        Input.orbit=0;
+        Input.pitch=0;
+        Input.zoom=1;
+        lastTapAt=0;
+      }else{
+        lastTapAt=now;
+      }
+    }else{
+      lastTapAt=0;
+    }
+
+    tapStart=null;
     resetJog();
   }
 
   jog.addEventListener('pointerup',endJog);
-  jog.addEventListener('pointercancel',endJog);
+  jog.addEventListener('pointercancel',function(e){
+    if(e.pointerId===state.pointerId){
+      tapStart=null;
+      resetJog();
+    }
+  });
   jog.addEventListener('lostpointercapture',function(e){
-    if(e.pointerId===state.pointerId) resetJog();
+    if(e.pointerId===state.pointerId){
+      tapStart=null;
+      resetJog();
+    }
   });
 
-  /*
-   * カメラ更新は既存関数を残し、その結果に視点オフセットを加える。
-   * ゲーム内の移動入力やカメラ追従計算は変更しない。
-   */
-  if(typeof updateCamera!=='function' ||
-     typeof camera==='undefined' ||
-     typeof camLook==='undefined'){
-    console.warn('視点ジョグ: 既存カメラ処理を参照できません');
-    return;
-  }
+  // カメラ位置を直接変更せず、既存の入力状態だけを更新する。
+  // updateCameraの元の定義は維持する。
+  let previousFrame=0;
 
-  const originalUpdateCamera=updateCamera;
-  const offset=new THREE.Vector3();
-  const spherical=new THREE.Spherical();
+  function updateJogInput(now){
+    requestAnimationFrame(updateJogInput);
 
-  updateCamera=function(dt){
-    originalUpdateCamera(dt);
+    const dt=previousFrame
+      ? Math.min(0.05,Math.max(0,(now-previousFrame)/1000))
+      : 0;
+    previousFrame=now;
 
-    if(G && G.phase!=='play') return;
+    if(G.phase!=='play' || Player.bike || Player.dead){
+      if(state.pointerId!==null) resetJog();
+      return;
+    }
 
-    const step=Math.min(Math.max(dt||0,0),.05);
+    if(state.pointerId===null) return;
 
     if(Math.abs(state.x)>.08){
-      state.yaw+=state.x*state.yawSpeed*step;
-    }
-    if(Math.abs(state.y)>.08){
-      state.pitch=Math.max(
-        state.minPitch,
-        Math.min(state.maxPitch,state.pitch-state.y*state.pitchSpeed*step)
+      Input.orbit=angDiff(
+        Input.orbit+state.x*state.yawSpeed*dt,
+        0
       );
     }
 
-    offset.copy(camera.position).sub(camLook);
+    if(Math.abs(state.y)>.08){
+      Input.pitch=clamp(
+        Input.pitch-state.y*state.pitchSpeed*dt,
+        CONFIG.orbit.pitchMin,
+        CONFIG.orbit.pitchMax
+      );
+    }
+  }
 
-    if(offset.lengthSq()<.0001) return;
+  jog.addEventListener('pointerdown',function(e){
+    tapStart={
+      time:performance.now(),
+      x:e.clientX,
+      y:e.clientY
+    };
+  });
 
-    spherical.setFromVector3(offset);
-
-    spherical.theta+=state.yaw;
-    spherical.phi=Math.max(
-      .18,
-      Math.min(Math.PI-.18,spherical.phi-state.pitch)
-    );
-
-    offset.setFromSpherical(spherical);
-    camera.position.copy(camLook).add(offset);
-    camera.lookAt(camLook);
-  };
+  requestAnimationFrame(updateJogInput);
 })();
 </script>
 <!-- APPSTUDIO_PWA_SCRIPT_START -->
