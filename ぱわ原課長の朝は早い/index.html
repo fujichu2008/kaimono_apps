@@ -5976,7 +5976,71 @@ const Tips = {
 };
 
 const Allies = {
-  list: [], uniCD: 0, mark: null,
+  list: [], uniCD: 0, mark: null, shots: [], shotMats: {}, plusReady: false,
+  atkLines: {
+    uchiki: ['反論スライドいきます！', '根拠資料、全部揃えてきました！', '資料の角で失礼します！'],
+    damemura: ['主語、私です！', '誰がやるか？ 私がやります！', '定時前に終わらせます！']
+  },
+  // 支援用の設定（CONFIG側に未定義の場合だけ既定値を補う）
+  initPlus(cfg) {
+    if (this.plusReady) return;
+    this.plusReady = true;
+    const D = { atkEvery: 5.5, allyDmg: 7, shotSpeed: 16, potionEvery: 16, potionHp: 0.65 };
+    for (const k in D) if (cfg[k] == null) cfg[k] = D[k];
+    if (!CONFIG.items.ripodetanB) CONFIG.items.ripodetanB = { name: 'リポデタンB', heal: 35, color: '#ffd23a' };
+  },
+  // 加勢中の支援：攻撃参加（内木・駄目村）と、リポデタンBの手渡し（内木）
+  support(a, ctrl, dt) {
+    const cfg = CONFIG.allies, P = Player;
+    a.atkCd = (a.atkCd == null ? (a.kind === 'uchiki' ? 2 : 4.5) : a.atkCd) - dt;
+    if (a.atkCd <= 0 && !a.bottle && ctrl.vulnerable && ctrl.vulnerable()) {
+      a.atkCd = cfg.atkEvery + Math.random();
+      this.fire(a);
+      Barks.say(a.head, pick(this.atkLines[a.kind]), 'tout', 1.2);
+    }
+    if (a.kind !== 'uchiki') return;
+    a.giveCd = (a.giveCd || 0) - dt;
+    if (!a.bottle && a.giveCd <= 0 && !P.dead && P.hp < CONFIG.player.hp * cfg.potionHp) {
+      a.bottle = makePickup('ripodetanB'); scene.add(a.bottle); a.bottleT = 0;
+      Barks.say(a.head, '課長、これを！ リポデタンBです！', 'tout', 1.6);
+    }
+    if (!a.bottle) return;
+    a.bottleT += dt;
+    a.bottle.position.set(a.x, 1.25 + Math.sin(G.time * 6) * 0.05, a.z);
+    a.bottle.rotation.y += dt * 3;
+    const near = Math.hypot(P.x - a.x, P.z - a.z) < 1.6;
+    if (near || a.bottleT > 4) {
+      if (near && P.takeItem('ripodetanB')) FX.emit(P.x, 1.2 + P.floorY, P.z, { n: 20, color: '#ffd23a', speed: 3, life: 0.6, size: 0.25, g: -2 });
+      else World.dropItem('ripodetanB', clamp(a.x, -6, 6), a.z);   // 受け取れなかった時は足元に置いていく
+      scene.remove(a.bottle); a.bottle = null; a.giveCd = cfg.potionEvery;
+    }
+  },
+  fire(a) {
+    const col = a.kind === 'uchiki' ? '#7fb4ff' : '#ff7ab0';
+    if (!this.shotMats[col]) this.shotMats[col] = new THREE.SpriteMaterial({ map: TEX.glow, color: col, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+    const s = new THREE.Sprite(this.shotMats[col]); s.scale.set(0.9, 0.9, 1); s.position.set(a.x, 1.4, a.z); scene.add(s);
+    this.shots.push({ s, x: a.x, y: 1.4, z: a.z, t: 0, col });
+  },
+  updateShots(dt, ctrl) {
+    const cfg = CONFIG.allies;
+    for (let i = this.shots.length - 1; i >= 0; i--) {
+      const q = this.shots[i];
+      q.t += dt;
+      if (!ctrl) { scene.remove(q.s); this.shots.splice(i, 1); continue; }
+      const bp = ctrl.pos(), dx = bp.x - q.x, dz = bp.z - q.z, d = Math.hypot(dx, dz) || 1, step = cfg.shotSpeed * dt;
+      if (d <= step + 1.2 || q.t > 2.5) {
+        if (d <= step + 1.2) {
+          let done = false;
+          Boss.eachCircle(c => { if (!done) { done = true; c.hit(cfg.allyDmg, dx / d, dz / d, 0); } });
+          FX.emit(q.x, q.y, q.z, { n: 14, color: q.col, speed: 5, life: 0.4, size: 0.28 });
+        }
+        scene.remove(q.s); this.shots.splice(i, 1); continue;
+      }
+      q.x += dx / d * step; q.z += dz / d * step; q.y = 1.4 + Math.sin(Math.min(1, q.t / 0.8) * Math.PI) * 1.2;
+      q.s.position.set(q.x, q.y, q.z);
+      if (Math.random() < 0.5) FX.emit(q.x, q.y, q.z, { n: 1, color: q.col, speed: 0.4, life: 0.25, size: 0.2, g: 0 });
+    }
+  },
   get(kind) { return this.list.find(a => a.kind === kind) || null; },
   clear() {
     const shared = Object.values(GEO);
@@ -5984,6 +6048,8 @@ const Allies = {
       scene.remove(a.obj); a.obj.traverse(m => { if (m.geometry && shared.indexOf(m.geometry) < 0) m.geometry.dispose(); });
       if (a.shield) { scene.remove(a.shield); a.shield.traverse(m => { if (m.geometry) m.geometry.dispose(); }); }
     }
+    for (const a of this.list) if (a.bottle) { scene.remove(a.bottle); a.bottle = null; }
+    this.shots.forEach(q => scene.remove(q.s)); this.shots.length = 0;
     this.list.length = 0; this.uniCD = 0;
     if (this.mark) this.mark.visible = false;
     if (this.weakRing) this.weakRing.visible = false;
@@ -6014,6 +6080,7 @@ const Allies = {
   },
   update(dt) {
     const cfg = CONFIG.allies, P = Player;
+    this.initPlus(cfg);
     const ctrl = Boss.active && Boss.ctrl && Boss.ctrl.phase ? Boss.ctrl : null;
     if (this.uniCD > 0) this.uniCD -= dt;
     // 第二形態になってから、時間を置いて駆けつける
@@ -6024,7 +6091,8 @@ const Allies = {
     }
     for (const a of this.list) {
       // 課長の少し後ろについて歩き、CEOの方を向く
-      const side = a.kind === 'uchiki' ? 1 : -1, tx = P.x + side * 2.2, tz = P.z - 2.4, mx = tx - a.x, mz = tz - a.z, md = Math.hypot(mx, mz);
+      const side = a.kind === 'uchiki' ? 1 : -1, give = !!a.bottle;   // 手渡し中は課長のすぐ横まで駆け寄る
+      const tx = P.x + side * (give ? 0.9 : 2.2), tz = P.z - (give ? 0.6 : 2.4), mx = tx - a.x, mz = tz - a.z, md = Math.hypot(mx, mz);
       let sp = 0;
       if (md > 0.4) { sp = Math.min(6, md * 2); a.x += mx / md * sp * dt; a.z += mz / md * sp * dt; }
       const bp = ctrl ? ctrl.pos() : { x: P.x, z: P.z + 5 };
@@ -6034,6 +6102,7 @@ const Allies = {
       a.cd -= dt; if (a.active > 0) a.active -= dt;
       if (a.shield) a.shield.visible = !!ctrl && a.active > 0;
       if (!ctrl) continue;
+      this.support(a, ctrl, dt);
       if (a.kind === 'uchiki') { // 全員分のパワポ：課長の前に盾を張り、弾を消す
         if (a.cd <= 0) {
           a.cd = cfg.shieldEvery;
@@ -6055,6 +6124,7 @@ const Allies = {
         Tips.show('weak');
       }
     }
+    this.updateShots(dt, ctrl);
     // 弱点の印（CEOの胸の制御核の位置で点滅）
     if (!this.mark) {
       this.mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: TEX.glow, color: 0xff2020, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
@@ -6782,6 +6852,16 @@ function createRatBoss(def) {
    体力半分で部下を馬鹿にし、課長が覚醒する（加勢フラグの数だけ強化が長く続く） */
 function createBuchoBoss(def) {
   const c = CONFIG.bucho, A = def.arena, HW = def.halfWidth;
+  // 強化用の設定（CONFIG側に未定義の場合だけ既定値を補う）
+  const BUCHO_PLUS = {
+    hpMul: 1.5, armor: 0.85, armor2: 0.7, tiredMul: 0.7,
+    silenceWind: 1.0, silenceTime: 7, silenceCd: 9, silenceDrain: 9, silenceBreak: 4, breakStun: 3.2,
+    blameN: 10, blameDmg: 10, blameWind: 0.9
+  };
+  for (const k in BUCHO_PLUS) if (c[k] == null) c[k] = BUCHO_PLUS[k];
+  def = Object.assign({}, def, { hp: Math.round(def.hp * c.hpMul) });   // 体力の強化（元のステージ定義は変更しない）
+  const SILENCE_LINES = ['この会議で反論した者は、評価に響くと思え。', '心理的安全性？ そんなものは成果を出してから言え。', '黙って聞け。質問は受け付けん。'];
+  const BLAME_WORDS = ['誰の責任だ', '前例は？', '言い訳するな', '聞いてないぞ', '根回しは？', 'お前の部下だろ'];
   const ch = ModelRenderer.createCharacter(MODEL_DATA_SALARYMAN_GLASSES_SUIT, {
     colors: { suit: '#14161c', suit_lapel: '#0c0d12', tie: '#c8a030', shirt: '#f2efe6', hair: '#9a968e' },
     hide: ['briefcase']
@@ -6790,7 +6870,7 @@ function createBuchoBoss(def) {
   const head = ch.anchor('head_top');
   const B = { x: 0, z: A[1] - 6, face: Math.PI, hp: def.hp, st: 'intro', t: 0, cd: 1.5, done: false, phase: 1, n: 0, wait: 1,
               summonT: 0, sepiaT: 0, awakenT: 0, awoke: false, said: {} };
-  const circle = { x: B.x, z: B.z, y: 0, r: 0.9, owner: B, hit: d => damage(d) };
+  const circle = { x: B.x, z: B.z, y: 0, r: 0.9, owner: B, hit: d => hitBy(d) };
   const set = s => { B.st = s; B.t = 0; B.done = false; };
   const toTired = w => { B.wait = w; set('tired'); };
   const sepia = on => { document.body.dataset.sepia = on ? 'true' : 'false'; };
@@ -6799,10 +6879,34 @@ function createBuchoBoss(def) {
     if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return;
     B.hp -= d;
     if (B.hp <= 0) {
-      B.hp = 0; set('dying'); ch.action('die'); G.shake = 0.9; G.hitstop = 0.3; sepia(false); B.sepiaT = 0;
+      B.hp = 0; set('dying'); ch.action('die'); G.shake = 0.9; G.hitstop = 0.3; sepia(false); B.sepiaT = 0; B.silenceT = 0; document.body.dataset.silence = 'false';
       for (const e of Enemies.list.slice()) if (e.type === 'zombie' && !e.dead) Enemies.damage(e, 999, 0, 0, 0);
       Talk.play(LINES.buchoTalk.down, head);
     }
+  }
+  function silenceFx(on) { document.body.dataset.silence = on ? 'true' : 'false'; }
+  // 沈黙を終わらせる。broke=true は課長が言い返して破った時（部長が長く硬直する）
+  function endSilence(broke) {
+    if (!(B.silenceT > 0)) return;
+    B.silenceT = 0; silenceFx(false);
+    if (!broke) return;
+    const P = Player;
+    P.rage = Math.min(CONFIG.player.rageMax, P.rage + 35);
+    Barks.say(P.hero.anchor('head_top'), '言わせてもらいます！', 'rage', 1.6, true);
+    Barks.say(head, 'な、なんだその口の利き方は……！', 'tout', 1.6);
+    FX.emit(B.x, 1.6, B.z, { n: 40, color: '#ffe08a', speed: 7, life: 0.7, size: 0.35, spread: 1 });
+    G.shake = Math.max(G.shake, 0.4);
+    if (B.st !== 'dying' && B.st !== 'gone') { ch.stop(); toTired(c.breakStun); }
+  }
+  // 被弾の入口：硬さの補正と、沈黙中に言い返した回数を数える
+  function hitBy(d) {
+    if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return;
+    if (B.silenceT > 0 && d >= 4) {
+      B.silenceHits = (B.silenceHits || 0) + 1;
+      FX.emit(B.x, 1.8, B.z, { n: 8, color: '#ffe08a', speed: 4, life: 0.4, size: 0.25 });
+      if (B.silenceHits >= c.silenceBreak) endSilence(true);
+    }
+    damage(d * (B.phase === 2 ? c.armor2 : c.armor));
   }
   function awaken() { // 部下を馬鹿にされた課長の覚醒（部下との絆の数だけ強化が長く続く）
     const P = Player;
@@ -6819,6 +6923,10 @@ function createBuchoBoss(def) {
     }
     if (d < 3.2) { set('swingWind'); Barks.say(head, pick(LINES.buchoSwing), 'tout', 1.0); return; }
     const r = Math.random();
+    if (!(B.silenceT > 0) && !(B.silenceCd > 0) && Math.random() < (B.phase === 2 ? 0.4 : 0.25)) {
+      set('silence'); ch.action('Batou3'); Barks.say(head, '……いいか、よく聞け。', 'tout', 1.0); return;
+    }
+    if (Math.random() < (B.phase === 2 ? 0.3 : 0.18)) { set('blame'); ch.action('Batou2'); return; }
     if (r < 0.32) { set('tsume'); ch.action('Batou2'); Barks.say(head, '詰めるぞ。', 'tout', 1.0); }
     else if (r < 0.62) { set('numbers'); ch.action('Batou1'); Barks.say(head, '数字で説明しろ！', 'rage', 1.2); }
     else if (r < 0.82) { set('nostalgia'); ch.action('Batou1'); }
@@ -6828,14 +6936,22 @@ function createBuchoBoss(def) {
     ratio() { return B.hp / def.hp; },
     eachCircle(fn) { if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return; fn(circle); },
     dispose() {
-      scene.remove(o); sepia(false);
+      scene.remove(o); sepia(false); silenceFx(false);
       const shared = Object.values(GEO);
       o.traverse(m => { if (m.geometry && shared.indexOf(m.geometry) < 0) m.geometry.dispose(); });
     },
     update(dt) {
       const P = Player; if (B.st === 'gone') return;
-      B.t += dt; B.cd -= dt; B.summonT -= dt;
+      B.t += dt; B.cd -= dt; B.summonT -= dt; B.silenceCd = (B.silenceCd || 0) - dt;
       if (B.sepiaT > 0) { B.sepiaT -= dt; P.slow = Math.max(P.slow, 0.2); if (B.sepiaT <= 0) sepia(false); }
+      if (B.silenceT > 0) { // 心理的安全性ゼロ：喝が出せず、怒が削られていく
+        B.silenceT -= dt;
+        P.tapCD = Math.max(P.tapCD || 0, 0.25);
+        if (P.state === 'shout') { P.endShout(); P.shoutLock = true; }
+        P.rage = Math.max(0, P.rage - c.silenceDrain * dt);
+        if (Math.random() < dt * 6) FX.emit(P.x, 1.6 + P.floorY, P.z, { n: 1, color: '#3a3a48', speed: 0.6, life: 0.9, size: 0.6, g: -0.5, spread: 1.2 });
+        if (B.silenceT <= 0) endSilence(false);
+      }
       const dx = P.x - B.x, dz = P.z - B.z, d = Math.hypot(dx, dz) || 1, toP = Math.atan2(dx, dz);
       let sp = 0;
       switch (B.st) {
@@ -6846,7 +6962,7 @@ function createBuchoBoss(def) {
           break;
         case 'idle':
           B.face = angLerp(B.face, toP, Math.min(1, dt * 4));
-          if (d > 3) { sp = c.walk * (B.phase === 2 ? 1.3 : 1); B.x += dx / d * sp * dt; B.z += dz / d * sp * dt; }
+          if (d > 3) { sp = c.walk * (B.phase === 2 ? 1.3 : 1) * (B.silenceT > 0 ? 1.35 : 1); B.x += dx / d * sp * dt; B.z += dz / d * sp * dt; }
           if (B.cd <= 0 && !P.dead) choose(d);
           break;
         case 'swingWind':
@@ -6898,11 +7014,47 @@ function createBuchoBoss(def) {
           if (B.t > 1.6) { ch.stop(); toTired(c.tired * 0.6); }
           break;
         case 'tired':
-          if (B.t > B.wait) { set('idle'); B.cd = (B.phase === 2 ? 0.6 : 1.0) + Math.random() * 0.4; }
+          if (B.t > B.wait * c.tiredMul) { set('idle'); B.cd = (B.phase === 2 ? 0.45 : 0.8) + Math.random() * 0.4; }
           break;
         case 'dying':
           if (B.t > 2.0 && !B.done) { B.done = true; Boss.finish(); }
           if (B.t > 4) { o.visible = false; set('gone'); }
+          break;
+        case 'silence': // 心理的安全性ゼロ宣言：予兆の黒い圧 → 宣言（課長は言い返せなくなる）
+          if (!B.done && Math.random() < 0.6) FX.emit(B.x, 1.2, B.z, { n: 2, color: '#2a2a36', speed: 3, life: 0.7, size: 0.6, spread: 3, g: -0.5 });
+          if (!B.done && B.t > c.silenceWind) {
+            B.done = true;
+            B.silenceT = c.silenceTime * (B.phase === 2 ? 1.3 : 1); B.silenceHits = 0; B.silenceCd = c.silenceCd;
+            silenceFx(true); G.shake = Math.max(G.shake, 0.45);
+            FX.emit(B.x, 1, B.z, { n: 50, color: '#3a3a48', speed: 9, life: 0.9, size: 0.6, spread: 2 });
+            Barks.say(head, pick(SILENCE_LINES), 'rage', 2.2);
+            Barks.say(P.hero.anchor('head_top'), '……喝が出ない！ 部長を叩いて言い返せ', 'hint', 2.4, true);
+          }
+          if (B.t > c.silenceWind + 0.8) { ch.stop(); toTired(c.tired * 0.5); }
+          break;
+        case 'blame': { // 責任追及の包囲網：四方から言葉が迫る。逃げ道は1か所だけ（ジャンプでもかわせる）
+          const N = c.blameN, waves = B.phase === 2 ? 2 : 1;
+          if (!B.done) {
+            B.done = true; B.bx = P.x; B.bz = P.z; B.gap = Math.floor(Math.random() * N); B.n = 0;
+            Barks.say(head, '誰の責任だ？ 逃げられると思うなよ。', 'rage', 1.4);
+          }
+          if (B.n === 0 && Math.random() < 0.7) { // 予兆：課長を囲む赤い輪（逃げ道だけ空いている）
+            const a = Math.random() * Math.PI * 2;
+            if (Math.floor(a / (Math.PI * 2) * N) !== B.gap) FX.emit(B.bx + Math.sin(a) * 8.5, 0.3, B.bz + Math.cos(a) * 8.5, { n: 1, color: '#ff3a20', speed: 0.5, life: 0.5, size: 0.4, g: 0 });
+          }
+          if (B.n < waves && B.t > c.blameWind + B.n * 0.9) {
+            if (B.n === 1) { B.gap = (B.gap + 3 + Math.floor(Math.random() * 4)) % N; B.bx = P.x; B.bz = P.z; Barks.say(head, '逃げ道も塞いでやる！', 'rage', 1.2); }
+            for (let i = 0; i < N; i++) {
+              if (i === B.gap) continue;
+              const a = (i + 0.5) / N * Math.PI * 2, sx = clamp(B.bx + Math.sin(a) * 8.5, -HW + 0.5, HW - 0.5), sz = B.bz + Math.cos(a) * 8.5;
+              const ux = B.bx - sx, uz = B.bz - sz, ul = Math.hypot(ux, uz) || 1;
+              Shots.fire(sx, 1.2, sz, ux / ul, uz / ul, { word: pick(BLAME_WORDS), speed: 7, dmg: c.blameDmg, life: 2.2 });
+            }
+            B.n++;
+          }
+          if (B.t > c.blameWind + waves * 0.9 + 1.2) { ch.stop(); toTired(c.tired * 0.8); }
+          break;
+        }
           break;
       }
       // 体力半分：第2形態（全社朝礼）。部下を馬鹿にされた課長が、言い返した直後に覚醒する
@@ -6935,7 +7087,8 @@ function createBuchoBoss(def) {
 function createCeoBoss(def) {
   const c = CONFIG.ceo, A = def.arena, HW = def.halfWidth, T = LINES.ceoTalk;
   // 弱点直撃の設定（CONFIG側に未定義の場合だけ既定値を補う）
-  const WEAK_DEFAULTS = { weakMinHit: 8, weakBurst: 60, weakStun: 2.6, weakReach: 4.5 };
+  // cArmorMul / cTiredMul / cSpeedMul：部下の支援に釣り合わせる第二形態の強化
+  const WEAK_DEFAULTS = { weakMinHit: 8, weakBurst: 60, weakStun: 2.6, weakReach: 4.5, cArmorMul: 0.85, cTiredMul: 0.8, cSpeedMul: 1.15 };
   for (const k in WEAK_DEFAULTS) if (c[k] == null) c[k] = WEAK_DEFAULTS[k];
   const man = (colors, scale) => {
     const ch = ModelRenderer.createCharacter(MODEL_DATA_SALARYMAN_GLASSES_SUIT, { colors, hide: ['briefcase'] });
@@ -6998,7 +7151,7 @@ function createCeoBoss(def) {
     }
     if (B.phase === 'C') {
       burst = !raw && B.weakT > 0 && d >= c.weakMinHit;   // 防御補正の前の値で判定
-      d *= c.armorC;
+      d *= c.armorC * c.cArmorMul;
       if (B.shields.some(e => !e.dead)) d *= 0.25;   // 人的資本（社員の盾）が残っている間は硬い
       if (B.weakT > 0) d *= c.weakMul;
       if (burst) d += c.weakBurst;               // 駄目村が弱点に印をつけている間は大ダメージ
@@ -7074,7 +7227,7 @@ function createCeoBoss(def) {
           break;
         case 'idle': {
           B.face = angLerp(B.face, toP, Math.min(1, dt * 4));
-          const walk = B.phase === 'A' ? c.walkA : B.phase === 'B' ? c.walkB : c.walkC;
+          const walk = B.phase === 'A' ? c.walkA : B.phase === 'B' ? c.walkB : c.walkC * c.cSpeedMul;
           if (B.phase === 'B') { // 経理部長は間合いを保つ
             if (d < 5) { sp = walk; B.x -= dx / d * sp * dt; B.z -= dz / d * sp * dt; }
             else if (d > 9) { sp = walk; B.x += dx / d * sp * dt; B.z += dz / d * sp * dt; }
@@ -7083,7 +7236,7 @@ function createCeoBoss(def) {
           break;
         }
         case 'tired':
-          if (B.t > B.wait) { set('idle'); B.cd = (B.phase === 'C' ? 0.6 : 1.0) + Math.random() * 0.4; }
+          if (B.t > B.wait * (B.phase === 'C' ? c.cTiredMul : 1)) { set('idle'); B.cd = (B.phase === 'C' ? 0.45 : 1.0) + Math.random() * 0.4; }
           break;
         case 'pushWind':
           B.face = angLerp(B.face, toP, Math.min(1, dt * 8));
@@ -7243,14 +7396,14 @@ function createCeoBoss(def) {
           break;
         case 'meeting': // 株主総会：全方位の弾幕を2回
           if (!B.done) { B.done = true; Barks.say(ceoHead, '株主総会を開会する！', 'rage', 1.4); }
-          if (B.n < 2 && B.t > 0.6 + B.n * 0.6) {
+          if (B.n < 3 && B.t > 0.6 + B.n * 0.6) {
             B.n++;
             for (let i = 0; i < 16; i++) {
               const a = B.n * 0.2 + i / 16 * Math.PI * 2;
               Shots.fire(B.x + Math.sin(a) * 2, 1.4, B.z + Math.cos(a) * 2, Math.sin(a), Math.cos(a), { word: pick(LINES.ceoShareholders), speed: 8, dmg: c.meetDmg });
             }
           }
-          if (B.t > 2) toTired(c.tired);
+          if (B.t > 2.6) toTired(c.tired);
           break;
         case 'dying':
           mech.g.rotation.z = Math.min(0.45, B.t * 0.3);
@@ -8800,7 +8953,7 @@ const UI = {
         left: max(12px, env(safe-area-inset-left));
         z-index: 200;
         display: none;
-        width: min(260px, calc(100vw - 24px));
+        width: 145px;
         font-family: inherit;
       }
 
@@ -8809,14 +8962,17 @@ const UI = {
       }
 
       #btnStageSelect {
+        display: block;
+        width: 145px;
         min-height: 44px;
-        padding: 10px 15px;
+        margin-left: 0;
+        padding: 8px 10px;
         border: 1px solid rgba(220, 230, 240, .45);
         border-radius: 10px;
         color: #f1f5fa;
         background: rgba(15, 24, 37, .88);
         font: inherit;
-        font-size: 13px;
+        font-size: 12px;
         font-weight: bold;
         cursor: pointer;
         touch-action: manipulation;
@@ -13806,7 +13962,10 @@ const BGMDirector = (() => {
    * ボス撃破後は通常曲へ戻さない。
    * ステージ4の通常区間にはBGMを指定しない。
    */
+  let preview = null;   // ミュージックボックスで試聴中の曲（タイトル画面のみ有効）
+
   function selectTrack() {
+    if (G.phase === 'title') return preview;
     if (G.phase === 'ending') {
       return 'ending';
     }
@@ -13882,6 +14041,8 @@ const BGMDirector = (() => {
    * 状態を防ぐ。
    */
   function changeTrack(next) {
+    // ゲーム中に実際に流れた曲を、ミュージックボックス用に記録する
+    if (next && G.phase !== 'title') Help.mark(next);
     if (current === next) return;
 
     if (current) {
@@ -13977,9 +14138,339 @@ const BGMDirector = (() => {
 
   return {
     update,
-    stop
+    stop,
+    // ミュージックボックス用：タイトル画面でだけ指定曲を流す（null で停止）
+    preview(key) { preview = key || null; }
   };
 })();
+
+/* ============================================================
+ * 社員手帳（タイトルから開くヘルプ画面）
+ * ストーリー（ネタバレなし）・たたかいかた・ミュージックボックス
+ * 音楽の再生は BGMDirector.preview に任せ、abcjs には直接触れない
+ * ============================================================ */
+const Help = {
+  root: null, playing: null,
+  TRACKS: [
+    { key: 'stage1', stage: 1, title: '0430 国道15号、夜明け前の胸騒ぎ', scene: 'ステージ1　横浜 → 川崎', color: '#ffb35a' },
+    { key: 'boss1', stage: 1, title: '六郷橋に潜むもの', scene: 'ステージ1　強敵戦', color: '#ff6a3a' },
+    { key: 'stage2', stage: 2, title: '0520 東京、希望なき夜明け', scene: 'ステージ2　六郷橋 → 渋谷', color: '#7fb4ff' },
+    { key: 'boss2', stage: 2, title: 'スクランブルの地下から', scene: 'ステージ2　強敵戦', color: '#9a7aff' },
+    { key: 'stage3', stage: 3, title: '歌舞伎町・魑魅魍魎', scene: 'ステージ3　渋谷 → 新宿', color: '#ff5ab0' },
+    { key: 'boss3', stage: 3, title: '本社前の門番', scene: 'ステージ3　強敵戦', color: '#e0442c' },
+    { key: 'boss4', stage: 4, title: '0850 本社14階、矛盾', scene: 'ステージ4　最終決戦', color: '#ffd23a' },
+    { key: 'ending', stage: 4, title: '0900 始業の鐘、それでも我々は', scene: 'エンディング', color: '#9fe8a0' }
+  ],
+  init() {
+    const btn = document.createElement('button');
+    btn.id = 'btnHelp'; btn.type = 'button';
+    btn.textContent = '社員手帳';
+    btn.setAttribute('aria-label', '社員手帳を開く');
+    btn.addEventListener('click', () => { if (G.phase === 'title') this.show('story'); });
+    document.getElementById('stageSelector').appendChild(btn);
+
+    const st = document.createElement('style');
+    st.textContent = this.css();
+    document.head.appendChild(st);
+
+    const root = this.root = document.createElement('div');
+    root.id = 'helpScreen'; root.className = 'hidden';
+    root.setAttribute('role', 'dialog'); root.setAttribute('aria-label', '社員手帳');
+    root.innerHTML = this.html();
+    document.body.appendChild(root);
+
+    root.querySelector('#hpClose').addEventListener('click', () => this.hide());
+    root.querySelectorAll('[data-hp-tab]').forEach(b => b.addEventListener('click', () => this.tab(b.dataset.hpTab)));
+    root.querySelector('#hpStop').addEventListener('click', () => this.stop());
+    window.addEventListener('keydown', e => { if (e.key === 'Escape' && !root.classList.contains('hidden')) this.hide(); });
+  },
+  // 実際に流れた曲の記録（保存データに任意項目として追加。古いデータは空として扱う）
+  mark(key) {
+    const d = Save.data;
+    if (!Array.isArray(d.heard)) d.heard = [];
+    if (d.heard.indexOf(key) < 0) { d.heard.push(key); Save.store(); }
+  },
+  unlocked(t) {
+    const d = Save.data, heard = Array.isArray(d.heard) ? d.heard : [], cleared = Array.isArray(d.cleared) ? d.cleared : [];
+    return heard.indexOf(t.key) >= 0 || cleared.indexOf(t.stage) >= 0;
+  },
+  show(tab) {
+    if (G.phase !== 'title') return;
+    this.root.classList.remove('hidden');
+    this.tab(tab || 'story');
+  },
+  hide() {
+    this.stop();
+    this.root.classList.add('hidden');
+  },
+  tab(name) {
+    this.root.querySelectorAll('[data-hp-tab]').forEach(b => b.classList.toggle('on', b.dataset.hpTab === name));
+    this.root.querySelectorAll('[data-hp-pane]').forEach(p => p.classList.toggle('on', p.dataset.hpPane === name));
+    this.root.querySelector('.hp-body').scrollTop = 0;
+    if (name === 'music') this.renderMusic();
+  },
+  play(key) {
+    Stage1BGM_0430.unlockAudio();   // ユーザー操作の中で音声を有効化する
+    BGMDirector.preview(key);
+    this.playing = key;
+    this.renderMusic();
+  },
+  stop() {
+    BGMDirector.preview(null);
+    this.playing = null;
+    if (this.root) this.renderMusic();
+  },
+  renderMusic() {
+    const list = this.root.querySelector('#hpTracks');
+    list.replaceChildren();
+    let n = 0;
+    this.TRACKS.forEach((t, i) => {
+      const ok = this.unlocked(t), on = this.playing === t.key;
+      if (ok) n++;
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'hp-track' + (ok ? '' : ' locked') + (on ? ' on' : '');
+      row.style.setProperty('--tc', t.color);
+      row.disabled = !ok;
+      row.innerHTML = '<span class="hp-no"></span><span class="hp-tt"><b></b><small></small></span><span class="hp-pl"></span>';
+      row.querySelector('.hp-no').textContent = String(i + 1).padStart(2, '0');
+      row.querySelector('b').textContent = ok ? t.title : '？？？';
+      row.querySelector('small').textContent = ok ? t.scene : 'まだ到達していない場面';
+      row.querySelector('.hp-pl').textContent = !ok ? '🔒' : on ? '■' : '▶';
+      row.addEventListener('click', () => { if (this.playing === t.key) this.stop(); else this.play(t.key); });
+      list.appendChild(row);
+    });
+    this.root.querySelector('#hpCount').textContent = '解放済み ' + n + ' / ' + this.TRACKS.length + ' 曲';
+    const cur = this.TRACKS.find(t => t.key === this.playing);
+    this.root.classList.toggle('hp-playing', !!cur);
+    this.root.querySelector('#hpNowTitle').textContent = cur ? cur.title : '';
+  },
+  html() {
+    return `
+<div class="hp-panel">
+  <header class="hp-head">
+    <div class="hp-seal">JTC</div>
+    <div class="hp-ttl"><small>JTC重工 全社員配布</small><b>社員手帳</b><span>― 出社の手引き ―</span></div>
+    <button id="hpClose" type="button" aria-label="閉じる">×</button>
+  </header>
+  <nav class="hp-tabs">
+    <button type="button" data-hp-tab="story">ストーリー</button>
+    <button type="button" data-hp-tab="fight">たたかいかた</button>
+    <button type="button" data-hp-tab="music">ミュージックボックス</button>
+  </nav>
+  <div class="hp-body">
+
+    <section data-hp-pane="story">
+      <div class="hp-hero">
+        <span class="hp-chip">10 YEARS AFTER THE BLACKOUT</span>
+        <h3>電気が消えても、<br>始業時間は消えなかった。</h3>
+      </div>
+      <ol class="hp-time">
+        <li><em>過去</em><b>AIバブル</b><p>世界中のGPUが、昼も夜も電気を食べ続けた。誰もが「AIが夢の未来を作る」と信じていた。</p></li>
+        <li><em>崩壊</em><b>ブラックアウト</b><p>電力の需給バランスが崩れ、送電網は連鎖的に停止。信号は消え、電車は止まり、ネットは沈黙した。</p></li>
+        <li><em>現在</em><b>あれから10年</b><p>都市インフラは崩れたまま。野生化した獣と、柄の悪い輩が街を跋扈している。</p></li>
+      </ol>
+      <div class="hp-jtc">
+        <b>それでも――</b>
+        <p><strong>JTC</strong>（Japanese Traditional Company）とその気風は、生き残っていた。<span>稟議も、判子も、朝礼も。</span></p>
+      </div>
+      <div class="hp-who">
+        <div class="hp-face"><span>課</span></div>
+        <div>
+          <b>ぱわ原課長</b><small>JTC重工 課長／横浜市保土ケ谷区在住</small>
+          <p>武器は、愛用の鞄と、長年磨き上げたパワハラ力と精神論。今日も夜明け前に保土ケ谷の自宅を出て、新宿のJTC重工本社へ出勤する。電車？ 10年前から止まっている。</p>
+        </div>
+      </div>
+      <div class="hp-map">
+        <svg viewBox="0 0 320 210" role="img" aria-label="保土ケ谷から新宿までの通勤経路">
+          <path class="hp-river" d="M60 132 C 110 112, 160 120, 240 98"/>
+          <text class="hp-rv" x="214" y="94">多摩川</text>
+          <path id="hpRoute" class="hp-route-bg" d="M40 186 L80 154 L134 124 L192 100 L170 62 L180 24"/>
+          <path class="hp-route" d="M40 186 L80 154 L134 124 L192 100 L170 62 L180 24"/>
+          <g class="hp-pins">
+            <circle cx="40" cy="186" r="5"/><circle cx="80" cy="154" r="4"/><circle cx="134" cy="124" r="4"/>
+            <circle cx="192" cy="100" r="4"/><circle cx="170" cy="62" r="4"/><circle class="hp-goal" cx="180" cy="24" r="7"/>
+          </g>
+          <g class="hp-lbl">
+            <text x="50" y="196">保土ケ谷（自宅）</text><text x="90" y="160">横浜</text><text x="144" y="134">川崎</text>
+            <text x="202" y="108">品川</text><text x="118" y="64">渋谷</text><text x="194" y="22">新宿 JTC重工本社</text>
+          </g>
+          <circle r="6" class="hp-me"><animateMotion dur="8s" repeatCount="indefinite"><mpath href="#hpRoute" xlink:href="#hpRoute"/></animateMotion></circle>
+        </svg>
+        <span class="hp-mapcap">本日の通勤経路（徒歩）</span>
+      </div>
+      <blockquote class="hp-quote">「電車が動かない？ なら足を動かせ。俺も動かしてる。」<cite>― ぱわ原課長</cite></blockquote>
+      <p class="hp-note">※ パワハラは、ゲームの中だけにしてください。</p>
+    </section>
+
+    <section data-hp-pane="fight">
+      <h3 class="hp-h">画面の見かた</h3>
+      <div class="hp-gauges">
+        <div><i style="--g:#e0442c">体力</i><p>なくなると「欠勤」。打刻機の地点から再出社。</p></div>
+        <div><i style="--g:#ff8a3a">怒</i><p>殴る・殴られるで溜まる。喝と罵倒の燃料。</p></div>
+        <div><i style="--g:#7df0ff">電池</i><p>スマホの残量。ローカルAIを動かす。</p></div>
+      </div>
+      <h3 class="hp-h">技</h3>
+      <div class="hp-grid">
+        <div class="hp-card" style="--c:#ffb35a"><i>鞄</i><b>鞄でぶん殴る</b><p>近くの敵へ自動で向き直って殴る。連打OK。振り終わり際に押すと次の一撃を予約できる。</p></div>
+        <div class="hp-card" style="--c:#ffd23a"><i>喝</i><b>喝ッ！（短押し）</b><p>怒を少し使い、前方の敵をひるませて気絶させる。空のカラスも叩き落とし、飛んでくる横文字も論破して消し去る。</p></div>
+        <div class="hp-card" style="--c:#ff6a3a"><i>罵</i><b>罵倒（長押し）</b><p>溜めるほど強くなり、離した瞬間に音波を放つ。最大まで溜めると周囲に衝撃波。溜めている間は怒を消費しない。</p></div>
+        <div class="hp-card" style="--c:#c9a07a"><i>投</i><b>投げる</b><p>道に落ちたレンガ・空き缶・瓶は、近づくだけで拾える。拾った順に投げつける。</p></div>
+        <div class="hp-card" style="--c:#9fe8a0"><i>跳</i><b>ジャンプ</b><p>足元を狙う攻撃をかわし、着地で踏みつける。低い攻撃は跳んで越えろ。</p></div>
+        <div class="hp-card" style="--c:#7df0ff"><i>AI</i><b>スマホのローカルAI</b><p>ネットは死んだが、ローカルAIは生きている。起動中は敵の動きが鈍り、AIが自動で迎撃、受けるダメージも減る。ただし電池を食う。</p></div>
+      </div>
+      <div class="hp-dynamo">
+        <div class="hp-wheel"><span></span></div>
+        <div>
+          <b>ダイナモ発電</b><small>電気は、自分で作る。</small>
+          <p>道端の放置自転車に近づいて「漕」。画面のダイヤルを指でぐるぐる回すとライトが灯り、スマホが充電される。自転車ごとに発電できる量には限りがある。敵が近くにいる時と強敵戦の最中は漕げない。</p>
+        </div>
+      </div>
+      <h3 class="hp-h">知っておくと出世する</h3>
+      <ul class="hp-tips">
+        <li><b>打刻機</b>中間地点。打刻すると体力が少し戻り、倒れてもここから再出社できる。</li>
+        <li><b>自販機</b>叩くと飲み物が出てくる。中身は……自販機による。</li>
+        <li><b>光る乗り物</b>廃車のバリケードは、光る乗り物で体当たりして突破する。</li>
+        <li><b>管理職アクション</b>強敵がよろめいた時に攻撃ボタンが光ったら好機。近くの物を使った決め技が出る。</li>
+        <li><b>道中の拾い物</b>鞄より頼れる何かが、落ちていることもある。</li>
+      </ul>
+      <h3 class="hp-h">操作</h3>
+      <div class="hp-keys">
+        <div><b>スマホ</b>スティックで移動／右のボタンで技／画面ドラッグで視点、2本指で拡大・縮小</div>
+        <div><b>キーボード</b>移動 WASD・矢印／鞄 J・Space／喝・罵倒 K（長押し）／投げる I／ジャンプ U／AI L／漕ぐ・乗る E／休憩 P</div>
+      </div>
+    </section>
+
+    <section data-hp-pane="music">
+      <div class="hp-mb">
+        <div class="hp-disc"><span></span></div>
+        <div>
+          <b>ミュージックボックス</b><small id="hpCount"></small>
+          <p>到達した場面の音楽を聴ける。まだ見ぬ場面の曲は、出社してのお楽しみ。</p>
+        </div>
+      </div>
+      <div class="hp-now">
+        <span class="hp-eq"><i></i><i></i><i></i><i></i></span>
+        <b id="hpNowTitle"></b>
+        <button id="hpStop" type="button">停止</button>
+      </div>
+      <div id="hpTracks" class="hp-tracks"></div>
+      <p class="hp-note">※ 音源の読み込みに数秒かかることがあります。手帳を閉じると停止します。</p>
+    </section>
+
+  </div>
+</div>`;
+  },
+  css() {
+    return `
+#btnHelp{position:relative;display:none;align-items:center;justify-content:center;width:145px;min-height:44px;margin:8px 0 0 0;padding:8px 10px;border:1px solid rgba(220,230,240,.45);border-radius:10px;color:#f1f5fa;background:rgba(15,24,37,.88);font:inherit;font-size:12px;font-weight:bold;text-align:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+body[data-phase="title"] #btnHelp{display:flex}
+#btnHelp small{display:block;font-size:10px;font-weight:normal;opacity:.75}
+.hp-btn-ic{display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:50%;background:#b8261c;color:#fff;font-size:15px;box-shadow:inset 0 0 0 2px rgba(255,255,255,.55)}
+#helpScreen{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:max(10px,env(safe-area-inset-top)) 10px max(10px,env(safe-area-inset-bottom));background:radial-gradient(ellipse at 30% 0%,rgba(255,140,60,.2),transparent 60%),rgba(4,7,12,.88);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+#helpScreen.hidden{display:none}
+#helpScreen *{box-sizing:border-box}
+.hp-panel{display:flex;flex-direction:column;width:min(720px,100%);max-height:100%;overflow:hidden;border:1px solid rgba(255,210,58,.35);border-radius:18px;color:#ece7d8;background:linear-gradient(180deg,#151c2b,#0a0f18);box-shadow:0 20px 60px rgba(0,0,0,.6);animation:hpIn .35s ease-out}
+@keyframes hpIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.hp-head{display:flex;align-items:center;gap:12px;padding:14px 14px 10px;background:linear-gradient(90deg,#3d1a12,#1a2238);border-bottom:1px solid rgba(255,210,58,.25)}
+.hp-seal{flex:none;display:grid;place-items:center;width:48px;height:48px;border:3px solid #e02818;border-radius:50%;color:#e02818;background:#fff3ea;font-weight:900;font-size:13px;letter-spacing:1px;transform:rotate(-12deg)}
+.hp-ttl{flex:1;min-width:0}
+.hp-ttl small{display:block;font-size:10px;opacity:.7}
+.hp-ttl b{display:block;font-size:24px;letter-spacing:.2em;color:#ffd23a;text-shadow:0 0 12px rgba(255,180,60,.45);font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif}
+.hp-ttl span{font-size:11px;opacity:.8}
+#hpClose{flex:none;width:44px;height:44px;border:1px solid rgba(255,255,255,.25);border-radius:50%;color:#fff;background:rgba(255,255,255,.08);font-size:22px;cursor:pointer}
+.hp-tabs{display:flex;gap:6px;padding:8px 10px;background:rgba(0,0,0,.25)}
+.hp-tabs button{flex:1;min-height:42px;padding:4px;border:1px solid rgba(255,255,255,.14);border-radius:10px;color:#cfd6e0;background:rgba(255,255,255,.04);font:inherit;font-size:12px;font-weight:bold;cursor:pointer}
+.hp-tabs button.on{color:#1a1206;background:linear-gradient(180deg,#ffe07a,#ffb43a);border-color:#ffd23a;box-shadow:0 0 14px rgba(255,190,60,.35)}
+.hp-body{flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:14px 14px 24px;font-size:13px;line-height:1.7}
+.hp-body section{display:none}
+.hp-body section.on{display:block;animation:hpIn .3s ease-out}
+.hp-body p{margin:4px 0 0}
+.hp-hero{padding:22px 16px;border-radius:14px;text-align:center;background:radial-gradient(ellipse at 50% 120%,rgba(255,150,60,.35),transparent 60%),linear-gradient(180deg,#05070c,#1a1420)}
+.hp-chip{display:inline-block;padding:2px 10px;border:1px solid rgba(255,210,58,.5);border-radius:99px;color:#ffd23a;font-size:10px;letter-spacing:.18em}
+.hp-hero h3{margin:10px 0 0;font-size:21px;line-height:1.5;color:#fff;font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif;text-shadow:0 2px 12px rgba(0,0,0,.8)}
+.hp-time{list-style:none;margin:14px 0;padding:0 0 0 16px;border-left:2px solid rgba(255,210,58,.35)}
+.hp-time li{position:relative;margin:0 0 12px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.04)}
+.hp-time li::before{content:"";position:absolute;left:-23px;top:16px;width:12px;height:12px;border-radius:50%;background:#ffd23a;box-shadow:0 0 10px rgba(255,210,58,.6)}
+.hp-time em{display:block;font-style:normal;font-size:10px;color:#ffb35a;letter-spacing:.2em}
+.hp-time b{font-size:15px;color:#fff}
+.hp-jtc{margin:6px 0 14px;padding:14px;border:1px solid rgba(224,40,24,.5);border-radius:12px;background:linear-gradient(135deg,rgba(120,20,14,.35),rgba(20,24,40,.6))}
+.hp-jtc b{font-size:16px;color:#ffd23a}
+.hp-jtc strong{color:#ff6a4a;font-size:16px}
+.hp-jtc span{display:block;margin-top:4px;font-size:12px;opacity:.8}
+.hp-who{display:flex;gap:12px;align-items:flex-start;padding:12px;border-radius:12px;background:rgba(255,255,255,.05)}
+.hp-face{flex:none;display:grid;place-items:center;width:58px;height:58px;border-radius:14px;background:linear-gradient(160deg,#3a4152,#1c2230);box-shadow:inset 0 0 0 2px rgba(255,210,58,.45)}
+.hp-face span{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:#e8c9a8;color:#1d1d24;font-weight:900;font-size:18px;box-shadow:0 -4px 0 #2a2420 inset}
+.hp-who b{font-size:16px;color:#fff}
+.hp-who small{display:block;font-size:11px;opacity:.7}
+.hp-map{position:relative;margin:14px 0;padding:8px;border-radius:14px;background:radial-gradient(ellipse at 50% 50%,#17233a,#0b111c);border:1px solid rgba(125,240,255,.18)}
+.hp-map svg{display:block;width:100%;height:auto}
+.hp-river{fill:none;stroke:#3a7ab8;stroke-width:7;stroke-linecap:round;opacity:.55}
+.hp-rv{fill:#7fb4ff;font-size:9px}
+.hp-route-bg{fill:none;stroke:rgba(255,255,255,.12);stroke-width:5;stroke-linejoin:round}
+.hp-route{fill:none;stroke:#ffd23a;stroke-width:2.5;stroke-dasharray:6 6;stroke-linejoin:round;animation:hpDash 1.2s linear infinite}
+@keyframes hpDash{to{stroke-dashoffset:-12}}
+.hp-pins circle{fill:#0b111c;stroke:#ffd23a;stroke-width:2}
+.hp-pins .hp-goal{fill:#e02818;stroke:#fff}
+.hp-lbl text{fill:#ece7d8;font-size:10px}
+.hp-me{fill:#ff6a3a;stroke:#fff;stroke-width:2}
+.hp-mapcap{position:absolute;left:12px;top:8px;font-size:10px;color:#7df0ff;letter-spacing:.1em}
+.hp-quote{margin:10px 0 0;padding:12px 14px;border-left:4px solid #ffd23a;border-radius:0 10px 10px 0;background:rgba(255,210,58,.08);font-size:15px;color:#fff;font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif}
+.hp-quote cite{display:block;margin-top:4px;font-size:11px;font-style:normal;opacity:.7}
+.hp-note{margin-top:12px !important;font-size:11px;opacity:.6;text-align:center}
+.hp-h{margin:16px 0 8px;padding-left:10px;border-left:4px solid #e02818;font-size:14px;color:#fff}
+.hp-h:first-child{margin-top:2px}
+.hp-gauges{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.hp-gauges div{padding:10px;border-radius:10px;background:rgba(255,255,255,.05);font-size:11px;line-height:1.5}
+.hp-gauges i{display:block;padding:3px 8px;border-radius:6px;font-style:normal;font-weight:bold;font-size:12px;color:#111;background:linear-gradient(90deg,var(--g) 70%,rgba(255,255,255,.2) 70%)}
+.hp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.hp-card{position:relative;padding:12px 12px 12px 62px;min-height:84px;border-radius:12px;background:linear-gradient(135deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.08);font-size:12px;line-height:1.6}
+.hp-card i{position:absolute;left:10px;top:12px;display:grid;place-items:center;width:42px;height:42px;border-radius:50%;font-style:normal;font-weight:900;font-size:17px;color:#111;background:var(--c);box-shadow:0 0 14px color-mix(in srgb,var(--c) 55%,transparent),inset 0 -3px 0 rgba(0,0,0,.25)}
+.hp-card b{display:block;font-size:13px;color:#fff}
+.hp-dynamo{display:flex;gap:14px;align-items:center;margin-top:10px;padding:14px;border-radius:14px;border:1px solid rgba(125,240,255,.35);background:linear-gradient(135deg,rgba(20,60,80,.55),rgba(10,16,28,.8));box-shadow:0 0 22px rgba(125,240,255,.12)}
+.hp-dynamo b{font-size:17px;color:#7df0ff}
+.hp-dynamo small{display:block;font-size:11px;color:#ffd23a}
+.hp-dynamo p{font-size:12px}
+.hp-wheel{position:relative;flex:none;width:72px;height:72px;border:6px solid #c8ccd0;border-radius:50%;animation:hpSpin 1.4s linear infinite}
+.hp-wheel::before,.hp-wheel::after{content:"";position:absolute;left:50%;top:50%;width:2px;height:100%;margin:-50% 0 0 -1px;background:#8d9499}
+.hp-wheel::after{transform:rotate(90deg)}
+.hp-wheel span{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#7df0ff;box-shadow:0 0 16px #7df0ff;animation:hpGlow 1.4s ease-in-out infinite}
+@keyframes hpSpin{to{transform:rotate(360deg)}}
+@keyframes hpGlow{50%{box-shadow:0 0 28px #7df0ff,0 0 8px #fff}}
+.hp-tips{list-style:none;margin:0;padding:0}
+.hp-tips li{margin:0 0 6px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.04);font-size:12px}
+.hp-tips b{display:inline-block;min-width:7.5em;margin-right:6px;color:#ffd23a}
+.hp-keys div{margin-bottom:6px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.04);font-size:12px}
+.hp-keys b{display:block;color:#7df0ff}
+.hp-mb{display:flex;gap:14px;align-items:center;padding:14px;border-radius:14px;background:linear-gradient(135deg,rgba(80,40,90,.45),rgba(12,18,30,.8))}
+.hp-mb b{font-size:17px;color:#fff}
+.hp-mb small{display:block;font-size:11px;color:#ffd23a}
+.hp-disc{position:relative;flex:none;width:72px;height:72px;border-radius:50%;background:repeating-radial-gradient(circle,#111 0 3px,#1e1e24 3px 5px);box-shadow:0 0 0 2px rgba(255,255,255,.12)}
+.hp-disc span{position:absolute;left:50%;top:50%;width:24px;height:24px;margin:-12px 0 0 -12px;border-radius:50%;background:radial-gradient(circle,#0b111c 0 3px,#e02818 4px)}
+#helpScreen.hp-playing .hp-disc{animation:hpSpin 2.4s linear infinite}
+.hp-now{display:none;align-items:center;gap:10px;margin:10px 0 0;padding:8px 10px;border-radius:10px;background:rgba(255,210,58,.12);border:1px solid rgba(255,210,58,.35)}
+#helpScreen.hp-playing .hp-now{display:flex}
+.hp-now b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ffd23a;font-size:12px}
+#hpStop{min-height:36px;padding:0 14px;border:0;border-radius:8px;color:#111;background:#ffd23a;font:inherit;font-size:12px;font-weight:bold;cursor:pointer}
+.hp-eq{display:flex;align-items:flex-end;gap:2px;height:18px}
+.hp-eq i{width:4px;height:100%;border-radius:2px;background:#ffd23a;animation:hpEq .9s ease-in-out infinite;transform-origin:bottom}
+.hp-eq i:nth-child(2){animation-delay:-.3s}.hp-eq i:nth-child(3){animation-delay:-.6s}.hp-eq i:nth-child(4){animation-delay:-.15s}
+@keyframes hpEq{0%,100%{transform:scaleY(.3)}50%{transform:scaleY(1)}}
+.hp-tracks{margin-top:10px}
+.hp-track{display:flex;align-items:center;gap:10px;width:100%;min-height:56px;margin:0 0 6px;padding:8px 12px;border:1px solid rgba(255,255,255,.08);border-left:4px solid var(--tc);border-radius:10px;color:#ece7d8;background:rgba(255,255,255,.04);font:inherit;text-align:left;cursor:pointer;touch-action:manipulation}
+.hp-track.on{background:linear-gradient(90deg,color-mix(in srgb,var(--tc) 28%,transparent),rgba(255,255,255,.03));box-shadow:0 0 14px color-mix(in srgb,var(--tc) 30%,transparent)}
+.hp-track.locked{border-left-color:#444;opacity:.5;cursor:default}
+.hp-no{flex:none;font-size:11px;opacity:.6;font-variant-numeric:tabular-nums}
+.hp-tt{flex:1;min-width:0}
+.hp-tt b{display:block;font-size:13px;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hp-tt small{display:block;font-size:11px;opacity:.7}
+.hp-pl{flex:none;display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.08);font-size:13px}
+.hp-track.on .hp-pl{background:var(--tc);color:#111}
+@media (max-width:480px){.hp-gauges{grid-template-columns:1fr}.hp-hero h3{font-size:18px}.hp-ttl b{font-size:20px}}
+@media (prefers-reduced-motion:reduce){#helpScreen *{animation:none !important}}
+`;
+  }
+};
 
 const Game = {
   loadStage(i) {
@@ -14158,7 +14649,7 @@ let lastTs = 0;
 function frame(ts) { requestAnimationFrame(frame); const raw = Math.min(0.05, Math.max(0.001, (ts - lastTs) / 1000 || 0.016)); lastTs = ts; step(raw); }
 
 function boot() {
-  initColors(); initAssets(); Sky.init(); Combat.init(); Player.init(); UI.init(); Input.init(); Save.load();
+  initColors(); initAssets(); Sky.init(); Combat.init(); Player.init(); UI.init(); Input.init(); Save.load(); Help.init();
   Game.loadStage(0); setPhase('title'); UI.showBest(); fireEvent('title');
   resize(); titleCam(camPos, camLook);
   window.addEventListener('resize', resize);
@@ -14184,6 +14675,16 @@ boot();
   font-size: 14px !important;
   opacity: .85;
   white-space: nowrap;
+}
+
+/* 鬼頭部長の「心理的安全性ゼロ」：画面が灰色に沈み、喝ボタンが封じられる */
+body[data-silence="true"] canvas {
+  filter: grayscale(.65) brightness(.78) contrast(1.1);
+  transition: filter .4s;
+}
+body[data-silence="true"] #btnShout {
+  opacity: .35 !important;
+  filter: grayscale(1);
 }
 
 /* スマホ対応：長いコメントを吹き出し内で自動改行 */
