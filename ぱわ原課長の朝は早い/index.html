@@ -14358,13 +14358,28 @@ const SharedBGMPlayer = (() => {
   // 表示用のスナップショット。再生処理や再試行状態は変更しない。
   // 選択直後に旧曲の状態を見せないよう、要求された曲キーも照合する。
   function getStatus(key) {
+    const ac = getContext();
+    const audioWaiting =
+      !ac || (ac.state !== 'running' && ac.state !== 'closed');
+    const audioClosed = !!ac && ac.state === 'closed';
     const snapshot = (state, retrySeconds = 0) =>
-      Object.freeze({ key: key || null, state, retrySeconds });
+      Object.freeze({
+        key: key || null,
+        state,
+        retrySeconds,
+        audioWaiting,
+        audioClosed
+      });
 
     if (!key) return snapshot('idle');
     if (currentKey !== key) return snapshot('pending');
 
+    // 自動再試行を打ち切った場合は、選び直す操作を優先する。
     if (playbackBlocked) return snapshot('playbackBlocked');
+
+    // 音源の準備状態とAudioContextの状態を別々に読み取る。
+    // 準備中・読み込み失敗と音声中断が重なっても表示側で案内できる。
+    if (loading) return snapshot('loading');
 
     if (!ready && failedKey === key) {
       const remaining = Math.max(
@@ -14374,6 +14389,11 @@ const SharedBGMPlayer = (() => {
       return snapshot('loadFailed', Math.ceil(remaining / 1000));
     }
 
+    if (audioClosed) return snapshot('audioClosed');
+    if (audioWaiting) return snapshot('audioWaiting');
+    if (!ready) return snapshot('loading');
+
+    // 音声が利用可能になってから、再生の再試行待機を案内する。
     if (!playing && playbackFailures > 0) {
       const remaining = Math.max(
         0,
@@ -14382,12 +14402,6 @@ const SharedBGMPlayer = (() => {
       return snapshot('playbackFailed', Math.ceil(remaining / 1000));
     }
 
-    const ac = getContext();
-    if (!ac || ac.state !== 'running') {
-      return snapshot('audioWaiting');
-    }
-
-    if (loading || !ready) return snapshot('loading');
     if (playing) return snapshot('playing');
     if (paused) return snapshot('paused');
     return snapshot('starting');
@@ -14618,8 +14632,18 @@ const BGMDirector = (() => {
   return {
     update,
     stop,
-    // ミュージックボックス用：タイトル画面でだけ指定曲を流す（null で停止）
-    preview(key) { preview = key || null; }
+    // 試聴の停止・切替は操作中に確定する。
+    // 同一フレームで停止して同曲を選び直しても、新しいセッションになる。
+    preview(key) {
+      if (G.phase !== 'title') {
+        // ゲーム中のBGMには触れず、試聴予約だけ解除する。
+        preview = null;
+        return;
+      }
+
+      preview = key && TRACKS[key] ? key : null;
+      changeTrack(preview);
+    }
   };
 })();
 
@@ -14757,6 +14781,9 @@ const Help = {
       case 'audioWaiting':
         text = '音声の再開待ち · 画面に触れて再開';
         break;
+      case 'audioClosed':
+        text = '音声を利用できません · ページの再読み込みが必要です';
+        break;
       case 'loadFailed':
         text = status.retrySeconds > 0
           ? '音源の読み込み失敗 · ' + status.retrySeconds + '秒後に再試行'
@@ -14770,6 +14797,19 @@ const Help = {
       case 'playbackBlocked':
         text = '再生失敗 · 自動再試行を停止しました。停止後に選び直してください';
         break;
+    }
+
+    // 音源準備は音声中断中にも進むため、両方の状態を伝える。
+    if (
+      status.state === 'pending' ||
+      status.state === 'loading' ||
+      status.state === 'loadFailed'
+    ) {
+      if (status.audioClosed) {
+        text += ' ／ 音声を利用するにはページの再読み込みが必要です';
+      } else if (status.audioWaiting) {
+        text += ' ／ 音声の再開待ち · 画面に触れて再開';
+      }
     }
 
     const label = this.root.querySelector('#hpNowStatus');
