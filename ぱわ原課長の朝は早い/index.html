@@ -5850,13 +5850,18 @@ const EndingScene = {
 const Sfx = {
   ctx: null, out: null, nbuf: null, last: {}, hooked: false,
   ph: null, hp: null, stock: null, air: false, pk: null, bossOn: false, br: null, shake: 0, ehp: new WeakMap(),
-  // スマホは画面に触れるまで音を出せないので、最初の操作で準備する
+  // BGM・効果音・走行音で同じAudioContextを使い、効果音の出力だけを初期化する。
   unlock() {
-    if (!this.ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
-      this.ctx = new AC(); this.out = this.ctx.createGain(); this.out.gain.value = 0.45; this.out.connect(this.ctx.destination);
+    if (!this.ctx || this.ctx.state !== 'running') {
+      const ctx = Stage1BGM_0430.unlockAudio();
+      if (!ctx) return;
+      if (!this.ctx) {
+        this.ctx = ctx;
+        this.out = ctx.createGain();
+        this.out.gain.value = 0.45;
+        this.out.connect(ctx.destination);
+      }
     }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
     if (!this.hooked && typeof Barks !== 'undefined') { // 課長の「喝」の吹き出しに合わせて鳴らす（喝の処理には手を入れない）
       this.hooked = true;
       const say = Barks.say.bind(Barks);
@@ -5947,9 +5952,6 @@ const Sfx = {
     this.shake = G.shake || 0;
   }
 };
-window.addEventListener('pointerdown', () => Sfx.unlock());
-window.addEventListener('keydown', () => Sfx.unlock());
-
 if (LINES.tips && !LINES.tips.weak) LINES.tips.weak = '駄目村が弱点を指摘中！ 赤い輪の中でCEOを殴ると大ダメージ＆硬直';
 /* ---- 初回だけの操作ガイド（種類ごとに1回。表示済みは Save.data.tips に記録） ---- */
 const Tips = {
@@ -10557,14 +10559,6 @@ E,,4 z4 | z8 | B,,,4 z4 | E,,4 z4
 
     try {
       context = new AudioContextClass();
-
-      // iPhoneではユーザー操作中にAudioContextを作成する。
-      if (context.state === 'suspended') {
-        context.resume().catch(error => {
-          console.warn('Stage1BGM: AudioContext再開失敗', error);
-        });
-      }
-
       return true;
     } catch (error) {
       disabled = true;
@@ -10777,12 +10771,13 @@ E,,4 z4 | z8 | B,,,4 z4 | E,,4 z4
     getAudioContext: () => context,
     getAbc: buildAbc,
     unlockAudio: () => {
-      if (!ensureAudio()) return;
+      if (!ensureAudio() || context.state === 'closed') return null;
       if (context.state !== 'running') {
         context.resume().catch(error => {
           console.warn('BGM: AudioContext再開失敗', error);
         });
       }
+      return context;
     }
   };
 })();
@@ -13794,86 +13789,17 @@ const SharedBGMPlayer = (() => {
     return Stage1BGM_0430.getAudioContext();
   }
 
-  // iPhone SafariではAudioContextが中断されることがある。
-  // 画面操作を契機に、既存Contextの再開だけを試みる。
-  // 音源の再生成や楽曲変更は行わない。
-  let resumePending = false;
-
-  function resumeAudioOnGesture() {
-    if (!currentKey) return;
-
-    const ac = getContext();
-
-    if (
-      !ac ||
-      ac.state === 'running' ||
-      ac.state === 'closed' ||
-      resumePending
-    ) {
-      return;
-    }
-
-    resumePending = true;
-
-    // Safariのユーザー操作制限に対応するため、
-    // Promiseのコールバックを経由せず、
-    // イベントハンドラ内で直接resume()を呼ぶ。
-    let result;
-
-    try {
-      result = ac.resume();
-    } catch (error) {
-      resumePending = false;
-
-      console.warn(
-        'SharedBGMPlayer: AudioContext再開失敗',
-        error
-      );
-
-      return;
-    }
-
-    Promise.resolve(result)
-      .then(() => {
-        if (ac.state === 'running') {
-          console.info(
-            'SharedBGMPlayer: AudioContext再開'
-          );
-        } else {
-          console.info(
-            'SharedBGMPlayer: AudioContext再開待機',
-            ac.state
-          );
-        }
-      })
-      .catch(error => {
-        console.warn(
-          'SharedBGMPlayer: AudioContext再開失敗',
-          error
-        );
-      })
-      .finally(() => {
-        resumePending = false;
-      });
+  // タッチは指を離す操作、マウスは押す操作で共通の音声を起動・再開する。
+  // キャプチャ段階で受け取り、ゲーム操作側の伝播停止に影響されないようにする。
+  function resumeAudioOnGesture(event) {
+    if (event.type === 'pointerdown' && event.pointerType !== 'mouse') return;
+    if (event.type === 'pointerup' && event.pointerType === 'mouse') return;
+    Sfx.unlock();
   }
 
-  // イベント登録はこの共通モジュール内で一度だけ行う。
-  window.addEventListener(
-    'pointerdown',
-    resumeAudioOnGesture,
-    { passive: true }
-  );
-
-  window.addEventListener(
-    'touchstart',
-    resumeAudioOnGesture,
-    { passive: true }
-  );
-
-  window.addEventListener(
-    'keydown',
-    resumeAudioOnGesture
-  );
+  for (const type of ['pointerdown', 'pointerup', 'keydown']) {
+    window.addEventListener(type, resumeAudioOnGesture, { capture: true, passive: true });
+  }
 
   function reportError(message, error) {
     console.warn(
