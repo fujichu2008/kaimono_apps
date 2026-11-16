@@ -2791,6 +2791,7 @@ const Barks = (function () {
       if (!b) return;
       b.priority = priority;
       b.obj = obj; b.t = dur || 1.4; b.el.textContent = text; b.el.className = 'bark ' + (cls || ''); b.el.style.display = 'block';
+      SceneAudio.bark(obj, text);
     },
     clear() { pool.forEach(b => { b.t = 0; b.el.style.display = 'none'; }); },
     busy(obj) { return pool.some(b => b.obj === obj && b.t > 0); },
@@ -3121,6 +3122,7 @@ const World = {
     this.pickups.push({ type, x, z, y, g, t: Math.random() * 6 });
   },
   hitVending(v) {
+    SceneAudio.play('vending');
     v.shake = 0.45; FX.emit(v.x, 1.2, v.z, { n: 8, color: '#ffd9a0', speed: 3, life: 0.4, size: 0.2 });
     if (v.left <= 0) return;
     v.left--;
@@ -3168,6 +3170,7 @@ const World = {
     b.c.active = false;
     b.g.visible = false;
     b.shake = 0;
+    SceneAudio.play('crash');
 
     G.shake = Math.max(G.shake, 0.7);
     G.hitstop = Math.max(G.hitstop, 0.09);
@@ -5933,12 +5936,14 @@ const Sfx = {
       this.ehp.set(e, { hp: e.hp, dead: !!e.dead });
     }
     const hammer = P.weapon === 'hammer' || (P.weapon && P.weapon.id === 'hammer');
-    if (kill) this.play('kill'); else if (hit) this.play(hammer ? 'stamp' : 'hit');
+    // 武器の命中音はCombatの実際の命中箇所から鳴らす。
+    // HP監視による重複発音は行わない。
+    if (kill) this.play('kill');
     if (Boss.active && !this.bossOn) this.play('boss');
     this.bossOn = !!Boss.active;
     const ctrl = Boss.active && Boss.ctrl && Boss.ctrl.ratio ? Boss.ctrl : null;
-    if (ctrl) { const r = ctrl.ratio(); if (this.br != null && r < this.br - 0.001) this.play(hammer ? 'stamp' : 'bossHit'); this.br = r; } else this.br = null;
-    if ((G.shake || 0) > this.shake + 0.35) this.play('boom');
+    if (ctrl) { this.br = ctrl.ratio(); } else this.br = null;
+    if ((G.shake || 0) > this.shake + 0.35 && !SceneAudio.impactBusy()) this.play('boom');
     this.shake = G.shake || 0;
   }
 };
@@ -7344,7 +7349,11 @@ function createCeoBoss(def) {
             const mx = 0 - B.x, mz = A[1] - 1.5 - B.z, md = Math.hypot(mx, mz);
             if (md > 0.3) { sp = 2.5; B.x += mx / md * sp * dt; B.z += mz / md * sp * dt; B.face = Math.atan2(mx, mz); }
           }
-          if (B.t > 8) { ceo.object.visible = false; B.phase = 'B'; set('acctIntro'); }
+          if (B.t > 8) {
+            ceo.object.visible = false;
+            SceneAudio.play('elevator');
+            B.phase = 'B'; set('acctIntro');
+          }
           break;
         case 'acctIntro':
           if (!B.done) {
@@ -7415,6 +7424,7 @@ function createCeoBoss(def) {
             mech.g.visible = true; mech.g.add(ceo.object); ceo.object.visible = true;
             ceo.object.position.set(0, 3.0, 0.2); ceo.object.rotation.set(0, 0, 0); ceo.object.scale.setScalar(0.85);
             UI.showNameCard('CEO 第二形態', '経営者用重機スーツ'); Talk.play(T.transform, ceoHead);
+            SceneAudio.play('mech');
             G.shake = Math.max(G.shake, 0.8);
           }
           mech.g.scale.setScalar(lerp(0.4, 1.3, Math.min(1, B.t / 1.5)));
@@ -7681,6 +7691,7 @@ const Combat = {
 
         const dir = Math.hypot(q.vx, q.vz) || 1;
         t.hit(q.def.damage, q.vx / dir, q.vz / dir, q.def.push);
+        SceneAudio.play(q.type === 'can' ? 'metal' : q.type === 'bottle' ? 'glass' : 'bag');
 
         Player.rage = Math.min(
           CONFIG.player.rageMax,
@@ -7789,7 +7800,10 @@ const Combat = {
     // 自販機を叩いた場合も同じ鞄攻撃として扱う。
     P.consumePowerAttack();
 
-    if (hit) P.rage = Math.min(c.rageMax, P.rage + CONFIG.rage.onHit);
+    if (hit) {
+      P.rage = Math.min(c.rageMax, P.rage + CONFIG.rage.onHit);
+      SceneAudio.play(P.weapon === 'hammer' ? 'hammer' : P.weapon === 'golf' ? 'metal' : 'bag');
+    }
     if (hit || hitVending) { G.hitstop = Math.max(G.hitstop, 0.05); G.shake = Math.max(G.shake, 0.15); }
   },
   stomp() {
@@ -8300,6 +8314,7 @@ const Player = {
   },
   rotatePedals(angle) {
     const b = this.bike, cfg = CONFIG.bike, tau = 2 * Math.PI;
+    if (Math.abs(angle) > 0.0001) SceneAudio.pedal();
     b.crank.rotation.x = (b.crank.rotation.x + angle) % tau;
     b.wheels[0].rotation.x = (b.wheels[0].rotation.x + angle * 2) % tau;
     b.glow = 1;
@@ -9195,6 +9210,22 @@ const UI = {
     $('endBtn').addEventListener('click', () => Game.toTitle());
     $('btnPause').addEventListener('click', () => Game.pause());
     for (const id of ['pedalPanel', 'pedalNeedle', 'pedalCharge']) this.el[id] = $(id);
+    const dynamoGuide = document.createElement('p');
+    dynamoGuide.id = 'dynamoGuide';
+    dynamoGuide.textContent = 'ダイナモでスマホを充電 → ローカルAIの電源に。ダイヤルを回して発電！';
+    Object.assign(dynamoGuide.style, {
+      margin: '6px auto 10px',
+      maxWidth: '280px',
+      padding: '0 10px',
+      boxSizing: 'border-box',
+      color: '#baf5ff',
+      fontSize: '12px',
+      lineHeight: '1.55',
+      textAlign: 'center',
+      whiteSpace: 'normal',
+      pointerEvents: 'none'
+    });
+    this.el.pedalPanel.prepend(dynamoGuide);
     $('btnPedalBack').addEventListener('click', () => { if (Player.bike) Player.endPedal(); });
     this.el.ovBtn.addEventListener('click', () => { if (this.ovAction) this.ovAction(); });
     this.el.ovBtn2.addEventListener('click', () => { if (this.ovAction2) this.ovAction2(); });
@@ -9512,12 +9543,22 @@ const UI = {
     set('use', canUse, v => {
       e.btnUse.classList.toggle('hidden', !v);
     });
-    set('useLabel', P.truck ? '降' : truck ? '乗' : '漕', v => {
+    const useVehicle = P.truck || truck;
+    const useVehicleName = useVehicle
+      ? useVehicle.train ? '電車' :
+        useVehicle.kind === 'bus' ? 'バス' : '軽トラ'
+      : '';
+    const useLabel = P.truck ? '降' : truck ? '乗' : '漕';
+    set('useLabel', useLabel, v => {
       e.btnUse.textContent = v;
-      e.btnUse.setAttribute('aria-label',
-        v === '乗' ? '軽トラに乗る' :
-        v === '降' ? '軽トラから降りる' : '漕ぐ');
     });
+    set('useAriaLabel',
+      P.truck ? useVehicleName + 'から降りる' :
+      truck ? useVehicleName + 'に乗る' : '漕ぐ',
+      v => {
+        e.btnUse.setAttribute('aria-label', v);
+      }
+    );
 
     // 鞄・喝は最下段の固定位置で表示。
     // 長押し中の喝は、充電段階が変わっても消さない。
@@ -9610,9 +9651,22 @@ const UI = {
     if (nearBarrier) {
       const b = nearBarrier;
       const title = '廃車のバリケード';
-      const vName = b.vehicle === 'train' ? '山手線' : b.vehicle === 'bus' ? 'バス' : '軽トラ';
-      const guide = P.truck ? (b.vehicle === 'bus' || b.vehicle === 'train' ? '加速して突っ込め！' : '前進して突破！') : '光る' + vName + 'で突破 · 乗／E';
-      const rageText = P.truck ? '突破すると' + vName + 'は壊れます' : vName + 'を運転して体当たり';
+      // 乗車中は現在の車両、乗車前は近くの車両を優先する。
+      // まだ車両が近くにない場合は、バリケードの指定車種を案内する。
+      const barrierVehicle = P.truck || truck;
+      const vehicleType = barrierVehicle
+        ? barrierVehicle.train ? 'train' :
+          barrierVehicle.kind === 'bus' ? 'bus' : 'kei'
+        : b.vehicle;
+      const vName = vehicleType === 'train' ? '電車' :
+        vehicleType === 'bus' ? 'バス' : '軽トラ';
+      const continues = vehicleType === 'bus' || vehicleType === 'train';
+      const guide = P.truck
+        ? continues ? '加速して突っ込め！' : '前進して突破！'
+        : '光る' + vName + 'で突破 · 乗／E';
+      const rageText = continues
+        ? '突破後もしばらく' + vName + 'で走行できます'
+        : '軽トラは突破すると壊れます';
 
       const hp = Math.max(0, Math.ceil(b.hp));
       const hpText = '耐久力 ' + hp + ' / 100';
@@ -13082,20 +13136,115 @@ C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 C,2 z2 | C,2 z2 z4
   return {
     update,
     stop,
-    getAbc: buildAbc
+    // 共通プレイヤーには新しい最終ボス曲を渡す。
+    getAbc: () => Stage4ExecutiveScore,
+    // 既存の「矛盾」はステージ4道中用に保持する。
+    getFieldAbc: buildAbc
   };
 })();
+
+/* 最終ボス専用の楽曲データ。
+ * 提供されたURLエンコードを展開し、Xヘッダーを正規化。
+ * 音符・臨時記号・音色指定は維持し、反復はSharedBGMPlayerに任せる。
+ */
+const Stage4ExecutiveScore = `
+X:1
+T:0850_JTC_HQ_14F_Executive_Judgment
+M:4/4
+L:1/8
+Q:1/4=148
+K:Em
+V:1 nm=Oboe clef=treble
+%%MIDI program 68
+| B,2 E2 _B4 | A2 G2 F2 ^D2 | E2 G2 _B3 A | F6 ^D2 |
+B4 e3 f | g2 f2 e2 ^d2 | c3 d e2 c2 | B4 ^D4 |
+G3 A B2 ^c2 | d2 ^d2 e3 f | g3 a _b2 g2 | f6 ^d2 |
+b3 a g2 f2 | e2 ^d2 e2 f2 | g3 a b2 g2 | f6 B2 |
+c3 d e2 c2 | B3 c d2 B2 | A2 G2 F2 E2 | ^D6 B,2 |
+e3 f g2 e2 | f3 g a2 f2 | g2 e2 c'2 b2 | a6 g2 |
+f2 b2 ^d2 f2 | e2 g2 B2 e2 | c2 A2 F2 ^D2 | E4 _B4 |
+B,2 E2 G2 B2 | c3 d e2 B2 | A2 F2 ^D2 B,2 | E6 z2 |
+V:2 nm=Violin clef=treble
+%%MIDI program 40
+| z4 g3 f | e2 ^d2 B2 A2 | G2 B2 ^c3 =c | B6 A2 |
+G4 B3 ^d | e2 ^d2 B2 G2 | A3 B c2 A2 | F6 B2 |
+e3 f g2 e2 | f2 b2 g3 a | _b3 c' g2 e2 | ^d6 B2 |
+g2 b2 e'3 d' | c'2 b2 c'2 a2 | b3 c' d'2 b2 | ^d'6 b2 |
+e'3 d' c'2 a2 | d'3 c' b2 g2 | c'2 b2 a2 g2 | f6 ^d2 |
+g3 a b2 g2 | a3 b c'2 a2 | b2 g2 e'2 d'2 | c'6 b2 |
+a2 d'2 f2 a2 | g2 b2 e2 g2 | e2 c2 A2 F2 | G4 ^c4 |
+G2 B2 e2 g2 | a3 b c'2 g2 | f2 ^d2 B2 A2 | e6 z2 |
+V:3 nm=Harpsichord clef=treble
+%%MIDI program 6
+| E,B,GB, ^C,G,_EG, | C,G,EG, B,,F,^DF, | E,B,GB, ^C,G,_EG, | B,,F,^DF, B,,F,DF, |
+E,B,GB, E,B,GB, | E,B,GB, E,B,GB, | A,Ece A,Ece | B,F^df B,Fdf |
+E,B,GB, E,B,GB, | B,F^df E,B,GB, | ^C,G,_EG, C,G,EG, | B,F^df B,Fdf |
+E,B,GB, E,B,GB, | A,Ece A,Ece | G,DBd G,DBd | B,F^df B,Fdf |
+A,Ece A,Ece | G,DBd G,DBd | F,CAc F,CAc | B,F^df B,Fdf |
+E,B,GB, E,B,GB, | D,A,FA, D,A,FA, | C,G,EG, C,G,EG, | A,Ece A,Ece |
+B,F^df B,Fdf | E,B,GB, E,B,GB, | A,Ece B,F^df | E,B,GB, ^C,G,_EG, |
+E,B,GB, E,B,GB, | A,Ece A,Ece | B,F^df B,Fdf | E,B,GB, E,2 z2 |
+V:4 nm=TubularBells clef=treble
+%%MIDI program 14
+| e4 _B4 | c4 B4 | e4 _B4 | B4 ^d4 |
+e4 z4 | B4 z4 | c4 A4 | B4 F4 |
+e4 G4 | B4 e4 | _B4 g4 | f4 ^d4 |
+e4 z4 | c4 z4 | d4 z4 | B4 ^d4 |
+e4 c4 | d4 B4 | c4 A4 | B6 z2 |
+e2 B2 G2 B2 | d2 A2 F2 A2 | c2 G2 E2 G2 | c2 A2 E2 C2 |
+B2 ^F2 ^D2 F2 | B2 G2 E2 G2 | A2 E2 ^D2 B,2 | E4 _B4 |
+e2 z2 B2 z2 | c2 z2 A2 z2 | B4 ^d4 | e6 z2 |
+V:5 nm=ChurchOrgan clef=treble
+%%MIDI program 19
+| [E4G4B4] [^C4G4_B4] | [C4E4A4] [B,4^D4F4] | [E4G4B4] [^C4G4_B4] | [B,8^D8F8] |
+[E8G8B8] | [E8G8B8] | [C8E8A8] | [B,8^D8F8] |
+[E8G8B8] | [D4F4A4] [E4G4B4] | [^C8G8_B8] | [B,8^D8F8] |
+[E8G8B8] | [C8E8A8] | [D8G8B8] | [B,8^D8F8] |
+[C8E8A8] | [B,8D8G8] | [A,8C8F8] | [B,8^D8F8] |
+[E8G8B8] | [D8F8A8] | [C8E8G8] | [C8E8A8] |
+[B,8^D8F8] | [E8G8B8] | [C4E4A4] [B,4^D4F4] | [E4G4B4] [^C4G4_B4] |
+[E8G8B8] | [C8E8A8] | [B,8^D8F8] | [E6G6B6] z2 |
+V:6 nm=FrenchHorn clef=treble
+%%MIDI program 60
+| [E2G2] z2 [^C2_B2] z2 | [C2A2] z2 [B,2^D2] z2 | [E2G2] z2 [^C2_B2] z2 | [B,4F4] [B,4^D4] |
+[B,4E4] [E4G4] | [B,4E4] [E4G4] | [C4E4] [E4A4] | [B,4^D4] [D4F4] |
+[B,4E4] [E4G4] | [D4F4] [E4G4] | [^C4E4] [E4_B4] | [B,4^D4] [D4F4] |
+[E2G2] [E2G2] [B,2E2] z2 | [C2E2] [C2E2] [A,2C2] z2 | [B,2D2] [B,2D2] [G,2B,2] z2 | [B,2^D2] [B,2D2] [F,2B,2] z2 |
+[C2E2] [C2E2] [E2A2] z2 | [B,2D2] [B,2D2] [D2G2] z2 | [A,2C2] [A,2C2] [C2F2] z2 | [B,2^D2] [B,2F2] [D2A2] z2 |
+[E4G4] [B,4E4] | [D4F4] [A,4D4] | [C4E4] [G,4C4] | [C4E4] [A,4C4] |
+[B,4^D4] [F,4B,4] | [B,4E4] [G,4B,4] | [A,4C4] [B,4^D4] | [B,4E4] [^C4_B4] |
+[B,4E4] [E4G4] | [C4E4] [E4A4] | [B,4^D4] [D4F4] | [B,6E6] z2 |
+V:7 nm=Contrabass clef=bass
+%%MIDI program 43
+| E,,2 E,,2 _B,,,2 B,,,2 | C,,2 C,,2 B,,,2 B,,,2 | E,,2 E,,2 _B,,,2 B,,,2 | B,,,2 B,,,2 F,,2 ^D,,2 |
+E,,2 E,,2 B,,,2 B,,,2 | E,,2 E,,2 D,,2 D,,2 | C,,2 C,,2 A,,,2 A,,,2 | B,,,2 B,,,2 F,,2 F,,2 |
+E,,2 E,,2 D,,2 D,,2 | B,,,2 B,,,2 E,,2 E,,2 | ^C,,2 C,,2 _B,,,2 B,,,2 | B,,,2 B,,,2 F,,2 ^D,,2 |
+E,,2 E,,2 B,,,2 D,,2 | C,,2 C,,2 A,,,2 C,,2 | G,,,2 G,,,2 D,,2 G,,2 | B,,,2 B,,,2 F,,2 B,,,2 |
+A,,,2 A,,,2 E,,2 A,,2 | G,,,2 G,,,2 D,,2 G,,2 | F,,,2 F,,,2 C,,2 F,,2 | B,,,2 B,,,2 F,,2 B,,,2 |
+E,,2 E,,2 D,,2 D,,2 | D,,2 D,,2 A,,,2 A,,,2 | C,,2 C,,2 G,,,2 G,,,2 | A,,,2 A,,,2 E,,2 E,,2 |
+B,,,2 B,,,2 F,,2 F,,2 | E,,2 E,,2 D,,2 D,,2 | C,,2 A,,,2 B,,,2 B,,,2 | E,,2 B,,,2 _B,,,2 B,,,2 |
+E,,2 E,,2 B,,,2 B,,,2 | C,,2 C,,2 A,,,2 A,,,2 | B,,,2 B,,,2 F,,2 B,,,2 | E,,2 B,,,2 E,,2 z2 |
+V:8 nm=Timpani clef=bass
+%%MIDI program 47
+| E,,2 z2 _B,,,2 z2 | C,,2 z2 B,,,2 z2 | E,,2 z2 _B,,,2 z2 | B,,,2 B,,,2 B,,,2 z2 |
+E,,2 z2 B,,,2 z2 | E,,2 z2 D,,2 z2 | C,,2 z2 A,,,2 z2 | B,,,2 B,,,2 F,,2 z2 |
+E,,2 z2 D,,2 z2 | B,,,2 z2 E,,2 z2 | ^C,,2 z2 _B,,,2 z2 | B,,,2 B,,,2 B,,,2 z2 |
+E,,2 E,,2 B,,,2 z2 | C,,2 C,,2 A,,,2 z2 | G,,,2 G,,,2 D,,2 z2 | B,,,2 B,,,2 B,,,2 B,,,2 |
+A,,,2 A,,,2 E,,2 z2 | G,,,2 G,,,2 D,,2 z2 | F,,,2 F,,,2 C,,2 z2 | B,,,2 B,,,2 B,,,2 B,,,2 |
+E,,2 B,,,2 E,,2 z2 | D,,2 A,,,2 D,,2 z2 | C,,2 G,,,2 C,,2 z2 | A,,,2 E,,2 A,,,2 z2 |
+B,,,2 F,,2 B,,,2 z2 | E,,2 B,,,2 E,,2 z2 | A,,,2 A,,,2 B,,,2 B,,,2 | E,,2 B,,,2 _B,,,2 B,,,2 |
+E,,2 E,,2 B,,,2 z2 | C,,2 C,,2 A,,,2 z2 | B,,,2 B,,,2 B,,,2 B,,,2 | E,,2 E,,2 E,,2 z2 |
+`.trim();
 
 /* ============================================================
  * ステージ4 通常BGM
  * 0850_JTC_HQ_14F_Contradiction
  *
- * ボス戦と同一の指定楽曲を道中でも使用する。
- * SCOREを複製せず、既存の8声部ABC楽譜を共用する。
+ * 道中は従来の「矛盾」を維持する。
  * 再生状態はSharedBGMPlayerが管理する。
  * ============================================================ */
 const Stage4BGM = Object.freeze({
-  getAbc: () => Stage4BossBGM.getAbc()
+  getAbc: () => Stage4BossBGM.getFieldAbc()
 });
 
 /* ============================================================
@@ -13524,7 +13673,8 @@ const SharedBGMPlayer = (() => {
   });
 
   const AUDIO_OPTIONS = Object.freeze({
-    soundFontVolumeMultiplier: 0.65,
+    // 全曲共通：効果音の立ち上がりと声の帯域を埋もれさせない。
+    soundFontVolumeMultiplier: 0.38,
     chordsOff: true
   });
 
@@ -14205,9 +14355,48 @@ const SharedBGMPlayer = (() => {
     pause();
   }
 
+  // 表示用のスナップショット。再生処理や再試行状態は変更しない。
+  // 選択直後に旧曲の状態を見せないよう、要求された曲キーも照合する。
+  function getStatus(key) {
+    const snapshot = (state, retrySeconds = 0) =>
+      Object.freeze({ key: key || null, state, retrySeconds });
+
+    if (!key) return snapshot('idle');
+    if (currentKey !== key) return snapshot('pending');
+
+    if (playbackBlocked) return snapshot('playbackBlocked');
+
+    if (!ready && failedKey === key) {
+      const remaining = Math.max(
+        0,
+        RETRY_INTERVAL_MS - (performance.now() - failedAt)
+      );
+      return snapshot('loadFailed', Math.ceil(remaining / 1000));
+    }
+
+    if (!playing && playbackFailures > 0) {
+      const remaining = Math.max(
+        0,
+        nextPlaybackRetryAt - performance.now()
+      );
+      return snapshot('playbackFailed', Math.ceil(remaining / 1000));
+    }
+
+    const ac = getContext();
+    if (!ac || ac.state !== 'running') {
+      return snapshot('audioWaiting');
+    }
+
+    if (loading || !ready) return snapshot('loading');
+    if (playing) return snapshot('playing');
+    if (paused) return snapshot('paused');
+    return snapshot('starting');
+  }
+
   return {
     update,
-    stop
+    stop,
+    getStatus
   };
 })();
 
@@ -14449,7 +14638,7 @@ const Help = {
     { key: 'stage3', stage: 3, title: '歌舞伎町・魑魅魍魎', scene: 'ステージ3　渋谷 → 新宿', color: '#ff5ab0' },
     { key: 'boss3', stage: 3, title: '本社前の門番', scene: 'ステージ3　強敵戦', color: '#e0442c' },
     { key: 'stage4', stage: 4, title: '0850 本社14階、矛盾', scene: 'ステージ4　社長室への道', color: '#c9b5ff' },
-    { key: 'boss4', stage: 4, title: '0850 本社14階、矛盾（最終決戦）', scene: 'ステージ4　最終決戦', color: '#ffd23a' },
+    { key: 'boss4', stage: 4, title: '0850 本社14階、経営者の審判', scene: 'ステージ4　最終決戦 · Executive Judgment', color: '#ffd23a' },
     { key: 'ending', stage: 4, title: '0900 始業の鐘、それでも我々は', scene: 'エンディング', color: '#9fe8a0' }
   ],
   init() {
@@ -14533,8 +14722,60 @@ const Help = {
     });
     this.root.querySelector('#hpCount').textContent = '解放済み ' + n + ' / ' + this.TRACKS.length + ' 曲';
     const cur = this.TRACKS.find(t => t.key === this.playing);
-    this.root.classList.toggle('hp-playing', !!cur);
+    this.root.classList.toggle('hp-selected', !!cur);
     this.root.querySelector('#hpNowTitle').textContent = cur ? cur.title : '';
+    this.updateMusicStatus();
+  },
+  updateMusicStatus() {
+    if (!this.root || this.root.classList.contains('hidden')) return;
+
+    const status = SharedBGMPlayer.getStatus(this.playing);
+    const sounding =
+      G.phase === 'title' &&
+      status.state === 'playing';
+
+    // 曲の選択表示と、実際の再生アニメーションを分ける。
+    this.root.classList.toggle('hp-playing', sounding);
+
+    let text = '';
+    switch (status.state) {
+      case 'pending':
+        text = '音源準備中';
+        break;
+      case 'loading':
+        text = '音源準備中';
+        break;
+      case 'starting':
+        text = '再生開始待ち';
+        break;
+      case 'playing':
+        text = sounding ? '再生中' : '試聴停止中';
+        break;
+      case 'paused':
+        text = '一時停止中';
+        break;
+      case 'audioWaiting':
+        text = '音声の再開待ち · 画面に触れて再開';
+        break;
+      case 'loadFailed':
+        text = status.retrySeconds > 0
+          ? '音源の読み込み失敗 · ' + status.retrySeconds + '秒後に再試行'
+          : '音源の読み込み失敗 · 再試行待ち';
+        break;
+      case 'playbackFailed':
+        text = status.retrySeconds > 0
+          ? '再生失敗 · ' + status.retrySeconds + '秒後に再試行'
+          : '再生失敗 · 再試行待ち';
+        break;
+      case 'playbackBlocked':
+        text = '再生失敗 · 自動再試行を停止しました。停止後に選び直してください';
+        break;
+    }
+
+    const label = this.root.querySelector('#hpNowStatus');
+    if (label && label.textContent !== text) {
+      label.textContent = text;
+    }
   },
   html() {
     return `
@@ -14641,8 +14882,11 @@ const Help = {
         </div>
       </div>
       <div class="hp-now">
-        <span class="hp-eq"><i></i><i></i><i></i><i></i></span>
-        <b id="hpNowTitle"></b>
+        <span class="hp-eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <div style="flex:1;min-width:0">
+          <b id="hpNowTitle" style="display:block"></b>
+          <small id="hpNowStatus" style="display:block;margin-top:3px;font-size:11px;line-height:1.5;overflow-wrap:anywhere"></small>
+        </div>
         <button id="hpStop" type="button">停止</button>
       </div>
       <div id="hpTracks" class="hp-tracks"></div>
@@ -14740,7 +14984,8 @@ body[data-phase="title"] #btnHelp{display:flex}
 .hp-disc span{position:absolute;left:50%;top:50%;width:24px;height:24px;margin:-12px 0 0 -12px;border-radius:50%;background:radial-gradient(circle,#0b111c 0 3px,#e02818 4px)}
 #helpScreen.hp-playing .hp-disc{animation:hpSpin 2.4s linear infinite}
 .hp-now{display:none;align-items:center;gap:10px;margin:10px 0 0;padding:8px 10px;border-radius:10px;background:rgba(255,210,58,.12);border:1px solid rgba(255,210,58,.35)}
-#helpScreen.hp-playing .hp-now{display:flex}
+#helpScreen.hp-selected .hp-now{display:flex}
+#helpScreen:not(.hp-playing) .hp-eq i{animation:none;transform:scaleY(.2);opacity:.4}
 .hp-now b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ffd23a;font-size:12px}
 #hpStop{min-height:36px;padding:0 14px;border:0;border-radius:8px;color:#111;background:#ffd23a;font:inherit;font-size:12px;font-weight:bold;cursor:pointer}
 .hp-eq{display:flex;align-items:flex-end;gap:2px;height:18px}
@@ -15244,6 +15489,332 @@ const ActionAudio = (() => {
   });
 })();
 
+/* 音の生成・寿命・環境音を管理。ゲームの判定値は変更しない。 */
+const SceneAudio = (() => {
+  const GAP = Object.freeze({
+    bag: 0.08, metal: 0.08, hammer: 0.12, glass: 0.1,
+    vending: 0.18, mimic: 1.4, crow: 0.8, pigeon: 0.9,
+    crash: 0.5, elevator: 2, mech: 2
+  });
+  const last = Object.create(null);
+  const voices = new Set();
+  let ac = null, bus = null, noiseBuffer = null, river = null;
+  let impactUntil = 0;
+
+  function ready() {
+    const ctx = Sfx.ctx;
+    if (!ctx || ctx.state !== 'running') return false;
+    if (bus) return ac === ctx;
+    ac = ctx;
+    bus = ac.createDynamicsCompressor();
+    bus.threshold.value = -15;
+    bus.knee.value = 12;
+    bus.ratio.value = 4;
+    bus.attack.value = 0.004;
+    bus.release.value = 0.16;
+    bus.connect(ac.destination);
+    noiseBuffer = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    return true;
+  }
+
+  function own(source, nodes) {
+    const item = { source, nodes };
+    voices.add(item);
+    source.onended = () => {
+      voices.delete(item);
+      nodes.forEach(n => n.disconnect());
+    };
+  }
+
+  function tone(f0, f1, length, volume, delay = 0, wave = 'sine') {
+    const t = ac.currentTime + delay;
+    const source = ac.createOscillator(), gain = ac.createGain();
+    source.type = wave;
+    source.frequency.setValueAtTime(f0, t);
+    source.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + length);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(volume, t + Math.min(0.012, length * 0.2));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    source.connect(gain); gain.connect(bus);
+    own(source, [source, gain]);
+    source.start(t); source.stop(t + length + 0.02);
+  }
+
+  function noise(length, volume, hz, delay = 0, low = false) {
+    const t = ac.currentTime + delay;
+    const source = ac.createBufferSource(), filter = ac.createBiquadFilter(), gain = ac.createGain();
+    source.buffer = noiseBuffer; source.loop = true;
+    filter.type = low ? 'lowpass' : 'bandpass';
+    filter.frequency.value = hz; filter.Q.value = 0.8;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(volume, t + Math.min(0.025, length * 0.2));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    source.connect(filter); filter.connect(gain); gain.connect(bus);
+    own(source, [source, filter, gain]);
+    source.start(t); source.stop(t + length + 0.02);
+  }
+
+  function play(key) {
+    if (G.phase !== 'play' || Player.dead || !ready()) return;
+    const now = ac.currentTime;
+    if (now - (last[key] ?? -Infinity) < (GAP[key] || 0.1)) return;
+    last[key] = now;
+    switch (key) {
+      case 'bag':
+        // 革鞄：短い低音と乾いた打撃。
+        tone(165, 65, 0.14, 0.26);
+        noise(0.075, 0.38, 1050);
+        break;
+      case 'metal':
+        // アイアン：鋭い接触音と短い金属の余韻。
+        noise(0.04, 0.28, 2400);
+        tone(1500, 1050, 0.19, 0.15);
+        tone(2350, 1800, 0.12, 0.09);
+        tone(180, 75, 0.1, 0.16);
+        break;
+      case 'hammer':
+        // 決裁鎚：重い胴鳴り＋硬い印面の衝撃。
+        tone(115, 38, 0.32, 0.34);
+        tone(620, 270, 0.15, 0.18, 0, 'triangle');
+        noise(0.16, 0.48, 1100);
+        break;
+      case 'glass':
+        noise(0.23, 0.34, 3600);
+        [2100, 2800, 3900].forEach((f, i) => tone(f, f * 0.8, 0.13, 0.08, i * 0.025));
+        break;
+      case 'vending':
+        // 「ガタッ」：筐体と内部の缶が時間差で鳴る。
+        noise(0.11, 0.42, 650);
+        tone(185, 95, 0.18, 0.25, 0, 'triangle');
+        noise(0.065, 0.32, 1700, 0.085);
+        tone(880, 620, 0.12, 0.1, 0.09);
+        break;
+      case 'mimic':
+        // 自販機の筐体音とは異なる、低く歪んだ三連の笑い。
+        [0, 0.19, 0.43].forEach((delay, i) => {
+          tone(155 - i * 12, 78, 0.2, 0.12, delay, 'sawtooth');
+          tone(490 - i * 30, 260, 0.19, 0.08, delay, 'triangle');
+          noise(0.12, 0.1, 700, delay);
+        });
+        break;
+      case 'crow':
+        [0, 0.26].forEach(delay => {
+          tone(670, 430, 0.2, 0.12, delay, 'sawtooth');
+          tone(980, 720, 0.17, 0.06, delay, 'triangle');
+          noise(0.16, 0.11, 1500, delay);
+        });
+        break;
+      case 'pigeon':
+        tone(420, 330, 0.11, 0.17);
+        tone(330, 480, 0.2, 0.14, 0.1);
+        tone(450, 290, 0.25, 0.13, 0.28);
+        break;
+      case 'crash':
+        impactUntil = now + 1.1;
+        noise(0.8, 0.65, 750, 0, true);
+        noise(0.2, 0.48, 2200);
+        tone(125, 32, 0.65, 0.38);
+        [0.12, 0.24, 0.39].forEach((delay, i) => {
+          noise(0.17, 0.23, 1200 + i * 400, delay);
+          tone(540 + i * 270, 160, 0.24, 0.1, delay, 'triangle');
+        });
+        break;
+      case 'elevator':
+        noise(0.55, 0.18, 950);
+        tone(210, 125, 3.5, 0.11, 0.25, 'triangle');
+        tone(430, 260, 3.3, 0.07, 0.3);
+        noise(3.3, 0.12, 500, 0.2, true);
+        tone(1047, 1047, 0.5, 0.12, 3.2);
+        break;
+      case 'mech':
+        impactUntil = now + 4.5;
+        // 低い振動だけに頼らず、スマホでも聞こえる中低域を重ねる。
+        noise(4.3, 0.36, 650, 0, true);
+        tone(75, 120, 4.2, 0.18, 0, 'triangle');
+        for (let i = 0; i < 12; i++) {
+          tone(210 + i * 5, 110, 0.23, 0.12, i * 0.27, 'triangle');
+          noise(0.18, 0.13, 900, i * 0.27);
+        }
+        noise(0.45, 0.4, 1200, 3.4);
+        break;
+    }
+  }
+
+  // ダイナモ音：回転入力の通知だけを受け取り、
+  // 音源の生成・フェード・破棄は音声側で管理する。
+  let dynamo = null;
+  let pedalUntil = 0;
+  const DYNAMO = Object.freeze({
+    inputHoldMs: 140,
+    fadeSeconds: 0.035,
+    volume: 0.095,
+    frequency: 155
+  });
+
+  function pedal() {
+    if (G.phase !== 'play' || !Player.bike || Player.dead) return;
+    pedalUntil = performance.now() + DYNAMO.inputHoldMs;
+  }
+
+  function createDynamo() {
+    const oscillator = ac.createOscillator();
+    const noiseSource = ac.createBufferSource();
+    const noiseFilter = ac.createBiquadFilter();
+    const noiseGain = ac.createGain();
+    const filter = ac.createBiquadFilter();
+    const gain = ac.createGain();
+
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.value = DYNAMO.frequency;
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.value = 2100;
+    noiseFilter.Q.value = 0.7;
+    noiseGain.gain.value = 0.28;
+    filter.type = 'lowpass';
+    filter.frequency.value = 2600;
+    filter.Q.value = 0.6;
+    gain.gain.value = 0;
+
+    oscillator.connect(filter);
+    noiseSource.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(filter);
+    filter.connect(gain);
+    gain.connect(bus);
+
+    oscillator.start();
+    noiseSource.start();
+    dynamo = {
+      oscillator, noiseSource, gain,
+      nodes: [oscillator, noiseSource, noiseFilter, noiseGain, filter, gain],
+      silentSince: null
+    };
+  }
+
+  function disposeDynamo() {
+    if (!dynamo) return;
+    for (const source of [dynamo.oscillator, dynamo.noiseSource]) {
+      try { source.stop(); } catch (_) {}
+    }
+    dynamo.nodes.forEach(node => node.disconnect());
+    dynamo = null;
+  }
+
+  function updateDynamo() {
+    const now = performance.now();
+    const allowed = G.phase === 'play' && !!Player.bike && !Player.dead;
+    if (!allowed) pedalUntil = 0;
+    const turning = allowed && now < pedalUntil;
+
+    if (!turning && !dynamo) return;
+    if (!ready()) {
+      disposeDynamo();
+      pedalUntil = 0;
+      return;
+    }
+    if (!dynamo) createDynamo();
+
+    const t = ac.currentTime;
+    if (turning) {
+      dynamo.silentSince = null;
+      // 細かな振幅と音高の揺れで「ビリビリ」を表現する。
+      const pulse = 0.76 + 0.24 * Math.sin(t * Math.PI * 2 * 23);
+      dynamo.oscillator.frequency.setTargetAtTime(
+        DYNAMO.frequency + 18 * Math.sin(t * 31),
+        t, 0.02
+      );
+      dynamo.gain.gain.setTargetAtTime(
+        DYNAMO.volume * pulse, t, 0.02
+      );
+    } else {
+      if (dynamo.silentSince === null) dynamo.silentSince = now;
+      dynamo.gain.gain.setTargetAtTime(0, t, DYNAMO.fadeSeconds);
+      if (now - dynamo.silentSince > 220) disposeDynamo();
+    }
+  }
+
+  function bark(obj, text) {
+    if (G.phase !== 'play') return;
+    // 吹き出しのアンカーから親をたどり、発話した敵を特定。
+    let speaker = null;
+    for (let node = obj; node && !speaker; node = node.parent) {
+      speaker = Enemies.list.find(e => !e.dead && e.obj === node);
+    }
+    if (!speaker) return;
+    if (speaker.type === 'mimic') play('mimic');
+    else if (speaker.type === 'crow' && /カ|ガ|ｶ/.test(text)) play('crow');
+    else if (speaker.type === 'pigeon' && /ク|ル|ポ|ホ|ｸ/.test(text)) play('pigeon');
+  }
+
+  function stopTransient() {
+    for (const item of voices) {
+      item.source.onended = null;
+      try { item.source.stop(); } catch (_) {}
+      item.nodes.forEach(n => n.disconnect());
+    }
+    voices.clear();
+    impactUntil = 0;
+  }
+
+  function update() {
+    updateDynamo();
+    const active = G.phase === 'play' && !Player.dead;
+    if (!active) {
+      if (voices.size) stopTransient();
+      for (const key in last) delete last[key];
+    }
+    const stage = G.stage;
+    const targetZone = stage && stage.id === 1 && stage.boss
+      ? World.zoneAt(stage.boss.gateZ)
+      : null;
+    const nearRiver = active && targetZone && targetZone.kind === 'river' &&
+      Player.z > targetZone.z0 - 12 && Player.z < targetZone.z1 + 12;
+
+    if (!nearRiver && !river) return;
+    if (!ready()) return;
+
+    if (!river && nearRiver) {
+      const source = ac.createBufferSource();
+      const filter = ac.createBiquadFilter(), gain = ac.createGain();
+      source.buffer = noiseBuffer; source.loop = true;
+      filter.type = 'lowpass'; filter.frequency.value = 650; filter.Q.value = 0.5;
+      gain.gain.value = 0;
+      source.connect(filter); filter.connect(gain); gain.connect(bus);
+      source.start();
+      river = { source, filter, gain };
+    }
+    if (!river) return;
+    let volume = 0;
+    if (nearRiver) {
+      const edge = Math.min(
+        1,
+        Math.max(0, (Player.z - targetZone.z0 + 12) / 12),
+        Math.max(0, (targetZone.z1 + 12 - Player.z) / 12)
+      );
+      volume = edge * (0.025 + 0.003 * Math.sin(G.time * 0.55));
+      river.filter.frequency.setTargetAtTime(
+        650 + 70 * Math.sin(G.time * 0.35),
+        ac.currentTime, 0.6
+      );
+    }
+    river.gain.gain.setTargetAtTime(volume, ac.currentTime, active ? 0.45 : 0.05);
+    if (!nearRiver && river.gain.gain.value < 0.0003) {
+      river.source.stop();
+      river.source.disconnect(); river.filter.disconnect(); river.gain.disconnect();
+      river = null;
+    }
+  }
+
+  return {
+    play, bark, update, pedal,
+    impactBusy: () => !!ac && ac.currentTime < impactUntil
+  };
+})();
+
 const Game = {
   loadStage(i) {
     G.stageIndex = i; G.stage = STAGES[i];
@@ -15438,8 +16009,10 @@ function step(raw) {
     raw
   );
 
+  SceneAudio.update();
   Sfx.watch();
   BGMDirector.update();
+  Help.updateMusicStatus();
   Sky.update(raw, G.phase === 'title' ? 0 : clamp(G.maxZ / G.stage.goalZ, 0, 1));
   updateCamera(raw);
   if (G.phase !== 'pause' && !pedaling) { FX.update(dt); Barks.update(dt); }
