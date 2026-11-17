@@ -658,7 +658,12 @@ const CONFIG = {
               wind: 0.8, cd: 2.6, shotDmg: 9, bombR: 1.7, bombDmg: 12, fogR: 5 },
   // ステージ3のボス 鬼頭部長：名乗りの秒数・歩く速さ・殴り・詰め（回数/間隔/威力）・数字の弾・セピアの秒数・攻撃後の隙・朝礼の間隔
   bucho: { introTime: 9.5, walk: 2.4, swingWind: 0.6, swingDmg: 22, tsumeN: 5, tsumeGap: 0.3, tsumeDmg: 8, numDmg: 9,
-           sepiaTime: 4, tired: 1.5, summonEvery: 9 },
+           sepiaTime: 4, tired: 1.5, summonEvery: 9,
+           publicScold: {
+             wind: 1.8, range: 6.4, halfAngle: 0.68, hold: 1.2, tick: 0.3,
+             damageRatio: 0.02, cooldown: 18, dodgeRecover: 1, hitRecover: 0.45,
+             crowdX: 4.65, crowdZ: [0.65, 2.55]
+           } },
   // ラスボス CEO（3段構え）：名乗り・退避する体力割合・経理部長の体力と名乗り・変身の秒数・歩く速さ・各技・第二形態の硬さ・弱点の倍率・技の後の隙
   ceo: { introTime: 7.5, retreatAt: 0.6, acctHp: 420, acctName: '経理部長 算盤 正', acctIntro: 9.5, transformTime: 7,
          walkA: 2.0, walkB: 1.6, walkC: 2.8, pushDmg: 14, planR: 1.8, planDmg: 14, planTime: 1.8, focusHW: 5, focusTime: 6, creedTime: 3.6,
@@ -2835,6 +2840,13 @@ const Barks = (function () {
       SceneAudio.bark(obj, text);
     },
     clear() { pool.forEach(b => { b.t = 0; b.el.style.display = 'none'; }); },
+    dismiss(obj, className) {
+      for (const b of pool) {
+        if (b.obj !== obj || !b.el.classList.contains(className)) continue;
+        b.t = 0;
+        b.el.style.display = 'none';
+      }
+    },
     busy(obj) { return pool.some(b => b.obj === obj && b.t > 0); },
     update(dt) {
       for (const b of pool) {
@@ -6934,11 +6946,137 @@ function createBuchoBoss(def) {
   const o = ch.object; o.scale.setScalar(1.35); scene.add(o);
   const head = ch.anchor('head_top');
   const B = { x: 0, z: A[1] - 6, face: Math.PI, hp: def.hp, st: 'intro', t: 0, cd: 1.5, done: false, phase: 1, n: 0, wait: 1,
-              summonT: 0, sepiaT: 0, awakenT: 0, awoke: false, said: {} };
+              summonT: 0, sepiaT: 0, awakenT: 0, awoke: false, said: {},
+              publicCast: null, publicCd: 0 };
   const circle = { x: B.x, z: B.z, y: 0, r: 0.9, owner: B, hit: d => hitBy(d) };
-  const set = s => { B.st = s; B.t = 0; B.done = false; };
+  const publicCfg = CONFIG.bucho.publicScold;
+  const isPublicState = state => state === 'publicWind' || state === 'publicScold';
+  let publicView = null;
+  const set = s => {
+    if (!isPublicState(s) && B.publicCast) clearPublicScold();
+    B.st = s; B.t = 0; B.done = false;
+  };
   const toTired = w => { B.wait = w; set('tired'); };
   const sepia = on => { document.body.dataset.sepia = on ? 'true' : 'false'; };
+
+  function makePublicView() {
+    const group = new THREE.Group(), marker = new THREE.Group();
+    group.add(marker);
+    marker.position.y = 0.075;
+
+    const segments = 32;
+    const start = Math.PI / 2 - publicCfg.halfAngle;
+    const sweep = publicCfg.halfAngle * 2;
+    const fill = new THREE.Mesh(
+      new THREE.CircleGeometry(publicCfg.range, segments, start, sweep),
+      new THREE.MeshBasicMaterial({
+        color: 0xff6b42, transparent: true, opacity: 0.22,
+        side: THREE.DoubleSide, depthWrite: false
+      })
+    );
+    fill.rotation.x = Math.PI / 2;
+    marker.add(fill);
+
+    const points = [new THREE.Vector3(0, 0.005, 0)];
+    for (let i = 0; i <= segments; i++) {
+      const angle = start + sweep * i / segments;
+      points.push(new THREE.Vector3(
+        Math.cos(angle) * publicCfg.range, 0.005,
+        Math.sin(angle) * publicCfg.range
+      ));
+    }
+    const outline = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({
+        color: 0xffdd8c, transparent: true, opacity: 0.95, depthWrite: false
+      })
+    );
+    fill.renderOrder = 1;
+    outline.renderOrder = 2;
+    marker.add(outline);
+
+    // 既存の社員モデルを一度だけ作り、観衆で形状・材質を共用する。
+    const employee = ModelRenderer.createCharacter(MODEL_DATA_SALARYMAN_GLASSES_SUIT);
+    employee.setSpeed(0);
+    employee.action('idle');
+    employee.update(0.2);
+    const template = employee.object;
+    const bag = template.getObjectByName('briefcase');
+    if (bag) bag.visible = false;
+    template.traverse(node => { node.castShadow = false; });
+
+    const crowd = [];
+    publicCfg.crowdZ.forEach((z, row) => {
+      for (const side of [-1, 1]) {
+        const actor = crowd.length === 0 ? template : template.clone(true);
+        actor.scale.multiplyScalar(0.92);
+        group.add(actor);
+        crowd.push({ actor, side, z, row });
+      }
+    });
+
+    return { group, marker, fill, crowd };
+  }
+
+  function placePublicCrowd(progress) {
+    const cast = B.publicCast;
+    const cos = Math.cos(cast.face), sin = Math.sin(cast.face);
+    for (const entry of publicView.crowd) {
+      const amount = clamp((progress - entry.row * 0.14) / 0.76, 0, 1);
+      const ease = 1 - (1 - amount) * (1 - amount);
+      const x = entry.side * (publicCfg.crowdX + 1.35 * (1 - ease));
+      const z = entry.z;
+      const wx = cast.x + x * cos + z * sin;
+      const wz = cast.z - x * sin + z * cos;
+      entry.actor.visible = Math.abs(wx) < World.halfWidthAt(wz) - 0.6 &&
+        wz > A[0] + 0.5 && wz < A[1] - 0.5;
+      entry.actor.position.set(x, Math.sin(amount * Math.PI * 5) * 0.05 * (1 - amount), z);
+      entry.actor.rotation.y = Math.atan2(-x, 1.5 - z);
+    }
+  }
+
+  function beginPublicScold() {
+    B.publicCast = { x: B.x, z: B.z, face: B.face, caught: false, nextTick: publicCfg.tick };
+    B.publicCd = publicCfg.cooldown;
+    set('publicWind');
+
+    if (!publicView) publicView = makePublicView();
+    publicView.group.position.set(B.publicCast.x, 0, B.publicCast.z);
+    publicView.group.rotation.y = B.publicCast.face;
+    publicView.marker.visible = true;
+    publicView.fill.material.opacity = 0.22;
+    placePublicCrowd(0);
+    scene.add(publicView.group);
+    Barks.say(head, 'おい、みんな集まれ！', 'bucho-public', publicCfg.wind + 0.1, 3);
+  }
+
+  function clearPublicScold() {
+    const cast = B.publicCast;
+    B.publicCast = null;
+    if (publicView) scene.remove(publicView.group);
+    Barks.dismiss(head, 'bucho-public');
+    if (cast && cast.caught) Player.endPublicHold();
+  }
+
+  function disposePublicView() {
+    if (!publicView) return;
+    const geometries = new Set(), materials = new Set();
+    publicView.group.traverse(node => {
+      if (node.geometry) geometries.add(node.geometry);
+      if (Array.isArray(node.material)) node.material.forEach(mat => materials.add(mat));
+      else if (node.material) materials.add(node.material);
+    });
+    geometries.forEach(geometry => geometry.dispose());
+    materials.forEach(material => material.dispose());
+    publicView = null;
+  }
+
+  function publicSectorContains(cast, P) {
+    const x = P.x - cast.x, z = P.z - cast.z;
+    const distance = Math.hypot(x, z);
+    return distance <= publicCfg.range &&
+      (distance < 0.0001 || Math.abs(angDiff(Math.atan2(x, z), cast.face)) <= publicCfg.halfAngle);
+  }
   ch.on('hit', () => { const P = Player; if (B.st === 'swing' && Math.hypot(P.x - B.x, P.z - B.z) < 2.8) P.damage(c.swingDmg, B.x, B.z, 10); });
   function damage(d) {
     if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return;
@@ -6986,6 +7124,11 @@ function createBuchoBoss(def) {
     if (B.phase === 2 && B.summonT <= 0 && Enemies.list.filter(e => e.type === 'zombie' && !e.dead).length < 3) {
       B.summonT = c.summonEvery; set('summon'); ch.action('Batou3'); Barks.say(head, '全社朝礼を始める！', 'rage', 1.4); return;
     }
+    if (G.phase === 'play' && !Player.dead && !(B.silenceT > 0) &&
+        B.publicCd <= 0 && d <= publicCfg.range) {
+      beginPublicScold();
+      return;
+    }
     if (d < 3.2) { set('swingWind'); Barks.say(head, pick(LINES.buchoSwing), 'tout', 1.0); return; }
     const r = Math.random();
     if (!(B.silenceT > 0) && !(B.silenceCd > 0) && Math.random() < (B.phase === 2 ? 0.4 : 0.25)) {
@@ -7001,21 +7144,26 @@ function createBuchoBoss(def) {
     ratio() { return B.hp / def.hp; },
     eachCircle(fn) { if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return; fn(circle); },
     dispose() {
+      clearPublicScold();
+      disposePublicView();
       scene.remove(o); sepia(false); silenceFx(false);
       const shared = Object.values(GEO);
       o.traverse(m => { if (m.geometry && shared.indexOf(m.geometry) < 0) m.geometry.dispose(); });
     },
-    update(dt) {
+    update(dt, actionDt = dt) {
       const P = Player; if (B.st === 'gone') return;
-      B.t += dt; B.cd -= dt; B.summonT -= dt; B.silenceCd = (B.silenceCd || 0) - dt;
+      if (B.publicCast && P.dead) { set('idle'); return; }
+      B.publicCd = Math.max(0, B.publicCd - actionDt);
+      B.t += isPublicState(B.st) ? actionDt : dt;
+      B.cd -= dt; B.summonT -= dt; B.silenceCd = (B.silenceCd || 0) - dt;
       if (B.sepiaT > 0) { B.sepiaT -= dt; P.slow = Math.max(P.slow, 0.2); if (B.sepiaT <= 0) sepia(false); }
       if (B.silenceT > 0) { // 心理的安全性ゼロ：喝が出せず、怒が削られていく
-        B.silenceT -= dt;
         P.tapCD = Math.max(P.tapCD || 0, 0.25);
         if (P.state === 'shout') { P.endShout(); P.shoutLock = true; }
         P.rage = Math.max(0, P.rage - c.silenceDrain * dt);
         if (Math.random() < dt * 6) FX.emit(P.x, 1.6 + P.floorY, P.z, { n: 1, color: '#3a3a48', speed: 0.6, life: 0.9, size: 0.6, g: -0.5, spread: 1.2 });
-        if (B.silenceT <= 0) endSilence(false);
+        if (B.silenceT <= dt) endSilence(false);
+        else B.silenceT -= dt;
       }
       const dx = P.x - B.x, dz = P.z - B.z, d = Math.hypot(dx, dz) || 1, toP = Math.atan2(dx, dz);
       let sp = 0;
@@ -7030,6 +7178,43 @@ function createBuchoBoss(def) {
           if (d > 3) { sp = c.walk * (B.phase === 2 ? 1.3 : 1) * (B.silenceT > 0 ? 1.35 : 1); B.x += dx / d * sp * dt; B.z += dz / d * sp * dt; }
           if (B.cd <= 0 && !P.dead) choose(d);
           break;
+        case 'publicWind': {
+          const cast = B.publicCast;
+          B.face = cast.face;
+          const progress = Math.min(1, B.t / publicCfg.wind);
+          placePublicCrowd(progress);
+          publicView.fill.material.opacity = 0.17 + progress * 0.16;
+
+          if (B.t + 1e-9 >= publicCfg.wind) {
+            // 範囲にいるか調べるのは発動時の一度だけ。
+            if (publicSectorContains(cast, P) && P.beginPublicHold()) {
+              cast.caught = true;
+              publicView.marker.visible = false;
+              set('publicScold');
+              ch.action('Batou2');
+              Barks.dismiss(head, 'bucho-public');
+              Barks.say(head, '公開処刑だ！', 'bucho-public', publicCfg.hold, 3);
+            } else {
+              toTired(publicCfg.dodgeRecover / c.tiredMul);
+            }
+          }
+          break;
+        }
+        case 'publicScold': {
+          const cast = B.publicCast;
+          B.face = cast.face;
+          // 絶対時刻で処理して、フレーム間隔の端数を次の打撃へ足さない。
+          while (cast.nextTick <= Math.min(B.t, publicCfg.hold) + 1e-9 && !P.dead) {
+            P.damage(CONFIG.player.hp * publicCfg.damageRatio, null, null, null, true);
+            cast.nextTick += publicCfg.tick;
+          }
+          if (P.dead) set('idle');
+          else if (B.t + 1e-9 >= publicCfg.hold) {
+            set('idle');
+            B.cd = publicCfg.hitRecover;
+          }
+          break;
+        }
         case 'swingWind':
           B.face = angLerp(B.face, toP, Math.min(1, dt * 6));
           if (B.t > c.swingWind) { set('swing'); ch.action('attack'); }
@@ -7261,7 +7446,7 @@ function createCeoBoss(def) {
   const walls = [-1, 1].map(s => { const m = new THREE.Mesh(wallGeo, wallMat); m.visible = false; m.position.set(s * HW, 1.7, (A[0] + A[1]) / 2); scene.add(m); return m; });
 
   const B = { phase: 'A', st: 'intro', t: 0, cd: 1.5, x: 0, z: A[1] - 8, face: Math.PI, hp: def.hp, ahp: c.acctHp, done: false, n: 0, wait: 1,
-              said: {}, weakT: 0, phaseT: 0, focusT: 0, hwNow: HW, shields: [], clock0: G.clockSec, clockSet: false, side: 0, hitWin: false, fx: 0, fz: 0 };
+              said: {}, weakT: 0, phaseT: 0, lastPhaseCAttack: null, focusT: 0, hwNow: HW, shields: [], clock0: G.clockSec, clockSet: false, side: 0, hitWin: false, fx: 0, fz: 0 };
   const INV = { intro: 1, retreat: 1, acctIntro: 1, acctDown: 1, transform: 1, dying: 1, gone: 1 };
   const circle = { x: B.x, z: B.z, y: 0, r: 0.8, owner: B, hit: d => damage(d) };
   const set = s => { B.st = s; B.t = 0; B.done = false; B.n = 0; };
@@ -7310,11 +7495,14 @@ function createCeoBoss(def) {
     } else if (B.phase === 'B') {
       if (r < 0.35) set('refund'); else if (r < 0.7) set('freeze'); else set('receipt');
     } else {
-      if (d < 4) { set('stompWind'); return; }
-      if (r < 0.28) set('pull');
-      else if (r < 0.5 && !B.shields.some(e => !e.dead)) set('capital');
-      else if (r < 0.8) set('meeting');
-      else set('plan');
+      let next;
+      if (d < 4 && B.lastPhaseCAttack !== 'stompWind') next = 'stompWind';
+      else if (r < 0.28) next = 'pull';
+      else if (r < 0.5 && !B.shields.some(e => !e.dead)) next = 'capital';
+      else if (r < 0.8) next = 'meeting';
+      else next = 'plan';
+      B.lastPhaseCAttack = next;
+      set(next);
     }
   }
 
@@ -7596,7 +7784,9 @@ const Boss = {
     this.ctrl = BOSS_TYPES[def.type](def);
     this.active = true;
   },
-  update(dt) { if (this.ctrl) this.ctrl.update(Player.ai ? dt * 0.8 : dt); },
+  update(dt) {
+    if (this.ctrl) this.ctrl.update(Player.ai ? dt * 0.8 : dt, dt);
+  },
   eachCircle(fn) { if (this.ctrl && this.active) this.ctrl.eachCircle(fn); },
   ratio() { return this.ctrl ? this.ctrl.ratio() : 0; },
   finish() { this.active = false; G.bossDown = true; G.lock = null; fireEvent('bossDown'); },
@@ -8438,6 +8628,7 @@ const Player = {
     if (impact) this.leaveTruck();
   },
   startPedal() {
+    if (this.state === 'publicHeld') return;
     if (this.truck) { if (!(this.truck.kind === 'bus' && this.truck.rampage)) this.leaveTruck(); return; }
     const truck = this.nearTruck();
     // 飲酒中は車両を運転できない。
@@ -8576,15 +8767,43 @@ const Player = {
     }
     return true;
   },
-  damage(n, fx, fz, push) {
+  beginPublicHold() {
+    if (this.dead || this.falling || this.truck || this.bike || this.floorY > 2.2) return false;
+    Input.clearPublicActions();
+    this.shoutT = 0;
+    this.shoutLv = 0;
+    // 地上で拘束する。ジャンプ中に捕まっても着地攻撃は発生させない。
+    this.jumpT = -1;
+    this.y = this.vy = this.kx = this.kz = 0;
+    this.state = 'publicHeld';
+    this.st = 0;
+    this.hero.setSpeed(0);
+    this.hero.action('hurt');
+    this.sync();
+    return true;
+  },
+  endPublicHold() {
+    Input.clearPublicActions();
+    if (this.state !== 'publicHeld') return;
+    this.shoutLock = Input.tShout || !!Input.keys.shout;
+    this.state = 'free';
+    this.hero.stop();
+  },
+  damage(n, fx, fz, push, publicTick = false) {
     const P = this;
     if (P.dead || P.inv > 0 || G.phase !== 'play') return;
     if (P.truck && P.truck.kind === 'bus') return;   // バスの車内はほぼ無敵
     if (P.floorY > 2.2) return;                      // 高所には地上の攻撃が届かない
+    const held = P.state === 'publicHeld';
     Input.clearAttack();
     if (P.ai) n *= CONFIG.phone.guard;
-    P.hp -= n; P.inv = CONFIG.player.invuln; P.rage = Math.min(CONFIG.player.rageMax, P.rage + CONFIG.rage.onHurt); G.shake = Math.max(G.shake, 0.35); fireEvent('hurt');
-    if (fx != null) { const dx = P.x - fx, dz = P.z - fz, l = Math.hypot(dx, dz) || 1; P.kx = dx / l * (push || 5); P.kz = dz / l * (push || 5); }
+    P.hp -= n;
+    // 公開処刑の各打撃は、既存の無敵を尊重するが新しい無敵は作らない。
+    if (!publicTick) P.inv = CONFIG.player.invuln;
+    P.rage = Math.min(CONFIG.player.rageMax, P.rage + CONFIG.rage.onHurt);
+    G.shake = Math.max(G.shake, publicTick ? 0.18 : 0.35);
+    fireEvent('hurt');
+    if (fx != null && !held) { const dx = P.x - fx, dz = P.z - fz, l = Math.hypot(dx, dz) || 1; P.kx = dx / l * (push || 5); P.kz = dz / l * (push || 5); }
     if (P.bike) P.endPedal();
     if (P.truck) P.leaveTruck();
     if (P.hp <= 0) {
@@ -8592,6 +8811,8 @@ const Player = {
       if (P.jumpT >= 0) { P.jumpT = -1; P.y = 0; }
       P.setAI(false); P.hero.action('die'); fireEvent('playerDown'); return;
     }
+    // 拘束中の打撃で、移動や硬直時間を上書きしない。
+    if (held) return;
     if (P.state === 'shout' && P.shoutLv === 3) return;           // 激昂中はひるまない
     if (P.state === 'shout') { P.endShout(); P.shoutLock = true; }      // 溜めは破棄（怒は消費しない）。離すまで再開しない
     P.state = 'hurt'; P.st = 0.35; P.hero.action('hurt');
@@ -8633,6 +8854,14 @@ const Player = {
         P.falling = false; P.y = 0; P.vy = 0; P.x = P.safe.x; P.z = P.safe.z; P.kx = P.kz = 0; P.inv = 0; P.damage(c.fallDmg);
       }
       h.setSpeed(0); h.update(dt); P.sync(); return;
+    }
+    if (P.state === 'publicHeld') {
+      Input.clearPublicActions();
+      // 起動済みのローカルAIは通常どおり動作する。起動・停止の入力は破棄済み。
+      P.updateAI(dt);
+      if (P.tapCD > 0) P.tapCD -= dt;
+      h.setSpeed(0); h.update(dt); P.sync();
+      return;
     }
     P.updateAI(dt);
     const cos = Math.cos(cameraHeading), sin = Math.sin(cameraHeading);
@@ -8769,6 +8998,10 @@ const Input = {
   clearAttack() {
     this.attackQueued = false;
     this._p.attack = false;
+  },
+  clearPublicActions() {
+    this.clearAttack();
+    this._p.throw = this._p.jump = this._p.ai = this._p.use = false;
   },
   requestAttack() {
     const P = Player;
@@ -9767,7 +10000,7 @@ const UI = {
 
     // AIは起動可能な残量がある場合、または使用中だけ表示。
     // classNameの更新時にも非表示状態を保持する。
-    const aiVisible = operational &&
+    const aiVisible = operational && P.state !== 'publicHeld' &&
       (P.ai || P.batt >= CONFIG.phone.minStart);
     const aiClass = P.ai ? 'pb on' : 'pb';
     set('ai', aiClass + (aiVisible ? '' : ' hidden'), v => {
@@ -16501,10 +16734,15 @@ body[data-silence="true"] #btnShout {
   filter: grayscale(1);
 }
 
-/* 掛け合い中は、操作に反応する「喝」の短文だけ吹き出しを表示する。 */
-body:has(#talkBar.on) .bark:not(.kaatsu),
+/* 掛け合い中も、喝への反応と公開処刑の回避に必要な台詞は表示する。 */
+body:has(#talkBar.on) .bark:not(.kaatsu):not(.bucho-public),
 body[data-phase="ending"] .bark {
   display: none !important;
+}
+.bark.bucho-public {
+  color: #fff1cf;
+  background: rgba(72, 22, 15, .94);
+  border: 1px solid #ffb870;
 }
 
 /* スマホ対応：長いコメントを吹き出し内で自動改行 */
