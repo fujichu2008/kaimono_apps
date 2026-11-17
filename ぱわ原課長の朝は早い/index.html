@@ -661,7 +661,7 @@ const CONFIG = {
            sepiaTime: 4, tired: 1.5, summonEvery: 9,
            publicScold: {
              wind: 1.8, range: 6.4, halfAngle: 0.68, hold: 1.2, tick: 0.3,
-             damageRatio: 0.02, cooldown: 18, dodgeRecover: 1, hitRecover: 0.45,
+             damageRatio: 0.02, cooldown: 18, dodgeRecover: 1.5, hitRecover: 0.45,
              crowdX: 4.65, crowdZ: [0.65, 2.55]
            } },
   // ラスボス CEO（3段構え）：名乗り・退避する体力割合・経理部長の体力と名乗り・変身の秒数・歩く速さ・各技・第二形態の硬さ・弱点の倍率・技の後の隙
@@ -6947,13 +6947,14 @@ function createBuchoBoss(def) {
   const head = ch.anchor('head_top');
   const B = { x: 0, z: A[1] - 6, face: Math.PI, hp: def.hp, st: 'intro', t: 0, cd: 1.5, done: false, phase: 1, n: 0, wait: 1,
               summonT: 0, sepiaT: 0, awakenT: 0, awoke: false, said: {},
-              publicCast: null, publicCd: 0 };
+              publicCast: null, publicCd: 0, publicDodge: null };
   const circle = { x: B.x, z: B.z, y: 0, r: 0.9, owner: B, hit: d => hitBy(d) };
   const publicCfg = CONFIG.bucho.publicScold;
   const isPublicState = state => state === 'publicWind' || state === 'publicScold';
   let publicView = null;
   const set = s => {
     if (!isPublicState(s) && B.publicCast) clearPublicScold();
+    if (B.publicDodge) clearPublicDodge();
     B.st = s; B.t = 0; B.done = false;
   };
   const toTired = w => { B.wait = w; set('tired'); };
@@ -7058,6 +7059,20 @@ function createBuchoBoss(def) {
     if (cast && cast.caught) Player.endPublicHold();
   }
 
+  function beginPublicDodge() {
+    toTired(publicCfg.dodgeRecover / c.tiredMul);
+    B.publicDodge = { roll: o.rotation.z };
+    o.rotation.z -= 0.22;
+    Barks.say(head, 'チッ、外したか……', 'bucho-public', publicCfg.dodgeRecover, 3);
+  }
+
+  function clearPublicDodge() {
+    if (!B.publicDodge) return;
+    o.rotation.z = B.publicDodge.roll;
+    B.publicDodge = null;
+    Barks.dismiss(head, 'bucho-public');
+  }
+
   function disposePublicView() {
     if (!publicView) return;
     const geometries = new Set(), materials = new Set();
@@ -7145,6 +7160,7 @@ function createBuchoBoss(def) {
     eachCircle(fn) { if (B.st === 'intro' || B.st === 'dying' || B.st === 'gone') return; fn(circle); },
     dispose() {
       clearPublicScold();
+      clearPublicDodge();
       disposePublicView();
       scene.remove(o); sepia(false); silenceFx(false);
       const shared = Object.values(GEO);
@@ -7152,9 +7168,14 @@ function createBuchoBoss(def) {
     },
     update(dt, actionDt = dt) {
       const P = Player; if (B.st === 'gone') return;
-      if (B.publicCast && P.dead) { set('idle'); return; }
+      if ((B.publicCast || B.publicDodge) && P.dead) { set('idle'); return; }
       B.publicCd = Math.max(0, B.publicCd - actionDt);
-      B.t += isPublicState(B.st) ? actionDt : dt;
+      // 公開処刑と回避後の硬直は、AIによるボスの減速に左右されない。
+      B.t += (isPublicState(B.st) || B.publicDodge) ? actionDt : dt;
+      if (B.publicDodge) {
+        const remaining = Math.max(0, 1 - B.t / publicCfg.dodgeRecover);
+        o.rotation.z = B.publicDodge.roll - 0.22 * remaining * remaining;
+      }
       B.cd -= dt; B.summonT -= dt; B.silenceCd = (B.silenceCd || 0) - dt;
       if (B.sepiaT > 0) { B.sepiaT -= dt; P.slow = Math.max(P.slow, 0.2); if (B.sepiaT <= 0) sepia(false); }
       if (B.silenceT > 0) { // 心理的安全性ゼロ：喝が出せず、怒が削られていく
@@ -7195,7 +7216,7 @@ function createBuchoBoss(def) {
               Barks.dismiss(head, 'bucho-public');
               Barks.say(head, '公開処刑だ！', 'bucho-public', publicCfg.hold, 3);
             } else {
-              toTired(publicCfg.dodgeRecover / c.tiredMul);
+              beginPublicDodge();
             }
           }
           break;
