@@ -3343,12 +3343,14 @@
     return cleanSpeechText((s.title ? s.title + '。' : '') + String(s.text || ''));
   }
   function cancelSpeech() {
+    // このアプリの読み上げが進行中のときだけ止める（止めた直後の読み上げが消える環境があるため）。
+    var wasSpeaking = !speech.done;
     speech.session++;
     speech.done = true;
     setBgmDuck(false);
     clearTimeout(speech.timer);
     speech.timer = null;
-    if (speech.supported) { try { window.speechSynthesis.cancel(); } catch (e) {} }
+    if (speech.supported && wasSpeaking) { try { window.speechSynthesis.cancel(); } catch (e) {} }
   }
   function speak(text) {
     cancelSpeech();
@@ -3362,19 +3364,42 @@
       speech.done = true;
       setBgmDuck(false);
     };
-    var u = new window.SpeechSynthesisUtterance(text);
-    u.lang = 'ja-JP';
-    if (!speech.voice) speech.voice = pickVoice();
-    if (speech.voice) u.voice = speech.voice;
-    u.rate = kidsMode ? 0.9 : 1.0;
-    u.pitch = kidsMode ? 1.15 : 1.0;
-    u.onend = finish;
-    u.onerror = finish;
+    var retried = false;
+    var start = function (useVoice) {
+      var u = new window.SpeechSynthesisUtterance(text);
+      u.lang = 'ja-JP';
+      if (useVoice) {
+        if (!speech.voice) speech.voice = pickVoice();
+        if (speech.voice) u.voice = speech.voice;
+      }
+      u.rate = kidsMode ? 0.9 : 1.0;
+      u.pitch = kidsMode ? 1.15 : 1.0;
+      u.onend = finish;
+      u.onerror = function (e) {
+        var code = e && e.error ? String(e.error) : '';
+        // 選んだ声が使えない環境では、端末標準の声で1回だけ読み直す。
+        if (session === speech.session && !retried && u.voice && code !== 'interrupted' && code !== 'canceled') {
+          retried = true;
+          speech.voiceFailed = true;
+          start(false);
+          return;
+        }
+        if (code && code !== 'interrupted' && code !== 'canceled') sfxWarnOnce('読み上げに失敗しました: ' + code);
+        finish();
+      };
+      // 読み上げ中の発話が途中で破棄されないよう、参照を保持しておく。
+      speech.current = u;
+      try {
+        var ss = window.speechSynthesis;
+        if (ss.paused) ss.resume();
+        ss.speak(u);
+      } catch (err) { finish(); }
+    };
     speech.done = false;
     setBgmDuck(true);
     // 終了通知が来ない環境でもツアーが止まらないよう、文字数から上限時間を決めておく。
     speech.timer = setTimeout(finish, text.length * 280 + 4000);
-    try { window.speechSynthesis.speak(u); } catch (e) { finish(); }
+    start(!speech.voiceFailed);
   }
   function toggleSpeech() {
     if (!speech.supported) return;
@@ -3402,6 +3427,23 @@
       speech.voice = pickVoice();
       try { window.speechSynthesis.onvoiceschanged = function () { speech.voice = pickVoice(); }; } catch (e) {}
       document.addEventListener('visibilitychange', function () { if (document.hidden) cancelSpeech(); });
+      // iPhone などでは、最初の読み上げを画面操作の中で行わないと、その後の自動の読み上げが鳴らないことがある。
+      // 最初に画面へ触れたとき、無音の短い読み上げを1回行って音声出力を有効にする。
+      var unlockSpeech = function () {
+        if (speech.unlocked) return;
+        speech.unlocked = true;
+        ['pointerup', 'touchend', 'click'].forEach(function (type) { document.removeEventListener(type, unlockSpeech, true); });
+        try {
+          var ss = window.speechSynthesis;
+          if (ss.speaking || ss.pending) return;
+          var u0 = new window.SpeechSynthesisUtterance(' ');
+          u0.volume = 0;
+          u0.lang = 'ja-JP';
+          speech.unlockUtterance = u0;
+          ss.speak(u0);
+        } catch (e) {}
+      };
+      ['pointerup', 'touchend', 'click'].forEach(function (type) { document.addEventListener(type, unlockSpeech, true); });
     }
   }
 
