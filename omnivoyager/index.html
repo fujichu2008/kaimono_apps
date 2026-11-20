@@ -1323,6 +1323,13 @@
     '.tb.on{background:rgba(0,122,204,.38);border-color:#3ea6ff;color:#fff;}',
     '.tb:active{transform:scale(.96);}',
     '#s-tools:not(.more-open) .tb.more-item{display:none;}',
+    '#s-sec{left:8px;bottom:68px;width:min(250px,calc(100% - 76px));padding:8px;}',
+    '#s-sec .sec-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;}',
+    '#s-sec .sec-row.two{grid-template-columns:1fr 1fr;margin-top:4px;}',
+    '#s-sec button{min-height:32px;padding:0 2px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#e6edf5;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;cursor:pointer;touch-action:manipulation;}',
+    '#s-sec button.on{background:rgba(0,122,204,.38);border-color:#3ea6ff;color:#fff;}',
+    '#s-sec input[type=range]{display:block;width:100%;margin:8px 0 4px;accent-color:#3ea6ff;}',
+    'body.tour-cinematic #s-sec{display:none!important;}',
     '#s-pill.nudge{animation:pillNudge 1.6s ease-in-out infinite;}',
     '@keyframes pillNudge{0%,100%{transform:translateX(-50%) scale(1);box-shadow:0 6px 22px rgba(0,0,0,.4);}50%{transform:translateX(-50%) scale(1.07);box-shadow:0 0 0 3px rgba(143,214,255,.35),0 0 22px rgba(58,168,255,.65);}}',
     '@media (prefers-reduced-motion:reduce){#s-pill.nudge{animation:none;}}',
@@ -1416,6 +1423,7 @@
     '#s-tools .tb.on{background:#193e58;border-color:#467a9b;}',
     '#s-tools .tb:hover,.cap-btns button:hover{box-shadow:inset 0 0 0 1px #8295a4;}',
     '#s-info{left:16px;top:62px;width:340px;}',
+    '#s-sec{left:16px;bottom:76px;width:280px;}',
     '#s-cap,body.tour-cinematic #s-cap{left:16px;right:16px;bottom:16px;max-width:min(740px,calc(100% - 280px));max-height:42%;margin-inline:auto;padding:12px 16px;background:rgba(18,24,31,.94);}',
     '#s-capTitle,body.tour-cinematic #s-capTitle{font-size:17px;}',
     '#s-capText,body.tour-cinematic #s-capText{font-size:14px;line-height:1.65;}',
@@ -1919,6 +1927,7 @@
   function setSection(on) {
     view.section = !!on;
     renderer.localClippingEnabled = view.section;
+    syncSecPanel();
   }
   function focusMeshes() {
     var list = [];
@@ -2320,6 +2329,8 @@
     if (!tour.steps.length) return;
     hideInfo();
     tour.active = true; tour.playing = true; tour.done = false;
+    // ツアー中はモデル既定の断面を使う（終了時にユーザーの調整値へ戻す）。
+    if (secState.def) clipPlane.copy(secState.def);
     state.tourActive = true;
     goStep(0);
   }
@@ -2429,6 +2440,7 @@
     tour.active = false; tour.done = false;
     state.tourActive = false; state.step = -1; state.stepId = '';
     setHighlight([]);
+    applyUserSection(false);
     setSection(userView.section);
     setXray(userView.xray);
     state.speed = baseSpeed;
@@ -3429,6 +3441,129 @@
     return list;
   }
 
+  // ----- 任意方向の断面調整（ツアー外で断面がオンのときだけパネルを表示） -----
+  // 切る面は「法線 n」と「モデル中心からの位置 s」で持ち、clipPlane へ反映する（保存はしない）。
+  var secState = { def: null, n: null, s: 0, dir: '', guideUntil: 0, tmp: null, z: null };
+  var secEls = { panel: null, range: null, dirs: {} };
+  var secGuide = null;
+  var SEC_DIRS = [
+    { id: 'z', label: '前後', kids: 'まえうしろ', x: 0, y: 0, z: -1 },
+    { id: 'x', label: '左右', kids: 'よこ', x: -1, y: 0, z: 0 },
+    { id: 'y', label: '上下', kids: 'うえした', x: 0, y: -1, z: 0 },
+    { id: 'view', label: '👁 視点', kids: '👁 みてる むき' }
+  ];
+  function setupSectionPanel() {
+    var R = bounds.radius, C = bounds.center;
+    secState.def = clipPlane.clone();
+    secState.n = clipPlane.normal.clone();
+    secState.s = -secState.n.dot(C) - clipPlane.constant;
+    secState.tmp = new V3();
+    secState.z = new V3(0, 0, 1);
+    // 切断面の目印（モデルの外に置き、断面・タップ判定・影の対象にしない）。
+    var g = new T.Group();
+    g.visible = false;
+    var disc = new T.Mesh(new T.CircleGeometry(R, 48), new T.MeshBasicMaterial({ color: 0x3aa8ff, transparent: true, opacity: 0.08, side: T.DoubleSide, depthWrite: false, toneMapped: false }));
+    var rim = new T.Mesh(new T.RingGeometry(R * 0.985, R, 64), new T.MeshBasicMaterial({ color: 0x8fd6ff, transparent: true, opacity: 0.7, side: T.DoubleSide, depthWrite: false, blending: T.AdditiveBlending, toneMapped: false }));
+    [disc, rim].forEach(function (m) {
+      m.castShadow = false; m.receiveShadow = false;
+      m.raycast = function () {};
+      m.userData.noSection = true;
+      m.renderOrder = 6;
+      g.add(m);
+    });
+    scene.add(g);
+    secGuide = g;
+    var panel = document.createElement('div');
+    panel.id = 's-sec'; panel.className = 'card'; panel.hidden = true;
+    var row = document.createElement('div');
+    row.className = 'sec-row';
+    SEC_DIRS.forEach(function (d) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = kt(d.label, d.kids);
+      b.addEventListener('click', function (e) { e.stopPropagation(); setSectionDir(d); });
+      row.appendChild(b);
+      secEls.dirs[d.id] = b;
+    });
+    var range = document.createElement('input');
+    range.type = 'range';
+    range.min = String(-R); range.max = String(R); range.step = String(R / 100);
+    range.setAttribute('aria-label', kt('断面の位置', 'きる ばしょ'));
+    range.addEventListener('input', function () {
+      secState.s = Number(range.value) || 0;
+      applyUserSection(true);
+    });
+    var row2 = document.createElement('div');
+    row2.className = 'sec-row two';
+    var flip = document.createElement('button');
+    flip.type = 'button';
+    flip.textContent = kt('⇄ 反転', '⇄ はんたい');
+    flip.addEventListener('click', function (e) {
+      e.stopPropagation();
+      secState.n.negate();
+      secState.s = -secState.s;
+      applyUserSection(true);
+      syncSecRange();
+    });
+    var reset = document.createElement('button');
+    reset.type = 'button';
+    reset.textContent = kt('↺ 元に戻す', '↺ もとに もどす');
+    reset.addEventListener('click', function (e) {
+      e.stopPropagation();
+      secState.n.copy(secState.def.normal);
+      secState.s = -secState.def.normal.dot(bounds.center) - secState.def.constant;
+      secState.dir = '';
+      applyUserSection(true);
+      syncSecRange();
+    });
+    row2.append(flip, reset);
+    panel.append(row, range, row2);
+    document.body.appendChild(panel);
+    secEls.panel = panel;
+    secEls.range = range;
+    syncSecRange();
+    syncSecPanel();
+  }
+  function setSectionDir(d) {
+    if (!secState.n) return;
+    if (d.id === 'view') {
+      // カメラから注視点への向きを法線にし、注視点を通る面で手前側を切り取る。
+      secState.n.subVectors(orbit.target, camera.position);
+      if (secState.n.lengthSq() < 1e-8) secState.n.set(0, 0, -1);
+      secState.n.normalize();
+      secState.s = secState.tmp.subVectors(orbit.target, bounds.center).dot(secState.n);
+    } else {
+      secState.n.set(d.x, d.y, d.z);
+      secState.s = 0;
+    }
+    secState.dir = d.id;
+    applyUserSection(true);
+    syncSecRange();
+  }
+  function applyUserSection(guide) {
+    if (!secState.n) return;
+    clipPlane.normal.copy(secState.n);
+    clipPlane.constant = -secState.n.dot(bounds.center) - secState.s;
+    if (!guide || !secGuide) return;
+    secState.tmp.copy(secState.n).multiplyScalar(secState.s).add(bounds.center);
+    secGuide.position.copy(secState.tmp);
+    secGuide.quaternion.setFromUnitVectors(secState.z, secState.n);
+    secState.guideUntil = performance.now() + 1500;
+  }
+  function syncSecRange() {
+    if (!secEls.range) return;
+    var R = bounds.radius;
+    secEls.range.value = String(clamp(secState.s, -R, R));
+    SEC_DIRS.forEach(function (d) {
+      var b = secEls.dirs[d.id];
+      if (b) b.classList.toggle('on', secState.dir === d.id);
+    });
+  }
+  function syncSecPanel() {
+    if (!secEls.panel) return;
+    secEls.panel.hidden = !(view.section && !tour.active);
+  }
+
   // ----- 初期化と描画ループ -----
   function buildCtx() {
     return {
@@ -3505,6 +3640,7 @@
     tourTick(dt);
     sfxTick();
     updateViewShift(dt);
+    if (secGuide) secGuide.visible = view.section && performance.now() < secState.guideUntil;
     if (overlayActive) overlayMat.opacity = 0.14 + 0.16 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006));
     renderer.render(scene, camera);
     updateLabels();
@@ -3557,6 +3693,7 @@
     initKidsAndSpeech();
     initSfx();
     setupTools();
+    setupSectionPanel();
     setupTourExitGesture();
     resize();
     window.addEventListener('resize', resize);
