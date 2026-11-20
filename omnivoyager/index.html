@@ -1938,6 +1938,8 @@
   function setSection(on) {
     view.section = !!on;
     renderer.localClippingEnabled = view.section;
+    if (capU) capU.uCapOn.value = view.section ? 1 : 0;
+    if (view.section) syncSectionMaterials();
     syncSecPanel();
   }
   function focusMeshes() {
@@ -1995,6 +1997,57 @@
     overlayActive = meshes.length > 0;
     if (view.xray) setXray(true);
   }
+  // ----- 断面の切り口の塗りつぶし（擬似キャップ）と、切る設定の付け直し -----
+  // 断面オン中だけ、残った部品の裏面（切り口から見える内側）を切り口の色で塗る。
+  // オン・オフは全材質で共有する uniform で切り替え、シェーダーの再コンパイルを起こさない。
+  var capU = null;
+  var secSyncAt = 0;
+  var CAP_FRAG = [
+    'if (uCapOn > 0.5 && !gl_FrontFacing) {',
+    '  float capHatch = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 10.0));',
+    '  gl_FragColor = vec4(uCapColor * (0.8 + 0.2 * capHatch), gl_FragColor.a);',
+    '}'
+  ].join('\n');
+  function capOnBeforeCompile(shader) {
+    var fs = shader.fragmentShader;
+    if (!capU || fs.indexOf('void main() {') < 0 || fs.indexOf('#include <dithering_fragment>') < 0) return;
+    shader.uniforms.uCapOn = capU.uCapOn;
+    shader.uniforms.uCapColor = capU.uCapColor;
+    shader.fragmentShader = fs
+      .replace('void main() {', 'uniform float uCapOn;\nuniform vec3 uCapColor;\nvoid main() {')
+      .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n' + CAP_FRAG);
+  }
+  function capCacheKey() { return 'omnivoyager-cap-v1'; }
+  // 対象: 断面処理を付ける不透明な MeshStandard / MeshPhysical 材質だけ。設定できたら true を返す。
+  function installCap(m) {
+    if (!capU || !m || !m.isMeshStandardMaterial || m.wireframe) return false;
+    if (!m.userData || m.userData.__capInstalled || m.userData.__overlay) return false;
+    if (m.onBeforeCompile !== T.Material.prototype.onBeforeCompile) return false;
+    var origTransparent = m.userData.__orig ? m.userData.__orig.transparent : m.transparent;
+    if (origTransparent) return false;
+    m.onBeforeCompile = capOnBeforeCompile;
+    m.customProgramCacheKey = capCacheKey;
+    m.userData.__capInstalled = true;
+    return true;
+  }
+  // 起動後に差し替えられた材質にも、切る設定と切り口の塗りつぶしを付け直す（変わった材質だけ更新する）。
+  function syncSectionMaterials() {
+    eachModelMesh(function (o) {
+      if (hasNoSection(o)) return;
+      materialsOf(o).forEach(function (m) {
+        if (!m || (m.userData && m.userData.__overlay)) return;
+        var changed = false;
+        if (!m.clippingPlanes || m.clippingPlanes.indexOf(clipPlane) < 0) {
+          m.clippingPlanes = [clipPlane];
+          m.clipShadows = true;
+          if (o.isMesh && m.side === T.FrontSide && !m.userData.__keepSide) m.side = T.DoubleSide;
+          changed = true;
+        }
+        if (o.isMesh && installCap(m)) changed = true;
+        if (changed) m.needsUpdate = true;
+      });
+    });
+  }
   function applyClipping() {
     eachModelMesh(function (o) {
       if (hasNoSection(o)) return;
@@ -2003,6 +2056,7 @@
         m.clippingPlanes = [clipPlane];
         m.clipShadows = true;
         if (o.isMesh && m.side === T.FrontSide && !m.userData.__keepSide) m.side = T.DoubleSide;
+        if (o.isMesh) installCap(m);
       });
     });
   }
@@ -3850,6 +3904,11 @@
     sfxTick();
     updateViewShift(dt);
     if (secGuide) secGuide.visible = view.section && performance.now() < secState.guideUntil;
+    // 断面表示中は約1秒ごとに、切る設定が付いていない材質がないか確認する（毎フレームは走査しない）。
+    if (view.section) {
+      var secNow = performance.now();
+      if (secNow - secSyncAt > 1000) { secSyncAt = secNow; syncSectionMaterials(); }
+    }
     if (overlayActive) overlayMat.opacity = 0.14 + 0.16 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006));
     renderer.render(scene, camera);
     updateLabels();
@@ -3880,6 +3939,7 @@
     var sec = MODEL.section || {};
     clipPlane = new T.Plane(toV3(sec.normal, new V3(0, 0, -1)).normalize(), Number(sec.constant) || 0);
     overlayMat.clippingPlanes = [clipPlane];
+    capU = { uCapOn: { value: 0 }, uCapColor: { value: new T.Color(0xc7834f) } };
     dotTexture = makeDotTexture();
     ctx = buildCtx();
     if (typeof MODEL.build !== 'function') throw new Error('defineModel に build(ctx) 関数がありません');
