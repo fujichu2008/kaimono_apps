@@ -367,6 +367,46 @@
         transition: opacity .18s, transform .18s;
     }
     #guide-toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .undo-chip {
+        position: absolute;
+        left: 50%;
+        top: 48px;
+        transform: translateX(-50%);
+        z-index: 31;
+        min-height: 44px;
+        padding: 0 16px;
+        border: 1px solid rgba(255,183,77,.75);
+        border-radius: 999px;
+        background: rgba(40,30,16,.94);
+        color: #ffe0b2;
+        font-size: 13px;
+        font-weight: 700;
+        white-space: nowrap;
+        cursor: pointer;
+        touch-action: manipulation;
+        box-shadow: 0 4px 14px rgba(0,0,0,.4);
+    }
+    .undo-chip[hidden] { display: none; }
+    body.tour-playing .undo-chip { display: none !important; }
+    .tabs-app-name { display: none; }
+    @media (min-width: 960px) and (hover: hover) and (pointer: fine) {
+        .undo-chip { top: calc(var(--desktop-float-top, 12px) + 56px); }
+        .tabs-app-name {
+            display: block;
+            align-self: center;
+            min-width: 0;
+            max-width: 16vw;
+            padding: 0 10px 0 8px;
+            border-left: 1px solid #525961;
+            color: #bbc5cf;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tabs-app-name:empty { display: none; }
+    }
 
     /* --- その他メニュー --- */
     .run-menu {
@@ -960,6 +1000,7 @@
 <nav class="tabs" aria-label="メイン">
     <button type="button" class="tab-btn active" data-tab="run" onclick="switchTab('run')"><span class="tab-icon">▶</span><span>再生</span></button>
     <button type="button" class="tab-btn" data-tab="library" onclick="switchTab('library')"><span class="tab-icon">📚</span><span>ライブラリ</span></button>
+    <div id="tabs-app-name" class="tabs-app-name" aria-label="編集中のモデル"></div>
 </nav>
 
 <!-- ===== エディタ ===== -->
@@ -1002,6 +1043,7 @@
     </div>
     <div class="run-frame-wrap" id="run-frame-wrap">
         <div id="verify-status" class="verify-status" data-state="idle" onclick="handleVerifyTap()">○ 未確認</div>
+        <button type="button" id="undo-chip" class="undo-chip" hidden onclick="undoFromChip()">⏪ 反映前に戻す</button>
         <iframe id="sim-frame" title="3Dシミュレーター" sandbox="allow-scripts"></iframe>
         <div id="guide-toast" role="status" aria-live="polite"></div>
     </div>
@@ -1199,6 +1241,7 @@
         </ol>
         <p class="section-desc">3D表示部品（Three.js）は外部から読み込みます。オフラインでは表示できません。作成したモデルコードは、端末のブラウザ内に保存されます。</p>
         <div class="modal-buttons"><button type="button" class="btn-action" onclick="closeModal('help-modal'); openOnboarding()">はじめてガイドをもう一度見る</button></div>
+        <div class="modal-buttons"><button type="button" class="btn-action" onclick="resetCopiedGuideSkip()">コピー後の案内をまた表示する</button></div>
         <div class="modal-buttons"><button type="button" class="btn-cancel" onclick="closeModal('help-modal')">閉じる</button></div>
     </div>
 </div>
@@ -3419,8 +3462,6 @@
   function cancelSpeech() {
     // このアプリの読み上げが進行中のときだけ止める（止めた直後の読み上げが消える環境があるため）。
     var wasSpeaking = !speech.done;
-    // このアプリの読み上げが進行中のときだけ止める（止めた直後の読み上げが消える環境があるため）。
-    var wasSpeaking = !speech.done;
     speech.session++;
     speech.done = true;
     setBgmDuck(false);
@@ -3503,23 +3544,6 @@
       speech.voice = pickVoice();
       try { window.speechSynthesis.onvoiceschanged = function () { speech.voice = pickVoice(); }; } catch (e) {}
       document.addEventListener('visibilitychange', function () { if (document.hidden) cancelSpeech(); });
-      // iPhone などでは、最初の読み上げを画面操作の中で行わないと、その後の自動の読み上げが鳴らないことがある。
-      // 最初に画面へ触れたとき、無音の短い読み上げを1回行って音声出力を有効にする。
-      var unlockSpeech = function () {
-        if (speech.unlocked) return;
-        speech.unlocked = true;
-        ['pointerup', 'touchend', 'click'].forEach(function (type) { document.removeEventListener(type, unlockSpeech, true); });
-        try {
-          var ss = window.speechSynthesis;
-          if (ss.speaking || ss.pending) return;
-          var u0 = new window.SpeechSynthesisUtterance(' ');
-          u0.volume = 0;
-          u0.lang = 'ja-JP';
-          speech.unlockUtterance = u0;
-          ss.speak(u0);
-        } catch (e) {}
-      };
-      ['pointerup', 'touchend', 'click'].forEach(function (type) { document.addEventListener(type, unlockSpeech, true); });
       // iPhone などでは、最初の読み上げを画面操作の中で行わないと、その後の自動の読み上げが鳴らないことがある。
       // 最初に画面へ触れたとき、無音の短い読み上げを1回行って音声出力を有効にする。
       var unlockSpeech = function () {
@@ -9589,6 +9613,11 @@ const appState = {
     truncatedModel: '',
     nextReflectIsNew: false,
     nextNewInstruction: '',
+    snapshotMeta: [],
+    redoSnapshotMeta: [],
+    lastCopiedPrompt: '',
+    promptAttachModeTouched: false,
+    consultAttachModeTouched: false,
     verify: { status: 'idle', token: '', revision: -1, timer: null }
 };
 
@@ -9629,6 +9658,8 @@ function syncNames() {
         || (appState.modelInfo && appState.modelInfo.title)
         || (getCode().trim() ? '(未保存のモデル)' : '(新規作成中)');
     $('run-app-name').textContent = name;
+    const tabsName = $('tabs-app-name');
+    if (tabsName) tabsName.textContent = name;
 }
 
 function syncSaveButtons() {
@@ -9643,29 +9674,69 @@ function syncSaveButtons() {
     syncNames();
 }
 
+// 反映履歴のコード（文字列配列）と同じ位置に、保存先名・BGM・AI指示履歴を持つ（保存・下書きの形式は変えない）。
+function captureSnapshotMeta() {
+    return {
+        currentName: appState.currentName,
+        bgm: normalizeBgm(appState.bgm),
+        pendingInstructions: appState.pendingInstructions.slice()
+    };
+}
+
+function applySnapshotMeta(meta) {
+    if (!meta) return;
+    appState.currentName = String(meta.currentName || '');
+    appState.bgm = normalizeBgm(meta.bgm);
+    appState.pendingInstructions = Array.isArray(meta.pendingInstructions) ? meta.pendingInstructions.slice() : [];
+    syncRestoreInstructionButton();
+    syncNames();
+}
+
+// 長さがずれている場合（下書きから復元した履歴など）は、先頭を null（メタなし）で埋めてそろえる。
+function alignSnapshotMeta(codes, metas) {
+    while (metas.length < codes.length) metas.unshift(null);
+    while (metas.length > codes.length) metas.shift();
+}
+
 function pushSnapshot(code) {
     const snap = String(code || '');
     appState.redoSnapshots = [];
+    appState.redoSnapshotMeta = [];
     const list = appState.snapshots;
+    const metas = appState.snapshotMeta;
+    alignSnapshotMeta(list, metas);
     if (list.length && list[list.length - 1] === snap) return;
     list.push(snap);
-    if (list.length > SNAPSHOT_LIMIT) list.shift();
+    metas.push(captureSnapshotMeta());
+    if (list.length > SNAPSHOT_LIMIT) { list.shift(); metas.shift(); }
 }
 
 function restoreSnapshot() {
+    hideUndoChip();
     if (!appState.snapshots.length) { showToast('戻せる反映履歴がありません'); return; }
+    alignSnapshotMeta(appState.snapshots, appState.snapshotMeta);
+    alignSnapshotMeta(appState.redoSnapshots, appState.redoSnapshotMeta);
     appState.redoSnapshots.push(getCode());
-    if (appState.redoSnapshots.length > SNAPSHOT_LIMIT) appState.redoSnapshots.shift();
-    setCode(appState.snapshots.pop());
+    appState.redoSnapshotMeta.push(captureSnapshotMeta());
+    if (appState.redoSnapshots.length > SNAPSHOT_LIMIT) { appState.redoSnapshots.shift(); appState.redoSnapshotMeta.shift(); }
+    const code = appState.snapshots.pop();
+    applySnapshotMeta(appState.snapshotMeta.pop());
+    setCode(code);
     reloadFrame();
     showToast('反映前の状態に戻しました');
 }
 
 function redoSnapshot() {
+    hideUndoChip();
     if (!appState.redoSnapshots.length) { showToast('やり直せる反映履歴がありません'); return; }
+    alignSnapshotMeta(appState.snapshots, appState.snapshotMeta);
+    alignSnapshotMeta(appState.redoSnapshots, appState.redoSnapshotMeta);
     appState.snapshots.push(getCode());
-    if (appState.snapshots.length > SNAPSHOT_LIMIT) appState.snapshots.shift();
-    setCode(appState.redoSnapshots.pop());
+    appState.snapshotMeta.push(captureSnapshotMeta());
+    if (appState.snapshots.length > SNAPSHOT_LIMIT) { appState.snapshots.shift(); appState.snapshotMeta.shift(); }
+    const code = appState.redoSnapshots.pop();
+    applySnapshotMeta(appState.redoSnapshotMeta.pop());
+    setCode(code);
     reloadFrame();
     showToast('反映後の状態へやり直しました');
 }
@@ -9673,6 +9744,10 @@ function redoSnapshot() {
 function resetWorkspace() {
     appState.promptAttachMode = 'full';
     appState.consultAttachMode = 'full';
+    appState.promptAttachModeTouched = false;
+    appState.consultAttachModeTouched = false;
+    appState.snapshotMeta = [];
+    appState.redoSnapshotMeta = [];
     appState.snapshots = [];
     appState.redoSnapshots = [];
     appState.pendingInstructions = [];
@@ -9947,6 +10022,50 @@ function handleVerifyTap() {
     if (confirm('反映前の状態に戻しますか？')) restoreSnapshot();
 }
 
+// ============================================================
+// UI: 反映直後の「戻す」チップ・依頼文の誤反映対策・案内の再表示
+// ============================================================
+const TRUNCATED_STEPS_TEXT = '👇 やることは3つだけ\n① 下のボタンで『続きを頼む文』をコピー\n② 同じ会話のAIに貼り付けて送信し、回答をコピー\n③ 戻って『🔁 AI反映』を押す（前半とつないで読み込みます）';
+const UNDO_CHIP_MS = 10000;
+let undoChipTimer = null;
+
+function showUndoChip() {
+    const chip = $('undo-chip');
+    if (!chip) return;
+    chip.hidden = false;
+    clearTimeout(undoChipTimer);
+    undoChipTimer = setTimeout(hideUndoChip, UNDO_CHIP_MS);
+}
+
+function hideUndoChip() {
+    clearTimeout(undoChipTimer);
+    undoChipTimer = null;
+    const chip = $('undo-chip');
+    if (chip) chip.hidden = true;
+}
+
+function undoFromChip() {
+    hideUndoChip();
+    restoreSnapshot();
+}
+
+// AIへ送る依頼文をコピーできたときだけ記録する（誤って依頼文を反映しないための判定用）。
+function rememberCopiedPrompt(text) {
+    appState.lastCopiedPrompt = String(text || '').trim();
+}
+
+function isCopiedPromptText(source) {
+    const text = String(source || '').trim();
+    if (!text) return false;
+    if (appState.lastCopiedPrompt && text === appState.lastCopiedPrompt) return true;
+    return text.includes('[OMNIVOYAGER モデルコード仕様 v1]') || text.includes('[モデルコード 第');
+}
+
+function resetCopiedGuideSkip() {
+    setCopiedGuideSkip(false);
+    showToast('コピー後の案内をまた表示します');
+}
+
 function flashReflect() {
     const wrap = $('run-frame-wrap');
     wrap.classList.remove('reflect-flash');
@@ -10053,6 +10172,7 @@ function copyErrorFixPrompt() {
     const instruction = '3D表示で以下のエラーが発生しています。原因を特定し、既存の形状・動作・ツアーを壊さずに修正してください。\n\n[エラーログ]\n' + getErrorLogText();
     const prompt = buildModifyPrompt(instruction, getCode(), appState.promptAttachMode);
     copyText(prompt, '修正指示をコピーしました', () => {
+        rememberCopiedPrompt(prompt);
         showCopiedGuide('✅ 直してもらう指示をコピーしました', 'コピーしたのは「AIへのお願い文」です。内容は変えず、そのままAIに貼り付けて送信してください。', AI_COPIED_STEPS);
         setAwaitingReflect(true);
         closeModal('error-log-modal');
@@ -10247,6 +10367,10 @@ function openPromptModal() {
     $('prompt-lead').textContent = hasCode
         ? '直したい点や、もっと詳しく見せたい部分を書いてください。必要な箇所だけを変える修正パッチが返ってきます。'
         : '作りたい3Dモデルや、知りたい仕組みを書いてください。';
+    // 長いコードでは、ユーザーがまだ送り方を選んでいなければ分割送信を既定にする。
+    if (hasCode && !appState.promptAttachModeTouched && appState.promptAttachMode === 'full' && getCode().length > SPLIT_RECOMMEND_LENGTH) {
+        appState.promptAttachMode = 'split';
+    }
     document.querySelectorAll('input[name="prompt-code-mode"]').forEach(input => {
         input.checked = input.value === appState.promptAttachMode;
     });
@@ -10257,6 +10381,7 @@ function openPromptModal() {
 }
 
 function setPromptAttachMode(mode) {
+    appState.promptAttachModeTouched = true;
     appState.promptAttachMode = normalizeAttachMode(mode);
     renderSplitPanels();
 }
@@ -10288,6 +10413,7 @@ function loadSplitChunkSize() {
 const splitState = { size: loadSplitChunkSize(), copied: new Set(), signature: '' };
 
 function setConsultAttachMode(mode) {
+    appState.consultAttachModeTouched = true;
     appState.consultAttachMode = normalizeAttachMode(mode);
     renderSplitPanels();
 }
@@ -10361,7 +10487,9 @@ function copySplitChunk(index) {
         showToast('コードが変わったため分割一覧を更新しました');
         return;
     }
-    copyText(buildSplitChunkPrompt(index, chunks.length, chunks[index]), `第${index + 1}分割をコピーしました`, () => {
+    const chunkPrompt = buildSplitChunkPrompt(index, chunks.length, chunks[index]);
+    copyText(chunkPrompt, `第${index + 1}分割をコピーしました`, () => {
+        rememberCopiedPrompt(chunkPrompt);
         // コピー中にコードが変わった場合は、古い分割をコピー済みにしない。
         if (syncSplitCopiedState() !== signatureAtCopy) { renderSplitPanels(); return; }
         splitState.copied.add(index);
@@ -10442,7 +10570,9 @@ function afterPromptCopied(instruction) {
 // 現在のモデルを閉じずに、全く別の新しいモデルを作る依頼文をコピーする（現在のコードは添付しない）。
 function copyNewModelPrompt() {
     const instruction = $('ai-instruction').value;
-    copyText(buildCreatePrompt(instruction), '新しいモデルの作成指示をコピーしました', () => {
+    const prompt = buildCreatePrompt(instruction);
+    copyText(prompt, '新しいモデルの作成指示をコピーしました', () => {
+        rememberCopiedPrompt(prompt);
         appState.nextReflectIsNew = true;
         appState.nextNewInstruction = instruction;
         afterPromptCopied(instruction);
@@ -10456,7 +10586,10 @@ function copyPrimaryPrompt() {
     const prompt = hasCode
         ? buildModifyPrompt(instruction, getCode(), appState.promptAttachMode)
         : buildCreatePrompt(instruction);
-    copyText(prompt, hasCode ? '修正指示をコピーしました' : '作成指示をコピーしました', () => afterPromptCopied(instruction));
+    copyText(prompt, hasCode ? '修正指示をコピーしました' : '作成指示をコピーしました', () => {
+        rememberCopiedPrompt(prompt);
+        afterPromptCopied(instruction);
+    });
 }
 
 function copyRebuildPrompt() {
@@ -10464,7 +10597,11 @@ function copyRebuildPrompt() {
     if (!getCode().trim()) { copyPrimaryPrompt(); return; }
     if (!confirm('モデルコード全体を作り直すAI指示を作成します。\nこの回答を反映すると、現在のコード全体が置き換わります。続けますか？')) return;
     const instruction = $('ai-instruction').value;
-    copyText(buildRebuildPrompt(instruction, getCode(), appState.promptAttachMode), '作り直し指示をコピーしました', () => afterPromptCopied(instruction));
+    const prompt = buildRebuildPrompt(instruction, getCode(), appState.promptAttachMode);
+    copyText(prompt, '作り直し指示をコピーしました', () => {
+        rememberCopiedPrompt(prompt);
+        afterPromptCopied(instruction);
+    });
 }
 
 async function pasteInstruction() {
@@ -10685,7 +10822,7 @@ function holdTruncatedModel(code) {
     showFixError(`AIの回答が途中で切れているため、読み込みませんでした（受け取ったコード ${appState.truncatedModel.length.toLocaleString()}文字）。`);
     showRecovery({ kind: 'truncated' },
         '⚠ AIの回答が途中で切れています',
-        'コードは変更していません。受け取った部分は一時保存しました。\n\n1. 下のボタンで「続きだけを出力して」の依頼文をコピー\n2. 同じ会話の生成AIへ貼り付けて送信し、回答をコピー\n3. 戻って「AI反映」を押す（前半とつないで読み込みます）');
+        'コードは変更していません。受け取った部分は一時保存しました。\n\n1. 下のボタンで「続きだけを出力して」の依頼文をコピー\n2. 同じ会話の生成AIへ貼り付けて送信し、回答をコピー\n3. 戻って「AI反映」を押す（前半とつないで読み込みます）', TRUNCATED_STEPS_TEXT);
     const recoveryButton = document.querySelector('#fix-recovery .fix-recovery-btn');
     if (recoveryButton) recoveryButton.textContent = '📋 続きを頼む文をコピー';
     return false;
@@ -10763,6 +10900,12 @@ function applyReflectText(text) {
         showFixError('反映する内容が空です。AIの回答全体をコピーしてください。');
         return false;
     }
+    // AIへの依頼文そのものを反映しようとした場合は、何も変えずに案内する。
+    if (isCopiedPromptText(source)) {
+        openFixModal();
+        showFixError('コピーされているのはAIへの依頼文です。AIの回答が最後まで出たら、回答の全体をコピーしてから🔁 AI反映を押してください。');
+        return false;
+    }
     // 途中で切れた回答の「続き」なら、一時保存した前半とつないで、通常のモデル全文として扱う。
     const continuation = extractContinuation(source);
     if (continuation !== null) {
@@ -10834,10 +10977,12 @@ function applyFullModel(code, raw) {
     closeModal('fix-modal');
     stageVerification();
     switchTab('run');
+    showUndoChip();
     if (treatAsNew) {
-        showToast('🆕 新しいモデルとして読み込みました（保存すると別のモデルになります）'
-            + (bgmRemoved ? '・BGMは外しました' : '')
+        showToast('🆕 新しいモデルとして読み込みました'
+            + (bgmRemoved ? '（BGMは外しました）' : '')
             + (syntax ? '・⚠ 構文エラーあり' : ''));
+        showGuide('🆕 新しいモデルとして読み込みました。\n保存すると別のモデルになります', 4000);
     } else {
         showToast(syntax ? '⚠ 構文エラーのあるモデルを読み込みました' : '✅ モデルを取り込みました');
     }
@@ -10908,7 +11053,7 @@ function applyPatches(fixes, raw) {
     ].filter(Boolean).join('・');
 
     if (plan.failed.length) {
-        if (appliedCount) { stageVerification(); switchTab('run'); }
+        if (appliedCount) { stageVerification(); switchTab('run'); showUndoChip(); }
         openFixModal();
         $('json-input').value = JSON.stringify(plan.failed.map(item => ({ before: item.before, after: item.after })), null, 2);
         showFixError(summary + '\n' + plan.failed.map((item, i) => `${i + 1}. ${item.reason}`).join('\n'));
@@ -10923,6 +11068,7 @@ function applyPatches(fixes, raw) {
     if (appliedCount) {
         stageVerification();
         switchTab('run');
+        showUndoChip();
         showToast(`✅ ${summary}`);
     } else {
         switchTab('run');
@@ -10962,10 +11108,10 @@ function showFixError(message) {
     box.style.display = 'block';
 }
 
-function showRecovery(recovery, title, text) {
+function showRecovery(recovery, title, text, steps) {
     appState.recovery = recovery;
     $('fix-recovery-title').textContent = title;
-    $('fix-recovery-text').textContent = String(text).split('\n\n')[0] + '\n\n' + RECOVERY_STEPS_TEXT;
+    $('fix-recovery-text').textContent = String(text).split('\n\n')[0] + '\n\n' + (steps ? String(steps) : RECOVERY_STEPS_TEXT);
     $('fix-recovery').style.display = 'block';
 }
 
@@ -10984,6 +11130,7 @@ function copyRecoveryPrompt() {
     const prompt = buildRecoveryPrompt(appState.recovery);
     if (!prompt) { showToast('AIに直してもらう対象がありません'); return; }
     copyText(prompt, 'コピーしました', () => {
+        rememberCopiedPrompt(prompt);
         showRecoveryCopiedGuide();
         setAwaitingReflect(true);
         closeModal('fix-modal');
@@ -11038,6 +11185,10 @@ function renderConsultCategories() {
 
 function openConsultModal() {
     renderConsultCategories();
+    // 長いコードでは、ユーザーがまだ送り方を選んでいなければ分割送信を既定にする。
+    if (!appState.consultAttachModeTouched && appState.consultAttachMode === 'full' && getCode().length > SPLIT_RECOMMEND_LENGTH) {
+        appState.consultAttachMode = 'split';
+    }
     document.querySelectorAll('input[name="consult-code-mode"]').forEach(input => {
         input.checked = input.value === appState.consultAttachMode;
     });
@@ -11049,7 +11200,10 @@ function copyConsultPrompt() {
     if (!getCode().trim()) { showToast('相談するモデルがありません。先にモデルを作ってください'); return; }
     const categories = Array.from(document.querySelectorAll('input[name="consult-cat"]:checked')).map(input => input.value);
     const prompt = buildConsultPrompt(categories, $('consult-text').value, getCode(), appState.consultAttachMode);
-    copyText(prompt, '相談用プロンプトをコピーしました', () => closeModal('consult-modal'));
+    copyText(prompt, '相談用プロンプトをコピーしました', () => {
+        rememberCopiedPrompt(prompt);
+        closeModal('consult-modal');
+    });
 }
 
 // ============================================================
@@ -11950,6 +12104,7 @@ function switchTab(tabName) {
     document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
     $('view-' + tabName).classList.add('active');
     if (tabName !== 'run') document.body.classList.remove('tour-playing');
+    if (tabName !== 'run') hideUndoChip();
     if (tabName === 'library') renderLibrary();
     if (tabName === 'run') {
         if (appState.frameDirty) reloadFrame();
@@ -12044,7 +12199,10 @@ const RECOVERY_COPIED_STEPS = [
 const RECOVERY_STEPS_TEXT = '👇 やることは3つだけ\n① 下のオレンジのボタンを押す（AIへの「直してもらう文」がコピーされます）\n② AIアプリに貼り付けてそのまま送信し、回答が出たら全体をコピー\n③ このアプリに戻って「🔁 AI反映」を押す（直ったモデルが表示されます）';
 
 // 起動時（モデルが空のとき）に「指示」ボタンとライブラリタブを光らせて誘導する。
+// 一度でも誘導を消したら（ユーザーが操作したら）、起動処理の後から再点灯しない。
+let startupGuideDismissed = false;
 function setStartupGuide(on, libraryToo = true) {
+    if (!on) startupGuideDismissed = true;
     const targets = [document.querySelector('.run-ctrl-btn[data-guide="prompt"]')];
     if (libraryToo || !on) targets.push(document.querySelector('.tab-btn[data-tab="library"]'));
     targets.forEach(el => {
@@ -12280,8 +12438,10 @@ restoreDraft().finally(async () => {
         let hasSaved = true;
         try { hasSaved = (await DB.all()).length > 0; } catch (error) {}
         if (!getCode().trim()) {
-            setStartupGuide(true, hasSaved);
-            showGuide('最初に、光っている「🤖指示」を押して\n作りたいものを伝えましょう（保存したモデルは「📚ライブラリ」）', 5000);
+            if (!startupGuideDismissed) {
+                setStartupGuide(true, hasSaved);
+                showGuide('最初に、光っている「🤖指示」を押して\n作りたいものを伝えましょう（保存したモデルは「📚ライブラリ」）', 5000);
+            }
         }
     }
     maybeShowOnboarding();
