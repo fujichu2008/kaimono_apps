@@ -450,6 +450,7 @@
         touch-action: manipulation;
     }
     .lib-meta { color: #888; font-size: 11px; }
+    .lib-thumb { display: block; width: 100%; height: 120px; object-fit: cover; border-radius: 6px; background: #15171c; }
     .lib-history {
         min-height: 40px;
         padding: 8px 10px;
@@ -3893,6 +3894,39 @@
       eachModelMesh(function (o) { materialsOf(o).forEach(function (m) { if (m) m.needsUpdate = true; }); });
     }
   }
+  // ----- ライブラリ用のサムネイル撮影（親画面から依頼されたときだけ、描画直後に1回だけ撮る） -----
+  var THUMB_MAX = 240;
+  var thumbPending = false;
+  function captureThumb() {
+    thumbPending = false;
+    var dataUrl = '';
+    try {
+      var src = renderer.domElement;
+      var w = src.width, h = src.height;
+      if (w > 0 && h > 0) {
+        var s = Math.min(1, THUMB_MAX / Math.max(w, h));
+        var c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * s));
+        c.height = Math.max(1, Math.round(h * s));
+        var g = c.getContext('2d');
+        var bg = g.createRadialGradient(c.width * 0.5, c.height * 0.32, 0, c.width * 0.5, c.height * 0.32, Math.max(c.width, c.height) * 0.75);
+        bg.addColorStop(0, '#2c323d');
+        bg.addColorStop(0.55, '#1a1d23');
+        bg.addColorStop(1, '#111318');
+        g.fillStyle = bg;
+        g.fillRect(0, 0, c.width, c.height);
+        g.drawImage(src, 0, 0, c.width, c.height);
+        dataUrl = c.toDataURL('image/jpeg', 0.7);
+      }
+    } catch (e) { dataUrl = ''; }
+    post('thumb', { dataUrl: dataUrl });
+  }
+  window.addEventListener('message', function (e) {
+    var d = e && e.data;
+    if (!d || d.type !== 'capture_thumb' || !TOKEN || d.runtimeToken !== TOKEN || e.source !== window.parent) return;
+    if (!renderer || !ctx) { post('thumb', { dataUrl: '' }); return; }
+    thumbPending = true;
+  });
   var firstFrame = true;
   function loop() {
     requestAnimationFrame(loop);
@@ -3925,6 +3959,7 @@
     }
     if (overlayActive) overlayMat.opacity = 0.14 + 0.16 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006));
     renderer.render(scene, camera);
+    if (thumbPending) captureThumb();
     updateLabels();
     if (firstFrame) {
       firstFrame = false;
@@ -9948,6 +9983,9 @@ window.addEventListener('message', event => {
             appState.diagnostics = normalizeDiagnostics(data.diagnostics);
             renderVerify();
             break;
+        case 'thumb':
+            resolveThumbCapture(data.runtimeToken, data.dataUrl);
+            break;
         case 'tour_ui':
             document.body.classList.toggle('tour-playing', data.active === true);
             break;
@@ -11060,6 +11098,67 @@ function openSaveModal() {
     openModal('save-modal');
 }
 
+// ============================================================
+// LOGIC: ライブラリのサムネイル（保存時に1回だけ3D表示へ撮影を依頼する。撮れなくても保存は続ける）
+// ============================================================
+const THUMB_TIMEOUT_MS = 1500;
+const THUMB_MAX_LENGTH = 200000;
+let thumbCapture = null;
+
+function normalizeThumb(value) {
+    return typeof value === 'string' && value.startsWith('data:image/jpeg') && value.length <= THUMB_MAX_LENGTH ? value : '';
+}
+
+function requestThumbnail() {
+    return new Promise(resolve => {
+        const token = appState.runtimeToken;
+        const canCapture = Boolean(token)
+            && appState.readyToken === token
+            && !appState.frameDirty
+            && !document.hidden
+            && $('view-run').classList.contains('active')
+            && !document.body.classList.contains('tour-playing')
+            && Boolean(frame.contentWindow);
+        if (!canCapture) { resolve(''); return; }
+        if (thumbCapture) thumbCapture.finish('');
+        const entry = { token, timer: null, finish: null };
+        entry.finish = value => {
+            if (thumbCapture !== entry) return;
+            clearTimeout(entry.timer);
+            thumbCapture = null;
+            resolve(value);
+        };
+        entry.timer = setTimeout(() => entry.finish(''), THUMB_TIMEOUT_MS);
+        thumbCapture = entry;
+        try {
+            frame.contentWindow.postMessage({ type: 'capture_thumb', runtimeToken: token }, '*');
+        } catch (error) {
+            entry.finish('');
+        }
+    });
+}
+
+function resolveThumbCapture(token, dataUrl) {
+    if (!thumbCapture || thumbCapture.token !== token) return;
+    thumbCapture.finish(normalizeThumb(dataUrl));
+}
+
+function createLibraryThumb(record, onClick) {
+    const src = normalizeThumb(record && record.thumb);
+    if (!src) return null;
+    const img = document.createElement('img');
+    img.className = 'lib-thumb';
+    img.src = src;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    if (typeof onClick === 'function') {
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', onClick);
+    }
+    return img;
+}
+
 let librarySaveBusy = false;
 async function saveToLibrary() {
     if (librarySaveBusy) return;
@@ -11082,6 +11181,8 @@ async function saveToLibrary() {
     librarySaveBusy = true;
     $('save-library-btn').disabled = true;
     try {
+        const thumb = await requestThumbnail();
+        if (thumb) record.thumb = thumb;
         await DB.put(record);
         appState.currentName = projectName;
         appState.pendingInstructions = [];
@@ -11428,7 +11529,10 @@ function createProjectCard(projectName, versions) {
     history.className = 'lib-history';
     history.textContent = '💡 この版のAI指示\n' + instructionPreview(latest);
     history.onclick = () => showHistoryModal(latest);
-    card.append(header, meta, history);
+    const thumbRecord = versions.find(version => normalizeThumb(version.thumb));
+    const thumbEl = thumbRecord ? createLibraryThumb(thumbRecord, () => renderLibrary(projectName)) : null;
+    if (thumbEl) card.append(header, thumbEl, meta, history);
+    else card.append(header, meta, history);
     return card;
 }
 
@@ -11462,7 +11566,9 @@ function createVersionCard(record, projectName) {
     history.className = 'lib-history';
     history.textContent = '💡 この版のAI指示\n' + instructionPreview(record);
     history.onclick = () => showHistoryModal(record);
-    card.append(header, meta, history);
+    const thumbEl = createLibraryThumb(record, null);
+    if (thumbEl) card.append(header, thumbEl, meta, history);
+    else card.append(header, meta, history);
     return card;
 }
 
