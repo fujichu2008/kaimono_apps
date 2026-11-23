@@ -1039,6 +1039,7 @@
         <h2 id="save-title">保存</h2>
         <p class="section-desc">ライブラリへ保存すると、あとで続きを修正できます。</p>
         <input type="text" id="filename-input" placeholder="モデル名（例: 遠心ポンプ）">
+        <p class="section-desc" id="save-dest" hidden></p>
         <div class="modal-buttons">
             <button type="button" id="save-library-btn" class="btn-confirm" onclick="saveToLibrary()">ライブラリへ保存</button>
             <button type="button" class="btn-confirm" style="background:#2f7d43;" onclick="downloadStandaloneHtml()">HTMLで書き出す</button>
@@ -1071,6 +1072,7 @@
         </div>
         <div id="prompt-kids-options" class="option-box">
             <div class="option-title">だれ向けに つくる？</div>
+            <p class="section-desc" id="prompt-kids-note" hidden>※ 新しいモデルをつくるときだけ使います（今のモデルの修正には使いません）。</p>
             <label class="option-row"><input type="checkbox" id="prompt-kids-mode" onchange="setCreateOption('kids', this.checked)"><span>🧒 こどもモード（小学校低学年向け。ひらがなで短く、やさしく説明）</span></label>
             <label class="option-row"><input type="checkbox" id="prompt-narration-mode" onchange="setCreateOption('narration', this.checked)"><span>🔊 音読モード（解説ツアーをブラウザの音声で読み上げる）</span></label>
             <label class="option-row"><input type="checkbox" id="prompt-sounds-mode" onchange="setCreateOption('sounds', this.checked)"><span>🔊 効果音つき（動きに合わせた効果音を合成で鳴らす）</span></label>
@@ -1082,6 +1084,9 @@
         </div>
         <div class="modal-buttons" id="prompt-rebuild-row" style="display:none;margin-top:6px;">
             <button type="button" class="btn-action" style="background:transparent;color:#999;font-size:11px;" onclick="copyRebuildPrompt()">最初から作り直す（全文を出力させる）</button>
+        </div>
+        <div class="modal-buttons" id="prompt-new-row" style="display:none;margin-top:6px;">
+            <button type="button" class="btn-action" onclick="copyNewModelPrompt()">🆕 別の新しいモデルをつくる</button>
         </div>
         <div class="modal-buttons sheet-close-row"><button type="button" class="btn-cancel" onclick="closeModal('prompt-modal')">閉じる</button></div>
     </div>
@@ -9582,6 +9587,8 @@ const appState = {
     diagnostics: [],
     readyToken: '',
     truncatedModel: '',
+    nextReflectIsNew: false,
+    nextNewInstruction: '',
     verify: { status: 'idle', token: '', revision: -1, timer: null }
 };
 
@@ -9672,6 +9679,8 @@ function resetWorkspace() {
     appState.modelInfo = null;
     appState.bgm = null;
     appState.truncatedModel = '';
+    appState.nextReflectIsNew = false;
+    appState.nextNewInstruction = '';
     setAwaitingReflect(false);
     syncRestoreInstructionButton();
 }
@@ -10227,11 +10236,13 @@ function openPromptModal() {
     setStartupGuide(false);
     const hasCode = Boolean(getCode().trim());
     $('prompt-code-options').style.display = hasCode ? '' : 'none';
-    $('prompt-kids-options').style.display = hasCode ? 'none' : '';
+    $('prompt-kids-options').style.display = '';
+    $('prompt-kids-note').hidden = !hasCode;
     $('prompt-sounds-mode').checked = Boolean(appState.createOptions.sounds);
     $('prompt-kids-mode').checked = appState.createOptions.kids;
     $('prompt-narration-mode').checked = appState.createOptions.narration;
     $('prompt-rebuild-row').style.display = hasCode ? 'flex' : 'none';
+    $('prompt-new-row').style.display = hasCode ? 'flex' : 'none';
     $('prompt-primary-btn').textContent = hasCode ? '🛠 このモデルを修正' : '🚀 新しいモデルをつくる';
     $('prompt-lead').textContent = hasCode
         ? '直したい点や、もっと詳しく見せたい部分を書いてください。必要な箇所だけを変える修正パッチが返ってきます。'
@@ -10428,7 +10439,18 @@ function afterPromptCopied(instruction) {
     showCopiedGuide('✅ 指示をコピーしました', 'コピーしたのは「AIへのお願い文」です。内容は変えず、そのままAIに貼り付けて送信してください。', AI_COPIED_STEPS);
 }
 
+// 現在のモデルを閉じずに、全く別の新しいモデルを作る依頼文をコピーする（現在のコードは添付しない）。
+function copyNewModelPrompt() {
+    const instruction = $('ai-instruction').value;
+    copyText(buildCreatePrompt(instruction), '新しいモデルの作成指示をコピーしました', () => {
+        appState.nextReflectIsNew = true;
+        appState.nextNewInstruction = instruction;
+        afterPromptCopied(instruction);
+    });
+}
+
 function copyPrimaryPrompt() {
+    appState.nextReflectIsNew = false;
     const instruction = $('ai-instruction').value;
     const hasCode = Boolean(getCode().trim());
     const prompt = hasCode
@@ -10438,6 +10460,7 @@ function copyPrimaryPrompt() {
 }
 
 function copyRebuildPrompt() {
+    appState.nextReflectIsNew = false;
     if (!getCode().trim()) { copyPrimaryPrompt(); return; }
     if (!confirm('モデルコード全体を作り直すAI指示を作成します。\nこの回答を反映すると、現在のコード全体が置き換わります。続けますか？')) return;
     const instruction = $('ai-instruction').value;
@@ -10777,6 +10800,11 @@ function applyFullModel(code, raw) {
     // 途中で切れたモデル全文は読み込まず、続きを受け取るために一時保存する（構文チェックより前に判定）。
     if (isModelTruncated(code)) return holdTruncatedModel(code);
     appState.truncatedModel = '';
+    // 「新しいモデル」の予約は、このモデル全文の処理で使い切る（反映・キャンセル・エラーのいずれでも解除）。
+    const treatAsNewRequested = appState.nextReflectIsNew;
+    const newInstructionText = appState.nextNewInstruction;
+    appState.nextReflectIsNew = false;
+    appState.nextNewInstruction = '';
     if (!/defineModel\s*\(/.test(code)) {
         openFixModal();
         showFixError('defineModel( が見つかりません。');
@@ -10796,19 +10824,62 @@ function applyFullModel(code, raw) {
             + `現在: ${current.length.toLocaleString()}字\n新しいコード: ${code.length.toLocaleString()}字`;
         if (!confirm(message)) return false;
     }
+    const treatAsNew = decideTreatAsNewModel(current, code, treatAsNewRequested);
     pushSnapshot(current);
     setCode(code);
+    const bgmRemoved = treatAsNew ? startAsNewModel(treatAsNewRequested, newInstructionText) : false;
     appState.pendingLoadIssue = syntax ? 'JavaScriptの構文エラー: ' + syntax : '';
     setAwaitingReflect(false);
     clearFixState();
     closeModal('fix-modal');
     stageVerification();
     switchTab('run');
-    showToast(syntax ? '⚠ 構文エラーのあるモデルを読み込みました' : '✅ モデルを取り込みました');
+    if (treatAsNew) {
+        showToast('🆕 新しいモデルとして読み込みました（保存すると別のモデルになります）'
+            + (bgmRemoved ? '・BGMは外しました' : '')
+            + (syntax ? '・⚠ 構文エラーあり' : ''));
+    } else {
+        showToast(syntax ? '⚠ 構文エラーのあるモデルを読み込みました' : '✅ モデルを取り込みました');
+    }
     return true;
 }
 
+// defineModel 内の最初の title: "..."（' や ` も可）を取り出す。取れなければ空文字。
+function extractModelTitle(code) {
+    const text = String(code || '');
+    const start = text.search(/defineModel\s*\(/);
+    if (start < 0) return '';
+    const match = text.slice(start).match(/\btitle\s*:\s*(?:"([^"\n]*)"|'([^'\n]*)'|`([^`]*)`)/);
+    return match ? String(match[1] ?? match[2] ?? match[3] ?? '').trim() : '';
+}
+
+// モデル全文の反映を「新しいモデル」として扱うかを決める。
+function decideTreatAsNewModel(currentCode, newCode, requested) {
+    if (requested) return true;
+    if (!appState.currentName) return false;
+    const oldTitle = extractModelTitle(currentCode);
+    const newTitle = extractModelTitle(newCode);
+    if (!oldTitle || !newTitle || oldTitle === newTitle) return false;
+    return confirm(`タイトルが違うモデルです（現在: ${oldTitle}／新しい: ${newTitle}）。\nOK: 新しいモデルとして扱う（別のモデルとして保存）\nキャンセル: 現在のモデルの新しい版として扱う`);
+}
+
+// 保存先・BGM・AI指示履歴を新しいモデル用に切り替える。BGMを外した場合は true を返す。
+function startAsNewModel(requested, instructionText) {
+    const hadBgm = Boolean(appState.bgm);
+    appState.currentName = '';
+    appState.bgm = null;
+    const latest = appState.pendingInstructions[appState.pendingInstructions.length - 1];
+    const keep = latest && (!requested || latest.text === instructionText);
+    appState.pendingInstructions = keep ? [latest] : [];
+    syncRestoreInstructionButton();
+    syncNames();
+    scheduleDraftSave();
+    return hadBgm;
+}
+
 function applyPatches(fixes, raw) {
+    appState.nextReflectIsNew = false;
+    appState.nextNewInstruction = '';
     const before = getCode();
     const plan = buildPatchPlan(before, fixes);
     let code = plan.normalizedCode;
@@ -11095,8 +11166,32 @@ function openSaveModal() {
     $('filename-input').value = appState.currentName
         || (appState.modelInfo && appState.modelInfo.title)
         || `Model_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+    updateSaveDestination();
     openModal('save-modal');
 }
+
+// 保存画面に、入力中の名前でどこへ保存されるかを表示する（DBを読めないときは表示しない）。
+let saveDestRequestId = 0;
+async function updateSaveDestination() {
+    const el = $('save-dest');
+    if (!el) return;
+    const requestId = ++saveDestRequestId;
+    const name = $('filename-input').value.trim() || 'Untitled';
+    let records;
+    try {
+        records = await DB.all();
+    } catch (error) {
+        if (requestId === saveDestRequestId) { el.hidden = true; el.textContent = ''; }
+        return;
+    }
+    if (requestId !== saveDestRequestId) return;
+    const count = records.filter(record => (record.projectName || record.name) === name).length;
+    el.textContent = count
+        ? `保存先: 『${name}』の新しい版（${count + 1}版目）`
+        : '保存先: 新しいモデルとして保存';
+    el.hidden = false;
+}
+$('filename-input').addEventListener('input', updateSaveDestination);
 
 // ============================================================
 // LOGIC: ライブラリのサムネイル（保存時に1回だけ3D表示へ撮影を依頼する。撮れなくても保存は続ける）
